@@ -1,0 +1,117 @@
+name: Sync Notion personal data to Raw
+
+on:
+  schedule:
+    # 03:20 and 15:20 Asia/Shanghai. GitHub cron is UTC.
+    - cron: "20 19 * * *"
+    - cron: "20 7 * * *"
+  workflow_dispatch:
+    inputs:
+      checkout_ref:
+        description: "Branch or commit to checkout before running the sync"
+        required: false
+        type: string
+        default: "main"
+      full_sync:
+        description: "Backfill all listened Xiaoyuzhou episodes"
+        required: false
+        type: boolean
+        default: false
+      only_missing:
+        description: "During full sync, skip episodes already written under Raw/13 小宇宙"
+        required: false
+        type: boolean
+        default: true
+      max_episodes:
+        description: "Maximum Xiaoyuzhou episodes to sync in one full backfill run"
+        required: false
+        type: string
+        default: "50"
+      hours_back:
+        description: "Incremental lookback window for Xiaoyuzhou sync"
+        required: false
+        type: string
+        default: "168"
+  repository_dispatch:
+    types: [sync-notion-personal-data]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync podcast notes
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
+            args=(--all-current)
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.only_missing || 'true' }}" = "true" ]; then
+              args+=(--only-missing)
+            fi
+            max_episodes="${{ github.event_name == 'workflow_dispatch' && inputs.max_episodes || '50' }}"
+            if [ -n "$max_episodes" ] && [ "$max_episodes" != "0" ]; then
+              args+=(--max-episodes "$max_episodes")
+            fi
+            python -u scripts/sync_my_podcast_to_raw.py "${args[@]}"
+          else
+            python -u scripts/sync_my_podcast_to_raw.py --hours-back "${{ github.event_name == 'workflow_dispatch' && inputs.hours_back || '168' }}"
+          fi
+
+      - name: Sync workout daily notes
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
+        run: |
+          set -euo pipefail
+          python scripts/sync_notion_workout_daily_to_raw.py
+
+      - name: Validate filename compliance
+        if: ${{ success() }}
+        run: |
+          python scripts/audit_raw_filenames.py --json
+
+      - name: Commit Raw updates
+        if: ${{ success() }}
+        run: |
+          target_ref="${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref_name }}"
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git stash push --include-untracked -m "pre-commit personal-data sync" || true
+          git pull --rebase origin "$target_ref"
+          git stash pop --index || true
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
+            git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/13 小宇宙"
+          else
+            git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/12 我的运动" "Raw/13 小宇宙"
+          fi
+          if git -C vault diff --cached --quiet; then
+            echo "No personal-data changes to commit."
+          else
+            git -C vault commit -m "Sync Notion personal data to Raw"
+            git -C vault push origin "HEAD:$target_ref"
+          fi

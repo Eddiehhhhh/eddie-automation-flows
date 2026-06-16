@@ -1,0 +1,66 @@
+name: Sync GetNote to Raw
+
+on:
+  schedule:
+    # 03:20, 09:20, 15:20, 21:20 Asia/Shanghai. GitHub cron is UTC.
+    - cron: "20 19 * * *"
+    - cron: "20 1 * * *"
+    - cron: "20 7 * * *"
+    - cron: "20 13 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [sync-getnote]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+      GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+      GETNOTE_SYNC_HOURS: "8"
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync GetNote notes
+        run: python scripts/sync_getnote_to_raw.py
+
+      - name: Validate filename compliance
+        if: ${{ success() }}
+        run: |
+          python scripts/audit_raw_filenames.py --json
+
+      - name: Commit Raw updates
+        if: ${{ success() }}
+        run: |
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add "Raw/03 Get"
+          if git -C vault diff --cached --quiet; then
+            echo "No GetNote changes to commit."
+          else
+            git -C vault commit -m "Sync GetNote notes to Raw"
+            git -C vault pull --rebase origin main
+            git -C vault push
+          fi

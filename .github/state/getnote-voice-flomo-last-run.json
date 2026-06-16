@@ -1,0 +1,14 @@
+{
+  "dry_run": false,
+  "scanned": 40,
+  "candidate": 0,
+  "created": 0,
+  "already_processed": 2,
+  "skipped": {
+    "daily_summary": 1,
+    "recorder_card": 3
+  },
+  "requested_tags": 0,
+  "resolved_tags": 0,
+  "unresolved_tags": 0
+}

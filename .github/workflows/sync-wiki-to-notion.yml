@@ -1,0 +1,103 @@
+name: Sync Wiki pages to Notion
+
+on:
+  schedule:
+    # Every 6 hours. GitHub cron is UTC.
+    - cron: "15 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Resolve changes without writing Notion or state"
+        required: false
+        default: false
+        type: boolean
+      full_sync:
+        description: "Rewrite all mirrored page content"
+        required: false
+        default: false
+        type: boolean
+      path_prefix:
+        description: "Optional path prefix, for example Wiki/06 Systems"
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: "Optional node limit for testing"
+        required: false
+        default: "0"
+        type: string
+  repository_dispatch:
+    types: [sync-wiki-to-notion]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      NOTION_WIKI_MIRROR_PARENT_PAGE_ID: ${{ secrets.NOTION_WIKI_MIRROR_PARENT_PAGE_ID }}
+      NOTION_WIKI_MIRROR_PARENT_PAGE_TITLE: ${{ secrets.NOTION_WIKI_MIRROR_PARENT_PAGE_TITLE }}
+      NOTION_WIKI_MIRROR_ROOT_TITLE: ${{ secrets.NOTION_WIKI_MIRROR_ROOT_TITLE }}
+      NOTION_WIKI_MIRROR_INCLUDE_JSON: ${{ secrets.NOTION_WIKI_MIRROR_INCLUDE_JSON }}
+      NOTION_WIKI_MIRROR_EXCLUDE_JSON: ${{ secrets.NOTION_WIKI_MIRROR_EXCLUDE_JSON }}
+      NOTION_WIKI_MIRROR_BUNDLE_PASSPHRASE: ${{ secrets.NOTION_WIKI_MIRROR_BUNDLE_PASSPHRASE }}
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync protected wiki content to Notion
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+              args+=(--dry-run)
+            fi
+            if [[ "${{ inputs.full_sync }}" == "true" ]]; then
+              args+=(--full-sync)
+            fi
+            if [[ -n "${{ inputs.path_prefix }}" ]]; then
+              args+=(--path-prefix "${{ inputs.path_prefix }}")
+            fi
+            if [[ "${{ inputs.limit }}" != "0" ]]; then
+              args+=(--limit "${{ inputs.limit }}")
+            fi
+          fi
+          python scripts/sync_wiki_to_notion.py "${args[@]}"
+
+      - name: Commit public-safe mirror state
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add ".github/state/notion-wiki-mirror-state.json"
+          if git -C vault diff --cached --quiet; then
+            echo "No public-safe state changes to commit."
+          else
+            git -C vault commit -m "Sync wiki mirror state to Notion"
+            git -C vault pull --no-rebase origin main
+            git -C vault push
+          fi

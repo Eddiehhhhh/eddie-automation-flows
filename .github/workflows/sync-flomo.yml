@@ -1,0 +1,94 @@
+name: Sync flomo to Raw
+
+on:
+  schedule:
+    # 03:20, 09:20, 15:20, 21:20 Asia/Shanghai. GitHub cron is UTC.
+    - cron: "20 19 * * *"
+    - cron: "20 1 * * *"
+    - cron: "20 7 * * *"
+    - cron: "20 13 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [sync-flomo]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FLOMO_TOKEN: ${{ secrets.FLOMO_TOKEN || secrets.FLOMO_MCP_TOKEN }}
+      FLOMO_SYNC_DAYS_BACK: "14"
+      FLOMO_SYNC_OVERLAP_DAYS: "5"
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync flomo memos
+        run: |
+          set -euo pipefail
+          python scripts/sync_flomo_to_raw.py | tee /tmp/flomo-sync-result.json
+
+      - name: Validate filename compliance
+        if: ${{ success() }}
+        run: |
+          python scripts/audit_raw_filenames.py --json
+          # exit code = number of violations; workflow fails if > 0
+
+      - name: Summarize sync result
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/flomo-sync-result.json").read_text(encoding="utf-8"))
+          summary = [
+              "## flomo sync result",
+              f"- previous_last_sync_at: {payload.get('previous_last_sync_at')}",
+              f"- window_start: {payload.get('window_start')}",
+              f"- window_end: {payload.get('window_end')}",
+              f"- fetched: {payload.get('fetched')}",
+              f"- written_or_changed: {payload.get('written_or_changed')}",
+          ]
+          path = Path(".github") / "state"
+          path.mkdir(parents=True, exist_ok=True)
+          (path / "flomo-sync-last-run.json").write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          with Path(Path(__import__("os").environ["GITHUB_STEP_SUMMARY"])).open("a", encoding="utf-8") as fh:
+              fh.write("\n".join(summary) + "\n")
+          PY
+
+      - name: Commit Raw updates
+        run: |
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add "Raw/01 Flomo" ".github/state/flomo-sync-last-run.json"
+          if git -C vault diff --cached --quiet; then
+            echo "No flomo changes to commit."
+          else
+            git -C vault commit -m "Sync flomo memos to Raw"
+            git -C vault pull --rebase origin main
+            git -C vault push
+          fi

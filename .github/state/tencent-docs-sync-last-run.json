@@ -1,0 +1,246 @@
+{
+  "synced_at": "2026-06-15T22:34:13Z",
+  "fetched_at": "2026-06-16",
+  "target_count": 38,
+  "written_or_changed": 38,
+  "folders": {
+    "面试记录": 10,
+    "组织关系与百科": 4,
+    "换届": 2,
+    "其他": 8,
+    "工作站": 4,
+    "制度与管理": 3,
+    "活动与项目": 2,
+    "招新": 5
+  },
+  "files": [
+    {
+      "file_id": "ECjppXFFvHsr",
+      "relative_path": "面试记录/陈婉欣一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "EUvQbVVaytQw",
+      "relative_path": "面试记录/郑婉仪一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "GyMEnrYXjKpw",
+      "relative_path": "组织关系与百科/濠联外联话术.md",
+      "folder": "组织关系与百科",
+      "changed": true
+    },
+    {
+      "file_id": "HBbasPjlwQFV",
+      "relative_path": "组织关系与百科/濠联百科全书.md",
+      "folder": "组织关系与百科",
+      "changed": true
+    },
+    {
+      "file_id": "HPKbHBugnbfb",
+      "relative_path": "换届/2023濠联换届ppt.md",
+      "folder": "换届",
+      "changed": true
+    },
+    {
+      "file_id": "HgFjcsVGRKDb",
+      "relative_path": "其他/濠联组织架构.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "IbkBgVrobCNE",
+      "relative_path": "其他/第九届濠联毕业纪念册.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "IlFaOGKLMjAO",
+      "relative_path": "工作站/2025第九届濠联青年工作站.md",
+      "folder": "工作站",
+      "changed": true
+    },
+    {
+      "file_id": "QgvwCbuUNlbd",
+      "relative_path": "制度与管理/濠联青年制度集.md",
+      "folder": "制度与管理",
+      "changed": true
+    },
+    {
+      "file_id": "QpvQMVhcSHpL",
+      "relative_path": "活动与项目/濠联智库-QpvQMVhcSHpL.md",
+      "folder": "活动与项目",
+      "changed": true
+    },
+    {
+      "file_id": "RufzvEhskKZo",
+      "relative_path": "招新/2026濠联招新KPOP随机舞蹈.md",
+      "folder": "招新",
+      "changed": true
+    },
+    {
+      "file_id": "SFIGVSZbkSRg",
+      "relative_path": "工作站/2021第五届濠江学联工作站.md",
+      "folder": "工作站",
+      "changed": true
+    },
+    {
+      "file_id": "SHUjYuZnjhZS",
+      "relative_path": "面试记录/陈敏儿.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "SLtdVgXUgAiM",
+      "relative_path": "制度与管理/濠联青年管理台.md",
+      "folder": "制度与管理",
+      "changed": true
+    },
+    {
+      "file_id": "SNFEoGkuHGHd",
+      "relative_path": "面试记录/吴非霏一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "SSWqaDovPLTL",
+      "relative_path": "其他/2026版濠联介绍1.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "SUSpfduUYlgw",
+      "relative_path": "其他/濠联文化.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "SVjpQQKCsLzY",
+      "relative_path": "工作站/第十届濠联青年工作站.md",
+      "folder": "工作站",
+      "changed": true
+    },
+    {
+      "file_id": "SdUUdaLSnVtF",
+      "relative_path": "组织关系与百科/百科全书.md",
+      "folder": "组织关系与百科",
+      "changed": true
+    },
+    {
+      "file_id": "SdqEJFgPudZP",
+      "relative_path": "其他/濠联组织架构-SdqEJFgPudZP.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "SkCvJHWrUYnL",
+      "relative_path": "活动与项目/濠联会议录.md",
+      "folder": "活动与项目",
+      "changed": true
+    },
+    {
+      "file_id": "SmZOzPjthZFt",
+      "relative_path": "其他/濠联部门交接流程.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "SqSIJYqUkxuN",
+      "relative_path": "换届/2022濠联换届ppt.md",
+      "folder": "换届",
+      "changed": true
+    },
+    {
+      "file_id": "SqZaWGgrggXY",
+      "relative_path": "其他/濠联第七届发言思路.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "SsYgPrIcTNwa",
+      "relative_path": "面试记录/李悦.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "UQbMsPvDOfuW",
+      "relative_path": "招新/26濠联招新 木棉音乐会.md",
+      "folder": "招新",
+      "changed": true
+    },
+    {
+      "file_id": "WBldVEDhdzxq",
+      "relative_path": "招新/濠联26招新-About Us.md",
+      "folder": "招新",
+      "changed": true
+    },
+    {
+      "file_id": "WDOmxSrCiEZF",
+      "relative_path": "面试记录/黄华泰一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "WSdefTOYVZzW",
+      "relative_path": "面试记录/李栋一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "WWXCjqpjBFJc",
+      "relative_path": "面试记录/郑煌琦一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "WoXlPyjarlvF",
+      "relative_path": "面试记录/黄梓莺一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "WvNeJtDnmPPB",
+      "relative_path": "面试记录/许思纳一面.md",
+      "folder": "面试记录",
+      "changed": true
+    },
+    {
+      "file_id": "XGLhIeuxXCqr",
+      "relative_path": "工作站/第六届濠联青年工作站.md",
+      "folder": "工作站",
+      "changed": true
+    },
+    {
+      "file_id": "ZaVuFnuNAynk",
+      "relative_path": "制度与管理/濠玩大学生生存指南.md",
+      "folder": "制度与管理",
+      "changed": true
+    },
+    {
+      "file_id": "dEqNlhvvxQQK",
+      "relative_path": "其他/濠联青年设计标准.md",
+      "folder": "其他",
+      "changed": true
+    },
+    {
+      "file_id": "dNnvvgjxpbGa",
+      "relative_path": "招新/2026濠联招新策划书.md",
+      "folder": "招新",
+      "changed": true
+    },
+    {
+      "file_id": "dxBgZVSKAqMc",
+      "relative_path": "招新/2026第十届濠联招新分工表.md",
+      "folder": "招新",
+      "changed": true
+    },
+    {
+      "file_id": "eQBGlBcuNCMJ",
+      "relative_path": "组织关系与百科/濠联合作方.md",
+      "folder": "组织关系与百科",
+      "changed": true
+    }
+  ]
+}

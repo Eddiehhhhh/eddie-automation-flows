@@ -1,0 +1,90 @@
+name: Rewrite GetNote link notes
+
+on:
+  push:
+    paths:
+      - scripts/rewrite_getnote_link_notes.py
+      - .github/workflows/rewrite-getnote-links.yml
+  schedule:
+    # 03:40, 09:40, 15:40, 21:40 Asia/Shanghai. GitHub cron is UTC.
+    - cron: "40 19 * * *"
+    - cron: "40 1 * * *"
+    - cron: "40 7 * * *"
+    - cron: "40 13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Inspect candidate notes without modifying GetNote"
+        required: false
+        type: boolean
+        default: true
+      hours_back:
+        description: "Look back window in hours"
+        required: false
+        type: string
+        default: "24"
+      limit:
+        description: "Maximum number of notes to process"
+        required: false
+        type: string
+        default: "200"
+  repository_dispatch:
+    types: [rewrite-getnote-links]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rewrite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+      GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+      IMA_OPENAPI_CLIENTID: ${{ secrets.IMA_OPENAPI_CLIENTID }}
+      IMA_OPENAPI_APIKEY: ${{ secrets.IMA_OPENAPI_APIKEY }}
+      IMA_LINK_REWRITE_KB_ID: ${{ secrets.IMA_LINK_REWRITE_KB_ID }}
+      GETNOTE_LINK_REWRITE_HOURS: ${{ github.event_name == 'workflow_dispatch' && inputs.hours_back || '24' }}
+      GETNOTE_LINK_REWRITE_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.limit || '200' }}
+      GETNOTE_LINK_REWRITE_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Rewrite link notes
+        run: |
+          if [ "${GETNOTE_LINK_REWRITE_DRY_RUN}" = "true" ]; then
+            python scripts/rewrite_getnote_link_notes.py --dry-run
+          else
+            python scripts/rewrite_getnote_link_notes.py
+          fi
+
+      - name: Commit state changes
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+        run: |
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add "Raw/03 Get/04 State"
+          if git -C vault diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git -C vault commit -m "Update GetNote link rewrite state"
+            git -C vault push
+          fi

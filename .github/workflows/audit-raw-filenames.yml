@@ -1,0 +1,99 @@
+name: Audit Raw filenames
+
+on:
+  schedule:
+    # ~13:47 Asia/Shanghai daily (off :00/:30 to avoid contention)
+    - cron: "47 5 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [audit-filenames]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run filename audit
+        id: audit
+        run: |
+          set -euo pipefail
+          python scripts/audit_raw_filenames.py --json > /tmp/audit-result.json
+          violations=$(python -c "import json; d=json.load(open('/tmp/audit-result.json')); print(d['total'])")
+          echo "violations=$violations" >> "$GITHUB_OUTPUT"
+          echo "Found $violations filename violations"
+
+      - name: Attempt auto-fix
+        if: steps.audit.outputs.violations != '0'
+        run: |
+          python scripts/audit_raw_filenames.py --fix 2>&1
+
+      - name: Re-check after fix
+        if: steps.audit.outputs.violations != '0'
+        id: recheck
+        run: |
+          python scripts/audit_raw_filenames.py --json > /tmp/recheck-result.json
+          remaining=$(python -c "import json; d=json.load(open('/tmp/recheck-result.json')); print(d['total'])")
+          echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
+
+      - name: Log audit result
+        run: |
+          mkdir -p .github/state
+          cp /tmp/audit-result.json .github/state/filename-audit-last-run.json
+          python -c "
+          import json
+          d = json.load(open('/tmp/audit-result.json'))
+          total = d['total']
+          lines = ['## Filename audit result']
+          lines.append(f'- violations: {total}')
+          for v in d['violations'][:20]:
+              lines.append(f'  - {v[\"path\"]}: {v[\"reason\"]}')
+          if total > 20:
+              lines.append(f'  - ... and {total - 20} more')
+          import os
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as fh:
+              fh.write('\n'.join(lines) + '\n')
+          "
+
+      - name: Commit auto-fixes
+        if: steps.audit.outputs.violations != '0' && steps.recheck.outputs.remaining == '0'
+        run: |
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add -A
+          if git -C vault diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git -C vault commit -m "Auto-fix: rename ${{ steps.audit.outputs.violations }} violating filenames"
+            git -C vault pull --rebase origin main
+            git -C vault push
+          fi
+
+      - name: Report remaining violations
+        if: steps.audit.outputs.violations != '0' && steps.recheck.outputs.remaining != '0'
+        run: |
+          echo "::error::${{ steps.recheck.outputs.remaining }} filename violations remain after auto-fix. Manual investigation needed."
+          exit 1

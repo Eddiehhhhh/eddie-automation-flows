@@ -1,0 +1,113 @@
+name: Sync GetNote voice notes to flomo
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub cron is UTC; the flow itself filters recent notes.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Inspect candidates without creating flomo memos"
+        required: false
+        type: boolean
+        default: true
+      hours_back:
+        description: "Look back window in hours"
+        required: false
+        type: string
+        default: "36"
+      max_notes:
+        description: "Maximum candidate notes to process"
+        required: false
+        type: string
+        default: "80"
+  repository_dispatch:
+    types: [sync-getnote-voice-flomo]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+      GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+      FLOMO_TOKEN: ${{ secrets.FLOMO_TOKEN || secrets.FLOMO_MCP_TOKEN }}
+      GETNOTE_VOICE_FLOMO_HOURS: ${{ github.event_name == 'workflow_dispatch' && inputs.hours_back || '36' }}
+      GETNOTE_VOICE_FLOMO_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.max_notes || '80' }}
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync voice notes to flomo
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/sync_getnote_voice_to_flomo.py --dry-run | tee /tmp/getnote-voice-flomo-result.json
+          else
+            python scripts/sync_getnote_voice_to_flomo.py | tee /tmp/getnote-voice-flomo-result.json
+          fi
+
+      - name: Summarize sync result
+        if: ${{ always() }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result_path = Path("/tmp/getnote-voice-flomo-result.json")
+          if not result_path.exists():
+              raise SystemExit("missing result json")
+          payload = json.loads(result_path.read_text(encoding="utf-8"))
+          state_dir = Path(".github") / "state"
+          state_dir.mkdir(parents=True, exist_ok=True)
+          (state_dir / "getnote-voice-flomo-last-run.json").write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          lines = [
+              "## GetNote voice to flomo result",
+              f"- dry_run: {payload.get('dry_run')}",
+              f"- scanned: {payload.get('scanned')}",
+              f"- candidate: {payload.get('candidate')}",
+              f"- created: {payload.get('created')}",
+              f"- requested_tags: {payload.get('requested_tags')}",
+              f"- resolved_tags: {payload.get('resolved_tags')}",
+              f"- unresolved_tags: {payload.get('unresolved_tags')}",
+          ]
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as fh:
+              fh.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Commit state changes
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+        run: |
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add ".github/state/getnote-voice-flomo-sync.json" ".github/state/getnote-voice-flomo-last-run.json"
+          if git -C vault diff --cached --quiet; then
+            echo "No GetNote voice flomo state changes to commit."
+          else
+            git -C vault commit -m "Update GetNote voice flomo sync state"
+            git -C vault push
+          fi

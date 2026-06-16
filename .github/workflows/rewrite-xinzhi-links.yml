@@ -1,0 +1,106 @@
+name: Rewrite Xinzhi link notes
+
+on:
+  push:
+    paths:
+      - scripts/rewrite_xinzhi_link_notes.py
+      - .github/workflows/rewrite-xinzhi-links.yml
+  schedule:
+    # 04:10, 10:10, 16:10, 22:10 Asia/Shanghai. GitHub cron is UTC.
+    - cron: "10 20 * * *"
+    - cron: "10 2 * * *"
+    - cron: "10 8 * * *"
+    - cron: "10 14 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Inspect candidate notes without modifying Xinzhi"
+        required: false
+        type: boolean
+        default: true
+      days_back:
+        description: "Look back window in days"
+        required: false
+        type: string
+        default: "3"
+      limit:
+        description: "Maximum number of notes to process"
+        required: false
+        type: string
+        default: "200"
+      page_size:
+        description: "Search page size"
+        required: false
+        type: string
+        default: "50"
+      default_container:
+        description: "Fallback container name when the source note does not expose one"
+        required: false
+        type: string
+        default: "暂存箱"
+  repository_dispatch:
+    types: [rewrite-xinzhi-links]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rewrite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      XINZHI_CLI_ACCESS_TOKEN: ${{ secrets.XINZHI_CLI_ACCESS_TOKEN || secrets.XINZHI_ACCESS_TOKEN || secrets.XINZHI_TOKEN }}
+      XINZHI_DEFAULT_CONTAINER_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.default_container || '暂存箱' }}
+      XINZHI_REWRITE_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.days_back || '3' }}
+      XINZHI_REWRITE_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.limit || '200' }}
+      XINZHI_REWRITE_PAGE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.page_size || '50' }}
+      XINZHI_REWRITE_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Xinzhi CLI
+        run: npm install -g @xinzhi-zone/cli@0.0.11
+
+      - name: Rewrite link notes
+        run: |
+          if [ "${XINZHI_REWRITE_DRY_RUN}" = "true" ]; then
+            python scripts/rewrite_xinzhi_link_notes.py --dry-run
+          else
+            python scripts/rewrite_xinzhi_link_notes.py
+          fi
+
+      - name: Commit state changes
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+        run: |
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add ".github/state/xinzhi-link-rewrite.json"
+          if git -C vault diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git -C vault commit -m "Update Xinzhi link rewrite state"
+            git -C vault push
+          fi

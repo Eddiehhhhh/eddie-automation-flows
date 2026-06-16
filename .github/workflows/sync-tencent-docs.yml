@@ -1,0 +1,93 @@
+name: Sync Tencent Docs to Raw
+
+on:
+  schedule:
+    # 04:30 and 16:30 Asia/Shanghai. GitHub cron is UTC.
+    - cron: "30 20 * * *"
+    - cron: "30 8 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [sync-tencent-docs]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TENCENT_DOCS_TOKEN: ${{ secrets.TENCENT_DOCS_TOKEN }}
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out private vault
+        uses: actions/checkout@v4
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync Tencent Docs
+        run: |
+          set -euo pipefail
+          python scripts/sync_tencent_docs_to_raw.py | tee /tmp/tencent-docs-sync-result.json
+
+      - name: Summarize sync result
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/tencent-docs-sync-result.json").read_text(encoding="utf-8"))
+          summary = [
+              "## Tencent Docs sync result",
+              f"- fetched_at: {payload.get('fetched_at')}",
+              f"- target_count: {payload.get('target_count')}",
+              f"- written_or_changed: {payload.get('written_or_changed')}",
+          ]
+          folder_lines = [
+              f"- {folder}: {count}"
+              for folder, count in sorted((payload.get("folders") or {}).items())
+          ]
+          state_dir = Path(".github") / "state"
+          state_dir.mkdir(parents=True, exist_ok=True)
+          (state_dir / "tencent-docs-sync-last-run.json").write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as fh:
+              fh.write("\n".join(summary + ["", "### Folder counts", *folder_lines]) + "\n")
+          PY
+
+      - name: Validate filename compliance
+        if: ${{ success() }}
+        run: |
+          python scripts/audit_raw_filenames.py --json
+
+      - name: Commit Raw updates
+        if: ${{ success() }}
+        run: |
+          git -C vault config user.name "github-actions[bot]"
+          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vault add "Raw/06 TencentDocs" ".github/state/tencent-docs-sync-last-run.json"
+          if git -C vault diff --cached --quiet; then
+            echo "No Tencent Docs changes to commit."
+          else
+            git -C vault commit -m "Sync Tencent Docs to Raw"
+            git -C vault pull --rebase origin main
+            git -C vault push
+          fi

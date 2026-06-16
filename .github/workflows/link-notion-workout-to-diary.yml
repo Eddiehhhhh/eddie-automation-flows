@@ -1,0 +1,55 @@
+name: Link Notion workouts to diary
+
+on:
+  schedule:
+    # 03:20, 09:20, 15:20, 21:20 Asia/Shanghai. GitHub cron is UTC.
+    - cron: "20 19 * * *"
+    - cron: "20 1 * * *"
+    - cron: "20 7 * * *"
+    - cron: "20 13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Resolve the matching diary pages without updating Notion"
+        required: false
+        type: boolean
+        default: false
+      hours_back:
+        description: "Look back window in hours"
+        required: false
+        type: string
+        default: "72"
+  repository_dispatch:
+    types: [sync-notion-workout-links]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      NOTION_WORKOUT_DATABASE_ID: ${{ secrets.NOTION_WORKOUT_DATABASE_ID }}
+      NOTION_DIARY_DATABASE_ID: ${{ secrets.NOTION_DIARY_DATABASE_ID }}
+      NOTION_WORKOUT_DATE_PROPERTY: ${{ secrets.NOTION_WORKOUT_DATE_PROPERTY }}
+      NOTION_DIARY_DATE_PROPERTY: ${{ secrets.NOTION_DIARY_DATE_PROPERTY }}
+      NOTION_WORKOUT_DIARY_RELATION_PROPERTY: ${{ secrets.NOTION_WORKOUT_DIARY_RELATION_PROPERTY }}
+      NOTION_WORKOUT_SYNC_HOURS: ${{ github.event_name == 'workflow_dispatch' && inputs.hours_back || '72' }}
+      NOTION_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Link workouts to diary
+        run: python scripts/link_notion_workout_to_diary.py
