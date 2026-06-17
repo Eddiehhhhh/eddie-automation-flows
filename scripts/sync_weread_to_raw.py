@@ -340,7 +340,18 @@ def render_book_note(
 
     while lines and lines[-1] == "":
         lines.pop()
-    return "\n".join(lines) + "\n", OUTPUT_ROOT / f"{_safe_filename(title)}.md"
+
+    # Build year/month path from last_read_time
+    date_ref = last_read or ""
+    import re as _re
+    date_match = _re.match(r"(\d{4})-(\d{2})", date_ref)
+    if date_match:
+        year, year_month = date_match.group(1), date_match.group(2)
+    else:
+        now_dt = now()
+        year, year_month = now_dt.strftime("%Y"), now_dt.strftime("%Y-%m")
+    target_dir = OUTPUT_ROOT / year / year_month
+    return "\n".join(lines) + "\n", target_dir / f"{_safe_filename(title)}.md"
 
 
 def render_index(rows: List[Dict[str, Any]]) -> str:
