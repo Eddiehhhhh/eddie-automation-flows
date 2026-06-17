@@ -90,6 +90,18 @@ jobs:
           set -euo pipefail
           python scripts/sync_notion_workout_daily_to_raw.py
 
+      - name: Sync douban books
+        run: |
+          set -euo pipefail
+          python scripts/sync_notion_douban_to_raw.py
+
+      - name: Sync weread notes
+        env:
+          WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/sync_weread_to_raw.py
+
       - name: Validate filename compliance
         if: ${{ success() }}
         run: |
@@ -107,7 +119,7 @@ jobs:
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
             git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/13 小宇宙"
           else
-            git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/12 我的运动" "Raw/13 小宇宙"
+            git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/12 我的运动" "Raw/13 小宇宙" "Raw/14 豆瓣读书" "Raw/15 微信读书"
           fi
           if git -C vault diff --cached --quiet; then
             echo "No personal-data changes to commit."
