@@ -96,11 +96,9 @@ jobs:
           python scripts/sync_notion_douban_to_raw.py
 
       - name: Sync weread notes
-        env:
-          WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
         run: |
           set -euo pipefail
-          python scripts/sync_weread_to_raw.py
+          python scripts/sync_notion_weread_to_raw.py
 
       - name: Validate filename compliance
         if: ${{ success() }}
