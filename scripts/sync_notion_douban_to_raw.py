@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync douban book records from Notion into Raw/14 豆瓣读书."""
+"""Sync douban movie records from Notion into Raw/14 豆瓣影视."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from sync_notion_to_raw import (
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
-OUTPUT_ROOT = ROOT / "Raw" / "14 豆瓣读书"
+OUTPUT_ROOT = ROOT / "Raw" / "14 豆瓣影视"
 TZ = dt.timezone(dt.timedelta(hours=8))
 
 
@@ -101,7 +101,7 @@ def page_text(page: Dict[str, Any], property_name: str) -> str:
     return ""
 
 
-def book_path(title: str, added_date: Optional[dt.datetime]) -> Path:
+def movie_path(title: str, added_date: Optional[dt.datetime]) -> Path:
     dt_ref = added_date or now()
     year = dt_ref.strftime("%Y")
     year_month = dt_ref.strftime("%Y-%m")
@@ -118,36 +118,36 @@ def book_path(title: str, added_date: Optional[dt.datetime]) -> Path:
             except UnicodeDecodeError:
                 trimmed = trimmed[:-1]
     if not safe_title:
-        safe_title = "未命名书籍"
+        safe_title = "未命名影视"
     return OUTPUT_ROOT / year / year_month / f"{safe_title}.md"
 
 
-def render_book_note(
+def render_movie_note(
     page: Dict[str, Any],
     database: Dict[str, Any],
 ) -> tuple[str, Path]:
     title = page_title(page)
-    author = page_text(page, "作者")
+    director = page_text(page, "导演") or page_text(page, "作者")
     rating = page_number(page, "评分")
-    status = page_select(page, "状态") or page_select(page, "阅读状态")
+    status = page_select(page, "状态") or page_select(page, "观看状态") or page_select(page, "阅读状态")
     tags = page_multi_select(page, "标签") or page_multi_select(page, "Tags")
     added_date = page_date(page, "添加日期") or page_date(page, "日期")
     if added_date is None:
         created = parse_time(page.get("created_time"))
         if created:
             added_date = created
-    notes = page_text(page, "短评") or page_text(page, "笔记") or page_text(page, "备注")
+    notes = page_text(page, "短评") or page_text(page, "笔记") or page_text(page, "备注") or page_text(page, "影评")
     notion_url = (page.get("url") or "").strip()
     page_id = normalize_notion_id(str(page.get("id") or ""))
 
     frontmatter = render_frontmatter(
         {
             "source_system": "notion",
-            "source_type": "douban_book",
+            "source_type": "douban_movie",
             "database_name": title_text_from_database(database),
             "database_id": normalize_notion_id(str(database.get("id") or "")),
             "title": title,
-            "author": author,
+            "director": director,
             "rating": rating,
             "status": status,
             "tags": tags if tags else None,
@@ -166,8 +166,8 @@ def render_book_note(
         "## 基本信息",
         "",
     ]
-    if author:
-        lines.append(f"- 作者：{author}")
+    if director:
+        lines.append(f"- 导演：{director}")
     if rating is not None:
         lines.append(f"- 评分：{rating}")
     if status:
@@ -184,7 +184,7 @@ def render_book_note(
 
     while lines and lines[-1] == "":
         lines.pop()
-    return "\n".join(lines) + "\n", book_path(title, added_date)
+    return "\n".join(lines) + "\n", movie_path(title, added_date)
 
 
 def render_index(rows: List[Dict[str, Any]]) -> str:
@@ -192,16 +192,16 @@ def render_index(rows: List[Dict[str, Any]]) -> str:
     lines = [
         "---",
         'source_system: "notion"',
-        'source_type: "douban_book_index"',
+        'source_type: "douban_movie_index"',
         f'generated_at: "{generated_at}"',
-        f"book_count: {len(rows)}",
+        f"movie_count: {len(rows)}",
         "---",
         "",
-        "# 豆瓣读书索引",
+        "# 豆瓣影视索引",
         "",
-        f"> 本地已同步 {len(rows)} 本书。",
+        f"> 本地已同步 {len(rows)} 部影视。",
         "",
-        "| 书名 | 作者 | 评分 | 状态 | 日期 | 文件 |",
+        "| 片名 | 导演 | 评分 | 状态 | 日期 | 文件 |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for row in sorted(rows, key=lambda item: item.get("date") or "", reverse=True):
@@ -209,7 +209,7 @@ def render_index(rows: List[Dict[str, Any]]) -> str:
         status_text = row.get("status") or "-"
         date_text = row.get("date") or "-"
         lines.append(
-            f"| {row['title']} | {row.get('author') or '-'} | {rating_text} | {status_text} | {date_text} | [{row['path']}]({row['path']}) |"
+            f"| {row['title']} | {row.get('director') or '-'} | {rating_text} | {status_text} | {date_text} | [{row['path']}]({row['path']}) |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -218,7 +218,7 @@ def render_index(rows: List[Dict[str, Any]]) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Preview target files without writing.")
-    parser.add_argument("--max-pages", type=int, default=0, help="Limit the number of book pages to process.")
+    parser.add_argument("--max-pages", type=int, default=0, help="Limit the number of movie pages to process.")
     return parser.parse_args()
 
 
@@ -228,8 +228,7 @@ def main() -> None:
 
     database_id = os.environ.get("DOUBAN_DATABASE_ID")
     if not database_id:
-        # Try multiple search queries to find the douban database
-        for query in ["书籍", "豆瓣", "book", "豆瓣读书"]:
+        for query in ["影视", "movie", "豆瓣影视", "影视记录"]:
             try:
                 database = resolve_database(api_key, None, query)
                 break
@@ -237,12 +236,12 @@ def main() -> None:
                 continue
         else:
             raise SystemExit(
-                "Could not find douban database. "
+                "Could not find douban movie database. "
                 "Set DOUBAN_DATABASE_ID environment variable or ensure a Notion database "
-                "titled '书籍', '豆瓣', 'book', or '豆瓣读书' exists."
+                "titled '影视', 'movie', '豆瓣影视', or '影视记录' exists."
             )
     else:
-        database = resolve_database(api_key, database_id, "豆瓣读书")
+        database = resolve_database(api_key, database_id, "豆瓣影视")
 
     database_name = title_text_from_database(database)
     print(f"Found database: {database_name}")
@@ -252,13 +251,12 @@ def main() -> None:
     for page in paginate_database(api_key, normalize_notion_id(str(database.get("id")))):
         if page.get("archived"):
             continue
-        content, target = render_book_note(page, database)
+        content, target = render_movie_note(page, database)
         title = page_title(page)
 
-        # Extract metadata for index
-        author = page_text(page, "作者")
+        director = page_text(page, "导演") or page_text(page, "作者")
         rating = page_number(page, "评分")
-        status = page_select(page, "状态") or page_select(page, "阅读状态")
+        status = page_select(page, "状态") or page_select(page, "观看状态") or page_select(page, "阅读状态")
         added_date = page_date(page, "添加日期") or page_date(page, "日期")
         if added_date is None:
             created = parse_time(page.get("created_time"))
@@ -273,7 +271,7 @@ def main() -> None:
         rows.append(
             {
                 "title": title,
-                "author": author,
+                "director": director,
                 "rating": rating,
                 "status": status,
                 "date": added_date.strftime("%Y-%m-%d") if added_date else None,
@@ -290,7 +288,7 @@ def main() -> None:
     else:
         write_text(index_path, render_index(rows))
 
-    print(f"WROTE {len(rows)} book notes")
+    print(f"WROTE {len(rows)} movie notes")
     print(f"WROTE {index_path.relative_to(ROOT)}")
 
 
