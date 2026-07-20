@@ -103,9 +103,9 @@ jobs:
             "Raw/00 Meta" \
             "Raw/05 Chat" \
             "Wiki/06 Systems/工作区自动收口报告.md" \
-            "Wiki/10 观测站/艾迪宇宙观测站/weekly" \
-            "Wiki/10 观测站/艾迪宇宙观测站/index.html" \
-            "Wiki/10 观测站/艾迪宇宙观测站/metrics/observatory-data.json"
+            "Observatory/weekly" \
+            "Observatory/index.html" \
+            "Observatory/metrics/observatory-data.json"
           if git -C vault diff --cached --quiet; then
             echo "No weekly iteration changes to commit."
           else

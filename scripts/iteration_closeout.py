@@ -22,7 +22,7 @@ import workspace_intake_report
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
 RAW_DIR = ROOT / "Raw"
 WIKI_DIR = ROOT / "Wiki"
-OBS_ROOT = WIKI_DIR / "10 观测站" / "艾迪宇宙观测站"
+OBS_ROOT = WIKI_DIR.parent / "Observatory"
 META_DIR = RAW_DIR / "00 Meta"
 CHAT_DIR = RAW_DIR / "05 Chat"
 SHANGHAI = timezone(timedelta(hours=8))
@@ -559,13 +559,13 @@ def render_frontmatter(fields: dict[str, str]) -> str:
 def build_reference_section(mode: str, tab: str, extra_refs: list[str]) -> list[str]:
     base_refs: list[str]
     if tab == "个人状态":
-        base_refs = ["[[系统状态]]", "[[启发洞察]]", "[[Wiki/10 观测站/艾迪宇宙观测站/索引]]"]
+        base_refs = ["[[系统状态]]", "[[启发洞察]]", "[[Observatory/索引]]"]
     elif tab == "系统状态":
-        base_refs = ["[[个人状态]]", "[[启发洞察]]", "[[Wiki/10 观测站/艾迪宇宙观测站/索引]]"]
+        base_refs = ["[[个人状态]]", "[[启发洞察]]", "[[Observatory/索引]]"]
     else:
-        base_refs = ["[[个人状态]]", "[[系统状态]]", "[[Wiki/10 观测站/艾迪宇宙观测站/索引]]"]
+        base_refs = ["[[个人状态]]", "[[系统状态]]", "[[Observatory/索引]]"]
     if mode == "weekly":
-        base_refs.append("[[Wiki/10 观测站/艾迪宇宙观测站/weekly/索引]]")
+        base_refs.append("[[Observatory/weekly/索引]]")
     deduped: list[str] = []
     for ref in base_refs + extra_refs:
         if ref not in deduped:
@@ -979,9 +979,9 @@ def build_insight_tab(
     recent_history: Counter[str],
 ) -> tuple[str, list[str], dict[str, list[str]]]:
     refs: list[str] = [
-        "[[Wiki/01 People/Eddie]]",
-        "[[Wiki/02 Life/近期状态]]",
-        "[[Wiki/03 Work/AI协作与知识系统演进]]",
+        "[[Wiki/01 Self/Eddie]]",
+        "[[Wiki/02 Life/当前状态]]",
+        "[[Wiki/06 Systems/00 Architecture/系统设计]]",
     ]
     theme_refs: dict[str, list[str]] = defaultdict(list)
 

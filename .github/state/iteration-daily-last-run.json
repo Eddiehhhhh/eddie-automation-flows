@@ -1267,8 +1267,8 @@
     "path": "Raw/00 Meta/iteration-incremental-audit-latest.json"
   },
   "frontend": {
-    "html_path": "Wiki/10 观测站/艾迪宇宙观测站/index.html",
-    "json_path": "Wiki/10 观测站/艾迪宇宙观测站/metrics/observatory-data.json",
+    "html_path": "Observatory/index.html",
+    "json_path": "Observatory/metrics/observatory-data.json",
     "changed": {
       "json_changed": true,
       "html_changed": true
@@ -1281,11 +1281,11 @@
   },
   "closeout": {
     "chat_record": "Raw/05 Chat/2026-06-15-Hermes每日自动化-2026-06-15.md",
-    "observatory_folder": "Wiki/10 观测站/艾迪宇宙观测站/daily/2026/2026-06/2026-06-15",
+    "observatory_folder": "Observatory/daily/2026/2026-06/2026-06-15",
     "written_tabs": [
-      "Wiki/10 观测站/艾迪宇宙观测站/daily/2026/2026-06/2026-06-15/个人状态.md",
-      "Wiki/10 观测站/艾迪宇宙观测站/daily/2026/2026-06/2026-06-15/系统状态.md",
-      "Wiki/10 观测站/艾迪宇宙观测站/daily/2026/2026-06/2026-06-15/启发洞察.md"
+      "Observatory/daily/2026/2026-06/2026-06-15/个人状态.md",
+      "Observatory/daily/2026/2026-06/2026-06-15/系统状态.md",
+      "Observatory/daily/2026/2026-06/2026-06-15/启发洞察.md"
     ],
     "actual_wiki_updates": [],
     "candidate_wiki_updates": [

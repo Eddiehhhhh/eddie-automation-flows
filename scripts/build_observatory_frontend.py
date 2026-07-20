@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
-OBS_ROOT = ROOT / "Wiki" / "10 观测站" / "艾迪宇宙观测站"
+OBS_ROOT = ROOT / "Observatory"
 HTML_OUTPUT = OBS_ROOT / "index.html"
 JSON_OUTPUT = OBS_ROOT / "metrics" / "observatory-data.json"
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
