@@ -1,9 +1,6 @@
 name: Hermes Daily Iteration
 
 on:
-  schedule:
-    # 12:00 Asia/Shanghai. GitHub cron is UTC.
-    - cron: "0 4 * * *"
   workflow_dispatch:
     inputs:
       target_date:
