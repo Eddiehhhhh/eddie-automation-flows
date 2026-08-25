@@ -60,6 +60,9 @@ jobs:
           token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           path: vault
           fetch-depth: 1
+          sparse-checkout: |
+            Wiki
+            .github/state
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
