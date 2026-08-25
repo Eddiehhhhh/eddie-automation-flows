@@ -39,8 +39,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -111,9 +111,6 @@ jobs:
           target_ref="${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref_name }}"
           git -C vault config user.name "github-actions[bot]"
           git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git stash push --include-untracked -m "pre-commit personal-data sync" || true
-          git pull --rebase origin "$target_ref"
-          git stash pop --index || true
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
             git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/13 小宇宙"
           else
@@ -123,5 +120,10 @@ jobs:
             echo "No personal-data changes to commit."
           else
             git -C vault commit -m "Sync Notion personal data to Raw"
+            git -C vault fetch origin "$target_ref"
+            if ! git -C vault merge-base --is-ancestor "origin/$target_ref" HEAD; then
+              echo "::error::Private vault advanced during this run; stopping without rebasing. Rerun the workflow."
+              exit 1
+            fi
             git -C vault push origin "HEAD:$target_ref"
           fi

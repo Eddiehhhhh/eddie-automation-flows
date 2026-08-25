@@ -15,8 +15,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -61,6 +61,10 @@ jobs:
             echo "No GetNote changes to commit."
           else
             git -C vault commit -m "Sync GetNote notes to Raw"
-            git -C vault pull --rebase origin main
-            git -C vault push
+            git -C vault fetch origin main
+            if ! git -C vault merge-base --is-ancestor origin/main HEAD; then
+              echo "::error::Private vault advanced during this run; stopping without rebasing. Rerun the workflow."
+              exit 1
+            fi
+            git -C vault push origin HEAD:main
           fi
