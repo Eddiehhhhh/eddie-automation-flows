@@ -28,7 +28,7 @@ ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
 
 # Source directories to audit — (relative_path, label)
 SOURCE_DIRS: list[tuple[str, str]] = [
-    ("Raw/01 Flomo/01 Memos", "flomo"),
+    ("Raw/01 Flomo",          "flomo"),
     ("Raw/03 Get",            "get"),
     ("Raw/06 TencentDocs",    "tencent_docs"),
 ]
@@ -101,8 +101,7 @@ def strip_leading_date(text: str) -> str:
     match = LEADING_DATE_RE.match(value)
     if match:
         remainder = value[match.end():].lstrip(" -—_:：·|#.")
-        if remainder:
-            value = remainder
+        value = remainder
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
@@ -120,7 +119,15 @@ def expected_clean_name(path: Path) -> str | None:
     title = frontmatter_value(text, "title")
     if not title:
         return None
-    cleaned = strip_leading_date(title) or title
+    cleaned = strip_leading_date(title)
+    if not cleaned:
+        source_id = (
+            frontmatter_value(text, "memo_id")
+            or frontmatter_value(text, "note_id")
+            or frontmatter_value(text, "doc_id")
+            or "source"
+        )
+        cleaned = f"untitled-{source_id}"
     slug = truncate_utf8_bytes(safe_slug(cleaned, "untitled"), 160)
     return f"{slug}.md"
 
