@@ -22,7 +22,7 @@ import workspace_intake_report
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
 RAW_DIR = ROOT / "Raw"
 WIKI_DIR = ROOT / "Wiki"
-OBS_ROOT = WIKI_DIR / "10 观测站" / "艾迪宇宙观测站"
+OBS_ROOT = ROOT / "Observatory"
 META_DIR = RAW_DIR / "00 Meta"
 CHAT_DIR = RAW_DIR / "05 Chat"
 SHANGHAI = timezone(timedelta(hours=8))
@@ -559,13 +559,13 @@ def render_frontmatter(fields: dict[str, str]) -> str:
 def build_reference_section(mode: str, tab: str, extra_refs: list[str]) -> list[str]:
     base_refs: list[str]
     if tab == "个人状态":
-        base_refs = ["[[系统状态]]", "[[启发洞察]]", "[[Wiki/10 观测站/艾迪宇宙观测站/索引]]"]
+        base_refs = ["[[./系统状态]]", "[[./启发洞察]]", "[[Observatory/索引]]"]
     elif tab == "系统状态":
-        base_refs = ["[[个人状态]]", "[[启发洞察]]", "[[Wiki/10 观测站/艾迪宇宙观测站/索引]]"]
+        base_refs = ["[[./个人状态]]", "[[./启发洞察]]", "[[Observatory/索引]]"]
     else:
-        base_refs = ["[[个人状态]]", "[[系统状态]]", "[[Wiki/10 观测站/艾迪宇宙观测站/索引]]"]
+        base_refs = ["[[./个人状态]]", "[[./系统状态]]", "[[Observatory/索引]]"]
     if mode == "weekly":
-        base_refs.append("[[Wiki/10 观测站/艾迪宇宙观测站/weekly/索引]]")
+        base_refs.append("[[Observatory/weekly/索引]]")
     deduped: list[str] = []
     for ref in base_refs + extra_refs:
         if ref not in deduped:
@@ -668,8 +668,8 @@ def gather_seed_paths(entries: list[Entry], theme_key: str, limit: int = 3) -> l
 
 def build_known_context_lines() -> list[str]:
     lines: list[str] = []
-    life_text = read_text(WIKI_DIR / "02 Life" / "近期状态.md", 8000)
-    work_text = read_text(WIKI_DIR / "03 Work" / "AI协作与知识系统演进.md", 8000)
+    life_text = read_text(WIKI_DIR / "02 Life" / "当前状态.md", 8000)
+    work_text = read_text(WIKI_DIR / "03 Career" / "AI协作与知识系统演进.md", 8000)
     for text in (life_text, work_text):
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -712,7 +712,7 @@ def build_source_snapshot(
     cubox_window_entries = entries_in_range(cubox_root, "cubox", start, end)
     cubox_recent = get_recent_entries(cubox_root, "cubox", days=7)
     get_summary, get_summary_age = find_get_daily_summary(target)
-    exact_start = exact_end = target
+    exact_start, exact_end = (start, end) if mode == "weekly" else (target, target)
     return {
         "flomo": {
             "entries": entries_in_range(RAW_DIR / "01 Flomo", "flomo", exact_start, exact_end),
@@ -760,7 +760,8 @@ def build_personal_status(
     refs: list[str] = []
 
     intro_lines: list[str] = []
-    if get_daily and get_age == 0:
+    scope_label = "本周" if mode == "weekly" else "同日"
+    if mode == "daily" and get_daily and get_age == 0:
         score = get_fields.get("score", "未抽出")
         mood = get_fields.get("mood", "未抽出")
         sleep = get_fields.get("sleep", "未抽出")
@@ -774,9 +775,9 @@ def build_personal_status(
         refs.append(quote_path(get_daily.rel_path))
     else:
         intro_lines.append(
-            f"{target_label} 没抓到同日 `Get笔记` 每日总结 bundle，所以首页量化字段仍不能精确填值。"
+            f"{target_label} 没抓到可支撑{scope_label}个人状态判断的 `Get笔记` 总结，因此保留证据不足，不填造量化结论。"
         )
-        if get_daily and get_age is not None:
+        if mode == "daily" and get_daily and get_age is not None:
             intro_lines.append(
                 f"最近可核对的同结构 summary 距离目标日 {get_age} 天，来源是 `{get_daily.title}`。"
             )
@@ -788,9 +789,9 @@ def build_personal_status(
         )
 
     fixed_source_lines = [
-        f"- `Flomo`：同日命中 `{len(flomo_entries)}` 条，主题集中在 {topic_line(flomo_entries)}。"
+        f"- `Flomo`：{scope_label}命中 `{len(flomo_entries)}` 条，主题集中在 {topic_line(flomo_entries)}。"
         if flomo_entries
-        else f"- `Flomo`：同日未命中 memo；回看窗口共 `{len(flomo_window_entries)}` 条，主题集中在 {topic_line(flomo_window_entries)}。"
+        else f"- `Flomo`：{scope_label}未命中 memo；回看窗口共 `{len(flomo_window_entries)}` 条，主题集中在 {topic_line(flomo_window_entries)}。"
     ]
     if flomo_entries:
         refs.extend(quote_path(entry.rel_path) for entry in flomo_entries[:3])
@@ -799,28 +800,28 @@ def build_personal_status(
 
     get_topic = topic_line(get_entries or get_window_entries)
     if get_entries:
-        fixed_source_lines.append(f"- `Get笔记`：同日命中 `{len(get_entries)}` 条真实笔记；主题以 {get_topic} 为主。")
+        fixed_source_lines.append(f"- `Get笔记`：{scope_label}命中 `{len(get_entries)}` 条真实笔记；主题以 {get_topic} 为主。")
         refs.extend(quote_path(entry.rel_path) for entry in get_entries[:3])
     else:
         fixed_source_lines.append(
-            f"- `Get笔记`：同日未命中正文笔记；回看窗口共 `{len(get_window_entries)}` 条，可作为背景，但不替代 target-date 主轴。"
+            f"- `Get笔记`：{scope_label}未命中正文笔记；回看窗口共 `{len(get_window_entries)}` 条。"
         )
         refs.extend(quote_path(entry.rel_path) for entry in get_window_entries[:2])
 
     if notion_entries:
         fixed_source_lines.append(
-            f"- `Notion`：同日命中 `{len(notion_entries)}` 条结构化记录，可作为支持证据，不作为首页主导来源。"
+            f"- `Notion`：{scope_label}命中 `{len(notion_entries)}` 条结构化记录，可作为支持证据，不作为首页主导来源。"
         )
         refs.extend(quote_path(entry.rel_path) for entry in notion_entries[:2])
     else:
-        fixed_source_lines.append("- `Notion`：没有命中同日结构化生活 bundle。")
+        fixed_source_lines.append(f"- `Notion`：没有命中{scope_label}结构化生活 bundle。")
 
     cubox_root = sources["cubox"]["root"]
     cubox_mode = sources["cubox"]["mode"]
     cubox_recent = sources["cubox"]["recent_entries"]
     if cubox_entries:
         fixed_source_lines.append(
-            f"- `Cubox`：当前通过 `{cubox_root}` 读取，同日命中 `{len(cubox_entries)}` 条外部材料，主题为 {topic_line(cubox_entries)}。"
+            f"- `Cubox`：当前通过 `{cubox_root}` 读取，{scope_label}命中 `{len(cubox_entries)}` 条外部材料，主题为 {topic_line(cubox_entries)}。"
         )
         refs.extend(quote_path(entry.rel_path) for entry in cubox_entries[:3])
     elif cubox_recent:
@@ -834,17 +835,24 @@ def build_personal_status(
         fixed_source_lines.append(f"- `Cubox`：当前通过 `{cubox_root}` 读取，但目标窗口和近 7 天都未命中新材料。")
 
     signal_lines: list[str] = []
-    if get_daily and get_age == 0:
+    if mode == "daily" and get_daily and get_age == 0:
         signal_lines.append(f"- 精力：以 `Get` 同日字段为主，当前记录为 `{get_fields.get('energy', '未抽出')}`。")
         signal_lines.append(f"- 情绪：以 `Get` 同日字段为主，当前记录为 `{get_fields.get('mood', '未抽出')}`。")
         signal_lines.append(f"- 反馈：从行动摘要看，最强反馈来自 `{get_fields.get('action_summary', '当日行动摘要未抽出')}`。")
+    elif mode == "weekly":
+        primary = insights[0].title if insights else "证据不足"
+        signal_lines.append(f"- 精力：本周缺少可核对的量化来源；当前只能标记为“{primary}”。")
+        signal_lines.append("- 情绪：证据不足，不从自动化记录反推个人情绪。")
+        signal_lines.append("- 反馈：本周先补齐 Get / Notion 周期映射，再生成个人结论。")
     else:
         primary = insights[0].title if insights else "信息仍偏碎"
         signal_lines.append(f"- 精力：更像在做认知收束，主线落在“{primary}”，不是高并发输出日。")
         signal_lines.append("- 情绪：同日量化字段缺失，当前只能根据标题和外部材料判断为“关注点向内收，评价感更强”。")
         signal_lines.append("- 反馈：今天最有用的不是更多建议，而是分清哪些信号真的改变判断。")
     signal_lines.append(
-        "- 任务承载：适合 30-90 分钟的一页式判断，不适合再开新的复杂系统分支。"
+        "- 任务承载：当前证据不足以给出可靠建议。"
+        if mode == "weekly" and not insights
+        else "- 任务承载：适合 30-90 分钟的一页式判断，不适合再开新的复杂系统分支。"
     )
 
     frontmatter = render_frontmatter(
@@ -884,10 +892,11 @@ def build_system_status(
     actual_wiki_updates: list[str],
     candidate_skill_items: list[str],
 ) -> tuple[str, list[str]]:
+    scope_label = "本周" if mode == "weekly" else "同日"
     refs: list[str] = [
-        "[[Wiki/06 Systems/Notion 检索索引]]",
-        "[[Wiki/06 Systems/每日隐藏链接发现报告]]",
-        "[[Wiki/06 Systems/迭代系统]]",
+        "[[Wiki/06 Systems/03 Integrations/Notion 检索索引]]",
+        "[[Observatory/reports/每日隐藏链接发现报告]]",
+        "[[Wiki/06 Systems/00 Architecture/迭代系统]]",
     ]
     discovery_delta = discovery.get("delta", {})
     run_lines = [
@@ -908,16 +917,27 @@ def build_system_status(
     cubox_recent = sources["cubox"]["recent_entries"]
     cubox_root = sources["cubox"]["root"] or "无"
     data_lines = [
-        f"- `Flomo`：同日 `{len(flomo_entries)}` 条，回看窗口 `{len(sources['flomo']['window_entries'])}` 条。",
-        f"- `Get笔记`：同日 `{len(get_entries)}` 条，回看窗口 `{len(sources['get']['window_entries'])}` 条；同日 daily summary {'命中' if sources['get']['daily_summary_age'] == 0 else '未命中'}。",
-        f"- `Notion`：同日 `{len(notion_entries)}` 条；{'可作为支持证据' if notion_entries else '同周期 bundle 缺失'}。",
+        f"- `Flomo`：{scope_label} `{len(flomo_entries)}` 条，回看窗口 `{len(sources['flomo']['window_entries'])}` 条。",
+        f"- `Get笔记`：{scope_label} `{len(get_entries)}` 条，回看窗口 `{len(sources['get']['window_entries'])}` 条。",
+        f"- `Notion`：{scope_label} `{len(notion_entries)}` 条；{'可作为支持证据' if notion_entries else '同周期 bundle 缺失'}。",
         (
-            f"- `Cubox`：当前读取 `{cubox_root}`；同日 `{len(cubox_entries)}` 条，回看窗口 `{len(sources['cubox']['window_entries'])}` 条。"
+            f"- `Cubox`：当前读取 `{cubox_root}`；{scope_label} `{len(cubox_entries)}` 条，回看窗口 `{len(sources['cubox']['window_entries'])}` 条。"
             if cubox_entries
             else f"- `Cubox`：当前读取 `{cubox_root}`；{'近期有更新、待日级映射' if cubox_recent else '近期无命中'}。"
         ),
         "- `GitHub 运行痕迹`：当前仍按执行层处理，证据落在 `.github/state/`、workflow 和 `Raw/05 Chat/`，不假设存在 `Raw/GitHub`。",
     ]
+    active_sources = {
+        path: count
+        for path, count in audit["counts"].get("per_source", {}).items()
+        if count
+    }
+    if active_sources:
+        data_lines.append(
+            "- `全量增量来源`："
+            + "、".join(f"`{path}` {count} 条" for path, count in active_sources.items())
+            + "。"
+        )
     if discovery["summary"].get("unregistered_existing"):
         data_lines.append(
             f"- `其他 Raw 来源`：发现未注册但存在目录 `{len(discovery['summary']['unregistered_existing'])}` 个，仍需检索接线。"
@@ -932,8 +952,10 @@ def build_system_status(
     ]
 
     gap_lines: list[str] = []
-    if sources["get"]["daily_summary_age"] != 0:
+    if mode == "daily" and sources["get"]["daily_summary_age"] != 0:
         gap_lines.append("- `Get笔记` 同日 daily summary 缺失，首页量化字段仍可能断档。")
+    elif mode == "weekly" and not get_entries:
+        gap_lines.append("- `Get笔记` 本周缺少可核对语料，个人状态不生成推断性结论。")
     if not notion_entries:
         gap_lines.append("- `Notion` 同周期结构化 bundle 不稳定，生活指标仍不能稳定进入观测站首页。")
     if not cubox_entries and cubox_recent:
@@ -941,7 +963,7 @@ def build_system_status(
     if discovery["summary"].get("registered_missing"):
         gap_lines.append("- 注册表仍存在磁盘缺失来源，说明历史入口和真实目录还没有完全收敛。")
     if not gap_lines:
-        gap_lines.append("- 本轮没有发现会直接破坏可信度的新缺口，后续重点在提升同日 Get/Notion/Cubox 命中率。")
+        gap_lines.append(f"- 本轮没有发现会直接破坏可信度的新缺口，后续重点在提升{scope_label} Get/Notion/Cubox 命中率。")
 
     frontmatter = render_frontmatter(
         {
@@ -978,10 +1000,11 @@ def build_insight_tab(
     selected_themes: list[InsightTheme],
     recent_history: Counter[str],
 ) -> tuple[str, list[str], dict[str, list[str]]]:
+    scope_label = "本周" if mode == "weekly" else "今天"
     refs: list[str] = [
-        "[[Wiki/01 People/Eddie]]",
-        "[[Wiki/02 Life/近期状态]]",
-        "[[Wiki/03 Work/AI协作与知识系统演进]]",
+        "[[Wiki/01 Self/Eddie]]",
+        "[[Wiki/02 Life/当前状态]]",
+        "[[Wiki/03 Career/AI协作与知识系统演进]]",
     ]
     theme_refs: dict[str, list[str]] = defaultdict(list)
 
@@ -1041,20 +1064,22 @@ def build_insight_tab(
             ]
         )
     if not selected_themes:
-        sprout_lines.extend(["### 证据不足", "- 判断或外部镜头：今天不足以引入新的外部镜头。", ""])
+        sprout_lines.extend(["### 证据不足", f"- 判断或外部镜头：{scope_label}证据不足以引入新的外部镜头。", ""])
 
     action_theme = selected_themes[0] if selected_themes else None
     action_lines = ["## 行动建议", ""]
     if action_theme:
         action_lines.extend([f"### {action_theme.action_title}", f"- {action_theme.action_text}", ""])
     else:
-        action_lines.extend(["### 证据不足", "- 今天不足以给出不重复的行动建议。", ""])
+        action_lines.extend(["### 证据不足", f"- {scope_label}证据不足以给出不重复的行动建议。", ""])
 
     random_lines = ["## 随机洞察", ""]
     cubox_entries = sources["cubox"]["entries"]
     if cubox_entries:
         random_lines.append(f"- 外部材料今天更偏 `{topic_line(cubox_entries)}`，说明你的关注面没有只困在内部状态。")
-    if sources["get"]["daily_summary_age"] != 0:
+    if mode == "weekly" and not sources["get"]["entries"]:
+        random_lines.append("- `Get` 周期语料缺失时，系统不应从自动化记录反推个人状态；本轮已明确保留证据不足。")
+    elif sources["get"]["daily_summary_age"] != 0:
         random_lines.append("- 同日 `Get` 总结缺失时，系统更容易误把外部材料或 Flomo 当首页主轴；这轮已经显式压住了这个倾向。")
     if not cubox_entries and not sources["cubox"]["recent_entries"]:
         random_lines.append("- `Cubox` 没有命中时，不应该用别的来源假装填满外部视角。")
@@ -1114,6 +1139,7 @@ def build_hidden_links(
 
 
 def build_candidate_lists(
+    mode: str,
     discovery: dict[str, Any],
     sources: dict[str, Any],
 ) -> tuple[list[str], list[str], list[str]]:
@@ -1126,11 +1152,17 @@ def build_candidate_lists(
         wiki_candidates.append("在 `Schema/来源目录注册.md` 和相关系统页明确：当前 `Cubox` 逻辑源由 `Raw/10 新枝/` 承接，直到独立 `Raw/10 Cubox/` 出现。")
     if discovery["summary"].get("unregistered_existing"):
         wiki_candidates.append("把 `来源自发现` 标出的未注册来源补进 `Schema/来源目录注册.md` 与索引接线。")
-    if sources["get"]["daily_summary_age"] != 0:
+    if mode == "daily" and sources["get"]["daily_summary_age"] != 0:
         skill_candidates.append("为 `Get笔记` 增加同日 daily summary 命中检查，避免首页长期依赖旧 summary 回退。")
         follow_ups.append("检查 Get 同日 daily summary 是否同步延迟，必要时修正同步窗口或命名规则。")
+    elif mode == "weekly" and not sources["get"]["entries"]:
+        follow_ups.append("检查 Get 周期语料是否未同步，不用日级 summary 回退冒充周结论。")
     if not sources["notion"]["entries"]:
-        follow_ups.append("补查 Notion 同日结构化生活 bundle，确认是镜像滞后还是源侧没有记录。")
+        follow_ups.append(
+            "补查 Notion 同周期结构化生活 bundle，确认是镜像滞后还是源侧没有记录。"
+            if mode == "weekly"
+            else "补查 Notion 同日结构化生活 bundle，确认是镜像滞后还是源侧没有记录。"
+        )
     if not sources["cubox"]["entries"] and sources["cubox"]["recent_entries"]:
         skill_candidates.append("给 Cubox-like 外部材料补一个日级映射器，把 `近期有更新` 缩成可核对的 target-date bundle。")
         follow_ups.append("为 `Raw/10 新枝/` 增加 target-date 映射字段或索引，减少“近期有更新、待日级映射”的模糊状态。")
@@ -1149,7 +1181,7 @@ def build_promotion_block(
     seed_refs = [quote_path(path) for path in seed_paths[:3]]
     if theme.key == "ai_system":
         return (
-            WIKI_DIR / "03 Work" / "AI协作与知识系统演进.md",
+            WIKI_DIR / "03 Career" / "AI协作与知识系统演进.md",
             [
                 f"- `{period['label']}`：本周多源材料继续把 AI 的价值从“能回答”推向“协作接口与后台整合”。这说明当前主线不是再找一个更强工具，而是让 AI 进入既有协作边界与长期后台。",
                 f"  - 来源：{'、'.join(seed_refs + [observatory_ref])}",
@@ -1157,7 +1189,7 @@ def build_promotion_block(
         )
     if theme.key == "job_transition":
         return (
-            WIKI_DIR / "02 Life" / "近期状态.md",
+            WIKI_DIR / "02 Life" / "当前状态.md",
             [
                 f"- `{period['label']}`：离职过渡期的核心矛盾开始从“有没有机会”转向“按什么排序机会”，说明当前更需要决策标准，而不是继续同时维持所有选项。",
                 f"  - 来源：{'、'.join(seed_refs + [observatory_ref])}",
@@ -1346,7 +1378,7 @@ def closeout(
     if not selected_themes:
         selected_themes = select_insight_themes(fallback_theme_entries, Counter(), limit=2)
     personal_text, personal_refs = build_personal_status(mode, period, sources, selected_themes)
-    wiki_candidates, skill_candidates, follow_ups = build_candidate_lists(discovery, sources)
+    wiki_candidates, skill_candidates, follow_ups = build_candidate_lists(mode, discovery, sources)
     written_rel_paths = observatory_tab_paths(mode, period)
     insight_text, insight_refs, theme_refs = build_insight_tab(mode, period, sources, selected_themes, recent_history)
     actual_wiki_updates = promote_selected_themes(

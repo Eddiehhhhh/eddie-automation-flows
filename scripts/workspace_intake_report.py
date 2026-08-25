@@ -20,7 +20,7 @@ from typing import Iterable
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
-REPORT_PATH = ROOT / "Wiki" / "06 Systems" / "工作区自动收口报告.md"
+REPORT_PATH = ROOT / "Wiki" / "06 Systems" / "90 Incidents" / "工作区自动收口报告.md"
 JSON_PATH = ROOT / "Raw" / "00 Meta" / "workspace-intake-latest.json"
 TZ = dt.timezone(dt.timedelta(hours=8))
 
