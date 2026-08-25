@@ -33,7 +33,7 @@ jobs:
           repository: Eddiehhhhh/eddie-llm-wiki
           token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           path: vault
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
