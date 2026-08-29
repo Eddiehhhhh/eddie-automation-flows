@@ -42,7 +42,7 @@ jobs:
       - name: Sync Tencent Docs
         run: |
           set -euo pipefail
-          python scripts/sync_tencent_docs_to_raw.py | tee /tmp/tencent-docs-sync-result.json
+          python scripts/run_private_command.py --label "Tencent Docs sync" --stdout-file /tmp/tencent-docs-sync-result.json -- python scripts/sync_tencent_docs_to_raw.py
 
       - name: Summarize sync result
         if: ${{ success() }}
@@ -55,28 +55,23 @@ jobs:
           payload = json.loads(Path("/tmp/tencent-docs-sync-result.json").read_text(encoding="utf-8"))
           summary = [
               "## Tencent Docs sync result",
-              f"- fetched_at: {payload.get('fetched_at')}",
               f"- target_count: {payload.get('target_count')}",
               f"- written_or_changed: {payload.get('written_or_changed')}",
           ]
-          folder_lines = [
-              f"- {folder}: {count}"
-              for folder, count in sorted((payload.get("folders") or {}).items())
-          ]
-          state_dir = Path(".github") / "state"
+          state_dir = Path("vault/.github") / "state"
           state_dir.mkdir(parents=True, exist_ok=True)
           (state_dir / "tencent-docs-sync-last-run.json").write_text(
               json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8",
           )
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as fh:
-              fh.write("\n".join(summary + ["", "### Folder counts", *folder_lines]) + "\n")
+              fh.write("\n".join(summary) + "\n")
           PY
 
       - name: Validate filename compliance
         if: ${{ success() }}
         run: |
-          python scripts/audit_raw_filenames.py --json
+          python scripts/run_private_command.py --label "Tencent Docs filename audit" -- python scripts/audit_raw_filenames.py --source tencent_docs --json
 
       - name: Commit Raw updates
         if: ${{ success() }}

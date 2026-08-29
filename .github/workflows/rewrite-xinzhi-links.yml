@@ -87,9 +87,9 @@ jobs:
       - name: Rewrite link notes
         run: |
           if [ "${XINZHI_REWRITE_DRY_RUN}" = "true" ]; then
-            python scripts/rewrite_xinzhi_link_notes.py --dry-run
+            python scripts/run_private_command.py --label "Xinzhi link dry run" -- python scripts/rewrite_xinzhi_link_notes.py --dry-run
           else
-            python scripts/rewrite_xinzhi_link_notes.py
+            python scripts/run_private_command.py --label "Xinzhi link rewrite" -- python scripts/rewrite_xinzhi_link_notes.py
           fi
 
       - name: Commit state changes

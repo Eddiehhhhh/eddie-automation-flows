@@ -62,9 +62,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
-            python scripts/sync_getnote_voice_to_flomo.py --dry-run | tee /tmp/getnote-voice-flomo-result.json
+            python scripts/run_private_command.py --label "GetNote voice dry run" --stdout-file /tmp/getnote-voice-flomo-result.json -- python scripts/sync_getnote_voice_to_flomo.py --dry-run
           else
-            python scripts/sync_getnote_voice_to_flomo.py | tee /tmp/getnote-voice-flomo-result.json
+            python scripts/run_private_command.py --label "GetNote voice sync" --stdout-file /tmp/getnote-voice-flomo-result.json -- python scripts/sync_getnote_voice_to_flomo.py
           fi
 
       - name: Summarize sync result
@@ -79,7 +79,7 @@ jobs:
           if not result_path.exists():
               raise SystemExit("missing result json")
           payload = json.loads(result_path.read_text(encoding="utf-8"))
-          state_dir = Path(".github") / "state"
+          state_dir = Path("vault/.github") / "state"
           state_dir.mkdir(parents=True, exist_ok=True)
           (state_dir / "getnote-voice-flomo-last-run.json").write_text(
               json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -91,9 +91,6 @@ jobs:
               f"- scanned: {payload.get('scanned')}",
               f"- candidate: {payload.get('candidate')}",
               f"- created: {payload.get('created')}",
-              f"- requested_tags: {payload.get('requested_tags')}",
-              f"- resolved_tags: {payload.get('resolved_tags')}",
-              f"- unresolved_tags: {payload.get('unresolved_tags')}",
           ]
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as fh:
               fh.write("\n".join(lines) + "\n")

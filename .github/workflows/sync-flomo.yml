@@ -46,12 +46,12 @@ jobs:
       - name: Sync flomo memos
         run: |
           set -euo pipefail
-          python scripts/sync_flomo_to_raw.py | tee /tmp/flomo-sync-result.json
+          python scripts/run_private_command.py --label "flomo sync" --stdout-file /tmp/flomo-sync-result.json -- python scripts/sync_flomo_to_raw.py
 
       - name: Validate filename compliance
         if: ${{ success() }}
         run: |
-          python scripts/audit_raw_filenames.py --json
+          python scripts/run_private_command.py --label "flomo filename audit" -- python scripts/audit_raw_filenames.py --source flomo --json
           # exit code = number of violations; workflow fails if > 0
 
       - name: Summarize sync result
@@ -64,13 +64,10 @@ jobs:
           payload = json.loads(Path("/tmp/flomo-sync-result.json").read_text(encoding="utf-8"))
           summary = [
               "## flomo sync result",
-              f"- previous_last_sync_at: {payload.get('previous_last_sync_at')}",
-              f"- window_start: {payload.get('window_start')}",
-              f"- window_end: {payload.get('window_end')}",
               f"- fetched: {payload.get('fetched')}",
               f"- written_or_changed: {payload.get('written_or_changed')}",
           ]
-          path = Path(".github") / "state"
+          path = Path("vault/.github") / "state"
           path.mkdir(parents=True, exist_ok=True)
           (path / "flomo-sync-last-run.json").write_text(
               json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

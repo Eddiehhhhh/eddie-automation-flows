@@ -71,9 +71,9 @@ jobs:
       - name: Rewrite link notes
         run: |
           if [ "${GETNOTE_LINK_REWRITE_DRY_RUN}" = "true" ]; then
-            python scripts/rewrite_getnote_link_notes.py --dry-run
+            python scripts/run_private_command.py --label "GetNote link dry run" -- python scripts/rewrite_getnote_link_notes.py --dry-run
           else
-            python scripts/rewrite_getnote_link_notes.py
+            python scripts/run_private_command.py --label "GetNote link rewrite" -- python scripts/rewrite_getnote_link_notes.py
           fi
 
       - name: Commit state changes

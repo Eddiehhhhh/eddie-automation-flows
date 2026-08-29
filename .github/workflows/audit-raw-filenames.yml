@@ -41,7 +41,7 @@ jobs:
         id: audit
         run: |
           set -euo pipefail
-          python scripts/audit_raw_filenames.py --json > /tmp/audit-result.json
+          python scripts/run_private_command.py --label "filename audit" --stdout-file /tmp/audit-result.json -- python scripts/audit_raw_filenames.py --json --exit-zero
           violations=$(python -c "import json; d=json.load(open('/tmp/audit-result.json')); print(d['total'])")
           echo "violations=$violations" >> "$GITHUB_OUTPUT"
           echo "Found $violations filename violations"
@@ -49,30 +49,26 @@ jobs:
       - name: Attempt auto-fix
         if: steps.audit.outputs.violations != '0'
         run: |
-          python scripts/audit_raw_filenames.py --fix 2>&1
+          python scripts/run_private_command.py --label "filename repair" -- python scripts/audit_raw_filenames.py --fix --exit-zero
 
       - name: Re-check after fix
         if: steps.audit.outputs.violations != '0'
         id: recheck
         run: |
-          python scripts/audit_raw_filenames.py --json > /tmp/recheck-result.json
+          python scripts/run_private_command.py --label "filename recheck" --stdout-file /tmp/recheck-result.json -- python scripts/audit_raw_filenames.py --json --exit-zero
           remaining=$(python -c "import json; d=json.load(open('/tmp/recheck-result.json')); print(d['total'])")
           echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
 
       - name: Log audit result
         run: |
-          mkdir -p .github/state
-          cp /tmp/audit-result.json .github/state/filename-audit-last-run.json
+          mkdir -p vault/.github/state
+          install -m 600 /tmp/audit-result.json vault/.github/state/filename-audit-last-run.json
           python -c "
           import json
           d = json.load(open('/tmp/audit-result.json'))
           total = d['total']
           lines = ['## Filename audit result']
           lines.append(f'- violations: {total}')
-          for v in d['violations'][:20]:
-              lines.append(f'  - {v[\"path\"]}: {v[\"reason\"]}')
-          if total > 20:
-              lines.append(f'  - ... and {total - 20} more')
           import os
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as fh:
               fh.write('\n'.join(lines) + '\n')
@@ -83,7 +79,7 @@ jobs:
         run: |
           git -C vault config user.name "github-actions[bot]"
           git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C vault add -A
+          git -C vault add -A "Raw/01 Flomo" "Raw/03 Get" "Raw/06 TencentDocs" ".github/state/filename-audit-last-run.json"
           if git -C vault diff --cached --quiet; then
             echo "No changes to commit."
           else

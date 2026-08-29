@@ -88,7 +88,7 @@ jobs:
               args+=(--limit "${{ inputs.limit }}")
             fi
           fi
-          python scripts/sync_wiki_to_notion.py "${args[@]}"
+          python scripts/run_private_command.py --label "Wiki to Notion sync" -- python scripts/sync_wiki_to_notion.py "${args[@]}"
 
       - name: Commit public-safe mirror state
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}

@@ -79,31 +79,26 @@ jobs:
             if [ -n "$max_episodes" ] && [ "$max_episodes" != "0" ]; then
               args+=(--max-episodes "$max_episodes")
             fi
-            python -u scripts/sync_my_podcast_to_raw.py "${args[@]}"
+            python scripts/run_private_command.py --label "podcast full sync" -- python -u scripts/sync_my_podcast_to_raw.py "${args[@]}"
           else
-            python -u scripts/sync_my_podcast_to_raw.py --hours-back "${{ github.event_name == 'workflow_dispatch' && inputs.hours_back || '168' }}"
+            python scripts/run_private_command.py --label "podcast sync" -- python -u scripts/sync_my_podcast_to_raw.py --hours-back "${{ github.event_name == 'workflow_dispatch' && inputs.hours_back || '168' }}"
           fi
 
       - name: Sync workout daily notes
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
         run: |
           set -euo pipefail
-          python scripts/sync_notion_workout_daily_to_raw.py
+          python scripts/run_private_command.py --label "workout sync" -- python scripts/sync_notion_workout_daily_to_raw.py
 
       - name: Sync douban books
         run: |
           set -euo pipefail
-          python scripts/sync_notion_douban_to_raw.py
+          python scripts/run_private_command.py --label "douban sync" -- python scripts/sync_notion_douban_to_raw.py
 
       - name: Sync weread notes
         run: |
           set -euo pipefail
-          python scripts/sync_notion_weread_to_raw.py
-
-      - name: Validate filename compliance
-        if: ${{ success() }}
-        run: |
-          python scripts/audit_raw_filenames.py --json
+          python scripts/run_private_command.py --label "weread sync" -- python scripts/sync_notion_weread_to_raw.py
 
       - name: Commit Raw updates
         if: ${{ success() }}

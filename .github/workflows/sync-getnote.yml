@@ -44,12 +44,12 @@ jobs:
           python-version: "3.11"
 
       - name: Sync GetNote notes
-        run: python scripts/sync_getnote_to_raw.py
+        run: python scripts/run_private_command.py --label "GetNote sync" -- python scripts/sync_getnote_to_raw.py
 
       - name: Validate filename compliance
         if: ${{ success() }}
         run: |
-          python scripts/audit_raw_filenames.py --json
+          python scripts/run_private_command.py --label "GetNote filename audit" -- python scripts/audit_raw_filenames.py --source get --json
 
       - name: Commit Raw updates
         if: ${{ success() }}

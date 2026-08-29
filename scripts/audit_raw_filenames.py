@@ -11,6 +11,7 @@ Usage:
   python scripts/audit_raw_filenames.py           # scan & report
   python scripts/audit_raw_filenames.py --json     # machine-readable output
   python scripts/audit_raw_filenames.py --fix      # auto-rename violations
+  python scripts/audit_raw_filenames.py --source flomo --json --exit-zero
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ LEADING_DATE_RE = re.compile(
     r"""^\s*
     (?:
         \d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日)?
-        (?:\s*[Tt]\s*\d{1,2}:\d{2}(?::\d{2})?)?
+        (?:\s*(?:[Tt]\s*)?\d{1,2}:\d{2}(?::\d{2})?)?
         |\d{1,2}[-/.]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?
     )
     """,
@@ -252,11 +253,17 @@ def main() -> int:
                         help="Output results as JSON (machine-readable)")
     parser.add_argument("--fix", action="store_true",
                         help="Auto-rename violating files")
+    parser.add_argument("--source", action="append", choices=[label for _, label in SOURCE_DIRS],
+                        help="Audit only this source (repeatable)")
+    parser.add_argument("--exit-zero", action="store_true",
+                        help="Always exit 0 after emitting the report")
     args = parser.parse_args()
 
     # Scan
     all_violations: list[Violation] = []
-    for rel_dir, label in SOURCE_DIRS:
+    selected_sources = set(args.source or [])
+    source_dirs = [item for item in SOURCE_DIRS if not selected_sources or item[1] in selected_sources]
+    for rel_dir, label in source_dirs:
         base = ROOT / rel_dir
         if not base.exists():
             print(f"SKIP (not found): {rel_dir}", file=sys.stderr)
@@ -273,13 +280,13 @@ def main() -> int:
             "violations": [v.to_dict() for v in all_violations],
         }
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return total  # exit code = violation count
+        return 0 if args.exit_zero else total
 
     # Human-readable output
     print(f"\n{'=' * 60}")
     print(f"  文件名合规审计 — Raw 来源目录")
     print(f"{'=' * 60}")
-    print(f"  扫描范围: {', '.join(d for d, _ in SOURCE_DIRS)}")
+    print(f"  扫描范围: {', '.join(d for d, _ in source_dirs)}")
     print(f"  违规总数: {total}")
     print()
 
@@ -312,7 +319,7 @@ def main() -> int:
     else:
         print(f"  提示: 使用 --fix 参数自动重命名违规文件。")
 
-    return total  # exit code = violation count
+    return 0 if args.exit_zero else total
 
 
 if __name__ == "__main__":
