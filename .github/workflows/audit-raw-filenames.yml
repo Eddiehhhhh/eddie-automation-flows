@@ -77,20 +77,10 @@ jobs:
       - name: Commit auto-fixes
         if: steps.audit.outputs.violations != '0' && steps.recheck.outputs.remaining == '0'
         run: |
-          git -C vault config user.name "github-actions[bot]"
-          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C vault add -A "Raw/01 Flomo" "Raw/03 Get" "Raw/06 TencentDocs" ".github/state/filename-audit-last-run.json"
-          if git -C vault diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git -C vault commit -m "Auto-fix: rename ${{ steps.audit.outputs.violations }} violating filenames"
-            git -C vault fetch origin main
-            if ! git -C vault merge-base --is-ancestor origin/main HEAD; then
-              echo "::error::Private vault advanced during this run; stopping without rebasing. Rerun the workflow."
-              exit 1
-            fi
-            git -C vault push origin HEAD:main
-          fi
+          python scripts/commit_private_vault.py --all \
+            --message "Auto-fix: rename ${{ steps.audit.outputs.violations }} violating filenames" \
+            --path "Raw/01 Flomo" --path "Raw/03 Get" --path "Raw/06 TencentDocs" \
+            --path ".github/state/filename-audit-last-run.json"
 
       - name: Report remaining violations
         if: steps.audit.outputs.violations != '0' && steps.recheck.outputs.remaining != '0'

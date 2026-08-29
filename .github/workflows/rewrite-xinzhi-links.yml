@@ -95,17 +95,5 @@ jobs:
       - name: Commit state changes
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
         run: |
-          git -C vault config user.name "github-actions[bot]"
-          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C vault add ".github/state/xinzhi-link-rewrite.json"
-          if git -C vault diff --cached --quiet; then
-            echo "No state changes to commit."
-          else
-            git -C vault commit -m "Update Xinzhi link rewrite state"
-            git -C vault fetch origin main
-            if ! git -C vault merge-base --is-ancestor origin/main HEAD; then
-              echo "::error::Private vault advanced during this run; stopping without rebasing. Rerun the workflow."
-              exit 1
-            fi
-            git -C vault push origin HEAD:main
-          fi
+          python scripts/commit_private_vault.py --message "Update Xinzhi link rewrite state" \
+            --path ".github/state/xinzhi-link-rewrite.json"

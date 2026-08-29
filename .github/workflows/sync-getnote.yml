@@ -54,17 +54,4 @@ jobs:
       - name: Commit Raw updates
         if: ${{ success() }}
         run: |
-          git -C vault config user.name "github-actions[bot]"
-          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C vault add "Raw/03 Get"
-          if git -C vault diff --cached --quiet; then
-            echo "No GetNote changes to commit."
-          else
-            git -C vault commit -m "Sync GetNote notes to Raw"
-            git -C vault fetch origin main
-            if ! git -C vault merge-base --is-ancestor origin/main HEAD; then
-              echo "::error::Private vault advanced during this run; stopping without rebasing. Rerun the workflow."
-              exit 1
-            fi
-            git -C vault push origin HEAD:main
-          fi
+          python scripts/commit_private_vault.py --message "Sync GetNote notes to Raw" --path "Raw/03 Get"

@@ -79,17 +79,5 @@ jobs:
 
       - name: Commit Raw updates
         run: |
-          git -C vault config user.name "github-actions[bot]"
-          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C vault add "Raw/01 Flomo" ".github/state/flomo-sync-last-run.json"
-          if git -C vault diff --cached --quiet; then
-            echo "No flomo changes to commit."
-          else
-            git -C vault commit -m "Sync flomo memos to Raw"
-            git -C vault fetch origin main
-            if ! git -C vault merge-base --is-ancestor origin/main HEAD; then
-              echo "::error::Private vault advanced during this run; stopping without rebasing. Rerun the workflow."
-              exit 1
-            fi
-            git -C vault push origin HEAD:main
-          fi
+          python scripts/commit_private_vault.py --message "Sync flomo memos to Raw" \
+            --path "Raw/01 Flomo" --path ".github/state/flomo-sync-last-run.json"

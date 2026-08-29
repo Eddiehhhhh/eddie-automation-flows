@@ -95,17 +95,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git -C vault config user.name "github-actions[bot]"
-          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C vault add ".github/state/notion-wiki-mirror-state.json"
-          if git -C vault diff --cached --quiet; then
-            echo "No public-safe state changes to commit."
-          else
-            git -C vault commit -m "Sync wiki mirror state to Notion"
-            git -C vault fetch origin main
-            if ! git -C vault merge-base --is-ancestor origin/main HEAD; then
-              echo "::error::Private vault advanced during this run; stopping without merging. Rerun the workflow."
-              exit 1
-            fi
-            git -C vault push origin HEAD:main
-          fi
+          python scripts/commit_private_vault.py --message "Sync wiki mirror state to Notion" \
+            --path ".github/state/notion-wiki-mirror-state.json"

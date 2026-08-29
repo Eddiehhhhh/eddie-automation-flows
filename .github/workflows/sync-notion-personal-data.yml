@@ -104,21 +104,10 @@ jobs:
         if: ${{ success() }}
         run: |
           target_ref="${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref_name }}"
-          git -C vault config user.name "github-actions[bot]"
-          git -C vault config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
-            git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/13 小宇宙"
+            paths=(--path ".github/state/xiaoyuzhou-sync-state.json" --path "Raw/13 小宇宙")
           else
-            git -C vault add -A ".github/state/xiaoyuzhou-sync-state.json" "Raw/12 我的运动" "Raw/13 小宇宙" "Raw/14 豆瓣影视" "Raw/15 微信读书"
+            paths=(--path ".github/state/xiaoyuzhou-sync-state.json" --path "Raw/12 我的运动" --path "Raw/13 小宇宙" --path "Raw/14 豆瓣影视" --path "Raw/15 微信读书")
           fi
-          if git -C vault diff --cached --quiet; then
-            echo "No personal-data changes to commit."
-          else
-            git -C vault commit -m "Sync Notion personal data to Raw"
-            git -C vault fetch origin "$target_ref"
-            if ! git -C vault merge-base --is-ancestor "origin/$target_ref" HEAD; then
-              echo "::error::Private vault advanced during this run; stopping without rebasing. Rerun the workflow."
-              exit 1
-            fi
-            git -C vault push origin "HEAD:$target_ref"
-          fi
+          python scripts/commit_private_vault.py --all --ref "$target_ref" \
+            --message "Sync Notion personal data to Raw" "${paths[@]}"
