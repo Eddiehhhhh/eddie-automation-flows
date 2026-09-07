@@ -37,10 +37,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-days", type=int)
     parser.add_argument("--limit-per-source", type=int, default=80)
     parser.add_argument("--format", choices=["json", "markdown"], default="json")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect and render the summary without writing repository outputs",
+    )
     parser.add_argument("--write-latest", action="store_true")
     parser.add_argument("--finalize", action="store_true", help="Write observatory closeout files after preflight")
     parser.add_argument("--state-output", help="Optional JSON path for last-run state output")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.dry_run and (args.write_latest or args.finalize or args.state_output):
+        parser.error("--dry-run cannot be combined with write options")
+    return args
 
 
 def shanghai_today() -> date:
@@ -230,7 +238,14 @@ def main() -> int:
         frontend_result = closeout_result["frontend"]
     else:
         frontend_snapshot = build_observatory_frontend.build_snapshot()
-        frontend_changed = build_observatory_frontend.write_outputs(frontend_snapshot)
+        if args.dry_run:
+            frontend_changed = {
+                "json_changed": False,
+                "html_changed": False,
+                "dry_run": True,
+            }
+        else:
+            frontend_changed = build_observatory_frontend.write_outputs(frontend_snapshot)
         frontend_result = {
             "html_path": iteration_source_discovery.rel(build_observatory_frontend.HTML_OUTPUT),
             "json_path": iteration_source_discovery.rel(build_observatory_frontend.JSON_OUTPUT),
