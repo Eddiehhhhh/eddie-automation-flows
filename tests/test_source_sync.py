@@ -19,11 +19,16 @@ class SyncTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        from source_sync_assets import AssetStore
+        store_patch = patch.object(g, 'AssetStore', side_effect=lambda root, **kw: AssetStore(root, fetch=lambda url, **kwargs: (b'\x89PNG\r\n\x1a\nfixture', 'image/png'), **kw))
+        store_patch.start(); self.addCleanup(store_patch.stop)
         for module, names in [(g, ['ROOT','RAW_DIR','NOTES_DIR','STATE_DIR']), (f,['ROOT','RAW_DIR','MEMOS_DIR','INDEX_DIR','STATE_PATH','RECENT_INDEX_PATH','LOG_DIR'])]:
             for name in names:
                 p = patch.object(module, name, self.root / module.__name__ / name)
                 p.start(); self.addCleanup(p.stop)
         # Get identity lookup must encompass both normal and recording notes.
+        g.ROOT = g.RAW_DIR.parent
+        f.ROOT = f.RAW_DIR.parent
         g.NOTES_DIR = g.RAW_DIR / '01 Notes'
         g.STATE_DIR = g.RAW_DIR / '03 State'
         f.MEMOS_DIR = f.RAW_DIR
@@ -52,6 +57,33 @@ class SyncTests(unittest.TestCase):
         g.write_if_changed(path, '---\ncanonicalId: "api:9223372036854775807"\nsource: "api"\nsource_ids:\n  api: "9223372036854775807"\n  legacy: "different"\n---\nbody')
         self.assertEqual(g.output_path_for(self.note()), path)
         self.assertNotEqual(g.output_path_for(self.note('different')), path)
+
+    def test_frontmatter_standalone_delimiter_and_symlink_directory(self):
+        from source_sync_store import frontmatter
+        path=g.RAW_DIR/'note.md'
+        g.write_if_changed(path,'---\ntitle: "A---B"\n---not-a-delimiter: value\nsource_system: getnote\nnote_id: "9223372036854775807"\n---\nprivate original')
+        self.assertEqual(frontmatter(path)['title'],'A---B')
+        self.assertEqual(g.output_path_for(self.note()),path)
+        (g.RAW_DIR/'alias').symlink_to(g.RAW_DIR,target_is_directory=True)
+        with self.assertRaises(ValueError): g.output_path_for(self.note('other'))
+        self.assertIn('private original',path.read_text())
+
+    def test_symlink_source_ancestor_is_rejected(self):
+        outside=self.root/'outside';outside.mkdir()
+        g.ROOT=self.root/'vault';g.ROOT.mkdir()
+        (g.ROOT/'Raw').symlink_to(outside,target_is_directory=True)
+        g.RAW_DIR=g.ROOT/'Raw'/'03 Get'
+        g.NOTES_DIR=g.RAW_DIR/'01 Notes'
+        with self.assertRaises(ValueError): g.output_path_for(self.note())
+        self.assertEqual(list(outside.iterdir()),[])
+
+    def test_conflicting_duplicate_content_is_preserved(self):
+        first=g.RAW_DIR/'a.md';second=g.RAW_DIR/'b.md'
+        g.write_if_changed(first,g.render_note(self.note())+'unique A')
+        g.write_if_changed(second,g.render_note(self.note())+'unique B')
+        with self.assertRaises(ValueError): self.run_get([self.note()])
+        self.assertTrue(first.read_text().endswith('unique A'))
+        self.assertTrue(second.read_text().endswith('unique B'))
 
     def test_large_id_float_rejected(self):
         self.assertEqual(source_id(9223372036854775807), '9223372036854775807')
@@ -128,6 +160,28 @@ class SyncTests(unittest.TestCase):
                     self.assertEqual(f.main(),0)
             self.assertEqual(f.STATE_PATH.read_text(),prior)
         self.assertEqual(len(list(f.RAW_DIR.rglob('*.md'))),1)
+
+    def test_asset_failure_does_not_change_receipt_or_note_then_recovers(self):
+        self.run_get([self.note()])
+        before={p:p.read_bytes() for p in g.RAW_DIR.rglob('*') if p.is_file()}
+        n=self.note(attachments=[{'type':'image','url':'https://example.invalid/image'}])
+        from source_sync_assets import AssetError
+        with patch.object(g,'AssetStore') as store:
+            store.return_value.materialize.side_effect=AssetError('timeout')
+            with self.assertRaises(AssetError): self.run_get([n])
+        self.assertEqual(before,{p:p.read_bytes() for p in g.RAW_DIR.rglob('*') if p.is_file()})
+        self.run_get([n])
+        self.assertIn('## 本地附件',next(g.RAW_DIR.rglob('*.md')).read_text())
+        self.assertEqual(len(list((g.RAW_DIR/'_assets').rglob('*.png'))),1)
+
+    def test_flomo_requires_explicit_completeness_evidence(self):
+        import datetime
+        n=self.note()
+        for payload in [{'memos':[]},{'memos':[n]},{'memos':[n],'total':1},{'memos':[n],'has_more':False},{'memos':[n],'has_more':False,'total':2}]:
+            with patch.object(f,'call_tool',return_value=payload):
+                with self.assertRaises(RuntimeError): f.search_memos_for_day('unused',datetime.date.today(),1000)
+        with patch.object(f,'call_tool',return_value={'memos':[n],'has_more':False,'total':1}):
+            self.assertEqual(f.search_memos_for_day('unused',datetime.date.today(),1000),[n])
 
     def test_flomo_cap_missing_detail_and_errors(self):
         import datetime

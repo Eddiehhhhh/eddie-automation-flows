@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from source_sync_assets import AssetStore
 from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
 from source_sync_store import write_if_changed as atomic_write
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -280,11 +281,11 @@ def output_path_for(note: Dict[str, Any], index=None) -> Path:
     filename = f"{title}.md"
     base = RAW_DIR / "99 录音卡" if note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} else NOTES_DIR
     target_dir = base / year / month
-    index = index or IdentityIndex(RAW_DIR, "getnote", "note_id")
+    index = index or IdentityIndex(RAW_DIR, "getnote", "note_id", boundary=ROOT)
     return index.path(note_id, target_dir / filename)
 
 
-def render_note(note: Dict[str, Any]) -> str:
+def render_note(note: Dict[str, Any], assets=None, path=None) -> str:
     note_id = note_id_from(note)
     raw_title = note.get("title") or ""
     title = clean_title(raw_title) or raw_title or f"GetNote {note_id}"
@@ -348,6 +349,13 @@ def render_note(note: Dict[str, Any]) -> str:
             url = item.get("original_url") or item.get("url") or ""
             lines.append(f"- {label}: {url}")
 
+    if assets and path is not None:
+        lines.extend(["", "## 本地附件", ""])
+        for asset in assets:
+            if asset.get("status") == "downloaded":
+                relative = os.path.relpath(RAW_DIR / asset["path"], path.parent)
+                prefix = "!" if asset["kind"] == "image" else ""
+                lines.append(f"{prefix}[{asset['kind']}]({urllib.parse.quote(relative)})")
     lines.append("")
     return "\n".join(lines)
 
@@ -477,6 +485,9 @@ def main() -> int:
     parser.add_argument("--full-sync", action="store_true")
     parser.add_argument("--metadata-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--asset-max-bytes", type=int, default=25 * 1024 * 1024)
+    parser.add_argument("--asset-run-max-bytes", type=int, default=200 * 1024 * 1024)
+    parser.add_argument("--asset-max-count", type=int, default=128)
     args = parser.parse_args()
     if not os.environ.get("VAULT_ROOT"):
         raise RuntimeError("explicit private VAULT_ROOT required")
@@ -498,7 +509,13 @@ def main() -> int:
                 raise RuntimeError("Get detail identity/content validation failed")
             details.append(detail)
     details.sort(key=note_id_from)
-    index = IdentityIndex(RAW_DIR, "getnote", "note_id")
+    index = IdentityIndex(RAW_DIR, "getnote", "note_id", boundary=ROOT)
+    # Finish bounded asset acquisition before touching notes or run receipts.
+    assets_by_id = {}
+    if not args.dry_run and not args.metadata_only:
+        store = AssetStore(RAW_DIR, max_file=args.asset_max_bytes, max_run=args.asset_run_max_bytes, max_assets=args.asset_max_count)
+        for note in details:
+            assets_by_id[note_id_from(note)] = store.materialize(note)
     changed = 0
     pending = []
     for note in details:
@@ -516,10 +533,10 @@ def main() -> int:
             if (previous.get("audio") or {}).get("original"):
                 continue
         path = output_path_for(note, index)
-        changed += write_if_changed(path, render_note(note))
-        # No downloaded audio. Complete raw response and asset descriptors stay private.
+        changed += write_if_changed(path, render_note(note, assets_by_id[nid], path))
+        # Audio stays remote; downloaded images/files and raw descriptors stay private.
         write_if_changed(cache_path, json_text(note))
-        write_if_changed(STATE_DIR / "attachments" / (cache_id + ".json"), json_text(attachment_manifest(note)))
+        write_if_changed(STATE_DIR / "attachments" / (cache_id + ".json"), json_text(dict(attachment_manifest(note), assets=assets_by_id[nid])))
     if not args.dry_run and not args.metadata_only:
         write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
         # This receipt is committed with the data; it is NOT a published watermark.

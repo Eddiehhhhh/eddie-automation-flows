@@ -315,6 +315,13 @@ def search_memos_for_day(token: str, day: dt.date, limit: int) -> List[Dict[str,
         raise RuntimeError("truncated flomo search result")
     if len(memos) >= limit or payload.get("has_more") or payload.get("next_cursor") or (payload.get("total") is not None and int(payload["total"]) > len(memos)):
         raise RuntimeError("flomo result cap/pagination detected; refusing incomplete sync")
+    # A short result alone does not prove that search enumerated the whole window.
+    # These are conservative acceptance requirements, not a claim about the live schema.
+    total = payload.get("total")
+    if payload.get("has_more") is not False or type(total) is not int or total != len(memos):
+        raise RuntimeError("flomo enumeration completeness is unproven")
+    if len({memo_id(m) for m in memos if isinstance(m, dict)}) != len(memos):
+        raise RuntimeError("duplicate or invalid memos in search page")
     for memo in memos:
         if not isinstance(memo, dict):
             raise RuntimeError("invalid memo entry")
@@ -366,7 +373,7 @@ def memo_path_for(memo: Dict[str, Any], index=None) -> Path:
     title = truncate_utf8_bytes(safe_slug(memo_title(memo), mid), 160) or mid
     filename = f"{title}.md"
     target_dir = MEMOS_DIR / year / month
-    index = index or IdentityIndex(MEMOS_DIR, "flomo", "memo_id")
+    index = index or IdentityIndex(MEMOS_DIR, "flomo", "memo_id", boundary=ROOT)
     return index.path(mid, target_dir / filename)
 
 
@@ -543,7 +550,7 @@ def main() -> int:
                 memos_by_id[current_id] = memo
 
     records: List[Tuple[Dict[str, Any], Path]] = []
-    index = IdentityIndex(MEMOS_DIR, "flomo", "memo_id")
+    index = IdentityIndex(MEMOS_DIR, "flomo", "memo_id", boundary=ROOT)
     changed = 0
     for memo in sorted(
         memos_by_id.values(),

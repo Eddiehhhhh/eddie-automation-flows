@@ -1,0 +1,33 @@
+name: Source sync offline tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/source_sync_*.py'
+      - 'scripts/sync_getnote_to_raw.py'
+      - 'scripts/sync_flomo_to_raw.py'
+      - 'scripts/verify_shadow_repeat.py'
+      - 'tests/test_source_sync*.py'
+      - 'tests/fixtures/getnote-plugin-synthetic.json'
+      - '.github/workflows/source-sync-offline-tests.yml'
+  push:
+    branches: ['fix/source-sync-shadow']
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+      - name: Test synthetic source sync fixtures without credentials
+        run: python -m unittest discover -s tests -p 'test_source_sync*.py' -v
+      - name: Compile changed modules
+        run: python -m py_compile scripts/source_sync_store.py scripts/source_sync_assets.py scripts/sync_getnote_to_raw.py scripts/sync_flomo_to_raw.py scripts/verify_shadow_repeat.py

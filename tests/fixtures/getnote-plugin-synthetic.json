@@ -1,0 +1,17 @@
+{
+  "provenance": "Synthetic parity fixture derived from read-only plugin main.js asset classification: image/file downloaded; audio disabled; links retained. Contains no user content.",
+  "note": {
+    "id": "9223372036854775807",
+    "note_type": "recorder_audio",
+    "content": "Synthetic AI summary",
+    "audio": {"original": "SYNTHETIC BEGIN\nComplete synthetic original\nSYNTHETIC END", "play_url": "https://example.invalid/audio.m4a"},
+    "attachments": [
+      {"type": "image", "url": "https://example.invalid/image.png", "title": "../../escape.png"},
+      {"type": "file", "url": "https://example.invalid/document.pdf", "title": "/private/escape.pdf"},
+      {"type": "audio", "url": "https://example.invalid/audio.m4a"},
+      {"type": "link", "url": "https://example.invalid/reference"}
+    ]
+  },
+  "expected_asset_kinds": ["image", "file", "audio", "link"],
+  "expected_asset_statuses": ["downloaded", "downloaded", "not-downloaded", "not-downloaded"]
+}

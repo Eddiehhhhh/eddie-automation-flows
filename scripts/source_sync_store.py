@@ -16,9 +16,11 @@ def frontmatter(path):
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         return {}
-    head, sep, _ = text[4:].partition("\n---")
-    if not sep:
+    lines = text.splitlines()
+    closing = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if closing is None:
         return {}
+    head = "\n".join(lines[1:closing])
     fields = {}
     parent = None
     for line in head.splitlines():
@@ -37,10 +39,26 @@ def frontmatter(path):
     return fields
 
 
+def validate_tree_path(boundary, path):
+    boundary, path = Path(boundary).absolute(), Path(path).absolute()
+    if not path.is_relative_to(boundary) or not path.resolve().is_relative_to(boundary.resolve()):
+        raise ValueError("path escapes declared vault root")
+    for part in [path, *path.parents]:
+        if part.is_symlink():
+            raise ValueError("symlink in declared vault path")
+        if part == boundary:
+            break
+
+
 class IdentityIndex:
-    def __init__(self, root, source, id_field):
+    def __init__(self, root, source, id_field, boundary=None):
         self.root, self.source, self.id_field = Path(root), source, id_field
+        validate_tree_path(boundary or self.root, self.root)
         self.paths = {}
+        # rglob does not normally recurse into directory symlinks. Reject them
+        # explicitly so hidden owners cannot be bypassed by a later output path.
+        if self.root.is_symlink() or any(path.is_symlink() for path in self.root.rglob("*")):
+            raise ValueError("symlink in source output")
         for path in sorted(self.root.rglob("*.md")):
             if path.is_symlink():
                 raise ValueError("symlink in source output")
