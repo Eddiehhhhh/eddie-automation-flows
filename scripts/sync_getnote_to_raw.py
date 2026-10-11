@@ -17,6 +17,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
+from source_sync_store import write_if_changed as atomic_write
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -72,14 +74,6 @@ def load_credentials() -> Tuple[str, str]:
 
     if api_key and client_id:
         return api_key, client_id
-
-    config_path = Path.home() / ".openclaw" / "openclaw.json"
-    if config_path.exists():
-        with config_path.open("r", encoding="utf-8") as f:
-            config = json.load(f)
-        getnote = config.get("skills", {}).get("entries", {}).get("getnote", {})
-        api_key = api_key or getnote.get("apiKey")
-        client_id = client_id or getnote.get("env", {}).get("GETNOTE_CLIENT_ID")
 
     missing = []
     if not api_key:
@@ -149,57 +143,53 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str) -> 
     raise RuntimeError(f"GetNote request failed: {last_error}")
 
 
-def fetch_note_list(api_key: str, client_id: str, max_pages: Optional[int]) -> List[Dict[str, Any]]:
-    notes: List[Dict[str, Any]] = []
-    cursor: Optional[str] = None
-    page = 0
+def fetch_note_list(api_key, client_id, max_pages=None, pagination="cursor"):
+    return [note for _, batch, _ in fetch_note_pages(api_key, client_id, max_pages, pagination) for note in batch]
 
+
+def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor"):
+    """Official cursor contract, plus explicit plugin since_id compatibility.
+
+    Never use time order to infer completeness. Caps and cursor cycles fail closed.
+    """
+    cursor = None
+    seen_cursors, seen_ids = set(), set()
+    page = 0
     while True:
-        params = {}
-        if cursor:
-            params["cursor"] = cursor
+        params = {pagination: cursor} if cursor is not None else ({"since_id": "0"} if pagination == "since_id" else {})
         data = api_get(LIST_PATH, params, api_key, client_id)
         payload = data.get("data", data)
-        batch = payload.get("notes", [])
-        notes.extend(batch)
-
+        batch = payload if isinstance(payload, list) else next((payload[k] for k in ("notes", "list", "records", "items") if k in payload), None)
+        if not isinstance(batch, list) or any(not isinstance(n, dict) for n in batch):
+            raise RuntimeError("invalid Get list payload")
+        ids = [note_id_from(n) for n in batch]
+        if len(ids) != len(set(ids)) or seen_ids.intersection(ids):
+            raise RuntimeError("repeated Get list IDs; enumeration is incomplete")
+        seen_ids.update(ids)
         page += 1
-        if max_pages and page >= max_pages:
+        if isinstance(payload, dict) and "has_more" in payload:
+            if not isinstance(payload["has_more"], bool):
+                raise RuntimeError("invalid has_more")
+            more = payload["has_more"]
+        elif pagination == "since_id":
+            more = bool(batch)
+        else:
+            raise RuntimeError("official cursor response missing has_more")
+        if more and not batch:
+            raise RuntimeError("empty page claims more records")
+        if max_pages and page >= max_pages and more:
+            raise RuntimeError("page cap reached; refusing incomplete sync")
+        yield page, batch, more
+        if not more:
             break
-        if not payload.get("has_more"):
-            break
-        next_cursor = payload.get("cursor")
-        if not next_cursor or next_cursor == cursor:
-            break
-        cursor = str(next_cursor)
-
-    return notes
-
-
-def fetch_note_pages(
-    api_key: str, client_id: str, max_pages: Optional[int]
-) -> Iterable[Tuple[int, List[Dict[str, Any]], bool]]:
-    cursor: Optional[str] = None
-    page = 0
-
-    while True:
-        params = {}
-        if cursor:
-            params["cursor"] = cursor
-        data = api_get(LIST_PATH, params, api_key, client_id)
-        payload = data.get("data", data)
-        batch = payload.get("notes", [])
-        page += 1
-        yield page, batch, bool(payload.get("has_more"))
-
-        if max_pages and page >= max_pages:
-            break
-        if not payload.get("has_more"):
-            break
-        next_cursor = payload.get("cursor")
-        if not next_cursor or next_cursor == cursor:
-            break
-        cursor = str(next_cursor)
+        keys = ("since_id", "next_since_id", "cursor", "next_cursor") if pagination == "since_id" else ("cursor", "next_cursor")
+        value = next((payload[k] for k in keys if isinstance(payload, dict) and payload.get(k) is not None), None)
+        if value is None and pagination == "since_id":
+            value = ids[-1]
+        cursor = source_id(value)
+        if cursor in seen_cursors:
+            raise RuntimeError("Get cursor did not advance")
+        seen_cursors.add(cursor)
 
 
 def fetch_note_detail(note_id: str, api_key: str, client_id: str) -> Dict[str, Any]:
@@ -271,10 +261,10 @@ def note_id_from(note: Dict[str, Any]) -> str:
     value = note.get("note_id") or note.get("id")
     if value is None:
         raise ValueError("note missing note_id/id")
-    return str(value)
+    return source_id(value)
 
 
-def output_path_for(note: Dict[str, Any]) -> Path:
+def output_path_for(note: Dict[str, Any], index=None) -> Path:
     """文件名不含日期；仅标题 + 冲突兜底（ID 尾缀）。日期信息保留在目录 YYYY/YYYY-MM/ 中。"""
     note_id = note_id_from(note)
     created = parse_time(note.get("created_at")) or parse_time(note.get("updated_at"))
@@ -286,15 +276,12 @@ def output_path_for(note: Dict[str, Any]) -> Path:
         month = "unknown"
     raw_title = note.get("title") or ""
     clean = clean_title(raw_title) or raw_title or note_id
-    title = safe_slug(clean, note_id)
+    title = safe_slug(clean, note_id).encode("utf-8")[:160].decode("utf-8", errors="ignore")
     filename = f"{title}.md"
-    target_dir = NOTES_DIR / year / month
-    target_dir.mkdir(parents=True, exist_ok=True)
-    candidate = target_dir / filename
-    if not candidate.exists():
-        return candidate
-    # 同目录下标题冲突 → ID 尾缀兜底
-    return target_dir / f"{title}-{note_id}.md"
+    base = RAW_DIR / "99 录音卡" if note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} else NOTES_DIR
+    target_dir = base / year / month
+    index = index or IdentityIndex(RAW_DIR, "getnote", "note_id")
+    return index.path(note_id, target_dir / filename)
 
 
 def render_note(note: Dict[str, Any]) -> str:
@@ -325,7 +312,7 @@ def render_note(note: Dict[str, Any]) -> str:
         f"share_id: {yaml_scalar(note.get('share_id') or '')}",
         "---",
         "",
-        "## 正文",
+        "## AI 总结" if note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} else "## 正文",
         "",
     ]
     lines.append(content.strip() or "（空）")
@@ -347,6 +334,11 @@ def render_note(note: Dict[str, Any]) -> str:
             if audio.get(key):
                 lines.extend(["", f"### {key}", "", str(audio.get(key)).strip()])
 
+    for key in ("timeline", "chapter_timeline", "quick_note"):
+        value = note.get(key, audio.get(key))
+        if value is not None:
+            lines.extend(["", f"## {key}", "", json.dumps(value, ensure_ascii=False, indent=2)])
+
     if attachments:
         lines.extend(["", "## 附件", ""])
         for item in attachments:
@@ -361,12 +353,7 @@ def render_note(note: Dict[str, Any]) -> str:
 
 
 def write_if_changed(path: Path, content: str) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.read_text(encoding="utf-8") == content:
-        return False
-    path.write_text(content, encoding="utf-8")
-    _set_file_timestamps(path, content)
-    return True
+    return atomic_write(path, content)
 
 
 def _set_file_timestamps(path: Path, content: str) -> None:
@@ -477,77 +464,67 @@ def render_manifest(records: List[Tuple[Dict[str, Any], Optional[Path]]]) -> str
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
+def transcription_pending(note):
+    return note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} and not (note.get("audio") or {}).get("original")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sync GetNote notes into Raw/03 Get")
-    parser.add_argument("--max-pages", type=int, default=None, help="Limit list pages for testing")
-    parser.add_argument("--workers", type=int, default=3, help="Concurrent detail fetches per page")
-    parser.add_argument(
-        "--hours-back",
-        type=float,
-        default=float(os.environ.get("GETNOTE_SYNC_HOURS", "30")),
-        help="Only sync notes updated within the recent N hours",
-    )
-    parser.add_argument("--full-sync", action="store_true", help="Ignore time window and sync all notes")
-    parser.add_argument("--metadata-only", action="store_true", help="Do not write note body files")
-    parser.add_argument("--dry-run", action="store_true", help="Fetch and report without writing")
+    parser = argparse.ArgumentParser(description="Reconcile Get notes; explicit private VAULT_ROOT required")
+    parser.add_argument("--max-pages", type=int)
+    parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument("--pagination", choices=("cursor", "since_id"), default="cursor")
+    parser.add_argument("--hours-back", type=float, default=0, help="Deprecated; full reconciliation catches old edits and delayed transcripts")
+    parser.add_argument("--full-sync", action="store_true")
+    parser.add_argument("--metadata-only", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-
+    if not os.environ.get("VAULT_ROOT"):
+        raise RuntimeError("explicit private VAULT_ROOT required")
     api_key, client_id = load_credentials()
-    cutoff: Optional[dt.datetime] = None
-    if not args.full_sync and args.hours_back > 0:
-        cutoff = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))) - dt.timedelta(hours=args.hours_back)
-    records: List[Tuple[Dict[str, Any], Optional[Path]]] = []
+    # Enumerate and validate every detail before writing anything. No time cutoff:
+    # upstream creation-order pages cannot prove an older note was not edited.
+    summaries = fetch_note_list(api_key, client_id, args.max_pages, args.pagination)
+    details = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        futures = {executor.submit(fetch_note_detail, note_id_from(n), api_key, client_id): note_id_from(n) for n in summaries}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                detail = future.result()
+            except Exception:
+                for pending_future in futures:
+                    pending_future.cancel()
+                raise
+            if note_id_from(detail) != futures[future] or not isinstance(detail.get("content"), str):
+                raise RuntimeError("Get detail identity/content validation failed")
+            details.append(detail)
+    details.sort(key=note_id_from)
+    index = IdentityIndex(RAW_DIR, "getnote", "note_id")
     changed = 0
-    fetched = 0
-    for page, list_notes, has_more in fetch_note_pages(api_key, client_id, args.max_pages):
-        print(
-            f"page={page} notes={len(list_notes)} has_more={str(has_more).lower()}",
-            file=sys.stderr,
-            flush=True,
-        )
-        candidates = list_notes
-        if cutoff is not None:
-            candidates = [item for item in list_notes if (note_timestamp(item) and note_timestamp(item) >= cutoff)]
-        workers = max(1, min(args.workers, len(candidates) or 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_id = {
-                executor.submit(fetch_note_detail, note_id_from(item), api_key, client_id): note_id_from(item)
-                for item in candidates
-            }
-            for future in concurrent.futures.as_completed(future_to_id):
-                fetched += 1
-                note_id = future_to_id[future]
-                try:
-                    detail = future.result()
-                except Exception as exc:
-                    raise RuntimeError(f"failed to fetch note detail for {note_id}: {exc}") from exc
-                path = None if args.metadata_only else output_path_for(detail)
-                records.append((detail, path))
-                if path is not None and not args.dry_run and write_if_changed(path, render_note(detail)):
-                    changed += 1
-        print(f"processed={fetched}", file=sys.stderr, flush=True)
-        if not args.dry_run:
-            write_if_changed(INDEX_DIR / "全部笔记.md", render_index(records))
-            write_if_changed(VICKY_INDEX_PATH, render_vicky_entry(records))
-            write_if_changed(STATE_DIR / "manifest.json", render_manifest(records))
-        if cutoff is not None and not candidates:
-            break
-
-    if not args.dry_run:
-        write_if_changed(INDEX_DIR / "全部笔记.md", render_index(records))
-        write_if_changed(VICKY_INDEX_PATH, render_vicky_entry(records))
-        write_if_changed(STATE_DIR / "manifest.json", render_manifest(records))
-
-    print(
-        json.dumps(
-            {
-                "fetched": fetched,
-                "written_or_changed": 0 if args.dry_run else changed,
-                "dry_run": args.dry_run,
-            },
-            ensure_ascii=False,
-        )
-    )
+    pending = []
+    for note in details:
+        nid = note_id_from(note)
+        if transcription_pending(note):
+            pending.append(nid)
+        if args.dry_run or args.metadata_only:
+            continue
+        # Do not replace a previously complete recording with a transient pending response.
+        import hashlib
+        cache_id = hashlib.sha256(nid.encode()).hexdigest()
+        cache_path = STATE_DIR / "raw-cache" / (cache_id + ".json")
+        if transcription_pending(note) and cache_path.exists():
+            previous = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (previous.get("audio") or {}).get("original"):
+                continue
+        path = output_path_for(note, index)
+        changed += write_if_changed(path, render_note(note))
+        # No downloaded audio. Complete raw response and asset descriptors stay private.
+        write_if_changed(cache_path, json_text(note))
+        write_if_changed(STATE_DIR / "attachments" / (cache_id + ".json"), json_text(attachment_manifest(note)))
+    if not args.dry_run and not args.metadata_only:
+        write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
+        # This receipt is committed with the data; it is NOT a published watermark.
+        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "enumerated": len(details), "complete": True}))
+    print(json.dumps({"fetched": len(details), "written_or_changed": changed, "pending": len(pending), "dry_run": args.dry_run}))
     return 0
 
 

@@ -1,0 +1,62 @@
+name: Validate source sync in ephemeral shadow
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Source to validate (no production writes)
+        type: choice
+        options: [getnote, flomo]
+        required: true
+      start_date:
+        description: flomo inclusive start date YYYY-MM-DD
+        type: string
+      end_date:
+        description: flomo inclusive end date YYYY-MM-DD
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-sync-shadow
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+      - name: Offline regression suite
+        run: python -m unittest discover -s tests -v
+      - name: Read Get into ephemeral shadow twice
+        if: inputs.source == 'getnote'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+        run: python scripts/run_private_command.py --label 'Get shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --source getnote
+      - name: Read flomo into ephemeral shadow twice
+        if: inputs.source == 'flomo'
+        env:
+          FLOMO_TOKEN: ${{ secrets.FLOMO_TOKEN }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: python scripts/run_private_command.py --label 'flomo shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --source flomo --start-date "$START_DATE" --end-date "$END_DATE"
+      - name: Publish aggregate evidence only
+        env:
+          RESULT: ${{ runner.temp }}/shadow-result.json
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads(Path(os.environ['RESULT']).read_text())
+          allowed = ('source', 'status', 'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes', 'published')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write(json.dumps({k: result[k] for k in allowed if k in result}, indent=2))
+          PY
