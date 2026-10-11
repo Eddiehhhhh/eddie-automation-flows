@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
+from types import SimpleNamespace
+import sys
 from datetime import datetime, timezone
 
 spec = importlib.util.spec_from_file_location('acceptance', Path(__file__).parents[1] / 'scripts/cloud_acceptance.py')
@@ -53,6 +56,74 @@ class HealthContractTests(unittest.TestCase):
     def test_hermes_disabled_is_expected(self):
         self.write('Raw/00 Meta/hermes-runtime-state.json', {'status': 'disabled_by_owner'})
         self.assertEqual(a.health(self.root, self.now)['hermes_policy'], 'disabled_by_owner')
+
+    def valid_report_state(self):
+        self.write('Raw/09 ChatGPT/_daily-promotion-state.json', {
+            'runs': {self.day: {'effective_status': 'success'}},
+            'raw_cursor': {'last_processed_head_sha': self.sha},
+            'last_processed_head_sha': self.sha,
+            'raw_scan': {'head_sha': self.sha, 'cursor_advanced': True, 'result': 'success'}})
+
+    def test_final_blocked_after_success_is_not_healthy(self):
+        self.valid_report_state()
+        self.write(f'Raw/09 ChatGPT/{self.day}-每日升格扫描.md',
+                   f'- 执行结果：`success`\n- 扫描终点：`{self.sha}`\n- 最终状态：`blocked`\n')
+        self.assertEqual(a.health(self.root, self.now)['promotion'], 'blocked')
+
+    def test_conflicting_final_status_is_conservatively_blocked(self):
+        self.valid_report_state()
+        self.write(f'Raw/09 ChatGPT/{self.day}-每日升格扫描.md',
+                   f'- 最终状态：`success`\n- 扫描终点：`{self.sha}`\n- 执行结果：`failed`\n')
+        self.assertEqual(a.health(self.root, self.now)['promotion'], 'blocked')
+
+    def test_malformed_final_status_does_not_fall_back_to_success(self):
+        self.valid_report_state()
+        self.write(f'Raw/09 ChatGPT/{self.day}-每日升格扫描.md',
+                   f'- 执行结果：`success`\n- 扫描终点：`{self.sha}`\n- 最终状态：unknown / blocked\n')
+        self.assertEqual(a.health(self.root, self.now)['promotion'], 'blocked')
+
+    def test_matching_repeated_status_is_healthy(self):
+        self.valid_report_state()
+        self.write(f'Raw/09 ChatGPT/{self.day}-每日升格扫描.md',
+                   f'- 执行结果：`success`\n- 扫描终点：`{self.sha}`\n- 最终状态：`success`\n')
+        self.assertEqual(a.health(self.root, self.now)['promotion'], 'healthy')
+
+    def test_ignored_file_write_invalidates_dry_run(self):
+        self.write('.gitignore', 'ignored/\n')
+        self.write('ignored/private.txt', 'original')
+        summary = {'audit': {'counts': {'total_candidates': 0, 'high_priority_candidates': 0}},
+                   'period': {'label': '2026-W41'}}
+        def pipeline(*args, **kwargs):
+            self.write('ignored/private.txt', 'changed')
+            return SimpleNamespace(stdout=json.dumps(summary))
+        with tempfile.TemporaryDirectory() as output, mock.patch.object(sys, 'argv',
+                ['cloud_acceptance.py', '--vault', str(self.root), '--output', str(Path(output)/'result.json')]), \
+                mock.patch.object(a, 'git', side_effect=[self.sha, '', '']), \
+                mock.patch.object(a.subprocess, 'run', side_effect=pipeline):
+            with self.assertRaisesRegex(ValueError, 'changed vault'):
+                a.main()
+
+    def test_fingerprint_covers_ignored_add_delete_and_symlinks(self):
+        self.write('.gitignore', 'ignored/\n')
+        first = a.vault_fingerprint(self.root)
+        self.write('ignored/new.txt', 'new')
+        second = a.vault_fingerprint(self.root)
+        self.assertNotEqual(first, second)
+        (self.root/'ignored/new.txt').unlink()
+        self.assertNotEqual(second, a.vault_fingerprint(self.root))
+        (self.root/'link').symlink_to('missing-one')
+        third = a.vault_fingerprint(self.root)
+        (self.root/'link').unlink()
+        (self.root/'link').symlink_to('missing-two')
+        self.assertNotEqual(third, a.vault_fingerprint(self.root))
+
+    def test_fingerprint_excludes_only_root_git_metadata(self):
+        self.write('.git/config', 'original')
+        first = a.vault_fingerprint(self.root)
+        self.write('.git/config', 'runtime metadata')
+        self.assertEqual(first, a.vault_fingerprint(self.root))
+        self.write('nested/.git/config', 'business data')
+        self.assertNotEqual(first, a.vault_fingerprint(self.root))
 
 
 if __name__ == '__main__':

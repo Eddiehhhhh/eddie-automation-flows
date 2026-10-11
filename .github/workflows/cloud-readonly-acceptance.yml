@@ -4,7 +4,9 @@ on:
     branches: [codex/cloud-readonly-acceptance]
     paths:
       - scripts/cloud_acceptance.py
+      - scripts/cloud_private_checkout.py
       - tests/test_cloud_acceptance.py
+      - tests/test_cloud_private_checkout.py
       - .github/workflows/cloud-readonly-acceptance.yml
   workflow_dispatch:
 permissions:
@@ -24,15 +26,11 @@ jobs:
         with:
           python-version: '3.11'
       - name: Test acceptance boundaries
-        run: python -m unittest discover -s tests -p 'test_cloud_acceptance.py' -v
+        run: python -m unittest discover -s tests -p 'test_cloud*.py' -v
       - name: Check out existing private snapshot
-        uses: actions/checkout@v7
-        with:
-          repository: Eddiehhhhh/eddie-llm-wiki
-          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          path: vault
-          persist-credentials: false
-          fetch-depth: 1
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: python scripts/cloud_private_checkout.py --destination vault
       - name: Run deterministic slices with no writes
         run: python scripts/cloud_acceptance.py --vault vault --output /tmp/cloud-acceptance.json
       - name: Publish only allowlisted status
