@@ -13,15 +13,16 @@ strict `page_id` and legacy `source_id` UUIDs. Metadata boundaries must be stand
 and unsupported quoted metadata fail closed.
 
 A single existing path is pinned in `Raw/15 微信读书/.notion-page-paths.json`.
-Byte-identical copies can bootstrap to the lexically first path. **Divergent copies
+**All page IDs with multiple paths, including byte-identical copies,
 are isolated before any source write**: every copy remains byte-for-byte intact,
 including unique text in the oldest file. No canonical winner is selected for that
 object. A later run repeats this check; there is no automatic conflict resolution.
-Other source pages continue. The complete Markdown index is preserved when any
-page is isolated, so unresolved pages cannot disappear from the index.
+Other source pages continue. The complete Markdown index is preserved whenever
+any local multi-path ID remains unresolved, even if the API does not return that
+page in this scan. Unresolved pages therefore cannot disappear from the index.
 
 `.notion-path-conflicts.json` records partial status, scan completeness, isolated
-page IDs/paths and the existing conflict count in the private output folder. This
+page IDs/paths, whether each appeared in this scan, and the existing conflict count in the private output folder. This
 is retry/review evidence, not a successful sync for those pages. A full conflict-free
 run is required before reporting this source healthy. Limited scans remain partial.
 Do not use job exit success alone as an all-pages health signal.
@@ -49,7 +50,7 @@ source directory. It includes UUIDs, candidate canonical paths, every duplicate
 path and SHA-256. Keep this report private; do not attach real titles, UUIDs,
 source URLs or reports to this public repository. Resolve references separately
 before any later cleanup. This change never removes, renames, merges, or rewrites
-divergent duplicates.
+multi-path duplicates.
 
 ## Verification and release
 

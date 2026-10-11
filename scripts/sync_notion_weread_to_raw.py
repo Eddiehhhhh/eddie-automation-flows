@@ -213,7 +213,7 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 class BookConflict(ValueError):
-    """Existing divergent copies need review before source writes can resume."""
+    """Existing multiple paths need review before source writes can resume."""
 
 
 class BookPaths:
@@ -248,10 +248,10 @@ class BookPaths:
                 self.paths[identity] = path
                 self.owners[path] = identity
         for identity, paths in self.existing.items():
-            if len(paths) > 1 and len({hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}) > 1:
+            if len(paths) > 1:
                 self.conflicts[identity] = paths
                 continue
-            # Lexically first legacy path is deterministic, not a content merge.
+            # Only an unambiguous single existing path may be reused.
             self.paths.setdefault(identity, paths[0])
 
     def checked(self, path: Path) -> Path:
@@ -264,7 +264,7 @@ class BookPaths:
     def target(self, page: Dict[str, Any], proposed: Path) -> Path:
         identity = notion_page_id(str(page.get("id") or ""))
         if identity in self.conflicts:
-            raise BookConflict("Divergent WeRead copies require review")
+            raise BookConflict("Multiple WeRead paths require review")
         if identity in self.paths:
             path = self.checked(self.paths[identity])
             if path.exists() and stored_page_id(path) != identity:
@@ -449,7 +449,12 @@ def main() -> None:
 
     rows: List[Dict[str, Any]] = []
     processed = 0
-    isolated: List[Dict[str, Any]] = []
+    isolated: List[Dict[str, Any]] = [
+        {"page_id": identity, "reason": "multiple_existing_paths", "seen_in_scan": False,
+         "paths": [str(p.relative_to(OUTPUT_ROOT)) for p in copies]}
+        for identity, copies in sorted(paths.conflicts.items())
+    ]
+    isolated_by_id = {item["page_id"]: item for item in isolated}
     for page in paginate_database(api_key, normalize_notion_id(str(database.get("id")))):
         if page.get("archived"):
             continue
@@ -458,8 +463,7 @@ def main() -> None:
             target = paths.target(page, target)
         except BookConflict:
             identity = notion_page_id(str(page.get("id") or ""))
-            isolated.append({"page_id": identity, "reason": "divergent_existing_copies",
-                             "paths": [str(p.relative_to(OUTPUT_ROOT)) for p in paths.conflicts[identity]]})
+            isolated_by_id[identity]["seen_in_scan"] = True
             processed += 1
             if args.max_pages and processed >= args.max_pages:
                 break
@@ -516,7 +520,7 @@ def main() -> None:
         print("PRESERVED full index during limited or conflicted run")
     elif not args.dry_run:
         print(f"WROTE {index_path.relative_to(ROOT)}")
-    print(f"ISOLATED {len(isolated)} pages with divergent existing copies; no copies overwritten")
+    print(f"ISOLATED {len(isolated)} pages with multiple existing paths; no copies overwritten")
 
 
 if __name__ == "__main__":

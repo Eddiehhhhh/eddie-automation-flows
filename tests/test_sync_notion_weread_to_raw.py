@@ -68,7 +68,7 @@ class CanonicalPathsTests(unittest.TestCase):
         sync.atomic_write(old, content + '\nunique old body\n')
         sync.atomic_write(new, content + '\nunique new body\n')
         before = {p: p.read_bytes() for p in (old, new)}
-        with self.assertRaisesRegex(sync.BookConflict, 'Divergent WeRead copies'):
+        with self.assertRaisesRegex(sync.BookConflict, 'Multiple WeRead paths'):
             self.store(page(title='Renamed'), month=10)
         self.assertEqual(before, {p: p.read_bytes() for p in (old, new)})
         group = sync.BookPaths(self.output).duplicate_report()['groups'][0]
@@ -99,6 +99,39 @@ class CanonicalPathsTests(unittest.TestCase):
         self.assertEqual('partial', health['status'])
         self.assertEqual(A, health['isolated'][0]['page_id'])
         self.assertEqual(4, len(list(self.output.rglob('*.md'))))
+
+    def test_identical_copies_are_isolated_before_first_write_and_retry(self):
+        content, _ = sync.render_book_note(page(), {'id': A})
+        first, second = self.output / 'first.md', self.output / 'second.md'
+        for path in (first, second):
+            sync.atomic_write(path, content)
+        before = {p: p.read_bytes() for p in (first, second)}
+        for month in (10, 11):
+            with self.assertRaises(sync.BookConflict):
+                self.store(page(), month=month)
+            self.assertEqual(before, {p: p.read_bytes() for p in (first, second)})
+        self.assertIsNone(sync.BookPaths(self.output).duplicate_report()['groups'][0]['canonical_path'])
+
+    def test_unfetched_conflict_keeps_index_and_partial_status(self):
+        content, _ = sync.render_book_note(page(), {'id': A})
+        first, second = self.output / 'first.md', self.output / 'second.md'
+        sync.atomic_write(first, content + 'first unique body')
+        sync.atomic_write(second, content + 'second unique body')
+        before = {p: p.read_bytes() for p in (first, second)}
+        index = self.output / '索引.md'
+        sync.atomic_write(index, 'existing full index contains A')
+        args = type('Args', (), {'audit_report': None, 'dry_run': False, 'max_pages': 0})()
+        for pages in ([page(B, 'Healthy')], [page(A), page(B, 'Healthy')]):
+            with patch.object(sync, 'parse_args', return_value=args), patch.object(sync, 'load_notion_api_key', return_value='fixture'), patch.object(sync, 'resolve_database', return_value={'id': A}), patch.object(sync, 'paginate_database', return_value=pages):
+                sync.main()
+            self.assertEqual(before, {p: p.read_bytes() for p in (first, second)})
+            self.assertEqual('existing full index contains A', index.read_text())
+            self.assertIn(B, sync.BookPaths(self.output).paths)
+            health = json.loads((self.output / '.notion-path-conflicts.json').read_text())
+            self.assertEqual('partial', health['status'])
+            self.assertEqual(1, health['existing_conflict_count'])
+            self.assertEqual(A, health['isolated'][0]['page_id'])
+            self.assertEqual(len(pages) == 2, health['isolated'][0]['seen_in_scan'])
 
     def test_in_root_symlink_alias_cannot_reassign_another_identity(self):
         original = self.store(page())
