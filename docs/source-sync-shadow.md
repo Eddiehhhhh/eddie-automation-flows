@@ -61,3 +61,16 @@ Official flomo [MCP connection instructions](https://help.flomoapp.com/advance/m
 - All present same-source Get identity fields (`note_id`, API `canonicalId`, `source_ids.api`) must agree. Conflicts stop the run before writes and preserve every original file.
 - Each asset attempt has one shared deadline across DNS, redirects, connection/TLS, headers and body. DNS waiting is bounded; an active transport watchdog interrupts slow header/chunk framing, and body reads use `read1` with the remaining deadline applied to the socket. Bounded retries retain their own attempts. Socketpair tests send slow body bytes and slow headers without external network access.
 - All three new regression tests fail against 41a15a1 and pass after the correction. The old slow-drip test took over one second with a 50 ms budget; the corrected regression enforces completion below 200 ms with the same budget (scheduler tolerance included).
+
+## Independent re-review and phase handoff
+
+The parent independently re-reviewed commit `4b6893d935fc68b4ad59df1be69ef46c4ebbd362` and reported PASS for this isolated shadow phase. Both the migrated-pending/no-cache data-loss reproduction and conflicting identity-field reproduction are fixed. Six independent real-`HTTPResponse` scenarios covering slow streams, connection closure and absent content length exited within their configured budgets. All 28 focused source tests passed in that review. These are independent offline/socket-level results, not successful authenticated source or real-CDN acceptance.
+
+This phase ends with PR #4 remaining a draft for isolated shadow work. Do not merge it as a production cutover, enable existing sync workflows, or introduce a second writer. No further credential retries are part of this phase.
+
+Remaining dependencies are explicit:
+
+1. Authorized, valid Get/flomo source access; the previous Get approval rejection and flomo HTTP 401 remain unresolved. Do not obtain credentials through another path or retry them tonight.
+2. Real CDN/TLS validation of the bounded asset downloader, including approved initial-library transfer budgets and actual attachment MIME/redirect behavior.
+3. Real flomo full-enumeration, full-detail and historical-edit completeness acceptance. Synthetic completeness envelopes are not evidence of the live API contract.
+4. Existing-vault migration acceptance and a coordinated single-writer handoff, with publication/state advancement verified together against the private target. Production remains stopped pending that acceptance.
