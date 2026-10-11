@@ -473,7 +473,8 @@ def render_manifest(records: List[Tuple[Dict[str, Any], Optional[Path]]]) -> str
 
 
 def transcription_pending(note):
-    return note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} and not (note.get("audio") or {}).get("original")
+    original = (note.get("audio") or {}).get("original")
+    return note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} and not (isinstance(original, str) and original.strip())
 
 
 def main() -> int:
@@ -528,11 +529,12 @@ def main() -> int:
         import hashlib
         cache_id = hashlib.sha256(nid.encode()).hexdigest()
         cache_path = STATE_DIR / "raw-cache" / (cache_id + ".json")
-        if transcription_pending(note) and cache_path.exists():
-            previous = json.loads(cache_path.read_text(encoding="utf-8"))
-            if (previous.get("audio") or {}).get("original"):
-                continue
         path = output_path_for(note, index)
+        # A migration may have Markdown but no new raw-cache. Treat any existing
+        # note as authoritative until a complete original is available; do not
+        # infer incompleteness from cache absence or a particular heading style.
+        if transcription_pending(note) and path.exists():
+            continue
         changed += write_if_changed(path, render_note(note, assets_by_id[nid], path))
         # Audio stays remote; downloaded images/files and raw descriptors stay private.
         write_if_changed(cache_path, json_text(note))
@@ -540,9 +542,9 @@ def main() -> int:
     if not args.dry_run and not args.metadata_only:
         write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
         # This receipt is committed with the data; it is NOT a published watermark.
-        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "enumerated": len(details), "complete": True}))
-    print(json.dumps({"fetched": len(details), "written_or_changed": changed, "pending": len(pending), "dry_run": args.dry_run}))
-    return 0
+        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "enumerated": len(details), "complete": not pending, "pending": len(pending)}))
+    print(json.dumps({"fetched": len(details), "written_or_changed": changed, "pending": len(pending), "complete": not pending, "dry_run": args.dry_run}))
+    return 2 if pending else 0
 
 
 if __name__ == "__main__":

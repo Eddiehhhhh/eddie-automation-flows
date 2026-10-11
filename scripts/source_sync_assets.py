@@ -7,6 +7,8 @@ from pathlib import Path
 import socket
 import ssl
 import tempfile
+import threading
+import queue
 import time
 from urllib.parse import urljoin, urlsplit
 
@@ -42,25 +44,77 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.address = address
 
     def connect(self):
-        sock = socket.create_connection((self.address, 443), self.timeout)
+        # Expose the transport before connect/handshake so the attempt watchdog
+        # can interrupt either phase, rather than granting each a fresh timeout.
+        sock = socket.socket(socket.AF_INET6 if ':' in self.address else socket.AF_INET, socket.SOCK_STREAM)
+        self.sock = sock
+        sock.settimeout(self.timeout)
         try:
-            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+            sock.connect((self.address, 443))
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host, do_handshake_on_connect=False)
+            self.sock.do_handshake()
         except Exception:
-            sock.close()
+            self.sock.close()
             raise
 
 
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise TimeoutError("asset transfer deadline exceeded")
+    return seconds
+
+
+def resolve_before(url, deadline):
+    # DNS has no socket timeout in Python. Bound the caller's wait; at most one
+    # daemon resolver remains per failed attempt, and retries are bounded to 3.
+    result = queue.Queue(maxsize=1)
+    def resolve():
+        try:
+            result.put((public_endpoint(url), None))
+        except Exception as exc:
+            result.put((None, exc))
+    threading.Thread(target=resolve, daemon=True).start()
+    try:
+        value, error = result.get(timeout=remaining(deadline))
+    except queue.Empty:
+        raise TimeoutError("asset DNS deadline exceeded") from None
+    if error:
+        raise error
+    remaining(deadline)
+    return value
+
+
 def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30):
+    deadline = time.monotonic() + timeout
     for _ in range(6):
-        parsed, address = public_endpoint(url)
-        connection = PinnedHTTPSConnection(parsed.hostname, address, timeout)
+        parsed, address = resolve_before(url, deadline)
+        connection = PinnedHTTPSConnection(parsed.hostname, address, remaining(deadline))
+        active_socket = [None]
+        def abort():
+            # HTTPResponse can detach connection.sock (Connection: close), so
+            # retain the transport before reading headers. This also interrupts
+            # slow-drip headers/chunk framing inside http.client.
+            sock = active_socket[0] or connection.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+        watchdog = threading.Timer(remaining(deadline), abort)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             target = parsed.path or '/'
             if parsed.query:
                 target += '?' + parsed.query
             # No Authorization, cookies, or local proxy credentials are forwarded.
             connection.request('GET', target, headers={'Accept-Encoding': 'identity', 'User-Agent': 'source-sync-assets/1'})
+            active_socket[0] = connection.sock
+            if active_socket[0] is not None:
+                active_socket[0].settimeout(remaining(deadline))
             response = connection.getresponse()
+            remaining(deadline)
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader('Location')
                 if not location:
@@ -82,11 +136,14 @@ def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30):
             if expected is not None and (expected < 0 or expected > max_bytes):
                 raise AssetError('asset exceeds byte limit')
             chunks, size = [], 0
-            deadline = time.monotonic() + timeout
             while True:
-                if time.monotonic() > deadline:
-                    raise TimeoutError('asset transfer deadline exceeded')
-                chunk = response.read(min(65536, max_bytes - size + 1))
+                wait = remaining(deadline)
+                if active_socket[0] is not None:
+                    active_socket[0].settimeout(wait)
+                # read(n) may wait for n bytes across an arbitrary number of
+                # successful tiny receives. read1 returns after one raw read.
+                chunk = response.read1(min(65536, max_bytes - size + 1))
+                remaining(deadline)
                 if not chunk:
                     break
                 size += len(chunk)
@@ -99,6 +156,8 @@ def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30):
                 raise AssetError('empty asset body')
             return b''.join(chunks), mime
         finally:
+            watchdog.cancel()
+            watchdog.join()
             connection.close()
     raise AssetError('asset redirect limit exceeded')
 

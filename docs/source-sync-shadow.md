@@ -54,3 +54,10 @@ Every note's assets must finish before any Markdown/raw-cache/receipt is updated
 `tests/fixtures/getnote-plugin-synthetic.json` mirrors the local plugin's image/file/audio/link classification inspected in `main.js`; original text and summary are synthetic. It is semantic parity, not a claim of byte-for-byte plugin Markdown equivalence. The independent `source-sync-offline-tests.yml` runs only synthetic tests on PR/push with read-only permissions and no secrets. Existing workflows are untouched.
 
 Official flomo [MCP connection instructions](https://help.flomoapp.com/advance/mcp/connect-antigravity.html) describe MAX membership and a personal token. They do not establish exhaustive search pagination, full-detail or updated-at enumeration semantics. The implementation therefore rejects absent completeness evidence; the mocked acceptance envelope is not represented as observed upstream behavior. No additional login or token request was attempted.
+
+## Review corrections after 41a15a1
+
+- Pending recording details preserve any existing Markdown byte-for-byte, including migrated plugin files with no new raw-cache. Pending runs now return exit 2 and `complete: false`; pending is never a successful shadow acceptance. Newly observed pending notes may be stored for retry, but no published watermark is advanced.
+- All present same-source Get identity fields (`note_id`, API `canonicalId`, `source_ids.api`) must agree. Conflicts stop the run before writes and preserve every original file.
+- Each asset attempt has one shared deadline across DNS, redirects, connection/TLS, headers and body. DNS waiting is bounded; an active transport watchdog interrupts slow header/chunk framing, and body reads use `read1` with the remaining deadline applied to the socket. Bounded retries retain their own attempts. Socketpair tests send slow body bytes and slow headers without external network access.
+- All three new regression tests fail against 41a15a1 and pass after the correction. The old slow-drip test took over one second with a 50 ms budget; the corrected regression enforces completion below 200 ms with the same budget (scheduler tolerance included).

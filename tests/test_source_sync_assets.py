@@ -73,6 +73,70 @@ class AssetTests(unittest.TestCase):
         with patch.object(a,'fetch_once',side_effect=TimeoutError()),patch.object(a.time,'sleep'):
             with self.assertRaises(a.AssetError): a.fetch_asset('https://example.com/a')
 
+    def test_socketpair_slow_drip_has_hard_body_and_header_deadline(self):
+        import http.client
+        import threading
+        import time
+        from urllib.parse import urlsplit
+        for slow_headers in (False, True):
+            reader, writer = socket.socketpair()
+            stop = threading.Event()
+            def drip():
+                try:
+                    header=b'HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 80\r\n\r\n'
+                    if slow_headers:
+                        data=header+b'x'*80
+                    else:
+                        writer.sendall(header)
+                        data=b'x'*80
+                    for byte in data:
+                        if stop.wait(0.01):
+                            break
+                        writer.sendall(bytes([byte]))
+                except OSError:
+                    pass
+                finally:
+                    writer.close()
+            class Connection:
+                def __init__(self,*args):
+                    self.sock=reader
+                    self.response=None
+                def request(self,*args,**kwargs): pass
+                def getresponse(self):
+                    self.response=http.client.HTTPResponse(self.sock)
+                    self.response.begin()
+                    return self.response
+                def close(self):
+                    if self.response: self.response.close()
+                    self.sock.close()
+            thread=threading.Thread(target=drip,daemon=True);thread.start()
+            try:
+                with patch.object(a,'public_endpoint',return_value=(urlsplit('https://example.com/a'),'8.8.8.8')),patch.object(a,'PinnedHTTPSConnection',Connection):
+                    started=time.monotonic()
+                    with self.assertRaises((TimeoutError,socket.timeout,http.client.HTTPException,a.AssetError)):
+                        a.fetch_once('https://example.com/a',timeout=0.05)
+                    self.assertLess(time.monotonic()-started,0.2)
+            finally:
+                stop.set();reader.close();thread.join(timeout=1)
+
+    def test_dns_and_redirect_share_the_attempt_deadline(self):
+        import time
+        from urllib.parse import urlsplit
+        def slow_dns(url):
+            time.sleep(0.1)
+            return urlsplit(url),'8.8.8.8'
+        started=time.monotonic()
+        with patch.object(a,'public_endpoint',side_effect=slow_dns):
+            with self.assertRaises(TimeoutError): a.fetch_once('https://example.com/a',timeout=0.02)
+        self.assertLess(time.monotonic()-started,0.08)
+        def delayed_redirect():
+            time.sleep(0.03)
+            return Response(status=302,headers={'Location':'https://example.com/next'})
+        with patch.object(a,'public_endpoint',return_value=(urlsplit('https://example.com/a'),'8.8.8.8')),patch.object(a,'PinnedHTTPSConnection') as conn:
+            conn.return_value.getresponse.side_effect=delayed_redirect
+            with self.assertRaises(TimeoutError): a.fetch_once('https://example.com/a',timeout=0.05)
+            self.assertLessEqual(conn.call_count,2)
+
     def test_path_symlink_and_total_limits(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)/'root';root.mkdir()

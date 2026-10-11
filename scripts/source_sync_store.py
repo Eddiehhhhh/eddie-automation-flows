@@ -35,6 +35,8 @@ def frontmatter(path):
                 value = json.loads(value)
             except (ValueError, TypeError):
                 value = value.strip("\"'")
+            if key in {"note_id", "canonicalId", "source_ids.api", "source_system"} and key in fields and fields[key] != str(value):
+                raise ValueError("conflicting repeated identity field")
             fields[key] = str(value)
     return fields
 
@@ -68,11 +70,13 @@ class IdentityIndex:
                 # Recognize the plugin's exact API namespace, never title/fingerprint matches.
                 canonical = fields.get("canonicalId", "")
                 api_id = fields.get("source_ids.api")
-                identity = identity or api_id or (canonical[4:] if canonical.startswith("api:") else None)
-                if not identity and fields.get("note_type"):
-                    identity = fields.get("note_id")
-                if api_id and canonical.startswith("api:") and api_id != canonical[4:]:
+                identities = [value for value in (
+                    fields.get("note_id"), api_id,
+                    canonical[4:] if canonical.startswith("api:") else None,
+                ) if value]
+                if len(set(identities)) > 1:
                     raise ValueError("conflicting Get API identities")
+                identity = identities[0] if identities else None
             if identity:
                 key = source_id(identity)
                 if key in self.paths:

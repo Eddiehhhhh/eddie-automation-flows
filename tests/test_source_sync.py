@@ -85,6 +85,37 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(first.read_text().endswith('unique A'))
         self.assertTrue(second.read_text().endswith('unique B'))
 
+    def test_all_same_source_identity_fields_must_agree(self):
+        variants = [
+            'note_id: "A"\nnote_id: "B"',
+            'note_id: "A"\ncanonicalId: "api:B"',
+            'note_id: "A"\nsource_ids:\n  api: "B"',
+            'note_id: "A"\ncanonicalId: "api:B"\nsource_ids:\n  api: "B"',
+            'canonicalId: "api:A"\nsource_ids:\n  api: "B"',
+        ]
+        path=g.RAW_DIR/'conflict.md'
+        for fields in variants:
+            original='---\nsource_system: getnote\n'+fields+'\n---\nUnique B original'
+            g.write_if_changed(path,original)
+            with self.assertRaises(ValueError): self.run_get([self.note()])
+            self.assertEqual(path.read_text(),original)
+            self.assertFalse(g.STATE_DIR.exists())
+
+    def test_legacy_original_without_raw_cache_survives_pending(self):
+        path=g.RAW_DIR/'old-plugin-recording.md'
+        original='---\ncanonicalId: "api:9223372036854775807"\nsource_ids:\n  api: "9223372036854775807"\n---\n## 原始转写\nBEGIN unique complete original END'
+        g.write_if_changed(path,original)
+        timestamp=path.stat().st_mtime_ns
+        result=self.run_get([self.note(note_type='recorder_audio',audio={})])
+        self.assertEqual(result,2)
+        self.assertEqual(path.read_text(),original)
+        self.assertEqual(path.stat().st_mtime_ns,timestamp)
+        self.assertFalse((g.STATE_DIR/'raw-cache').exists())
+        receipt=json.loads((g.STATE_DIR/'receipt.json').read_text())
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(receipt['pending'],1)
+        self.assertEqual(len(json.loads((g.STATE_DIR/'pending.json').read_text())['pending_ids']),1)
+
     def test_large_id_float_rejected(self):
         self.assertEqual(source_id(9223372036854775807), '9223372036854775807')
         with self.assertRaises(ValueError): source_id(9.223372036854776e18)
@@ -104,6 +135,8 @@ class SyncTests(unittest.TestCase):
         self.assertIn('99 录音卡',str(g.output_path_for(n)))
         self.assertFalse(g.transcription_pending(n))
         n['audio']={}
+        self.assertTrue(g.transcription_pending(n))
+        n['audio']={'original':'   \n'}
         self.assertTrue(g.transcription_pending(n))
 
     def test_cursor_contract_and_since_id(self):
