@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import re
+import tempfile
 import os
 import datetime as dt
 from pathlib import Path
@@ -18,7 +22,6 @@ from sync_notion_to_raw import (
     resolve_database,
     rich_text_plain_text,
     title_text_from_database,
-    write_text,
 )
 
 
@@ -140,6 +143,163 @@ def book_path(title: str, start_date: Optional[dt.datetime]) -> Path:
     if not safe_title:
         safe_title = "未命名书籍"
     return OUTPUT_ROOT / year / year_month / f"{safe_title}.md"
+
+
+def notion_page_id(value: str) -> str:
+    """Only UUID identities can authorize overwriting a source note."""
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})", value.strip()):
+        raise ValueError("Missing or invalid Notion page identity")
+    normalized = normalize_notion_id(value)
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", normalized):
+        raise ValueError("Missing or invalid Notion page identity")
+    return normalized
+
+
+def stored_page_id(path: Path) -> str:
+    # This reader intentionally supports the flat scalar metadata emitted by
+    # render_frontmatter, not arbitrary YAML objects/tags or multiline quotes.
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return ""
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.rstrip() == "---"), None)
+    if end is None:
+        return ""
+    values = {}
+    identity_keys = {"source_system", "source_type", "page_id", "source_id"}
+    for line in lines[1:end]:
+        if not line or line[0].isspace() or line.startswith("#"):
+            continue
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        value = value.strip()
+        if value.startswith('"'):
+            # JSON strings are the writer's YAML-compatible quoted form.
+            try:
+                parsed = json.loads(value)
+            except ValueError as exc:
+                raise ValueError("Unsupported quoted WeRead metadata") from exc
+        elif value.startswith("'"):
+            if not re.fullmatch(r"'(?:[^']|'')*'", value):
+                raise ValueError("Unsupported quoted WeRead metadata")
+            parsed = value[1:-1].replace("''", "'")
+        else:
+            parsed = value.split(" #", 1)[0].strip()
+        if key in identity_keys:
+            if key in values:
+                raise ValueError("Duplicate WeRead identity field")
+            values[key] = parsed
+    if values.get("source_system") != "notion" or values.get("source_type") != "wechat_read":
+        return ""
+    identities = {notion_page_id(values[key]) for key in ("page_id", "source_id") if values.get(key)}
+    if len(identities) > 1:
+        raise ValueError("Conflicting source identities")
+    return next(iter(identities), "")
+
+
+def atomic_write(path: Path, content: str) -> None:
+    """A failed write must leave the previous complete file available for retry."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".weread-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+class BookConflict(ValueError):
+    """Existing multiple paths need review before source writes can resume."""
+
+
+class BookPaths:
+    """Stable page identity index; legacy duplicates are preserved, never merged."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.state_path = root / ".notion-page-paths.json"
+        self.existing: Dict[str, List[Path]] = {}
+        self.conflicts: Dict[str, List[Path]] = {}
+        self.paths: Dict[str, Path] = {}
+        self.owners: Dict[Path, str] = {}
+        for path in sorted(root.rglob("*.md")):
+            self.checked(path)
+            identity = stored_page_id(path)
+            self.owners[path] = identity
+            if identity:
+                self.existing.setdefault(identity, []).append(path)
+        if self.state_path.exists():
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if state.get("version") != 1 or not isinstance(state.get("pages"), dict):
+                raise ValueError("Unsupported WeRead path index")
+            for identity, relative in state["pages"].items():
+                identity = notion_page_id(identity)
+                if identity in self.paths:
+                    raise ValueError("Duplicate normalized identity in WeRead index")
+                path = self.checked(root / relative)
+                if path in self.owners and self.owners[path] != identity:
+                    raise ValueError("WeRead path index ownership mismatch")
+                if path in self.paths.values():
+                    raise ValueError("WeRead path index collision")
+                self.paths[identity] = path
+                self.owners[path] = identity
+        for identity, paths in self.existing.items():
+            if len(paths) > 1:
+                self.conflicts[identity] = paths
+                continue
+            # Only an unambiguous single existing path may be reused.
+            self.paths.setdefault(identity, paths[0])
+
+    def checked(self, path: Path) -> Path:
+        if not path.is_relative_to(self.root) or ".." in path.parts or path.suffix != ".md":
+            raise ValueError("Invalid WeRead canonical path")
+        if any(parent.is_symlink() for parent in (path, *path.parents) if parent.is_relative_to(self.root)) or not path.resolve().is_relative_to(self.root.resolve()):
+            raise ValueError("WeRead canonical path escapes output root")
+        return path
+
+    def target(self, page: Dict[str, Any], proposed: Path) -> Path:
+        identity = notion_page_id(str(page.get("id") or ""))
+        if identity in self.conflicts:
+            raise BookConflict("Multiple WeRead paths require review")
+        if identity in self.paths:
+            path = self.checked(self.paths[identity])
+            if path.exists() and stored_page_id(path) != identity:
+                raise ValueError("WeRead canonical file ownership changed")
+            return path
+        path = self.checked(proposed)
+        if path in self.owners or path.exists():
+            path = proposed.with_name(f"{proposed.stem}-{identity}.md")
+            self.checked(path)
+            if path in self.owners or path.exists():
+                raise ValueError("WeRead identity suffix path already occupied")
+        self.paths[identity] = path
+        self.owners[path] = identity
+        return path
+
+    def save(self) -> None:
+        atomic_write(self.state_path, json.dumps({
+            "version": 1,
+            "pages": {identity: str(path.relative_to(self.root)) for identity, path in sorted(self.paths.items())},
+        }, ensure_ascii=False, indent=2) + "\n")
+
+    def duplicate_report(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "policy": "review_only_no_deletions",
+            "groups": [{
+                "page_id": identity,
+                "canonical_path": None if identity in self.conflicts else str(self.paths[identity].relative_to(self.root)),
+                "conflict": identity in self.conflicts,
+                "files": [{
+                    "path": str(path.relative_to(self.root)),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                } for path in paths],
+            } for identity, paths in sorted(self.existing.items()) if len(paths) > 1],
+        }
 
 
 def render_book_note(
@@ -265,11 +425,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Preview target files without writing.")
     parser.add_argument("--max-pages", type=int, default=0, help="Limit the number of book pages to process.")
+    parser.add_argument("--audit-report", type=Path, help="Write a private duplicate candidate report; no API or note writes.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    paths = BookPaths(OUTPUT_ROOT)
+    if args.audit_report:
+        if args.audit_report.resolve().is_relative_to(OUTPUT_ROOT.resolve()):
+            raise ValueError("Audit report must be outside the source directory")
+        atomic_write(args.audit_report, json.dumps(paths.duplicate_report(), ensure_ascii=False, indent=2) + "\n")
+        print("WROTE duplicate review report; source notes unchanged")
+        return
     api_key = load_notion_api_key()
 
     # Use configured database ID or resolve by name
@@ -281,10 +449,25 @@ def main() -> None:
 
     rows: List[Dict[str, Any]] = []
     processed = 0
+    isolated: List[Dict[str, Any]] = [
+        {"page_id": identity, "reason": "multiple_existing_paths", "seen_in_scan": False,
+         "paths": [str(p.relative_to(OUTPUT_ROOT)) for p in copies]}
+        for identity, copies in sorted(paths.conflicts.items())
+    ]
+    isolated_by_id = {item["page_id"]: item for item in isolated}
     for page in paginate_database(api_key, normalize_notion_id(str(database.get("id")))):
         if page.get("archived"):
             continue
         content, target = render_book_note(page, database)
+        try:
+            target = paths.target(page, target)
+        except BookConflict:
+            identity = notion_page_id(str(page.get("id") or ""))
+            isolated_by_id[identity]["seen_in_scan"] = True
+            processed += 1
+            if args.max_pages and processed >= args.max_pages:
+                break
+            continue
         title = page_title(page)
 
         author = page_text(page, "作者")
@@ -299,7 +482,8 @@ def main() -> None:
         if args.dry_run:
             print(f"DRY-RUN {title} -> {target.relative_to(ROOT)}")
         else:
-            write_text(target, content)
+            atomic_write(target, content)
+            paths.save()
 
         rows.append(
             {
@@ -321,11 +505,22 @@ def main() -> None:
     index_path = OUTPUT_ROOT / "索引.md"
     if args.dry_run:
         print(f"DRY-RUN {index_path.relative_to(ROOT)}")
-    else:
-        write_text(index_path, render_index(rows))
+    elif not args.max_pages and not isolated:
+        atomic_write(index_path, render_index(rows))
 
-    print(f"WROTE {len(rows)} book notes")
-    print(f"WROTE {index_path.relative_to(ROOT)}")
+    if not args.dry_run:
+        atomic_write(OUTPUT_ROOT / ".notion-path-conflicts.json", json.dumps({
+            "version": 1, "status": "partial" if isolated or args.max_pages else "ok",
+            "existing_conflict_count": len(paths.conflicts),
+            "scan_complete": not bool(args.max_pages), "isolated": isolated,
+        }, ensure_ascii=False, indent=2) + "\n")
+
+    print(f"{'PREVIEWED' if args.dry_run else 'WROTE'} {len(rows)} book notes")
+    if args.max_pages or isolated:
+        print("PRESERVED full index during limited or conflicted run")
+    elif not args.dry_run:
+        print(f"WROTE {index_path.relative_to(ROOT)}")
+    print(f"ISOLATED {len(isolated)} pages with multiple existing paths; no copies overwritten")
 
 
 if __name__ == "__main__":
