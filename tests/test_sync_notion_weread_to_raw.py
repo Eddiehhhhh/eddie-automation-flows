@@ -61,23 +61,57 @@ class CanonicalPathsTests(unittest.TestCase):
         self.assertEqual(A, sync.stored_page_id(first))
         self.assertEqual(B, sync.stored_page_id(second))
 
-    def test_legacy_duplicates_preserved_and_choice_pinned(self):
+    def test_legacy_duplicates_with_unique_body_are_isolated(self):
         content, _ = sync.render_book_note(page(), {'id': A})
         old = self.output / '2026/2026-08/Old.md'
         new = self.output / '2026/2026-09/New.md'
-        sync.atomic_write(old, content.replace('page_id:', 'source_id:'))
-        sync.atomic_write(new, content)
-        before = new.read_bytes()
-        chosen = self.store(page(title='Renamed'), month=10)
-        self.assertEqual(old, chosen)
-        self.assertEqual(before, new.read_bytes())
-        paths = sync.BookPaths(self.output)
-        report = paths.duplicate_report()
-        self.assertEqual(A, report['groups'][0]['page_id'])
-        self.assertEqual(2, len(report['groups'][0]['files']))
-        earlier = self.output / '2026/2026-01/Earlier.md'
-        sync.atomic_write(earlier, content)
-        self.assertEqual(old, self.store(page(), month=10))
+        sync.atomic_write(old, content + '\nunique old body\n')
+        sync.atomic_write(new, content + '\nunique new body\n')
+        before = {p: p.read_bytes() for p in (old, new)}
+        with self.assertRaisesRegex(sync.BookConflict, 'Divergent WeRead copies'):
+            self.store(page(title='Renamed'), month=10)
+        self.assertEqual(before, {p: p.read_bytes() for p in (old, new)})
+        group = sync.BookPaths(self.output).duplicate_report()['groups'][0]
+        self.assertTrue(group['conflict'])
+        self.assertIsNone(group['canonical_path'])
+
+    def test_legacy_source_id_single_file_is_reused(self):
+        content, proposed = sync.render_book_note(page(), {'id': A})
+        sync.atomic_write(proposed, content.replace('page_id:', 'source_id:'))
+        self.assertEqual(proposed, self.store(page(title='Renamed'), month=10))
+
+    def test_conflict_does_not_block_other_id_or_replace_full_index(self):
+        content, _ = sync.render_book_note(page(), {'id': A})
+        old, new = self.output / 'old.md', self.output / 'new.md'
+        sync.atomic_write(old, content + 'unique old body')
+        sync.atomic_write(new, content + 'unique new body')
+        index = self.output / '索引.md'
+        sync.atomic_write(index, 'existing complete index')
+        args = type('Args', (), {'audit_report': None, 'dry_run': False, 'max_pages': 0})()
+        with patch.object(sync, 'parse_args', return_value=args), patch.object(sync, 'load_notion_api_key', return_value='fixture'), patch.object(sync, 'resolve_database', return_value={'id': A}), patch.object(sync, 'paginate_database', return_value=[page(), page(B, 'Healthy')]):
+            sync.main()
+            sync.main()
+        self.assertIn('unique old body', old.read_text())
+        self.assertIn('unique new body', new.read_text())
+        self.assertEqual('existing complete index', index.read_text())
+        self.assertIn(B, sync.BookPaths(self.output).paths)
+        health = json.loads((self.output / '.notion-path-conflicts.json').read_text())
+        self.assertEqual('partial', health['status'])
+        self.assertEqual(A, health['isolated'][0]['page_id'])
+        self.assertEqual(4, len(list(self.output.rglob('*.md'))))
+
+    def test_in_root_symlink_alias_cannot_reassign_another_identity(self):
+        original = self.store(page())
+        alias = self.output / 'alias'
+        alias.symlink_to(original.parent, target_is_directory=True)
+        alias_path = alias / original.name
+        state = self.output / '.notion-page-paths.json'
+        state.write_text(json.dumps({'version': 1, 'pages': {B: str(alias_path.relative_to(self.output))}}))
+        before = original.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'escapes output root'):
+            sync.BookPaths(self.output)
+        self.assertEqual(before, original.read_bytes())
+        self.assertEqual(A, sync.stored_page_id(original))
 
     def test_missing_canonical_is_rebuilt_at_reserved_path(self):
         original = self.store(page())
@@ -175,6 +209,43 @@ class CanonicalPathsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sync.main()
         self.assertEqual(before, original.read_bytes())
+
+    def test_triple_dash_fields_round_trip_and_retry(self):
+        item = page(title='Title --- "quoted"')
+        item['properties']['作者'] = {'type': 'rich_text', 'rich_text': [{'plain_text': 'Author --- test'}]}
+        item['properties']['阅读状态']['status']['name'] = 'Status --- test'
+        database = {'id': A, 'title': [{'plain_text': 'Database --- test'}]}
+        content, proposed = sync.render_book_note(item, database)
+        sync.atomic_write(proposed, content)
+        self.assertEqual(A, sync.stored_page_id(proposed))
+        self.assertEqual(proposed, self.store(item, month=10))
+        self.assertEqual(proposed, self.store(item, month=11))
+
+    def test_bom_crlf_and_single_quoted_identity(self):
+        content, path = sync.render_book_note(page(), {'id': A})
+        content = content.replace(f'page_id: "{A}"', f"page_id: '{A}'")
+        path.parent.mkdir(parents=True)
+        path.write_bytes(('\ufeff' + content.replace('\n', '\r\n')).encode('utf-8'))
+        self.assertEqual(A, sync.stored_page_id(path))
+        self.assertEqual(path, self.store(page(title='Changed')))
+
+    def test_incomplete_header_and_body_cannot_supply_identity(self):
+        content, path = sync.render_book_note(page(), {'id': A})
+        header = content.split('\n---\n', 1)[0]
+        for text in (header, 'body\n' + content, '---\ntitle: fixture\n---\n' + content):
+            sync.atomic_write(path, text)
+            self.assertEqual('', sync.stored_page_id(path))
+        sync.atomic_write(path, f'---\nsource_system: notion\nsource_type: wechat_read\ndescription: |\n  page_id: {A}\n---\npage_id: {A}\n')
+        self.assertEqual('', sync.stored_page_id(path))
+
+    def test_duplicate_or_embedded_identity_cannot_authorize_overwrite(self):
+        content, path = sync.render_book_note(page(), {'id': A})
+        sync.atomic_write(path, content.replace('page_id:', f'page_id: "{A}"\npage_id:'))
+        with self.assertRaises(ValueError):
+            sync.stored_page_id(path)
+        for value in ('prefix-' + A, 'https://example.com/' + A, '|', A + ' trailing'):
+            with self.assertRaises(ValueError):
+                sync.notion_page_id(value)
 
     def test_audit_mode_never_calls_api_or_changes_notes(self):
         original = self.store(page())

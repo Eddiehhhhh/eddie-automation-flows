@@ -8,21 +8,33 @@ Different UUIDs with the same title receive an ID suffix only on collision.
 ## Bootstrap and recovery
 
 The script scans existing Notion/wechat_read frontmatter once per run, accepting
-`page_id` and legacy `source_id` UUIDs. It bootstraps each UUID to its lexically
-first path and pins it in `Raw/15 微信读书/.notion-page-paths.json`. This choice is
-path routing only: it does not establish which duplicate has authoritative text.
-The current source response updates only the selected path; other copies remain.
-All existing paths and links stay intact. The Markdown index uses canonical paths.
+strict `page_id` and legacy `source_id` UUIDs. Metadata boundaries must be standalone
+`---` lines; BOM and CRLF are accepted. Embedded UUIDs, duplicate identity fields,
+and unsupported quoted metadata fail closed.
 
-The JSON index lives in the private vault and is included by the existing scoped
-Raw commit step; no public state or workflow/authentication changes are needed.
-Writes use atomic replacement. A failed note write leaves the old note available;
-a crash after note write but before index save is recovered by the next scan.
-Missing canonical notes are rebuilt at the reserved path. Bad JSON, conflicting
-IDs, path traversal, symlink escapes and ownership collisions stop the run rather
-than guessing. Limited runs preserve the complete Markdown index. The existing
-workflow serializes private-vault writers; simultaneous manual local syncs are
-not supported.
+A single existing path is pinned in `Raw/15 微信读书/.notion-page-paths.json`.
+Byte-identical copies can bootstrap to the lexically first path. **Divergent copies
+are isolated before any source write**: every copy remains byte-for-byte intact,
+including unique text in the oldest file. No canonical winner is selected for that
+object. A later run repeats this check; there is no automatic conflict resolution.
+Other source pages continue. The complete Markdown index is preserved when any
+page is isolated, so unresolved pages cannot disappear from the index.
+
+`.notion-path-conflicts.json` records partial status, scan completeness, isolated
+page IDs/paths and the existing conflict count in the private output folder. This
+is retry/review evidence, not a successful sync for those pages. A full conflict-free
+run is required before reporting this source healthy. Limited scans remain partial.
+Do not use job exit success alone as an all-pages health signal.
+
+The JSON files live in the private vault and are included by the existing scoped
+Raw commit step; no public state or authentication changes are needed. Writes use
+atomic replacement. A failed note write leaves the old note available; a crash
+after note write but before index save is recovered by the next scan. Missing
+canonical notes are rebuilt at the reserved path. Bad JSON, conflicting IDs, path
+traversal, **any symlink component (even inside the root)**, and ownership collisions
+stop the run rather than guessing. Ownership is reread before an existing target is
+returned. The existing workflow serializes private-vault writers; simultaneous
+manual local syncs are not supported.
 
 ## Read-only audit
 
@@ -37,7 +49,7 @@ source directory. It includes UUIDs, candidate canonical paths, every duplicate
 path and SHA-256. Keep this report private; do not attach real titles, UUIDs,
 source URLs or reports to this public repository. Resolve references separately
 before any later cleanup. This change never removes, renames, merges, or rewrites
-noncanonical duplicates.
+divergent duplicates.
 
 ## Verification and release
 
@@ -48,7 +60,9 @@ python3 -m unittest discover -s tests -v
 Tests use synthetic offline fixtures, including month rollover, rename/status,
 date addition/removal, same-title IDs, legacy duplicate conflicts, failed writes,
 retry recovery, corrupt state and partial runs. No production sync is required
-for these tests.
+for these tests. The independent `test-weread-canonical-paths.yml` pull-request
+workflow runs the offline suite with read-only repository permission, no persisted
+Git credential, no application secrets and no private-vault checkout.
 
 A draft PR is not a deployment. After review, verify a private read-only dry-run,
 merge the approved code, then observe the existing scheduled sync and read back

@@ -1,0 +1,30 @@
+name: Test WeRead canonical paths
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/test-weread-canonical-paths.yml'
+      - 'scripts/sync_notion_weread_to_raw.py'
+      - 'scripts/sync_notion_to_raw.py'
+      - 'tests/**'
+      - 'docs/weread-canonical-paths.md'
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Run offline regression tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Check whitespace
+        run: git diff --check HEAD^ HEAD
