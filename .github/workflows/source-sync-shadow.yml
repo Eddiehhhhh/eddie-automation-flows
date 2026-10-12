@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Bounded list sample, existing private pair, or explicit full-library acceptance
+        description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, full]
+        options: [sample, existing_sample, inventory, full]
         default: sample
         required: true
       sample_pages:
@@ -55,10 +55,22 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: timeout 12m python scripts/run_private_command.py --label 'Get existing sample shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --sample-existing
+      - name: Compare bounded complete Get list to private index without detail reads
+        if: inputs.mode == 'inventory'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout 10m python scripts/run_private_command.py --label 'Get migration inventory' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_inventory.py
       - name: Publish aggregate evidence only
         if: always()
         env:
           RESULT: ${{ runner.temp }}/shadow-result.json
+          MODE: ${{ inputs.mode }}
         run: |
           set -o pipefail
-          python scripts/verify_shadow_repeat.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = inventory ]; then
+            python scripts/source_sync_inventory.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python scripts/verify_shadow_repeat.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

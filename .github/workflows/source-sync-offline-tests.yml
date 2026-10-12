@@ -29,4 +29,4 @@ jobs:
       - name: Test synthetic Get fixtures without credentials
         run: python -m unittest discover -s tests -p 'test_source_sync*.py' -v && python -m unittest discover -s tests -p 'test_getnote_sample.py' -v
       - name: Compile changed modules
-        run: python -m py_compile scripts/source_sync_store.py scripts/source_sync_assets.py scripts/source_sync_urls.py scripts/source_sync_sample.py scripts/sync_getnote_to_raw.py scripts/verify_shadow_repeat.py
+        run: python -m py_compile scripts/source_sync_store.py scripts/source_sync_assets.py scripts/source_sync_urls.py scripts/source_sync_inventory.py scripts/source_sync_sample.py scripts/sync_getnote_to_raw.py scripts/verify_shadow_repeat.py

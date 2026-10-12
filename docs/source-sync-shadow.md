@@ -66,6 +66,36 @@ changed. No URL, value, private field name, hash, ID or path is exposed. These d
 Known signing refreshes are handled by the narrow retention policy below;
 unrecognized query changes and real source edits continue to fail repeat acceptance.
 
+### Bounded complete-list inventory before migration replay
+
+The explicit `inventory` workflow choice runs `source_sync_inventory.py`. It
+verifies the existing private repository, pins its main commit, and reads only
+its bounded metadata manifest (three GitHub reads). The current source list is
+then enumerated with a hard 300-page / 5,000-unique-note ceiling, 2 MiB per API
+response, 64 MiB total API response bytes including retried API responses, and a
+10-minute workflow command limit. These caps leave growth room above the existing
+private-index scale; a cap is not permission to truncate and claim completeness.
+One extra byte may be read solely to detect an exceeded byte boundary.
+
+The inventory does not call the Get detail endpoint or download binary assets.
+Incidental content present in list responses is discarded with each page; only
+ID sets and the private path mapping remain in memory. It does not write notes,
+state or remote data. Private IDs, paths, source fields, API cursors and credentials
+are never printed or uploaded. The stdout publisher uses a fixed allowlist of
+counts and statuses. Non-numeric local IDs and missing-ID records are counted
+separately for preservation, never treated as Get API IDs. Duplicate API identities
+or manifest paths, malformed paths, cursor cycles, repeated IDs, missing terminal
+pagination or exceeded limits fail closed.
+
+A successful result is `inventory_ok`, `enumeration_complete: true`, with counts
+for source IDs, overlap with the prior API index, new API IDs, and prior IDs not
+seen in the current enumeration. An absent prior ID is not a deletion instruction.
+Every inventory result remains `source_complete: false` and `published: false`:
+list completeness is not detail completeness, full existing-vault path replay,
+attachment transfer, or destination publication/readback acceptance. The existing
+`full` mode still starts empty and lacks these migration guarantees; do not use it
+as evidence that the old vault has been safely migrated.
+
 ### Expiring attachment links and exact repeats
 
 The [real parameter diagnostic](https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38260739263)

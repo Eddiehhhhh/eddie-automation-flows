@@ -95,7 +95,7 @@ def json_loads_tolerant(text: str) -> Any:
     return json.JSONDecoder(strict=False).decode(text)
 
 
-def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None) -> Any:
+def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None, response_budget=None) -> Any:
     if path not in (LIST_PATH, DETAIL_PATH):
         raise ValueError("unsupported Get API path")
     query = urllib.parse.urlencode(params)
@@ -116,10 +116,15 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
         urllib.request.HTTPSHandler(context=ssl.create_default_context()),
     )
     for attempt in range(5):
+        read_limit = max_response_bytes
+        if response_budget is not None:
+            read_limit = response_budget.read_limit(read_limit)
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with opener.open(req, timeout=30) as resp:
-                raw = resp.read(max_response_bytes + 1) if max_response_bytes is not None else resp.read()
+                raw = resp.read(read_limit + 1) if read_limit is not None else resp.read()
+                if response_budget is not None:
+                    response_budget.consume(len(raw))
                 if max_response_bytes is not None and len(raw) > max_response_bytes:
                     raise RuntimeError("Get response byte limit reached")
                 body = raw.decode("utf-8", errors="replace")
@@ -195,7 +200,7 @@ def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor", p
     return [selected["ordinary"], selected["recording"]], read_pages
 
 
-def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", max_response_bytes=None):
+def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", max_response_bytes=None, response_budget=None):
     """Official cursor contract, plus explicit plugin since_id compatibility.
 
     Never use time order to infer completeness. Caps and cursor cycles fail closed.
@@ -205,7 +210,10 @@ def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", ma
     page = 0
     while True:
         params = {pagination: cursor} if cursor is not None else ({"since_id": "0"} if pagination == "since_id" else {})
-        data = api_get(LIST_PATH, params, api_key, client_id, max_response_bytes=max_response_bytes)
+        options = {"max_response_bytes": max_response_bytes}
+        if response_budget is not None:
+            options["response_budget"] = response_budget
+        data = api_get(LIST_PATH, params, api_key, client_id, **options)
         payload = data.get("data", data)
         batch = payload if isinstance(payload, list) else next((payload[k] for k in ("notes", "list", "records", "items") if k in payload), None)
         if not isinstance(batch, list) or any(not isinstance(n, dict) for n in batch):
