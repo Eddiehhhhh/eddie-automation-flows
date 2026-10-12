@@ -85,7 +85,7 @@ def resolve_before(url, deadline):
     return value
 
 
-def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30):
+def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30, transfer_budget=None):
     deadline = time.monotonic() + timeout
     for _ in range(6):
         parsed, address = resolve_before(url, deadline)
@@ -142,7 +142,17 @@ def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30):
                     active_socket[0].settimeout(wait)
                 # read(n) may wait for n bytes across an arbitrary number of
                 # successful tiny receives. read1 returns after one raw read.
-                chunk = response.read1(min(65536, max_bytes - size + 1))
+                read_limit = min(65536, max_bytes - size + 1)
+                if transfer_budget is not None:
+                    read_limit = transfer_budget.read_limit(read_limit)
+                try:
+                    chunk = response.read1(read_limit)
+                except http.client.IncompleteRead as error:
+                    if transfer_budget is not None:
+                        transfer_budget.consume(len(error.partial))
+                    raise
+                if transfer_budget is not None:
+                    transfer_budget.consume(len(chunk))
                 remaining(deadline)
                 if not chunk:
                     break
@@ -162,10 +172,11 @@ def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30):
     raise AssetError('asset redirect limit exceeded')
 
 
-def fetch_asset(url, max_bytes=MAX_FILE_BYTES):
+def fetch_asset(url, max_bytes=MAX_FILE_BYTES, transfer_budget=None):
     for attempt in range(3):
         try:
-            return fetch_once(url, max_bytes=max_bytes)
+            options = {} if transfer_budget is None else {'transfer_budget': transfer_budget}
+            return fetch_once(url, max_bytes=max_bytes, **options)
         except (RetryableAssetError, TimeoutError, ConnectionError, OSError, http.client.HTTPException):
             if attempt == 2:
                 raise AssetError('asset transfer failed after bounded retries') from None
@@ -245,3 +256,4 @@ class AssetStore:
                 self.memo[url] = {'url':url, 'status':'downloaded', 'path':relative.as_posix(), 'sha256':digest, 'bytes':len(content), 'mime':mime}
             result.append(dict(self.memo[url], kind=kind))
         return result
+

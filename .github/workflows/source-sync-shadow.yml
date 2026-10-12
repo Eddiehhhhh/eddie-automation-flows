@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, full]
         default: sample
         required: true
       sample_pages:
@@ -25,7 +25,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.mode == 'full_replay' && 120 || 60 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -74,6 +74,13 @@ jobs:
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: timeout 15m python scripts/run_private_command.py --label 'Get real pinned blob seed' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_pack_seed.py
+      - name: Replay complete bounded Get source twice on real private baseline
+        if: inputs.mode == 'full_replay'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get real full replay' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_full_replay.py
       - name: Publish aggregate evidence only
         if: always()
         env:
@@ -81,7 +88,9 @@ jobs:
           MODE: ${{ inputs.mode }}
         run: |
           set -o pipefail
-          if [ "$MODE" = pack_seed ]; then
+          if [ "$MODE" = full_replay ]; then
+            python scripts/source_sync_full_replay.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$MODE" = pack_seed ]; then
             python scripts/source_sync_pack_seed.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ "$MODE" = migration_check ]; then
             python scripts/source_sync_migration_check.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"

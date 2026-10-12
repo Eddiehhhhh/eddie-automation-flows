@@ -122,11 +122,36 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with opener.open(req, timeout=30) as resp:
-                raw = resp.read(read_limit + 1) if read_limit is not None else resp.read()
-                if response_budget is not None:
-                    response_budget.consume(len(raw))
-                if max_response_bytes is not None and len(raw) > max_response_bytes:
-                    raise RuntimeError("Get response byte limit reached")
+                if response_budget is None:
+                    raw = resp.read(read_limit + 1) if read_limit is not None else resp.read()
+                    if read_limit is not None and len(raw) > read_limit:
+                        raise RuntimeError("Get response byte limit reached")
+                else:
+                    declared = getattr(resp, 'headers', {}).get('Content-Length')
+                    try:
+                        expected = int(declared) if declared is not None else None
+                    except (ValueError, TypeError):
+                        raise RuntimeError("invalid Get response length") from None
+                    if expected is not None and (expected < 0 or expected > read_limit):
+                        raise RuntimeError("Get response byte limit reached")
+                    chunks, size = [], 0
+                    while True:
+                        remaining = read_limit - size + 1
+                        try:
+                            chunk = resp.read1(min(65536, remaining))
+                        except http.client.IncompleteRead as error:
+                            response_budget.consume(len(error.partial))
+                            raise
+                        response_budget.consume(len(chunk))
+                        size += len(chunk)
+                        if size > read_limit:
+                            raise RuntimeError("Get response byte limit reached")
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    if expected is not None and size != expected:
+                        raise RuntimeError("incomplete Get response body")
+                    raw = b"".join(chunks)
                 body = raw.decode("utf-8", errors="replace")
             data = json_loads_tolerant(body)
             if isinstance(data, dict) and data.get("success") is False:
@@ -533,6 +558,52 @@ def transcription_pending(note):
     return note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} and not (isinstance(original, str) and original.strip())
 
 
+def persist_details(details, assets_by_id, index, scope="full", progress=None, metadata_only=False, read_pages=None, dry_run=False):
+    """Shared production persistence; callers must finish bounded acquisition first."""
+    progress = {} if progress is None else progress
+    changed = 0
+    urls_reused = 0
+    pending = []
+    progress['stage'] = 'write'
+    for note in details:
+        nid = note_id_from(note)
+        if transcription_pending(note):
+            pending.append(nid)
+        if metadata_only:
+            continue
+        # Do not replace a previously complete recording with a transient pending response.
+        import hashlib
+        cache_id = hashlib.sha256(nid.encode()).hexdigest()
+        cache_path = STATE_DIR / "raw-cache" / (cache_id + ".json")
+        path = output_path_for(note, index)
+        # A migration may have Markdown but no new raw-cache. Treat any existing
+        # note as authoritative until a complete original is available; do not
+        # infer incompleteness from cache absence or a particular heading style.
+        if transcription_pending(note) and path.exists():
+            continue
+        manifest_path = STATE_DIR / "attachments" / (cache_id + ".json")
+        note, note_assets, reused = stabilize_attachment_urls(
+            note, assets_by_id[nid], read_previous(cache_path, ROOT),
+            read_previous(manifest_path, ROOT))
+        urls_reused += reused
+        changed += write_if_changed(path, render_note(note, note_assets, path))
+        progress['written_or_changed'] = changed
+        # Audio stays remote; downloaded images/files and raw descriptors stay private.
+        write_if_changed(cache_path, json_text(note))
+        write_if_changed(manifest_path, json_text(dict(attachment_manifest(note), assets=note_assets)))
+    if not metadata_only:
+        progress['stage'] = 'receipt'
+        write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
+        # This receipt is committed with the data; it is NOT a published watermark.
+        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "scope": scope, "enumerated": len(details), "complete": scope == "full" and not pending, "pending": len(pending)}))
+    print(json.dumps({"scope": scope, "source_complete": scope == "full" and not pending,
+                      "sample_pages": read_pages, "fetched": len(details), "written_or_changed": changed,
+                      "attachment_urls_reused": urls_reused,
+                      "pending": len(pending), "complete": scope == "full" and not pending, "dry_run": dry_run}))
+    return 2 if pending else 0
+
+
+
 def main(progress=None) -> int:
     progress = progress if progress is not None else {}
     progress['stage'] = 'configuration'
@@ -616,46 +687,8 @@ def main(progress=None) -> int:
         for note in details:
             assets_by_id[note_id_from(note)] = store.materialize(note)
             progress['assets_downloaded'] = len(store.memo)
-    changed = 0
-    urls_reused = 0
-    pending = []
-    progress['stage'] = 'write'
-    for note in details:
-        nid = note_id_from(note)
-        if transcription_pending(note):
-            pending.append(nid)
-        if args.dry_run or args.metadata_only:
-            continue
-        # Do not replace a previously complete recording with a transient pending response.
-        import hashlib
-        cache_id = hashlib.sha256(nid.encode()).hexdigest()
-        cache_path = STATE_DIR / "raw-cache" / (cache_id + ".json")
-        path = output_path_for(note, index)
-        # A migration may have Markdown but no new raw-cache. Treat any existing
-        # note as authoritative until a complete original is available; do not
-        # infer incompleteness from cache absence or a particular heading style.
-        if transcription_pending(note) and path.exists():
-            continue
-        manifest_path = STATE_DIR / "attachments" / (cache_id + ".json")
-        note, note_assets, reused = stabilize_attachment_urls(
-            note, assets_by_id[nid], read_previous(cache_path, ROOT),
-            read_previous(manifest_path, ROOT))
-        urls_reused += reused
-        changed += write_if_changed(path, render_note(note, note_assets, path))
-        progress['written_or_changed'] = changed
-        # Audio stays remote; downloaded images/files and raw descriptors stay private.
-        write_if_changed(cache_path, json_text(note))
-        write_if_changed(manifest_path, json_text(dict(attachment_manifest(note), assets=note_assets)))
-    if not args.dry_run and not args.metadata_only:
-        progress['stage'] = 'receipt'
-        write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
-        # This receipt is committed with the data; it is NOT a published watermark.
-        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "scope": "sample" if args.sample else "full", "enumerated": len(details), "complete": not args.sample and not pending, "pending": len(pending)}))
-    print(json.dumps({"scope": "sample" if args.sample else "full", "source_complete": not args.sample and not pending,
-                      "sample_pages": read_pages, "fetched": len(details), "written_or_changed": changed,
-                      "attachment_urls_reused": urls_reused,
-                      "pending": len(pending), "complete": not args.sample and not pending, "dry_run": args.dry_run}))
-    return 2 if pending else 0
+    return persist_details(details, assets_by_id, index, "sample" if args.sample else "full",
+                           progress, args.dry_run or args.metadata_only, read_pages, args.dry_run)
 
 
 def safe_error_code(stage, error):

@@ -239,3 +239,42 @@ The new sample tests cover page/detail bounds, asset budgets, output scope, priv
 Before a production cutover, verify a real ordinary body and recording original at both boundaries, a real image/file CDN response within an approved transfer budget, full-list completeness and historical edits, duplicate-ID migration, and single-writer private remote publication with content and state readback. Keep existing workflows in their current state until that acceptance is complete.
 
 Evidence: https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38205977952 is a successful bounded credential/detail probe. It reports one 20-note page, a recording detail, an original transcript field and one attachment URL; it did not find an ordinary note in that first page or validate transcript boundaries or binary downloads.
+
+
+## Real-baseline bounded full replay (explicit `full_replay` only)
+
+This gate seeds the same pinned, exact Get blob set already verified by `pack_seed`,
+then independently enumerates and reads the entire current Get API source twice.
+It uses the production `persist_details` function for Markdown, raw cache, attachment
+manifest, pending state and local receipt writes. Neither the private source repository
+nor production is written. Every old identity keeps its original path; every old file
+outside enumerated-note Markdown/cache/manifest and pending/receipt state must retain
+its exact hash and mtime. That includes non-API, missing-ID, unenumerated, manual-index
+and old attachment files. New identities cannot take occupied paths. The entire second
+output tree must match first-pass hashes and mtimes exactly, with zero note writes.
+Real source edits are failures requiring diagnosis, never normalized into success.
+
+Bounds are based on the observed 1,932 source IDs / 97 pages and 1,917 indexed prior
+API notes. Each pass permits at most 2,500 notes, 150 terminal-proven pages, 2 MiB per
+API response and 256 MiB total API body bytes. Details are fetched with three workers
+in 64-note segments, with private same-run JSON checkpoints. API retries consume the
+same reserved response allowance; reservations include overflow sentinels. The maximum
+is 5,000 logical detail calls plus 300 list calls across both passes; existing API
+transport retry limit is five attempts per logical call. Checkpoints are never uploaded
+to public artifacts/caches and do not imply cross-run recovery.
+
+Per pass, images/files are bounded to 256 distinct download URLs, 25 MiB per file,
+200 MiB successful storage and 200 MiB actual body transfer including failed/retried
+attempts. Every downloaded binary is read back and hash/size checked. Audio/video/link
+records remain remote-only and are counted; their binary contents are not validated.
+Unsupported nonempty images/files/resources collections stop the gate rather than
+being silently omitted. Source API pending transcripts also prevent success.
+
+The runner job is capped at 120 minutes, external command at 115 minutes, and the
+replay phase at 110 minutes. Byte/page/count/time limits fail closed. No production
+watermark or publish occurs. Normal/handled exits remove all private temporary files;
+forced timeout destroys the ephemeral runner, with no private artifacts retained.
+Only fixed aggregate counts, booleans and fixed failure categories reach public logs.
+`source_complete=true` is possible only for a successful ephemeral full replay; it
+never means publication or production cutover. The old `full` empty-directory mode is
+not a migration acceptance gate.
