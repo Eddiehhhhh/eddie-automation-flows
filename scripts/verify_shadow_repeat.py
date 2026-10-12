@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlsplit
 
 from source_sync_sample import prepare_private_sample
 
@@ -24,6 +25,64 @@ ERROR_CODES = frozenset(('missing_credentials', 'api_redirect', 'api_auth',
                          'unexpected', 'fixed_sample_invalid', 'private_sample_failed', 'legacy_path_mismatch'))
 COUNT_KEYS = ('sample_pages_read', 'details_fetched', 'assets_downloaded',
               'written_or_changed')
+DETAIL_GROUPS = ('content', 'title', 'source_timestamps', 'audio_original',
+                 'audio_transcript', 'audio_play_url', 'audio_other',
+                 'attachments', 'audit_fields', 'other')
+
+
+def private_detail_snapshot(root):
+    """Keep two bounded raw responses in memory; never print keys or values."""
+    directory = root / 'Raw' / '03 Get' / '03 State' / 'raw-cache'
+    paths = list(directory.glob('*.json'))
+    if len(paths) != 2:
+        raise ValueError('invalid private snapshot')
+    result = {}
+    for path in paths:
+        if path.is_symlink():
+            raise ValueError('invalid private snapshot')
+        with path.open('rb') as stream:
+            data = stream.read(2 * 1024 * 1024 + 1)
+        if len(data) > 2 * 1024 * 1024:
+            raise ValueError('invalid private snapshot')
+        value = json.loads(data)
+        if not isinstance(value, dict):
+            raise ValueError('invalid private snapshot')
+        result[path.name] = value
+    return result
+
+
+def detail_groups(note):
+    rest = note.copy()
+    audio = rest.pop('audio', None)
+    audio = audio.copy() if isinstance(audio, dict) else {'invalid': audio}
+    groups = {key: rest.pop(key, None) for key in ('content', 'title')}
+    groups['source_timestamps'] = [rest.pop(k, None) for k in ('created_at', 'updated_at')]
+    groups.update({'audio_' + k: audio.pop(k, None) for k in ('original', 'transcript', 'play_url')})
+    groups['audio_other'] = audio
+    groups['attachments'] = [rest.pop(k, None) for k in ('attachments', 'images', 'files', 'resources')]
+    groups['audit_fields'] = [rest.pop(k, None) for k in ('fetched_at', 'synced_at', 'request_id')]
+    groups['other'] = rest
+    return groups
+
+
+def private_detail_changes(before, after):
+    """Expose fixed field-group counts, never private hashes, names, IDs or URLs."""
+    if set(before) != set(after) or len(before) != 2:
+        raise ValueError('invalid private snapshot')
+    counts = dict.fromkeys(DETAIL_GROUPS, 0)
+    query_only = 0
+    for key in before:
+        left, right = detail_groups(before[key]), detail_groups(after[key])
+        for group in DETAIL_GROUPS:
+            counts[group] += int(left[group] != right[group])
+        old, new = left['audio_play_url'], right['audio_play_url']
+        if isinstance(old, str) and isinstance(new, str) and old != new:
+            a, b = urlsplit(old), urlsplit(new)
+            query_only += int(a.scheme == b.scheme == 'https' and
+                (a.netloc, a.path, a.fragment) == (b.netloc, b.path, b.fragment)
+                and a.query != b.query)
+    return {'detail_change_counts': counts, 'audio_query_only_refreshes': query_only,
+            'content_and_original_equal': counts['content'] == counts['audio_original'] == 0}
 
 
 def safe_count(value):
@@ -91,6 +150,15 @@ def publish_safe_report(path, out):
             for key in ('identical_hashes_and_mtimes', 'legacy_paths_preserved'):
                 if type(report.get(key)) is bool:
                     safe[key] = report[key]
+            counts = report.get('detail_change_counts')
+            if (isinstance(counts, dict) and set(counts) == set(DETAIL_GROUPS)
+                    and all(type(v) is int and 0 <= v <= 2 for v in counts.values())):
+                safe['detail_change_counts'] = counts
+            refreshes = report.get('audio_query_only_refreshes')
+            if type(refreshes) is int and 0 <= refreshes <= 2:
+                safe['audio_query_only_refreshes'] = refreshes
+            if type(report.get('content_and_original_equal')) is bool:
+                safe['content_and_original_equal'] = report['content_and_original_equal']
     out.write(json.dumps(safe, indent=2) + '\n')
 
 
@@ -140,6 +208,7 @@ def main():
         env = {key: value for key, value in os.environ.items() if key != 'PRIVATE_VAULT_TOKEN'}
         env.update(VAULT_ROOT=str(root), PYTHONDONTWRITEBYTECODE='1')
         reports = []
+        detail_evidence = {}
         for iteration in range(2):
             try:
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
@@ -180,6 +249,12 @@ def main():
             reports.append(report)
             try:
                 current = snapshot(root)
+                if args.sample_existing:
+                    current_details = private_detail_snapshot(root)
+                    if iteration == 0:
+                        previous_details = current_details
+                    else:
+                        detail_evidence = private_detail_changes(previous_details, current_details)
             except (OSError, ValueError):
                 print(json.dumps({'source': 'getnote', 'scope': scope, 'source_complete': False,
                                   'status': 'failed', 'stage': 'snapshot',
@@ -202,7 +277,8 @@ def main():
                           'legacy_paths_preserved': legacy_paths_preserved if seeded else None,
                           'files': len(current), 'fetched': [int(r['fetched']) for r in reports],
                           'written_or_changed': [int(r['written_or_changed']) for r in reports],
-                          'identical_hashes_and_mtimes': unchanged, 'published': False}))
+                          'identical_hashes_and_mtimes': unchanged, 'published': False,
+                          **detail_evidence}))
         return 0 if unchanged else 1
 
 

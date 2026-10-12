@@ -2,6 +2,7 @@ import contextlib
 import copy
 import email.message
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -221,6 +222,11 @@ class FixedSampleTests(unittest.TestCase):
         def run(command, env, capture_output, text):
             self.assertNotIn('PRIVATE_VAULT_TOKEN',env)
             self.assertNotIn('1001',' '.join(command));commands.append(command[:])
+            cache=Path(env['VAULT_ROOT'])/'Raw'/'03 Get'/'03 State'/'raw-cache'
+            cache.mkdir(parents=True,exist_ok=True)
+            for note in pair()['notes']:
+                sync.write_if_changed(cache/(hashlib.sha256(note['note_id'].encode()).hexdigest()+'.json'),
+                                      json.dumps(detail(note)))
             return type('Result',(),{'returncode':0,'stdout':json.dumps({'scope':'sample',
                 'source_complete':False,'sample_pages':0,'fetched':2,'written_or_changed':0}),
                 'stderr':'PRIVATE CONTENT'})()
@@ -238,6 +244,47 @@ class FixedSampleTests(unittest.TestCase):
             safe=io.StringIO();shadow.publish_safe_report(p,safe)
             self.assertNotIn('SECRET',safe.getvalue());self.assertNotIn('old ordinary',safe.getvalue())
             self.assertTrue(json.loads(safe.getvalue())['legacy_paths_preserved'])
+
+    def test_repeat_diagnostics_distinguish_query_refresh_without_exposing_private_data(self):
+        before={n['note_id']:detail(n) for n in pair()['notes']}
+        after=copy.deepcopy(before)
+        after['2002']['audio']['play_url']='https://example.invalid/private.m4a?sig=NEW_SECRET'
+        after['2002']['fetched_at']='PRIVATE TIME'
+        report=shadow.private_detail_changes(before,after)
+        self.assertEqual(report['audio_query_only_refreshes'],1)
+        self.assertTrue(report['content_and_original_equal'])
+        self.assertEqual(report['detail_change_counts']['audio_play_url'],1)
+        self.assertEqual(report['detail_change_counts']['audit_fields'],1)
+        after['2002']['audio']['original']+='PRIVATE EDIT'
+        after['1001']['content']='PRIVATE CONTENT EDIT'
+        after['2002']['audio']['play_url']='https://other.invalid/different?sig=SECRET'
+        report=shadow.private_detail_changes(before,after)
+        self.assertFalse(report['content_and_original_equal'])
+        self.assertEqual(report['audio_query_only_refreshes'],0)
+        self.assertEqual(report['detail_change_counts']['content'],1)
+        self.assertEqual(report['detail_change_counts']['audio_original'],1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'report.json'
+            path.write_text(json.dumps(dict(report,scope='sample',status='changed-between-runs',
+                                           private='SECRET')))
+            out=io.StringIO();shadow.publish_safe_report(path,out)
+            self.assertNotIn('PRIVATE',out.getvalue());self.assertNotIn('SECRET',out.getvalue())
+            self.assertNotIn('2002',out.getvalue());self.assertNotIn('https',out.getvalue())
+            self.assertEqual(json.loads(out.getvalue())['detail_change_counts'],report['detail_change_counts'])
+            report['detail_change_counts']['PRIVATE INJECTED KEY']=1
+            path.write_text(json.dumps(dict(report,scope='sample',status='failed')))
+            out=io.StringIO();shadow.publish_safe_report(path,out)
+            self.assertNotIn('detail_change_counts',json.loads(out.getvalue()))
+
+    def test_private_snapshot_requires_two_bounded_json_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cache=root/'Raw'/'03 Get'/'03 State'/'raw-cache'
+            cache.mkdir(parents=True)
+            with self.assertRaises(ValueError):shadow.private_detail_snapshot(root)
+            (cache/'one.json').write_text('{}');(cache/'two.json').write_text('{}')
+            self.assertEqual(len(shadow.private_detail_snapshot(root)),2)
+            (cache/'one.json').write_bytes(b' '*(2*1024*1024+1))
+            with self.assertRaises(ValueError):shadow.private_detail_snapshot(root)
 
 
 if __name__ == '__main__':

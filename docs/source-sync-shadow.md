@@ -59,6 +59,13 @@ The result explicitly says `scope: sample`, `source_complete: false`, and `statu
 
 On failure, the workflow now publishes a fixed `stage` and `error_code` plus bounded counts when known. These classify the failure without echoing child stdout, stderr, exception text or source fields. A missing or malformed private report becomes `invalid_report`; an unrecognized child failure becomes `unknown_failure`. A diagnostic narrows the next investigation but does not itself prove which private source value caused the failure.
 
+Existing-pair runs also compare the two bounded raw-cache objects in memory. The
+public report includes only fixed field-group change counts, whether content and
+the original transcript stayed equal, and a count of audio URLs whose query alone
+changed. No URL, value, private field name, hash, ID or path is exposed. These
+diagnostics do not relax the exact hash-and-mtime acceptance test: URL refreshes
+and source edits still fail repeat acceptance until their semantics are resolved.
+
 The `full` workflow choice and `verify_shadow_repeat.py --full` remain available for future explicit full-library acceptance. They are never the default. Full mode still fails closed on incomplete pagination, malformed details, pending transcription or asset budgets; it does not publish. Full acceptance is separately limited to 55 minutes per command. A successful full shadow is still not a production cutover.
 
 The workflow must exist on GitHub's default branch before `workflow_dispatch` can run. After review, merge only the manual shadow implementation, then dispatch `sample`. Review the allowlisted summary and inspect private acceptance evidence without copying private content into this public repository or logs. Do not infer that ordinary notes or transcript boundaries are complete from the older one-page credential probe.
