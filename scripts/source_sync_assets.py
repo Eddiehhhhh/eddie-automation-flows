@@ -256,4 +256,3 @@ class AssetStore:
                 self.memo[url] = {'url':url, 'status':'downloaded', 'path':relative.as_posix(), 'sha256':digest, 'bytes':len(content), 'mime':mime}
             result.append(dict(self.memo[url], kind=kind))
         return result
-
