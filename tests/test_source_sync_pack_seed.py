@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import source_sync_pack_seed as seed
@@ -91,6 +92,20 @@ class PackSeedTests(unittest.TestCase):
         self.assertEqual(result['status'],'real_seed_ok')
         self.assertNotIn('SECRET',str(result)); self.assertNotIn('commit',result)
         self.assertFalse(result['source_complete']); self.assertFalse(result['published'])
+
+    def test_protocol_v2_implicit_sha1_is_valid_and_unknown_format_rejected(self):
+        class Response(io.BytesIO):
+            status = 200
+        for format_line in (b'', seed.pkt(b'object-format=sha1\n')):
+            response=Response(seed.pkt(b'version 2\n')+seed.pkt(b'fetch=shallow filter\n')+format_line+b'0000')
+            report={}
+            with patch.object(seed,'opener',return_value=Mock(open=Mock(return_value=response))):
+                seed.capabilities('SECRET',report)
+            self.assertTrue(report['git_v2_advertised']); self.assertTrue(report['git_fetch_advertised'])
+            self.assertEqual(report['git_sha1_implicit'],not bool(format_line))
+        response=Response(seed.pkt(b'version 2\n')+seed.pkt(b'fetch\n')+seed.pkt(b'object-format=sha256\n')+b'0000')
+        with patch.object(seed,'opener',return_value=Mock(open=Mock(return_value=response))), self.assertRaises(ValueError):
+            seed.capabilities('SECRET')
 
 
 if __name__=='__main__': unittest.main()
