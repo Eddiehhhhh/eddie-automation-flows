@@ -30,7 +30,8 @@ COUNTS = ('seed_files', 'seed_bytes', 'unique_blobs', 'pack_bytes', 'probe_pack_
           'actual_markdown', 'actual_identity_owners', 'matched_manifest_api_paths')
 FLAGS = ('bounded_blob_probe_ok', 'pack_object_set_exact', 'seed_blob_hashes_exact',
          'all_actual_headers_checked', 'manifest_api_paths_exact')
-DIAGNOSTIC_FLAGS = ('git_v2_advertised', 'git_fetch_advertised', 'git_sha1_implicit')
+DIAGNOSTIC_FLAGS = ('git_v2_advertised', 'git_fetch_advertised', 'git_sha1_implicit',
+                    'git_smart_service_preamble', 'git_reachable_wants_advertised')
 STAGES = ('capabilities', 'small_transfer', 'small_index', 'full_transfer', 'full_index', 'identities')
 REASONS = {'protocol v2 unavailable':'git_v2_unavailable', 'fetch unavailable':'git_fetch_unavailable',
            'unsupported object format':'git_object_format', 'unexpected response section':'git_response_section',
@@ -39,6 +40,8 @@ REASONS = {'protocol v2 unavailable':'git_v2_unavailable', 'fetch unavailable':'
            'pack object set differs':'pack_object_set', 'truncated packet':'wire_truncated',
            'unexpected trailing response':'wire_trailing', 'pack byte limit':'pack_limit',
            'actual identity mapping differs':'actual_identity_mapping'}
+REASONS.update({'reachable blob wants unavailable':'git_reachable_wants_unavailable',
+                'invalid smart service header':'git_service_header'})
 ERRORS = ('snapshot_failed', 'protocol_probe_failed', 'pack_transfer_failed',
           'pack_validation_failed', 'actual_identity_failed')
 
@@ -113,8 +116,29 @@ def capabilities(token, report=None):
         if response.status != 200:
             raise ValueError('Git discovery rejected')
         wire = Wire(response, 65536)
-        if wire.packet() != b'version 2\n':
-            raise ValueError('protocol v2 unavailable')
+        first = wire.packet()
+        if first == b'# service=git-upload-pack\n':
+            report['git_smart_service_preamble'] = True
+            if wire.packet() != 0:
+                raise ValueError('invalid smart service header')
+            first = wire.packet()
+        if first != b'version 2\n':
+            # Legacy smart HTTP is safe only when the server explicitly grants
+            # reachable-object wants; never assume permission for unadvertised blobs.
+            if not isinstance(first, bytes) or b'\0' not in first:
+                raise ValueError('protocol v2 unavailable')
+            ref, advertised = first.split(b'\0', 1)
+            if len(ref) < 42:
+                raise ValueError('protocol v2 unavailable')
+            migration.sha(ref[:40].decode('ascii'))
+            values = set(advertised.rstrip(b'\n').split())
+            if not {b'allow-reachable-sha1-in-want', b'side-band-64k', b'no-progress'} <= values:
+                raise ValueError('reachable blob wants unavailable')
+            while wire.packet() != 0:
+                pass  # Discard all private ref names/OIDs within the 64KiB cap.
+            report.update(git_v2_advertised=False, git_fetch_advertised=True,
+                          git_sha1_implicit=True, git_reachable_wants_advertised=True)
+            return 0
         report['git_v2_advertised'] = True
         values = []
         while True:
@@ -132,11 +156,12 @@ def capabilities(token, report=None):
         if formats and formats != [b'object-format=sha1']:
             raise ValueError('unsupported object format')
         report['git_sha1_implicit'] = not formats
+        return 2
 
 
-def decode_pack(stream, destination, objects, maximum):
+def decode_pack(stream, destination, objects, maximum, protocol=2):
     wire = Wire(stream, maximum + MIB)
-    if wire.packet() != b'packfile\n':
+    if wire.packet() != (b'packfile\n' if protocol == 2 else b'NAK\n'):
         raise ValueError('unexpected response section')
     total, prefix, progress = 0, bytearray(), 0
     with Path(destination).open('wb') as out:
@@ -173,18 +198,25 @@ def decode_pack(stream, destination, objects, maximum):
     return total
 
 
-def fetch_pack(token, expected, destination, maximum=MAX_PACK):
+def fetch_pack(token, expected, destination, maximum=MAX_PACK, protocol=2):
     if not 1 <= len(expected) <= MAX_FILES:
         raise ValueError('object count limit')
-    body = pkt(b'command=fetch\n') + b'0001' + pkt(b'no-progress\n')
-    body += b''.join(pkt(('want ' + migration.sha(oid) + '\n').encode()) for oid in sorted(expected))
-    body += pkt(b'done\n') + b'0000'
+    if protocol == 2:
+        body = pkt(b'command=fetch\n') + b'0001' + pkt(b'no-progress\n')
+        body += b''.join(pkt(('want ' + migration.sha(oid) + '\n').encode()) for oid in sorted(expected))
+        body += pkt(b'done\n') + b'0000'
+    elif protocol == 0:
+        body = b''.join(pkt(('want ' + migration.sha(oid) +
+                    (' side-band-64k no-progress' if i == 0 else '') + '\n').encode())
+                    for i, oid in enumerate(sorted(expected))) + b'0000' + pkt(b'done\n')
+    else:
+        raise ValueError('protocol v2 unavailable')
     if len(body) > 512 * 1024:
         raise ValueError('request size limit')
     with deadline(300), opener().open(request(token, '/git-upload-pack', body), timeout=20) as response:
         if response.status != 200 or response.headers.get_content_type() != 'application/x-git-upload-pack-result':
             raise ValueError('Git fetch rejected')
-        return decode_pack(response, destination, len(expected), maximum)
+        return decode_pack(response, destination, len(expected), maximum, protocol)
 
 
 def child_limits():
@@ -265,7 +297,7 @@ def verify_materialize(pack, git_dir, expected, paths, root):
 def seed(root, work, token, blobs, report):
     expected = expected_blobs(blobs)
     report['seed_stage'] = 'capabilities'
-    capabilities(token, report)
+    protocol = capabilities(token, report)
     # First prove exact-object transfer on a <=64KiB Get Markdown; no wider fallback.
     options = [(p, b) for p, b in blobs.items() if p.endswith('.md') and 0 < b['size'] <= 65536]
     if not options:
@@ -273,13 +305,13 @@ def seed(root, work, token, blobs, report):
     path, blob = min(options, key=lambda pair: pair[1]['size'])
     probe = work / 'probe.pack'
     report['seed_stage'] = 'small_transfer'
-    report['probe_pack_bytes'] = fetch_pack(token, {blob['sha']:blob['size']}, probe, maximum=2*MIB)
+    report['probe_pack_bytes'] = fetch_pack(token, {blob['sha']:blob['size']}, probe, maximum=2*MIB, protocol=protocol)
     report['seed_stage'] = 'small_index'
     verify_materialize(probe, work/'probe.git', {blob['sha']:blob['size']}, {path:blob}, work/'probe')
     report['bounded_blob_probe_ok'] = True
     pack = work / 'source.pack'
     report['seed_stage'] = 'full_transfer'
-    report['pack_bytes'] = fetch_pack(token, expected, pack)
+    report['pack_bytes'] = fetch_pack(token, expected, pack, protocol=protocol)
     report['seed_stage'] = 'full_index'
     verify_materialize(pack, work/'objects.git', expected, blobs, root)
     report.update(seed_files=len(blobs), seed_bytes=sum(b['size'] for b in blobs.values()),

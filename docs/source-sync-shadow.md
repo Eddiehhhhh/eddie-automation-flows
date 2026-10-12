@@ -145,7 +145,10 @@ not silently bypassed by an unbounded search or larger download.
 sparse checkout includes files in ancestor directories, and blobless clones
 still retrieve repository tree metadata; neither alone proves Get-only transfer.
 The seed instead reuses the pinned, validated Get tree manifest, then requests
-only its known blob OIDs from the same repository's Git protocol v2 upload-pack.
+only its known blob OIDs from the same repository's Git upload-pack. It requests
+protocol v2, accepts the standard smart-HTTP service preamble, and can use legacy
+smart HTTP only when the server explicitly advertises reachable-SHA wants and
+bounded sideband support. It never assumes access to unadvertised blob objects.
 The existing runner token is used in memory on that fixed HTTPS repository only;
 there are no credential helpers, token files, authenticated child processes,
 redirects, environment proxies, remotes or persistent authorization changes.
