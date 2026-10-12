@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from source_sync_assets import AssetStore
+from source_sync_assets import AssetError, AssetStore
 from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
 from source_sync_store import write_if_changed as atomic_write
 from probe_getnote_auth import NoRedirect, RedirectBlocked
@@ -167,7 +167,7 @@ def fetch_note_list(api_key, client_id, max_pages=None, pagination="cursor"):
     return [note for _, batch, _ in fetch_note_pages(api_key, client_id, max_pages, pagination) for note in batch]
 
 
-def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor"):
+def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor", progress=None):
     """Read at most three list pages and select one ordinary plus one recording.
 
     This intentionally does not establish source enumeration completeness.
@@ -178,6 +178,8 @@ def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor"):
     read_pages = 0
     for _, batch, _ in fetch_note_pages(api_key, client_id, None, pagination, max_response_bytes=2 * 1024 * 1024):
         read_pages += 1
+        if progress is not None:
+            progress['sample_pages_read'] = read_pages
         for item in batch:
             kind = item.get("note_type")
             if kind == "plain_text":
@@ -521,7 +523,9 @@ def transcription_pending(note):
     return note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} and not (isinstance(original, str) and original.strip())
 
 
-def main() -> int:
+def main(progress=None) -> int:
+    progress = progress if progress is not None else {}
+    progress['stage'] = 'configuration'
     parser = argparse.ArgumentParser(description="Reconcile Get notes; explicit private VAULT_ROOT required")
     parser.add_argument("--sample", action="store_true", help="Bounded two-note shadow; never proves full-source completeness")
     parser.add_argument("--sample-pages", type=int, default=2, help="Sample list pages, 1-3; default 2")
@@ -542,12 +546,17 @@ def main() -> int:
         raise RuntimeError("explicit private VAULT_ROOT required")
     api_key, client_id = load_credentials()
     # Full mode reconciles all details; sample mode caps list and detail requests.
+    progress['stage'] = 'list'
     if args.sample:
-        summaries, read_pages = fetch_bounded_sample(api_key, client_id, args.sample_pages, args.pagination)
+        summaries, read_pages = fetch_bounded_sample(api_key, client_id, args.sample_pages,
+                                                     args.pagination, progress=progress)
     else:
         summaries = fetch_note_list(api_key, client_id, args.max_pages, args.pagination)
         read_pages = None
+    if read_pages is not None:
+        progress['sample_pages_read'] = read_pages
     details = []
+    progress['stage'] = 'detail'
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = {executor.submit(fetch_note_detail, note_id_from(n), api_key, client_id,
                                    2 * 1024 * 1024 if args.sample else None): note_id_from(n) for n in summaries}
@@ -561,7 +570,9 @@ def main() -> int:
             if note_id_from(detail) != futures[future] or not isinstance(detail.get("content"), str):
                 raise RuntimeError("Get detail identity/content validation failed")
             details.append(detail)
+            progress['details_fetched'] = len(details)
     details.sort(key=note_id_from)
+    progress['stage'] = 'validation'
     if args.sample:
         attachment_count = 0
         for note in details:
@@ -575,6 +586,7 @@ def main() -> int:
     index = IdentityIndex(RAW_DIR, "getnote", "note_id", boundary=ROOT)
     # Finish bounded asset acquisition before touching notes or run receipts.
     assets_by_id = {}
+    progress['stage'] = 'assets'
     if not args.dry_run and not args.metadata_only:
         store = AssetStore(
             RAW_DIR,
@@ -584,8 +596,10 @@ def main() -> int:
         )
         for note in details:
             assets_by_id[note_id_from(note)] = store.materialize(note)
+            progress['assets_downloaded'] = len(store.memo)
     changed = 0
     pending = []
+    progress['stage'] = 'write'
     for note in details:
         nid = note_id_from(note)
         if transcription_pending(note):
@@ -603,10 +617,12 @@ def main() -> int:
         if transcription_pending(note) and path.exists():
             continue
         changed += write_if_changed(path, render_note(note, assets_by_id[nid], path))
+        progress['written_or_changed'] = changed
         # Audio stays remote; downloaded images/files and raw descriptors stay private.
         write_if_changed(cache_path, json_text(note))
         write_if_changed(STATE_DIR / "attachments" / (cache_id + ".json"), json_text(dict(attachment_manifest(note), assets=assets_by_id[nid])))
     if not args.dry_run and not args.metadata_only:
+        progress['stage'] = 'receipt'
         write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
         # This receipt is committed with the data; it is NOT a published watermark.
         write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "scope": "sample" if args.sample else "full", "enumerated": len(details), "complete": not args.sample and not pending, "pending": len(pending)}))
@@ -616,5 +632,47 @@ def main() -> int:
     return 2 if pending else 0
 
 
+def safe_error_code(stage, error):
+    """Map only known local failures to fixed public codes; never echo exception text."""
+    message = str(error)
+    if stage == 'configuration' and isinstance(error, SystemExit):
+        return 'missing_credentials'
+    if message == 'GetNote redirect blocked':
+        return 'api_redirect'
+    if message in ('GetNote HTTP 401', 'GetNote HTTP 403'):
+        return 'api_auth'
+    if message == 'GetNote HTTP 429' or message == 'GetNote API error 10202':
+        return 'api_rate_limited'
+    if message.startswith('GetNote HTTP ') or message.startswith('GetNote API error '):
+        return 'api_rejected'
+    if message == 'GetNote transport failed':
+        return 'api_transport'
+    if message == 'Get response byte limit reached':
+        return 'response_limit'
+    if stage == 'list' and message == 'bounded sample lacks ordinary or recording note':
+        return 'sample_types_missing'
+    if stage == 'validation' and message == 'sample attachment count limit reached':
+        return 'attachment_limit'
+    if stage == 'assets' and isinstance(error, AssetError):
+        return 'asset_failure'
+    return 'unexpected'
+
+
+def run_cli():
+    progress = {}
+    try:
+        return main(progress)
+    except (Exception, SystemExit) as error:
+        stage = progress.get('stage', 'configuration')
+        report = {'status': 'failed', 'stage': stage,
+                  'error_code': safe_error_code(stage, error)}
+        for key in ('sample_pages_read', 'details_fetched', 'assets_downloaded', 'written_or_changed'):
+            value = progress.get(key)
+            if type(value) is int and 0 <= value <= 1000000:
+                report[key] = value
+        print(json.dumps(report))
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_cli())

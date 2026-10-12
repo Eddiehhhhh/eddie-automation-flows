@@ -49,16 +49,9 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
         run: timeout 55m python scripts/run_private_command.py --label 'Get full shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --full
       - name: Publish aggregate evidence only
-        if: success()
+        if: always()
         env:
           RESULT: ${{ runner.temp }}/shadow-result.json
         run: |
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          result = json.loads(Path(os.environ['RESULT']).read_text())
-          allowed = ('source', 'scope', 'source_complete', 'status', 'sample_pages_limit',
-                     'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes', 'published')
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write(json.dumps({k: result[k] for k in allowed if k in result}, indent=2))
-          PY
+          set -o pipefail
+          python scripts/verify_shadow_repeat.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -118,6 +118,11 @@ class GetSampleTests(unittest.TestCase):
         with patch.object(g, 'fetch_note_pages', return_value=iter(pages)):
             with self.assertRaisesRegex(RuntimeError, 'bounded sample'):
                 g.fetch_bounded_sample('key', 'client', 1, 'cursor')
+        progress = {}
+        with patch.object(g, 'fetch_note_pages', return_value=iter(pages)):
+            with self.assertRaisesRegex(RuntimeError, 'bounded sample'):
+                g.fetch_bounded_sample('key', 'client', 1, 'cursor', progress=progress)
+        self.assertEqual(progress['sample_pages_read'], 1)
 
     def test_sample_marks_source_incomplete_enforces_asset_budgets_and_repeats_without_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +216,74 @@ class GetSampleTests(unittest.TestCase):
         self.assertEqual(report['status'], 'invalid-source-report')
         self.assertFalse(report['source_complete'])
         self.assertNotIn('private', output.getvalue())
+
+    def test_sync_cli_failure_emits_only_fixed_diagnostic(self):
+        private = 'SYNTHETIC-PRIVATE-URL-AND-KEY'
+        with patch.object(sys, 'argv', ['sync', '--sample']), \
+             patch.dict(os.environ, {'VAULT_ROOT': '/tmp/private-shadow',
+                                      'GETNOTE_API_KEY': 'key', 'GETNOTE_CLIENT_ID': 'client'}), \
+             patch.object(g, 'fetch_bounded_sample', side_effect=RuntimeError(private)):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(g.run_cli(), 1)
+        report = json.loads(out.getvalue())
+        self.assertEqual((report['stage'], report['error_code']), ('list', 'unexpected'))
+        self.assertNotIn(private, out.getvalue() + err.getvalue())
+        self.assertEqual(g.safe_error_code('list', RuntimeError('bounded sample lacks ordinary or recording note')),
+                         'sample_types_missing')
+        self.assertEqual(g.safe_error_code('detail', RuntimeError('GetNote HTTP 401')), 'api_auth')
+
+    def test_shadow_failure_classifies_pending_and_rejects_private_child_text(self):
+        cases = [
+            (1, json.dumps({'status': 'failed', 'stage': 'list',
+                            'error_code': 'sample_types_missing', 'sample_pages_read': 2}),
+             ('list', 'sample_types_missing')),
+            (2, json.dumps({'scope': 'sample', 'pending': 1, 'fetched': 2,
+                            'sample_pages': 2, 'private': 'SECRET'}),
+             ('transcript', 'transcript_pending')),
+            (1, 'SECRET private URL', ('launch', 'unknown_failure')),
+        ]
+        for exit_code, child_stdout, expected in cases:
+            with self.subTest(exit_code=exit_code, expected=expected), \
+                 patch.object(sys, 'argv', ['shadow', '--sample-pages', '2']), \
+                 patch.object(shadow.subprocess, 'run', return_value=type('Result', (), {
+                     'returncode': exit_code, 'stdout': child_stdout, 'stderr': 'SECRET key'})()):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    self.assertEqual(shadow.main(), 1)
+                report = json.loads(out.getvalue())
+                self.assertEqual((report['stage'], report['error_code']), expected)
+                self.assertEqual(report['run'], 1)
+                self.assertNotIn('SECRET', out.getvalue() + err.getvalue())
+
+    def test_public_shadow_report_rejects_arbitrary_strings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'result.json'
+            path.write_text(json.dumps({'status': 'failed', 'stage': 'private title',
+                                        'error_code': 'SECRET', 'run': 1,
+                                        'fetched': [2, 'SECRET']}))
+            out = io.StringIO()
+            shadow.publish_safe_report(path, out)
+            self.assertNotIn('SECRET', out.getvalue())
+            self.assertNotIn('private title', out.getvalue())
+            self.assertIn('invalid_report', out.getvalue())
+            path.write_text(json.dumps({'scope': 'sample', 'status': 'failed',
+                                        'source_complete': True, 'stage': ['SECRET'],
+                                        'error_code': ['SECRET'], 'run': 1}))
+            out = io.StringIO()
+            shadow.publish_safe_report(path, out)
+            self.assertNotIn('SECRET', out.getvalue())
+            self.assertFalse(json.loads(out.getvalue())['source_complete'])
+            path.write_text(json.dumps({'scope': 'sample', 'status': 'failed',
+                                        'stage': 'list', 'error_code': 'sample_types_missing',
+                                        'sample_pages_limit': 2, 'run': 1,
+                                        'private': 'SECRET'}))
+            out = io.StringIO()
+            shadow.publish_safe_report(path, out)
+            public = json.loads(out.getvalue())
+            self.assertEqual((public['stage'], public['error_code'], public['sample_pages_limit']),
+                             ('list', 'sample_types_missing', 2))
+            self.assertNotIn('SECRET', out.getvalue())
 
 
 if __name__ == '__main__':
