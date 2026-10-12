@@ -62,4 +62,3 @@ jobs:
         run: |
           set -o pipefail
           python scripts/verify_shadow_repeat.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
-

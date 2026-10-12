@@ -78,4 +78,3 @@ The new sample tests cover page/detail bounds, asset budgets, output scope, priv
 Before a production cutover, verify a real ordinary body and recording original at both boundaries, a real image/file CDN response within an approved transfer budget, full-list completeness and historical edits, duplicate-ID migration, and single-writer private remote publication with content and state readback. Keep existing workflows in their current state until that acceptance is complete.
 
 Evidence: https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38205977952 is a successful bounded credential/detail probe. It reports one 20-note page, a recording detail, an original transcript field and one attachment URL; it did not find an ordinary note in that first page or validate transcript boundaries or binary downloads.
-
