@@ -2,6 +2,12 @@ name: One-time Get read-only credential probe
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: List-only authentication or bounded detail metrics
+        type: choice
+        options: [list, details]
+        default: list
 
 permissions:
   contents: read
@@ -22,9 +28,16 @@ jobs:
         with:
           python-version: '3.11'
       - name: Offline log and request-boundary tests
-        run: python -m unittest discover -s tests -p 'test_probe_getnote_auth.py' -v
+        run: python -m unittest discover -s tests -p 'test_probe_getnote*.py' -v
       - name: One Get list request with existing cloud secrets
+        if: inputs.mode != 'details'
         env:
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
         run: python scripts/probe_getnote_auth.py
+      - name: At most two detail requests after one list page
+        if: inputs.mode == 'details'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+        run: python scripts/probe_getnote_details.py
