@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Bounded two-note sample (default) or explicit full-library acceptance
+        description: Bounded list sample, existing private pair, or explicit full-library acceptance
         type: choice
-        options: [sample, full]
+        options: [sample, existing_sample, full]
         default: sample
         required: true
       sample_pages:
@@ -48,6 +48,13 @@ jobs:
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
         run: timeout 55m python scripts/run_private_command.py --label 'Get full shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --full
+      - name: Verify two existing private notes twice without Get list discovery
+        if: inputs.mode == 'existing_sample'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout 12m python scripts/run_private_command.py --label 'Get existing sample shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --sample-existing
       - name: Publish aggregate evidence only
         if: always()
         env:
@@ -55,3 +62,4 @@ jobs:
         run: |
           set -o pipefail
           python scripts/verify_shadow_repeat.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+

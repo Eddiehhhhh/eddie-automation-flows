@@ -21,6 +21,7 @@ from pathlib import Path
 from source_sync_assets import AssetError, AssetStore
 from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
 from source_sync_store import write_if_changed as atomic_write
+from source_sync_sample import FixedSampleError, load_pair, validate_detail
 from probe_getnote_auth import NoRedirect, RedirectBlocked
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -528,6 +529,7 @@ def main(progress=None) -> int:
     progress['stage'] = 'configuration'
     parser = argparse.ArgumentParser(description="Reconcile Get notes; explicit private VAULT_ROOT required")
     parser.add_argument("--sample", action="store_true", help="Bounded two-note shadow; never proves full-source completeness")
+    parser.add_argument("--sample-pair", type=Path, help="Private fixed-pair file; requires --sample and skips list discovery")
     parser.add_argument("--sample-pages", type=int, default=2, help="Sample list pages, 1-3; default 2")
     parser.add_argument("--max-pages", type=int)
     parser.add_argument("--workers", type=int, default=3)
@@ -542,12 +544,17 @@ def main(progress=None) -> int:
     args = parser.parse_args()
     if args.sample and (not 1 <= args.sample_pages <= 3 or args.max_pages is not None):
         parser.error("sample requires 1-3 sample pages and cannot use --max-pages")
+    if args.sample_pair is not None and not args.sample:
+        raise FixedSampleError("fixed pair requires sample")
     if not os.environ.get("VAULT_ROOT"):
         raise RuntimeError("explicit private VAULT_ROOT required")
     api_key, client_id = load_credentials()
     # Full mode reconciles all details; sample mode caps list and detail requests.
     progress['stage'] = 'list'
-    if args.sample:
+    fixed_pair = load_pair(args.sample_pair) if args.sample_pair is not None else None
+    if fixed_pair is not None:
+        summaries, read_pages = fixed_pair, 0
+    elif args.sample:
         summaries, read_pages = fetch_bounded_sample(api_key, client_id, args.sample_pages,
                                                      args.pagination, progress=progress)
     else:
@@ -567,6 +574,9 @@ def main(progress=None) -> int:
                 for pending_future in futures:
                     pending_future.cancel()
                 raise
+            if fixed_pair is not None:
+                expected = next(n for n in fixed_pair if n["note_id"] == futures[future])
+                validate_detail(detail, expected)
             if note_id_from(detail) != futures[future] or not isinstance(detail.get("content"), str):
                 raise RuntimeError("Get detail identity/content validation failed")
             details.append(detail)
@@ -634,6 +644,8 @@ def main(progress=None) -> int:
 
 def safe_error_code(stage, error):
     """Map only known local failures to fixed public codes; never echo exception text."""
+    if isinstance(error, FixedSampleError):
+        return "fixed_sample_invalid"
     message = str(error)
     if stage == 'configuration' and isinstance(error, SystemExit):
         return 'missing_credentials'
@@ -676,3 +688,4 @@ def run_cli():
 
 if __name__ == "__main__":
     sys.exit(run_cli())
+

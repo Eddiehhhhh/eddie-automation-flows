@@ -4,6 +4,53 @@ Status: Draft review. No production schedule, private-vault checkout, publicatio
 
 ## Current bounded entry
 
+### Existing private pair (no Get list discovery)
+
+The explicit `existing_sample` workflow mode / `--sample-existing` selects one
+`plain_text` and one `recorder_audio`/`recorder_flash_audio` note from the existing
+private `Raw/03 Get/03 State/manifest.json`. It sorts eligible relative paths in
+the existing `03 纯文本记录` and `99 录音卡笔记` categories and freezes the first
+of each type before either pass. Voice-input folders are not recording-card
+samples. No actual IDs, titles, private
+commit SHA, paths or contents belong in this public repository or workflow inputs.
+
+The already-existing `PRIVATE_VAULT_TOKEN` is used only for five fixed-host GitHub
+reads: verify the repository remains private, pin `main` to a commit, read the
+existing manifest, and read two selected Markdown files at that same commit.
+The manifest is limited to 2 MiB / 5,000 entries; each Markdown is limited to
+2 MiB. Reads reject redirects and environment proxies, have a 20-second hard
+deadline and 10-second socket timeout, and do not retry. The documented GitHub
+raw Contents media type handles the existing manifest above 1 MiB. There is no
+vault clone, private repository write, new manifest, new secret or new grant.
+
+The two Markdown files seed a private temporary shadow at their existing paths.
+Headers must agree with manifest string IDs and raw note types. A temporary,
+owner-readable-only pair file then selects exactly two Get details per pass,
+with zero Get list calls. A string `note_id` is authoritative over a potentially
+rounded numeric `id` alias; conflicting string aliases are rejected. Returned
+IDs, types and content fields must match. The private-vault token is removed
+from the Get subprocess environment. Existing bounded Get retries and attachment
+budgets remain unchanged; audio/video remain links, never binary downloads.
+
+Both passes use the same pair. The safe summary reports `sample_pages_limit: 0`,
+`seeded_existing_notes: 2`, and `legacy_paths_preserved`, alongside the existing
+two-pass hashes/mtimes and counters. A disappeared ID, wrong type, missing
+transcript, unavailable/oversized private index, malformed header or failed asset
+fails closed; it does not silently choose replacement notes or page the source.
+All selected content and identity metadata are deleted with the temporary folder.
+
+This proves only the two selected notes and old-path reuse when the real run
+passes. The private index can be stale; it is sample discovery, not completeness
+evidence. Synthetic transcript and layout tests are not real-source acceptance.
+Production still requires full-source, real-asset, single-writer and destination
+readback evidence. The production Get workflow remains untouched and disabled.
+
+Validation: `python3 -m unittest discover -s tests -v`; targeted regressions are
+in `tests/test_source_sync_sample.py`. They cover strict string identity, zero
+list discovery, two details, old paths, original transcript boundaries, link-only
+audio, repeat idempotence, pinned private reads, byte/entry caps, redirects,
+malformed sources and private-output redaction.
+
 `.github/workflows/source-sync-shadow.yml` is manual only. Its default `sample` mode reads at most two Get list pages (configurable to one, two or three), selects at most one `plain_text` note and one `recorder_audio` or `recorder_flash_audio` note, fetches at most two details, and repeats the same bounded sample in a fresh private temporary directory. If both types are not present within the page cap, it fails without claiming success. No source content enters the public checkout, artifact or log.
 
 Sample mode caps Get list and detail responses at 2 MiB each, all attachment descriptors at two, and downloaded image/file assets at two, 2 MiB each and 4 MiB per pass, even if broader command-line limits are supplied. Audio/video bodies are skipped. HTTPS redirects, public-IP resolution, TLS hostname checks, path traversal, symlink and timeout rules still apply. The workflow caps each sample command at 12 minutes. A failed asset fetch or pending transcription fails the run; a prior complete recording Markdown is never replaced by a pending response.
@@ -31,3 +78,4 @@ The new sample tests cover page/detail bounds, asset budgets, output scope, priv
 Before a production cutover, verify a real ordinary body and recording original at both boundaries, a real image/file CDN response within an approved transfer budget, full-list completeness and historical edits, duplicate-ID migration, and single-writer private remote publication with content and state readback. Keep existing workflows in their current state until that acceptance is complete.
 
 Evidence: https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38205977952 is a successful bounded credential/detail probe. It reports one 20-note page, a recording detail, an original transcript field and one attachment URL; it did not find an ordinary note in that first page or validate transcript boundaries or binary downloads.
+
