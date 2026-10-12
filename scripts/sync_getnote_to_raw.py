@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import re
+import ssl
 import sys
 import time
 import unicodedata
@@ -20,6 +21,7 @@ from pathlib import Path
 from source_sync_assets import AssetStore
 from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
 from source_sync_store import write_if_changed as atomic_write
+from probe_getnote_auth import NoRedirect, RedirectBlocked
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -92,6 +94,8 @@ def json_loads_tolerant(text: str) -> Any:
 
 
 def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None) -> Any:
+    if path not in (LIST_PATH, DETAIL_PATH):
+        raise ValueError("unsupported Get API path")
     query = urllib.parse.urlencode(params)
     url = f"{BASE_URL}{path}"
     if query:
@@ -103,11 +107,16 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
         "User-Agent": "eddie-wiki-getnote-sync/1.0",
     }
 
-    last_error: Optional[Exception] = None
+    # Match the validated read-only probe: only the fixed official HTTPS host,
+    # with no environment proxy and no credential-bearing redirects.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), NoRedirect(),
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+    )
     for attempt in range(5):
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with opener.open(req, timeout=30) as resp:
                 raw = resp.read(max_response_bytes + 1) if max_response_bytes is not None else resp.read()
                 if max_response_bytes is not None and len(raw) > max_response_bytes:
                     raise RuntimeError("Get response byte limit reached")
@@ -120,31 +129,38 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
                     retry_after = data.get("rate_limit", {}).get("retry_after", 10)
                     time.sleep(int(retry_after))
                     continue
-                raise RuntimeError(f"GetNote API error {code}: {err.get('message') or err.get('reason')}")
+                raise RuntimeError(f"GetNote API error {code}")
             return data
+        except RedirectBlocked:
+            raise RuntimeError("GetNote redirect blocked") from None
         except urllib.error.HTTPError as exc:
-            last_error = exc
+            if 300 <= exc.code < 400:
+                exc.close()
+                raise RuntimeError("GetNote redirect blocked") from None
             if exc.code == 429 and attempt < 4:
                 retry_after = exc.headers.get("Retry-After")
+                exc.close()
                 time.sleep(int(retry_after) if retry_after and retry_after.isdigit() else 10)
                 continue
             if 500 <= exc.code < 600 and attempt < 4:
+                exc.close()
                 time.sleep(5)
                 continue
-            raise
+            code = exc.code
+            exc.close()
+            raise RuntimeError(f"GetNote HTTP {code}") from None
         except (
             urllib.error.URLError,
             TimeoutError,
             http.client.RemoteDisconnected,
             ConnectionError,
-        ) as exc:
-            last_error = exc
+        ):
             if attempt < 4:
                 time.sleep(5)
                 continue
-            raise
+            raise RuntimeError("GetNote transport failed") from None
 
-    raise RuntimeError(f"GetNote request failed: {last_error}")
+    raise RuntimeError("GetNote request failed")
 
 
 def fetch_note_list(api_key, client_id, max_pages=None, pagination="cursor"):

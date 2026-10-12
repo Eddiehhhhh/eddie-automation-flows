@@ -1,4 +1,5 @@
 import contextlib
+import email.message
 import io
 import json
 import os
@@ -8,6 +9,9 @@ import unittest
 from unittest.mock import MagicMock
 from pathlib import Path
 from unittest.mock import patch
+import urllib.request
+import urllib.response
+import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import sync_getnote_to_raw as g
@@ -24,10 +28,81 @@ def note(ident, kind='plain_text'):
 
 
 class GetSampleTests(unittest.TestCase):
+    def test_authenticated_get_rejects_unlisted_path_before_opening(self):
+        with patch.object(g.urllib.request, 'build_opener') as build:
+            with self.assertRaisesRegex(ValueError, 'unsupported Get API path'):
+                g.api_get('/elsewhere', {}, 'key', 'client')
+        build.assert_not_called()
+
+    def test_authenticated_get_rejects_redirects_and_proxy_without_leaking(self):
+        secret = 'SYNTHETIC-GET-SECRET-DO-NOT-PRINT'
+        private = 'SYNTHETIC-PRIVATE-BODY-DO-NOT-PRINT'
+        class FakeHTTPS(urllib.request.HTTPSHandler):
+            def __init__(self, target, status):
+                super().__init__()
+                self.target, self.status, self.calls = target, status, []
+            def https_open(self, request):
+                self.calls.append((request.full_url, dict(request.header_items())))
+                headers = email.message.Message()
+                headers['Location'] = self.target
+                response = urllib.response.addinfourl(io.BytesIO(private.encode()), headers,
+                                                       request.full_url, self.status)
+                response.msg = private
+                return response
+        for status in (301, 302, 307, 308):
+            handler = FakeHTTPS('https://other.invalid/?secret='+secret, status)
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                                 g.NoRedirect(), handler)
+            out, err = io.StringIO(), io.StringIO()
+            with patch.dict(os.environ, {'HTTPS_PROXY': 'http://proxy.invalid:8080'}), \
+                 patch.object(g.urllib.request, 'urlopen', side_effect=AssertionError('default opener used')), \
+                 patch.object(g.urllib.request, 'build_opener', return_value=opener) as build, \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with self.assertRaisesRegex(RuntimeError, 'redirect blocked') as failure:
+                    g.api_get(g.LIST_PATH, {}, secret, secret)
+            self.assertEqual(len(handler.calls), 1)
+            self.assertEqual(handler.calls[0][0], g.BASE_URL + g.LIST_PATH)
+            self.assertEqual(handler.calls[0][1]['Authorization'], secret)
+            self.assertEqual(handler.calls[0][1]['X-client-id'], secret)
+            self.assertTrue(any(isinstance(h, urllib.request.ProxyHandler) and h.proxies == {}
+                                for h in build.call_args.args))
+            self.assertNotIn(secret, str(failure.exception)+out.getvalue()+err.getvalue())
+            self.assertNotIn(private, str(failure.exception)+out.getvalue()+err.getvalue())
+
+    def test_get_api_error_does_not_echo_upstream_message_or_secret(self):
+        secret = 'SYNTHETIC-GET-SECRET-DO-NOT-PRINT'
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            'success': False, 'error': {'code': 12345, 'message': 'private '+secret}}).encode()
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(g.urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaises(RuntimeError) as failure:
+                g.api_get(g.LIST_PATH, {}, secret, secret)
+        self.assertNotIn(secret, str(failure.exception))
+        self.assertNotIn('private', str(failure.exception))
+
+    def test_get_http_retry_boundaries_are_preserved_without_leaking_body(self):
+        secret = 'SYNTHETIC-GET-SECRET-DO-NOT-PRINT'
+        for status, expected_calls in ((401, 1), (429, 5), (500, 5)):
+            def failure():
+                return urllib.error.HTTPError(g.BASE_URL+g.LIST_PATH+'?secret='+secret,
+                                              status, 'private '+secret, {}, io.BytesIO(secret.encode()))
+            opener = MagicMock()
+            opener.open.side_effect = [failure() for _ in range(expected_calls)]
+            with patch.object(g.urllib.request, 'build_opener', return_value=opener), \
+                 patch.object(g.time, 'sleep'):
+                with self.assertRaises(RuntimeError) as raised:
+                    g.api_get(g.LIST_PATH, {}, secret, secret)
+            self.assertEqual(opener.open.call_count, expected_calls)
+            self.assertNotIn(secret, str(raised.exception))
+
     def test_sample_api_response_byte_cap_fails_before_json_parse(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = b'x' * 1025
-        with patch.object(g.urllib.request, 'urlopen', return_value=response):
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(g.urllib.request, 'build_opener', return_value=opener):
             with self.assertRaisesRegex(RuntimeError, 'response byte limit'):
                 g.api_get(g.LIST_PATH, {}, 'key', 'client', max_response_bytes=1024)
 

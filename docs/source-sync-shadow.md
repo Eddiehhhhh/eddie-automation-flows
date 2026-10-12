@@ -18,6 +18,7 @@ The workflow must exist on GitHub's default branch before `workflow_dispatch` ca
 
 - Exact source IDs determine paths; title or content similarity never merges distinct IDs. Old paths survive title and date edits. Duplicate or contradictory existing identities fail closed before writes.
 - Full reconciliation fetches every listed detail and does not use creation time to skip old edits. Pending recordings are retried; a complete existing recording remains byte-for-byte intact during a transient pending response. Originals, summaries, raw detail and attachment manifests remain separate.
+- Authenticated Get requests stay on the fixed official HTTPS host. They disable environment proxies and reject every redirect without forwarding Authorization or X-Client-ID; upstream error messages and HTTP/transport exception URLs are not printed. The existing bounded 429/5xx/transport retries remain in place.
 - Image/file binaries use content-addressed private `_assets` paths with hash, size and MIME manifests. The downloader forwards no Get credentials to asset hosts. Audio/video download remains disabled.
 - Writes are atomic and unchanged bytes preserve mtimes. A failed asset cannot update note bodies or receipts. The shadow never advances a published watermark. Production publication would need a coordinated single writer and private remote content/state readback; this PR does not enable it.
 
