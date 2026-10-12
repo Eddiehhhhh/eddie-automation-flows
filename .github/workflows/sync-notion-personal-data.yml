@@ -95,11 +95,6 @@ jobs:
           set -euo pipefail
           python scripts/run_private_command.py --label "douban sync" -- python scripts/sync_notion_douban_to_raw.py
 
-      - name: Sync weread notes
-        run: |
-          set -euo pipefail
-          python scripts/run_private_command.py --label "weread sync" -- python scripts/sync_notion_weread_to_raw.py
-
       - name: Commit Raw updates
         if: ${{ success() }}
         run: |
@@ -107,7 +102,7 @@ jobs:
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
             paths=(--path ".github/state/xiaoyuzhou-sync-state.json" --path "Raw/13 小宇宙")
           else
-            paths=(--path ".github/state/xiaoyuzhou-sync-state.json" --path "Raw/12 我的运动" --path "Raw/13 小宇宙" --path "Raw/14 豆瓣影视" --path "Raw/15 微信读书")
+            paths=(--path ".github/state/xiaoyuzhou-sync-state.json" --path "Raw/12 我的运动" --path "Raw/13 小宇宙" --path "Raw/14 豆瓣影视")
           fi
           python scripts/commit_private_vault.py --all --ref "$target_ref" \
             --message "Sync Notion personal data to Raw" "${paths[@]}"
