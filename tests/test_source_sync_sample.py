@@ -286,6 +286,31 @@ class FixedSampleTests(unittest.TestCase):
             (cache/'one.json').write_bytes(b' '*(2*1024*1024+1))
             with self.assertRaises(ValueError):shadow.private_detail_snapshot(root)
 
+    def test_attachment_change_classes_reject_real_edits_and_redact_query_values(self):
+        before={'attachments':[{'type':'audio','id':'PRIVATE','url':'https://example.invalid/a.m4a?s=SECRET'}]}
+        after=copy.deepcopy(before)
+        after['attachments'][0]['url']='https://example.invalid/a.m4a?s=NEW_SECRET'
+        changes=shadow.attachment_changes(before,after)
+        self.assertEqual(changes['url_query_only'],1);self.assertEqual(sum(changes.values()),1)
+        after['attachments'][0]['url']='https://example.invalid/b.m4a?s=SECRET'
+        after['attachments'][0]['id']='OTHER_PRIVATE'
+        changes=shadow.attachment_changes(before,after)
+        self.assertEqual(changes['url_location'],1);self.assertEqual(changes['stable_id'],1)
+        after['attachments'].append({})
+        self.assertEqual(shadow.attachment_changes(before,after)['added'],1)
+        self.assertEqual(shadow.attachment_changes(after,before)['removed'],1)
+        before={'attachments':[{'id':'ONE','url':'https://example.invalid/one'},
+                               {'id':'TWO','url':'https://example.invalid/two'}]}
+        changes=shadow.attachment_changes(before,{'attachments':list(reversed(before['attachments']))})
+        self.assertEqual(changes['reordered'],1);self.assertEqual(sum(changes.values()),1)
+        after=copy.deepcopy(before)
+        after['attachments'][0].update(path='PRIVATE PATH',size=123,mime='PRIVATE MIME',
+                                      name='PRIVATE NAME',updated_at='PRIVATE TIME',secret_key='PRIVATE')
+        changes=shadow.attachment_changes(before,after)
+        for key in ('stable_path','size','mime','name','updated_timestamp','unknown_changed_keys'):
+            self.assertEqual(changes[key],1)
+        self.assertNotIn('PRIVATE',json.dumps(changes));self.assertNotIn('secret_key',json.dumps(changes))
+
 
 if __name__ == '__main__':
     unittest.main()

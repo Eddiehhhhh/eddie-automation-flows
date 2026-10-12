@@ -28,6 +28,74 @@ COUNT_KEYS = ('sample_pages_read', 'details_fetched', 'assets_downloaded',
 DETAIL_GROUPS = ('content', 'title', 'source_timestamps', 'audio_original',
                  'audio_transcript', 'audio_play_url', 'audio_other',
                  'attachments', 'audit_fields', 'other')
+ATTACHMENT_FIELDS = ('attachments', 'images', 'files', 'resources')
+ATTACHMENT_CHANGES = ('added', 'removed', 'reordered', 'invalid_shape', 'url_query_only',
+                      'url_location', 'stable_id', 'stable_path', 'size', 'mime',
+                      'name', 'updated_timestamp', 'unknown_changed_keys')
+DESCRIPTOR_GROUPS = {
+    'stable_id': ('id', 'file_id', 'attachment_id'),
+    'stable_path': ('path', 'file_path', 'key'),
+    'size': ('size', 'file_size', 'byte_size'),
+    'mime': ('mime', 'mime_type', 'content_type', 'type'),
+    'name': ('name', 'file_name', 'filename', 'title'),
+    'updated_timestamp': ('updated_at', 'update_time', 'updated_time'),
+}
+
+
+def query_only_change(old, new):
+    if not isinstance(old, str) or not isinstance(new, str) or old == new:
+        return False
+    a, b = urlsplit(old), urlsplit(new)
+    return (a.scheme == b.scheme == 'https' and
+            (a.netloc, a.path, a.fragment) == (b.netloc, b.path, b.fragment)
+            and a.query != b.query)
+
+
+def attachment_changes(before, after):
+    changes = dict.fromkeys(ATTACHMENT_CHANGES, 0)
+    missing = object()
+    def identity(value):
+        for key in DESCRIPTOR_GROUPS['stable_id']:
+            ident = value.get(key)
+            if isinstance(ident, (str, int)) and not isinstance(ident, bool):
+                return (key, str(ident))
+        for key in ('original_url', 'url', 'download_url'):
+            value_url = value.get(key)
+            if isinstance(value_url, str):
+                url = urlsplit(value_url)
+                return ('url', url.scheme, url.netloc, url.path, url.fragment)
+        return None
+    for field in ATTACHMENT_FIELDS:
+        left, right = before.get(field), after.get(field)
+        if left == right:
+            continue
+        left = [] if left is None else left
+        right = [] if right is None else right
+        if (not isinstance(left, list) or not isinstance(right, list) or
+                any(not isinstance(n, dict) for n in left + right)):
+            changes['invalid_shape'] += 1
+            continue
+        changes['added'] += max(0, len(right) - len(left))
+        changes['removed'] += max(0, len(left) - len(right))
+        old_ids, new_ids = [identity(n) for n in left], [identity(n) for n in right]
+        if (old_ids and None not in old_ids + new_ids and
+                len(set(old_ids)) == len(old_ids) and len(set(new_ids)) == len(new_ids)
+                and set(old_ids) == set(new_ids)):
+            changes['reordered'] += int(old_ids != new_ids)
+            by_id = dict(zip(new_ids, right))
+            right = [by_id[ident] for ident in old_ids]
+        for old, new in zip(left, right):
+            old, new = old.copy(), new.copy()
+            for key in ('url', 'original_url', 'download_url'):
+                a, b = old.pop(key, missing), new.pop(key, missing)
+                if a != b:
+                    changes['url_query_only' if query_only_change(a, b) else 'url_location'] += 1
+            for group, keys in DESCRIPTOR_GROUPS.items():
+                pairs = [(old.pop(key, missing), new.pop(key, missing)) for key in keys]
+                changes[group] += int(any(a != b for a, b in pairs))
+            changes['unknown_changed_keys'] += sum(old.get(k, missing) != new.get(k, missing)
+                                                   for k in set(old) | set(new))
+    return changes
 
 
 def private_detail_snapshot(root):
@@ -70,18 +138,17 @@ def private_detail_changes(before, after):
     if set(before) != set(after) or len(before) != 2:
         raise ValueError('invalid private snapshot')
     counts = dict.fromkeys(DETAIL_GROUPS, 0)
+    attachment_counts = dict.fromkeys(ATTACHMENT_CHANGES, 0)
     query_only = 0
     for key in before:
         left, right = detail_groups(before[key]), detail_groups(after[key])
         for group in DETAIL_GROUPS:
             counts[group] += int(left[group] != right[group])
-        old, new = left['audio_play_url'], right['audio_play_url']
-        if isinstance(old, str) and isinstance(new, str) and old != new:
-            a, b = urlsplit(old), urlsplit(new)
-            query_only += int(a.scheme == b.scheme == 'https' and
-                (a.netloc, a.path, a.fragment) == (b.netloc, b.path, b.fragment)
-                and a.query != b.query)
+        query_only += int(query_only_change(left['audio_play_url'], right['audio_play_url']))
+        for group, count in attachment_changes(before[key], after[key]).items():
+            attachment_counts[group] += count
     return {'detail_change_counts': counts, 'audio_query_only_refreshes': query_only,
+            'attachment_change_counts': attachment_counts,
             'content_and_original_equal': counts['content'] == counts['audio_original'] == 0}
 
 
@@ -154,6 +221,10 @@ def publish_safe_report(path, out):
             if (isinstance(counts, dict) and set(counts) == set(DETAIL_GROUPS)
                     and all(type(v) is int and 0 <= v <= 2 for v in counts.values())):
                 safe['detail_change_counts'] = counts
+            attachment_counts = report.get('attachment_change_counts')
+            if (isinstance(attachment_counts, dict) and set(attachment_counts) == set(ATTACHMENT_CHANGES)
+                    and all(safe_count(v) is not None for v in attachment_counts.values())):
+                safe['attachment_change_counts'] = attachment_counts
             refreshes = report.get('audio_query_only_refreshes')
             if type(refreshes) is int and 0 <= refreshes <= 2:
                 safe['audio_query_only_refreshes'] = refreshes
