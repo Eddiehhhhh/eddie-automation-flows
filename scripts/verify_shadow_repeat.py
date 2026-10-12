@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one source twice in a NEW private temporary shadow, expose counts only.
+"""Run Get twice in a NEW private temporary shadow, expose counts only.
 
 Never publish, import local credentials, or write to the production vault.
 """
@@ -20,16 +20,16 @@ def snapshot(root):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--source', choices=('getnote', 'flomo'), required=True)
-    parser.add_argument('--start-date', help='Explicit flomo search window (not full-history completeness)')
-    parser.add_argument('--end-date')
+    parser.add_argument('--full', action='store_true', help='Explicit full-library acceptance; never the default')
+    parser.add_argument('--sample-pages', type=int, default=2, help='Bounded sample list pages, 1-3')
     args = parser.parse_args()
-    if args.source == 'flomo' and not (args.start_date and args.end_date):
-        parser.error('flomo requires explicit start and end dates')
+    if not 1 <= args.sample_pages <= 3:
+        parser.error('sample pages must be between 1 and 3')
     scripts = Path(__file__).resolve().parent
-    command = [sys.executable, str(scripts / f'sync_{args.source}_to_raw.py')]
-    if args.source == 'flomo':
-        command += ['--start-date', args.start_date, '--end-date', args.end_date]
+    command = [sys.executable, str(scripts / 'sync_getnote_to_raw.py')]
+    if not args.full:
+        command += ['--sample', '--sample-pages', str(args.sample_pages)]
+    scope = 'full' if args.full else 'sample'
     # TemporaryDirectory is outside the public checkout and removed on success/failure.
     # Existing secrets are inherited in memory only.
     with tempfile.TemporaryDirectory(prefix='source-shadow-') as temp:
@@ -39,20 +39,29 @@ def main():
         for iteration in range(2):
             result = subprocess.run(command, env=env, capture_output=True, text=True)
             if result.returncode:
-                print(json.dumps({'source': args.source, 'status': 'failed', 'run': iteration + 1, 'exit': result.returncode}))
+                print(json.dumps({'source': 'getnote', 'scope': scope, 'source_complete': False,
+                                  'status': 'failed', 'run': iteration + 1, 'exit': result.returncode}))
                 return 1
-            reports.append(json.loads(result.stdout))
+            report = json.loads(result.stdout)
+            if report.get('scope') != scope or report.get('source_complete') is not args.full:
+                print(json.dumps({'source': 'getnote', 'scope': scope, 'source_complete': False,
+                                  'status': 'invalid-source-report', 'run': iteration + 1}))
+                return 1
+            reports.append(report)
             current = snapshot(root)
             if iteration == 0:
                 previous = current
         # Live edits between reads are a legitimate mismatch, but still fail acceptance.
         unchanged = current == previous
-        print(json.dumps({'source': args.source, 'status': 'ok' if unchanged else 'changed-between-runs',
-                          'files': len(current), 'fetched': [r['fetched'] for r in reports],
-                          'written_or_changed': [r['written_or_changed'] for r in reports],
+        print(json.dumps({'source': 'getnote', 'scope': scope, 'source_complete': args.full and unchanged,
+                          'status': (scope + '_ok') if unchanged else 'changed-between-runs',
+                          'sample_pages_limit': None if args.full else args.sample_pages,
+                          'files': len(current), 'fetched': [int(r['fetched']) for r in reports],
+                          'written_or_changed': [int(r['written_or_changed']) for r in reports],
                           'identical_hashes_and_mtimes': unchanged, 'published': False}))
         return 0 if unchanged else 1
 
 
 if __name__ == '__main__':
     raise SystemExit(main())
+

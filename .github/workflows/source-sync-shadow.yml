@@ -1,25 +1,25 @@
-name: Validate source sync in ephemeral shadow
+name: Validate Get sync in ephemeral shadow
 
 on:
   workflow_dispatch:
     inputs:
-      source:
-        description: Source to validate (no production writes)
+      mode:
+        description: Bounded two-note sample (default) or explicit full-library acceptance
         type: choice
-        options: [getnote, flomo]
+        options: [sample, full]
+        default: sample
         required: true
-      start_date:
-        description: flomo inclusive start date YYYY-MM-DD
-        type: string
-      end_date:
-        description: flomo inclusive end date YYYY-MM-DD
-        type: string
+      sample_pages:
+        description: List pages to inspect for one ordinary note and one recording
+        type: choice
+        options: ['1', '2', '3']
+        default: '2'
 
 permissions:
   contents: read
 
 concurrency:
-  group: source-sync-shadow
+  group: getnote-shadow
   cancel-in-progress: false
 
 jobs:
@@ -35,20 +35,21 @@ jobs:
           python-version: '3.11'
       - name: Offline regression suite
         run: python -m unittest discover -s tests -v
-      - name: Read Get into ephemeral shadow twice
-        if: inputs.source == 'getnote'
+      - name: Read bounded Get sample twice
+        if: inputs.mode == 'sample'
         env:
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
-        run: python scripts/run_private_command.py --label 'Get shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --source getnote
-      - name: Read flomo into ephemeral shadow twice
-        if: inputs.source == 'flomo'
+          SAMPLE_PAGES: ${{ inputs.sample_pages }}
+        run: timeout 12m python scripts/run_private_command.py --label 'Get sample shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --sample-pages "$SAMPLE_PAGES"
+      - name: Read full Get library twice (explicit only)
+        if: inputs.mode == 'full'
         env:
-          FLOMO_TOKEN: ${{ secrets.FLOMO_TOKEN }}
-          START_DATE: ${{ inputs.start_date }}
-          END_DATE: ${{ inputs.end_date }}
-        run: python scripts/run_private_command.py --label 'flomo shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --source flomo --start-date "$START_DATE" --end-date "$END_DATE"
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+        run: timeout 55m python scripts/run_private_command.py --label 'Get full shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --full
       - name: Publish aggregate evidence only
+        if: success()
         env:
           RESULT: ${{ runner.temp }}/shadow-result.json
         run: |
@@ -56,7 +57,8 @@ jobs:
           import json, os
           from pathlib import Path
           result = json.loads(Path(os.environ['RESULT']).read_text())
-          allowed = ('source', 'status', 'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes', 'published')
+          allowed = ('source', 'scope', 'source_complete', 'status', 'sample_pages_limit',
+                     'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes', 'published')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write(json.dumps({k: result[k] for k in allowed if k in result}, indent=2))
           PY

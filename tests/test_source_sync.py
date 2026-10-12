@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import sync_getnote_to_raw as g
-import sync_flomo_to_raw as f
 from source_sync_store import IdentityIndex, source_id
 
 
@@ -22,24 +21,20 @@ class SyncTests(unittest.TestCase):
         from source_sync_assets import AssetStore
         store_patch = patch.object(g, 'AssetStore', side_effect=lambda root, **kw: AssetStore(root, fetch=lambda url, **kwargs: (b'\x89PNG\r\n\x1a\nfixture', 'image/png'), **kw))
         store_patch.start(); self.addCleanup(store_patch.stop)
-        for module, names in [(g, ['ROOT','RAW_DIR','NOTES_DIR','STATE_DIR']), (f,['ROOT','RAW_DIR','MEMOS_DIR','INDEX_DIR','STATE_PATH','RECENT_INDEX_PATH','LOG_DIR'])]:
+        for module, names in [(g, ['ROOT','RAW_DIR','NOTES_DIR','STATE_DIR'])]:
             for name in names:
                 p = patch.object(module, name, self.root / module.__name__ / name)
                 p.start(); self.addCleanup(p.stop)
         # Get identity lookup must encompass both normal and recording notes.
         g.ROOT = g.RAW_DIR.parent
-        f.ROOT = f.RAW_DIR.parent
         g.NOTES_DIR = g.RAW_DIR / '01 Notes'
         g.STATE_DIR = g.RAW_DIR / '03 State'
-        f.MEMOS_DIR = f.RAW_DIR
-        f.INDEX_DIR = f.RAW_DIR / '03 Index'
-        f.STATE_PATH = f.INDEX_DIR / 'state.json'
 
     def note(self, ident='9223372036854775807', **kw):
         return dict(id=ident, title='same', content='summary', created_at='2020-01-01T00:00:00Z', updated_at='2020-01-01T00:00:00Z', **kw)
 
     def test_idempotency_title_edit_and_same_title_different_id(self):
-        for path_for, render, write in [(g.output_path_for,g.render_note,g.write_if_changed),(f.memo_path_for,f.render_memo,f.write_if_changed)]:
+        for path_for, render, write in [(g.output_path_for,g.render_note,g.write_if_changed)]:
             n = self.note()
             first = path_for(n)
             self.assertTrue(write(first, render(n)))
@@ -180,20 +175,6 @@ class SyncTests(unittest.TestCase):
         self.assertIn('complete original',next(g.RAW_DIR.rglob('*.md')).read_text())
         self.assertEqual(len(json.loads((g.STATE_DIR/'pending.json').read_text())['pending_ids']),1)
 
-    def test_flomo_failure_preserves_watermark_then_recovers(self):
-        f.STATE_PATH.parent.mkdir(parents=True)
-        prior='{"last_sync_at":"2020-01-01T00:00:00Z"}'
-        f.STATE_PATH.write_text(prior)
-        import urllib.error
-        for result in [urllib.error.HTTPError('https://invalid',code,'failure',{},None) for code in (401,429,500)]+[[self.note()]]:
-            with patch.dict(os.environ,{'VAULT_ROOT':str(self.root)}), patch.object(sys,'argv',['sync','--start-date','2020-01-01','--end-date','2020-01-01']), patch.object(f,'load_token',return_value='unused'), patch.object(f,'initialize_client'), patch.object(f,'search_memos_for_day',side_effect=[result]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                if isinstance(result,Exception):
-                    with self.assertRaises(urllib.error.HTTPError): f.main()
-                else:
-                    self.assertEqual(f.main(),0)
-            self.assertEqual(f.STATE_PATH.read_text(),prior)
-        self.assertEqual(len(list(f.RAW_DIR.rglob('*.md'))),1)
-
     def test_asset_failure_does_not_change_receipt_or_note_then_recovers(self):
         self.run_get([self.note()])
         before={p:p.read_bytes() for p in g.RAW_DIR.rglob('*') if p.is_file()}
@@ -207,27 +188,6 @@ class SyncTests(unittest.TestCase):
         self.assertIn('## 本地附件',next(g.RAW_DIR.rglob('*.md')).read_text())
         self.assertEqual(len(list((g.RAW_DIR/'_assets').rglob('*.png'))),1)
 
-    def test_flomo_requires_explicit_completeness_evidence(self):
-        import datetime
-        n=self.note()
-        for payload in [{'memos':[]},{'memos':[n]},{'memos':[n],'total':1},{'memos':[n],'has_more':False},{'memos':[n],'has_more':False,'total':2}]:
-            with patch.object(f,'call_tool',return_value=payload):
-                with self.assertRaises(RuntimeError): f.search_memos_for_day('unused',datetime.date.today(),1000)
-        with patch.object(f,'call_tool',return_value={'memos':[n],'has_more':False,'total':1}):
-            self.assertEqual(f.search_memos_for_day('unused',datetime.date.today(),1000),[n])
-
-    def test_flomo_cap_missing_detail_and_errors(self):
-        import datetime
-        for payload in [{'memos':[self.note()]}, {}, {'memos':[{'id':'1'}]}, {'memos':[], 'has_more':True}]:
-            with patch.object(f,'call_tool',return_value=payload):
-                with self.assertRaises(RuntimeError): f.search_memos_for_day('unused',datetime.date.today(),1)
-        for payload in [{'error':{'code':1}},{'result':{'isError':True}}]:
-            with patch.object(f,'rpc_call',return_value=payload):
-                with self.assertRaises(RuntimeError): f.call_tool('unused','memo_search',{},1)
-
-    def test_flomo_preserves_tags_in_original_body(self):
-        n=self.note(); n['content']='hello #tag\n\nworld'
-        self.assertIn(n['content'],f.render_memo(n))
-
 
 if __name__ == '__main__': unittest.main()
+

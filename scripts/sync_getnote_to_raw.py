@@ -91,7 +91,7 @@ def json_loads_tolerant(text: str) -> Any:
     return json.JSONDecoder(strict=False).decode(text)
 
 
-def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str) -> Any:
+def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None) -> Any:
     query = urllib.parse.urlencode(params)
     url = f"{BASE_URL}{path}"
     if query:
@@ -108,7 +108,10 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str) -> 
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+                raw = resp.read(max_response_bytes + 1) if max_response_bytes is not None else resp.read()
+                if max_response_bytes is not None and len(raw) > max_response_bytes:
+                    raise RuntimeError("Get response byte limit reached")
+                body = raw.decode("utf-8", errors="replace")
             data = json_loads_tolerant(body)
             if isinstance(data, dict) and data.get("success") is False:
                 err = data.get("error") or {}
@@ -148,7 +151,31 @@ def fetch_note_list(api_key, client_id, max_pages=None, pagination="cursor"):
     return [note for _, batch, _ in fetch_note_pages(api_key, client_id, max_pages, pagination) for note in batch]
 
 
-def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor"):
+def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor"):
+    """Read at most three list pages and select one ordinary plus one recording.
+
+    This intentionally does not establish source enumeration completeness.
+    """
+    if not 1 <= max_pages <= 3:
+        raise ValueError("sample page limit must be between 1 and 3")
+    selected = {}
+    read_pages = 0
+    for _, batch, _ in fetch_note_pages(api_key, client_id, None, pagination, max_response_bytes=2 * 1024 * 1024):
+        read_pages += 1
+        for item in batch:
+            kind = item.get("note_type")
+            if kind == "plain_text":
+                selected.setdefault("ordinary", item)
+            elif kind in {"recorder_audio", "recorder_flash_audio"}:
+                selected.setdefault("recording", item)
+        if len(selected) == 2 or read_pages >= max_pages:
+            break
+    if len(selected) != 2:
+        raise RuntimeError("bounded sample lacks ordinary or recording note")
+    return [selected["ordinary"], selected["recording"]], read_pages
+
+
+def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", max_response_bytes=None):
     """Official cursor contract, plus explicit plugin since_id compatibility.
 
     Never use time order to infer completeness. Caps and cursor cycles fail closed.
@@ -158,7 +185,7 @@ def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor"):
     page = 0
     while True:
         params = {pagination: cursor} if cursor is not None else ({"since_id": "0"} if pagination == "since_id" else {})
-        data = api_get(LIST_PATH, params, api_key, client_id)
+        data = api_get(LIST_PATH, params, api_key, client_id, max_response_bytes=max_response_bytes)
         payload = data.get("data", data)
         batch = payload if isinstance(payload, list) else next((payload[k] for k in ("notes", "list", "records", "items") if k in payload), None)
         if not isinstance(batch, list) or any(not isinstance(n, dict) for n in batch):
@@ -193,8 +220,9 @@ def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor"):
         seen_cursors.add(cursor)
 
 
-def fetch_note_detail(note_id: str, api_key: str, client_id: str) -> Dict[str, Any]:
-    data = api_get(DETAIL_PATH, {"id": note_id, "image_quality": "original"}, api_key, client_id)
+def fetch_note_detail(note_id: str, api_key: str, client_id: str, max_response_bytes=None) -> Dict[str, Any]:
+    data = api_get(DETAIL_PATH, {"id": note_id, "image_quality": "original"}, api_key, client_id,
+                   max_response_bytes=max_response_bytes)
     payload = data.get("data", data)
     return payload.get("note", payload)
 
@@ -479,6 +507,8 @@ def transcription_pending(note):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reconcile Get notes; explicit private VAULT_ROOT required")
+    parser.add_argument("--sample", action="store_true", help="Bounded two-note shadow; never proves full-source completeness")
+    parser.add_argument("--sample-pages", type=int, default=2, help="Sample list pages, 1-3; default 2")
     parser.add_argument("--max-pages", type=int)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--pagination", choices=("cursor", "since_id"), default="cursor")
@@ -490,15 +520,21 @@ def main() -> int:
     parser.add_argument("--asset-run-max-bytes", type=int, default=200 * 1024 * 1024)
     parser.add_argument("--asset-max-count", type=int, default=128)
     args = parser.parse_args()
+    if args.sample and (not 1 <= args.sample_pages <= 3 or args.max_pages is not None):
+        parser.error("sample requires 1-3 sample pages and cannot use --max-pages")
     if not os.environ.get("VAULT_ROOT"):
         raise RuntimeError("explicit private VAULT_ROOT required")
     api_key, client_id = load_credentials()
-    # Enumerate and validate every detail before writing anything. No time cutoff:
-    # upstream creation-order pages cannot prove an older note was not edited.
-    summaries = fetch_note_list(api_key, client_id, args.max_pages, args.pagination)
+    # Full mode reconciles all details; sample mode caps list and detail requests.
+    if args.sample:
+        summaries, read_pages = fetch_bounded_sample(api_key, client_id, args.sample_pages, args.pagination)
+    else:
+        summaries = fetch_note_list(api_key, client_id, args.max_pages, args.pagination)
+        read_pages = None
     details = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
-        futures = {executor.submit(fetch_note_detail, note_id_from(n), api_key, client_id): note_id_from(n) for n in summaries}
+        futures = {executor.submit(fetch_note_detail, note_id_from(n), api_key, client_id,
+                                   2 * 1024 * 1024 if args.sample else None): note_id_from(n) for n in summaries}
         for future in concurrent.futures.as_completed(futures):
             try:
                 detail = future.result()
@@ -510,11 +546,26 @@ def main() -> int:
                 raise RuntimeError("Get detail identity/content validation failed")
             details.append(detail)
     details.sort(key=note_id_from)
+    if args.sample:
+        attachment_count = 0
+        for note in details:
+            for field in ("attachments", "images", "files", "resources"):
+                descriptors = note.get(field) or []
+                if not isinstance(descriptors, list):
+                    raise RuntimeError("invalid sample attachment descriptors")
+                attachment_count += len(descriptors)
+        if attachment_count > 2:
+            raise RuntimeError("sample attachment count limit reached")
     index = IdentityIndex(RAW_DIR, "getnote", "note_id", boundary=ROOT)
     # Finish bounded asset acquisition before touching notes or run receipts.
     assets_by_id = {}
     if not args.dry_run and not args.metadata_only:
-        store = AssetStore(RAW_DIR, max_file=args.asset_max_bytes, max_run=args.asset_run_max_bytes, max_assets=args.asset_max_count)
+        store = AssetStore(
+            RAW_DIR,
+            max_file=min(args.asset_max_bytes, 2 * 1024 * 1024) if args.sample else args.asset_max_bytes,
+            max_run=min(args.asset_run_max_bytes, 4 * 1024 * 1024) if args.sample else args.asset_run_max_bytes,
+            max_assets=min(args.asset_max_count, 2) if args.sample else args.asset_max_count,
+        )
         for note in details:
             assets_by_id[note_id_from(note)] = store.materialize(note)
     changed = 0
@@ -542,10 +593,13 @@ def main() -> int:
     if not args.dry_run and not args.metadata_only:
         write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
         # This receipt is committed with the data; it is NOT a published watermark.
-        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "enumerated": len(details), "complete": not pending, "pending": len(pending)}))
-    print(json.dumps({"fetched": len(details), "written_or_changed": changed, "pending": len(pending), "complete": not pending, "dry_run": args.dry_run}))
+        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "scope": "sample" if args.sample else "full", "enumerated": len(details), "complete": not args.sample and not pending, "pending": len(pending)}))
+    print(json.dumps({"scope": "sample" if args.sample else "full", "source_complete": not args.sample and not pending,
+                      "sample_pages": read_pages, "fetched": len(details), "written_or_changed": changed,
+                      "pending": len(pending), "complete": not args.sample and not pending, "dry_run": args.dry_run}))
     return 2 if pending else 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

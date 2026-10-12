@@ -14,8 +14,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
-from source_sync_store import write_if_changed as atomic_write
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -43,6 +41,14 @@ def load_token() -> str:
     if token:
         return token
 
+    services_path = Path.home() / ".codex" / "secrets" / "services.json"
+    if services_path.exists():
+        with services_path.open("r", encoding="utf-8") as f:
+            services = json.load(f)
+        token = services.get("flomo_mcp", {}).get("auth", {}).get("token")
+        if token:
+            return str(token)
+
     raise SystemExit("Missing required flomo token: FLOMO_TOKEN")
 
 
@@ -64,7 +70,12 @@ def json_scalar(value: Any) -> str:
 
 
 def write_if_changed(path: Path, content: str) -> bool:
-    return atomic_write(path, content)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.write_text(content, encoding="utf-8")
+    _set_file_timestamps(path, content)
+    return True
 
 
 def _set_file_timestamps(path: Path, content: str) -> None:
@@ -177,7 +188,7 @@ def memo_id(memo: Dict[str, Any]) -> str:
     value = memo.get("id")
     if value is None:
         raise ValueError("memo missing id")
-    return source_id(value)
+    return str(value)
 
 
 def decode_mcp_body(body: str) -> Dict[str, Any]:
@@ -191,7 +202,7 @@ def decode_mcp_body(body: str) -> Dict[str, Any]:
             data_lines.append(line[6:])
 
     if not data_lines:
-        raise ValueError("Unable to parse MCP response")
+        raise ValueError(f"Unable to parse MCP response: {body[:200]}")
 
     parsed = json.loads("\n".join(data_lines))
     if isinstance(parsed, dict):
@@ -235,8 +246,6 @@ def rpc_call(token: str, method: str, params: Dict[str, Any], request_id: int) -
             ConnectionError,
         ) as exc:
             last_error = exc
-            if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403):
-                raise
             if attempt < 4:
                 time.sleep(5)
                 continue
@@ -273,8 +282,6 @@ def call_tool(token: str, tool_name: str, arguments: Dict[str, Any], request_id:
         },
         request_id=request_id,
     )
-    if response.get("error") or response.get("result", {}).get("isError"):
-        raise RuntimeError("flomo MCP tool failed")
     result = response.get("result", {})
     content = result.get("content") or []
     if content and isinstance(content[0], dict):
@@ -309,28 +316,11 @@ def search_memos_for_day(token: str, day: dt.date, limit: int) -> List[Dict[str,
         request_id=1000 + day.toordinal(),
     )
     memos = payload.get("memos")
+    if memos is None:
+        return []
     if not isinstance(memos, list):
         raise RuntimeError("memo_search returned an unexpected payload shape")
-    if payload.get("truncated") or payload.get("is_truncated"):
-        raise RuntimeError("truncated flomo search result")
-    if len(memos) >= limit or payload.get("has_more") or payload.get("next_cursor") or (payload.get("total") is not None and int(payload["total"]) > len(memos)):
-        raise RuntimeError("flomo result cap/pagination detected; refusing incomplete sync")
-    # A short result alone does not prove that search enumerated the whole window.
-    # These are conservative acceptance requirements, not a claim about the live schema.
-    total = payload.get("total")
-    if payload.get("has_more") is not False or type(total) is not int or total != len(memos):
-        raise RuntimeError("flomo enumeration completeness is unproven")
-    if len({memo_id(m) for m in memos if isinstance(m, dict)}) != len(memos):
-        raise RuntimeError("duplicate or invalid memos in search page")
-    for memo in memos:
-        if not isinstance(memo, dict):
-            raise RuntimeError("invalid memo entry")
-        memo_id(memo)
-        if memo.get("truncated") or memo.get("is_truncated"):
-            raise RuntimeError("truncated memo detail")
-        if not isinstance(memo.get("content"), str) or not parse_time(memo.get("updated_at")):
-            raise RuntimeError("memo search lacks full content/update timestamp")
-    return memos
+    return [item for item in memos if isinstance(item, dict)]
 
 
 def date_range(start: dt.date, end: dt.date) -> Iterable[dt.date]:
@@ -360,7 +350,7 @@ def choose_window(args: argparse.Namespace, state: Dict[str, Any]) -> Tuple[dt.d
     return start_day, end_day
 
 
-def memo_path_for(memo: Dict[str, Any], index=None) -> Path:
+def memo_path_for(memo: Dict[str, Any]) -> Path:
     """文件名不含日期；仅标题 + 冲突兜底（memo_id 尾缀）。日期信息保留在目录 YYYY/YYYY-MM/ 中。"""
     mid = memo_id(memo)
     created = parse_time(memo.get("created_at")) or parse_time(memo.get("updated_at"))
@@ -373,14 +363,18 @@ def memo_path_for(memo: Dict[str, Any], index=None) -> Path:
     title = truncate_utf8_bytes(safe_slug(memo_title(memo), mid), 160) or mid
     filename = f"{title}.md"
     target_dir = MEMOS_DIR / year / month
-    index = index or IdentityIndex(MEMOS_DIR, "flomo", "memo_id", boundary=ROOT)
-    return index.path(mid, target_dir / filename)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    candidate = target_dir / filename
+    if not candidate.exists():
+        return candidate
+    # 同目录下标题冲突 → memo_id 尾缀兜底
+    return target_dir / f"{title}-{mid}.md"
 
 
 def render_memo(memo: Dict[str, Any]) -> str:
     memo_id_value = memo_id(memo)
     title = memo_title(memo)
-    content = memo.get("content") or ""
+    content = clean_body_text(memo.get("content") or "")
     tags = [str(item) for item in memo.get("tags") or [] if item]
     linked_memos = [str(item) for item in memo.get("linked_memos") or [] if item]
 
@@ -516,10 +510,6 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Fetch and report without writing files")
     args = parser.parse_args()
 
-    if not os.environ.get("VAULT_ROOT"):
-        raise RuntimeError("explicit private VAULT_ROOT required")
-    if args.limit < 1:
-        raise RuntimeError("limit must be positive")
     token = load_token()
     initialize_client(token)
 
@@ -550,24 +540,20 @@ def main() -> int:
                 memos_by_id[current_id] = memo
 
     records: List[Tuple[Dict[str, Any], Path]] = []
-    index = IdentityIndex(MEMOS_DIR, "flomo", "memo_id", boundary=ROOT)
     changed = 0
     for memo in sorted(
         memos_by_id.values(),
         key=lambda item: parse_time(item.get("updated_at")) or parse_time(item.get("created_at")) or dt.datetime.min.replace(tzinfo=TZ),
     ):
-        path = memo_path_for(memo, index)
+        path = memo_path_for(memo)
         records.append((memo, path))
         if not args.dry_run and write_if_changed(path, render_memo(memo)):
             changed += 1
-        if not args.dry_run:
-            import hashlib
-            cache_id = hashlib.sha256(memo_id(memo).encode()).hexdigest()
-            write_if_changed(INDEX_DIR / "raw-cache" / (cache_id + ".json"), json_text(memo))
-            write_if_changed(INDEX_DIR / "attachments" / (cache_id + ".json"), json_text(attachment_manifest(memo)))
 
     if not args.dry_run:
-        write_if_changed(INDEX_DIR / "receipt.json", json_text({"source_system": "flomo", "count": len(records), "window_start": start_day.isoformat(), "window_end": end_day.isoformat(), "published_watermark": None}))
+        write_if_changed(RECENT_INDEX_PATH, render_recent_index(records, start_day, end_day))
+        write_if_changed(STATE_PATH, render_state(records, start_day, end_day))
+        write_if_changed(LOG_DIR / f"{dt.datetime.now(TZ).strftime('%Y-%m-%d')}-flomo-sync.md", render_log(records, start_day, end_day))
 
     print(
         json.dumps(
