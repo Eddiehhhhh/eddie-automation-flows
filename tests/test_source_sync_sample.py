@@ -311,6 +311,32 @@ class FixedSampleTests(unittest.TestCase):
             self.assertEqual(changes[key],1)
         self.assertNotIn('PRIVATE',json.dumps(changes));self.assertNotIn('secret_key',json.dumps(changes))
 
+    def test_query_diagnostics_allowlist_names_only_and_classify_expiry(self):
+        before = {'attachments': [{'original_url':
+            'https://example.invalid/private?OSSAccessKeyId=PRIVATE&Expires=2000000000&Signature=SECRET&PRIVATE_KEY=SECRET'}]}
+        after = copy.deepcopy(before)
+        after['attachments'][0]['original_url'] = before['attachments'][0]['original_url'].replace('SECRET', 'NEW_SECRET')
+        result = shadow.attachment_query_diagnostics(before, after, now=1900000000)
+        self.assertEqual(result['query_keys_changed'], {'Signature': 1})
+        self.assertEqual(result['query_refresh_counts']['unknown_keys'], 1)
+        self.assertEqual(result['query_refresh_counts']['original_url'], 1)
+        self.assertEqual(result['query_refresh_counts']['expiry_at_least_day'], 1)
+        self.assertNotIn('PRIVATE', json.dumps(result)); self.assertNotIn('SECRET', json.dumps(result))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'report.json'
+            path.write_text(json.dumps(dict(result, scope='sample', status='changed-between-runs')))
+            out = io.StringIO(); shadow.publish_safe_report(path, out)
+            self.assertEqual(json.loads(out.getvalue())['query_keys_changed'], {'Signature': 1})
+            result['query_keys_changed']['PRIVATE_KEY'] = 1
+            path.write_text(json.dumps(dict(result, scope='sample', status='changed-between-runs')))
+            out = io.StringIO(); shadow.publish_safe_report(path, out)
+            self.assertNotIn('query_keys_changed', json.loads(out.getvalue()))
+        for expiry, expected in ((1899999999, 'expiry_expired'), (1900000030, 'expiry_under_hour'),
+                                 (1900007200, 'expiry_under_day')):
+            old = {'attachments': [{'url': f'https://example.invalid/a?q-sign-time=1;{expiry}&q-signature=SECRET'}]}
+            new = {'attachments': [{'url': f'https://example.invalid/a?q-sign-time=1;{expiry}&q-signature=NEW'}]}
+            self.assertEqual(shadow.attachment_query_diagnostics(old, new, now=1900000000)['query_refresh_counts'][expected], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -11,7 +11,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from urllib.parse import urlsplit
+import time
+from urllib.parse import urlsplit, parse_qs
 
 from source_sync_sample import prepare_private_sample
 
@@ -40,6 +41,68 @@ DESCRIPTOR_GROUPS = {
     'name': ('name', 'file_name', 'filename', 'title'),
     'updated_timestamp': ('updated_at', 'update_time', 'updated_time'),
 }
+
+# Only fixed, public signing parameter names can appear in diagnostic output.
+# Unrecognized upstream names and every parameter value remain private.
+QUERY_KEYS = frozenset(('OSSAccessKeyId', 'Expires', 'Signature', 'x-oss-security-token',
+    'x-oss-signature', 'x-oss-date', 'x-oss-expires', 'x-oss-credential',
+    'x-oss-signature-version', 'x-oss-process',
+    'q-sign-algorithm', 'q-ak', 'q-sign-time', 'q-key-time', 'q-header-list',
+    'q-url-param-list', 'q-signature',
+    'X-Amz-Algorithm', 'X-Amz-Credential', 'X-Amz-Date', 'X-Amz-Expires',
+    'X-Amz-SignedHeaders', 'X-Amz-Signature', 'X-Amz-Security-Token',
+    'Key-Pair-Id', 'Policy', 'e', 'token', '_upt', 'auth_key'))
+QUERY_COUNTS = ('unknown_keys', 'invalid_query', 'url', 'original_url', 'download_url',
+                'expiry_unknown', 'expiry_expired', 'expiry_under_hour',
+                'expiry_under_day', 'expiry_at_least_day')
+
+
+def attachment_query_diagnostics(before, after, now=None):
+    """Classify refreshed URLs without disclosing hosts, paths, names or values."""
+    present, changed = {}, {}
+    counts = dict.fromkeys(QUERY_COUNTS, 0)
+    now = time.time() if now is None else now
+    for field in ATTACHMENT_FIELDS:
+        left, right = before.get(field) or [], after.get(field) or []
+        if not isinstance(left, list) or not isinstance(right, list):
+            continue
+        for old, new in zip(left, right):
+            if not isinstance(old, dict) or not isinstance(new, dict):
+                continue
+            for key in ('url', 'original_url', 'download_url'):
+                a, b = old.get(key), new.get(key)
+                if not query_only_change(a, b):
+                    continue
+                counts[key] += 1
+                try:
+                    qa, qb = [parse_qs(urlsplit(v).query, keep_blank_values=True,
+                                       max_num_fields=64) for v in (a, b)]
+                except ValueError:
+                    counts['invalid_query'] += 1
+                    continue
+                for name in set(qa) | set(qb):
+                    if name in QUERY_KEYS:
+                        present[name] = present.get(name, 0) + 1
+                        if qa.get(name) != qb.get(name):
+                            changed[name] = changed.get(name, 0) + 1
+                    else:
+                        counts['unknown_keys'] += 1
+                expiry = None
+                for name in ('Expires', 'e', 'q-sign-time'):
+                    values = qa.get(name, [])
+                    if len(values) == 1:
+                        value = values[0].split(';')[-1]
+                        if value.isascii() and value.isdigit() and len(value) <= 12:
+                            expiry = int(value)
+                            break
+                bucket = ('expiry_unknown' if expiry is None else
+                          'expiry_expired' if expiry <= now else
+                          'expiry_under_hour' if expiry - now < 3600 else
+                          'expiry_under_day' if expiry - now < 86400 else
+                          'expiry_at_least_day')
+                counts[bucket] += 1
+    return {'query_keys_present': present, 'query_keys_changed': changed,
+            'query_refresh_counts': counts}
 
 
 def query_only_change(old, new):
@@ -140,6 +203,8 @@ def private_detail_changes(before, after):
     counts = dict.fromkeys(DETAIL_GROUPS, 0)
     attachment_counts = dict.fromkeys(ATTACHMENT_CHANGES, 0)
     query_only = 0
+    query_diagnostics = {'query_keys_present': {}, 'query_keys_changed': {},
+                         'query_refresh_counts': dict.fromkeys(QUERY_COUNTS, 0)}
     for key in before:
         left, right = detail_groups(before[key]), detail_groups(after[key])
         for group in DETAIL_GROUPS:
@@ -147,8 +212,11 @@ def private_detail_changes(before, after):
         query_only += int(query_only_change(left['audio_play_url'], right['audio_play_url']))
         for group, count in attachment_changes(before[key], after[key]).items():
             attachment_counts[group] += count
+        for group, values in attachment_query_diagnostics(before[key], after[key]).items():
+            for name, count in values.items():
+                query_diagnostics[group][name] = query_diagnostics[group].get(name, 0) + count
     return {'detail_change_counts': counts, 'audio_query_only_refreshes': query_only,
-            'attachment_change_counts': attachment_counts,
+            'attachment_change_counts': attachment_counts, **query_diagnostics,
             'content_and_original_equal': counts['content'] == counts['audio_original'] == 0}
 
 
@@ -225,6 +293,12 @@ def publish_safe_report(path, out):
             if (isinstance(attachment_counts, dict) and set(attachment_counts) == set(ATTACHMENT_CHANGES)
                     and all(safe_count(v) is not None for v in attachment_counts.values())):
                 safe['attachment_change_counts'] = attachment_counts
+            for group in ('query_keys_present', 'query_keys_changed', 'query_refresh_counts'):
+                values = report.get(group)
+                allowed = QUERY_COUNTS if group == 'query_refresh_counts' else QUERY_KEYS
+                if (isinstance(values, dict) and set(values) <= set(allowed)
+                        and all(safe_count(v) is not None for v in values.values())):
+                    safe[group] = values
             refreshes = report.get('audio_query_only_refreshes')
             if type(refreshes) is int and 0 <= refreshes <= 2:
                 safe['audio_query_only_refreshes'] = refreshes
