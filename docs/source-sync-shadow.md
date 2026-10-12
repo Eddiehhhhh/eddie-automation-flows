@@ -139,6 +139,44 @@ API identity, all source details, private destination readback and single-writer
 cutover remain separate gates. A failed bounded candidate must be diagnosed,
 not silently bypassed by an unbounded search or larger download.
 
+### Bounded real Get subtree seeding by exact blob objects
+
+`pack_seed` tests a narrower alternative to normal sparse checkout. Cone-mode
+sparse checkout includes files in ancestor directories, and blobless clones
+still retrieve repository tree metadata; neither alone proves Get-only transfer.
+The seed instead reuses the pinned, validated Get tree manifest, then requests
+only its known blob OIDs from the same repository's Git protocol v2 upload-pack.
+The existing runner token is used in memory on that fixed HTTPS repository only;
+there are no credential helpers, token files, authenticated child processes,
+redirects, environment proxies, remotes or persistent authorization changes.
+
+A first request must prove exact-object support with one Get Markdown blob of
+at most 64 KiB (2 MiB probe-pack cap). Only then is one whole Get blob pack requested:
+at most 6,000 files/objects, 128 MiB pack payload, 129 MiB framed response, 32 MiB
+per expanded blob and 256 MiB total seeded files. A fetch has a five-minute
+deadline; the whole command stops at 15 minutes. No full-clone or larger-pack
+fallback is allowed. Rejected wants, unexpected sections/URIs, unsupported
+protocol, excess object count or any limit cause failure, not a complete claim.
+
+An isolated empty Git object store indexes the pack with strict validation,
+1 GiB child memory, 300 MiB child file-size and 120-second CPU limits. The complete
+object-name/type/size set must exactly equal the requested pinned Get blob set.
+Every expanded file is SHA-1 Git-blob verified before use, and no checkout,
+filter, hook, submodule or source content is executed. Aggregate temporary disk
+is bounded by the pack, verified object-output and 256 MiB target limits (under
+1 GiB); all private data is removed with the job's temporary directory.
+
+The full real Markdown tree is then scanned by the actual identity resolver and
+all prior manifest API paths must match. This establishes real baseline bytes
+and headers, unlike the earlier placeholders. It still does not fetch current
+Get details, publish the destination, advance any receipt, or establish a safe
+production cutover. Only aggregate counts/flags are emitted, never object IDs,
+paths, source contents or credentials.
+
+Protocol and behavior references: [Git protocol v2](https://git-scm.com/docs/gitprotocol-v2),
+[Git sparse-checkout semantics](https://git-scm.com/docs/sparse-checkout.html),
+[GitHub partial clone behavior](https://github.blog/open-source/git/get-up-to-speed-with-partial-clone-and-shallow-clone/).
+
 ### Expiring attachment links and exact repeats
 
 The [real parameter diagnostic](https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38260739263)
