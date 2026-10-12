@@ -278,7 +278,7 @@ def publish_safe_report(path, out):
                 safe['stage'] = report['stage']
             if safe_enum(report.get('error_code'), ERROR_CODES):
                 safe['error_code'] = report['error_code']
-            for key in ('fetched', 'written_or_changed'):
+            for key in ('fetched', 'written_or_changed', 'attachment_urls_reused'):
                 value = report.get(key)
                 if isinstance(value, list) and len(value) == 2 and all(safe_count(x) is not None for x in value):
                     safe[key] = value
@@ -422,6 +422,7 @@ def main():
                           'legacy_paths_preserved': legacy_paths_preserved if seeded else None,
                           'files': len(current), 'fetched': [int(r['fetched']) for r in reports],
                           'written_or_changed': [int(r['written_or_changed']) for r in reports],
+                          'attachment_urls_reused': [int(r.get('attachment_urls_reused', 0)) for r in reports],
                           'identical_hashes_and_mtimes': unchanged, 'published': False,
                           **detail_evidence}))
         return 0 if unchanged else 1

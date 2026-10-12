@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from source_sync_assets import AssetError, AssetStore
+from source_sync_urls import read_previous, stabilize_attachment_urls
 from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
 from source_sync_store import write_if_changed as atomic_write
 from source_sync_sample import FixedSampleError, load_pair, validate_detail
@@ -608,6 +609,7 @@ def main(progress=None) -> int:
             assets_by_id[note_id_from(note)] = store.materialize(note)
             progress['assets_downloaded'] = len(store.memo)
     changed = 0
+    urls_reused = 0
     pending = []
     progress['stage'] = 'write'
     for note in details:
@@ -626,11 +628,16 @@ def main(progress=None) -> int:
         # infer incompleteness from cache absence or a particular heading style.
         if transcription_pending(note) and path.exists():
             continue
-        changed += write_if_changed(path, render_note(note, assets_by_id[nid], path))
+        manifest_path = STATE_DIR / "attachments" / (cache_id + ".json")
+        note, note_assets, reused = stabilize_attachment_urls(
+            note, assets_by_id[nid], read_previous(cache_path, ROOT),
+            read_previous(manifest_path, ROOT))
+        urls_reused += reused
+        changed += write_if_changed(path, render_note(note, note_assets, path))
         progress['written_or_changed'] = changed
         # Audio stays remote; downloaded images/files and raw descriptors stay private.
         write_if_changed(cache_path, json_text(note))
-        write_if_changed(STATE_DIR / "attachments" / (cache_id + ".json"), json_text(dict(attachment_manifest(note), assets=assets_by_id[nid])))
+        write_if_changed(manifest_path, json_text(dict(attachment_manifest(note), assets=note_assets)))
     if not args.dry_run and not args.metadata_only:
         progress['stage'] = 'receipt'
         write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
@@ -638,6 +645,7 @@ def main(progress=None) -> int:
         write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "scope": "sample" if args.sample else "full", "enumerated": len(details), "complete": not args.sample and not pending, "pending": len(pending)}))
     print(json.dumps({"scope": "sample" if args.sample else "full", "source_complete": not args.sample and not pending,
                       "sample_pages": read_pages, "fetched": len(details), "written_or_changed": changed,
+                      "attachment_urls_reused": urls_reused,
                       "pending": len(pending), "complete": not args.sample and not pending, "dry_run": args.dry_run}))
     return 2 if pending else 0
 

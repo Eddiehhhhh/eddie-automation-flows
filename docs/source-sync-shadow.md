@@ -62,9 +62,49 @@ On failure, the workflow now publishes a fixed `stage` and `error_code` plus bou
 Existing-pair runs also compare the two bounded raw-cache objects in memory. The
 public report includes only fixed field-group change counts, whether content and
 the original transcript stayed equal, and a count of audio URLs whose query alone
-changed. No URL, value, private field name, hash, ID or path is exposed. These
-diagnostics do not relax the exact hash-and-mtime acceptance test: URL refreshes
-and source edits still fail repeat acceptance until their semantics are resolved.
+changed. No URL, value, private field name, hash, ID or path is exposed. These diagnostics do not relax the exact hash-and-mtime acceptance test.
+Known signing refreshes are handled by the narrow retention policy below;
+unrecognized query changes and real source edits continue to fail repeat acceptance.
+
+### Expiring attachment links and exact repeats
+
+The [real parameter diagnostic](https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38260739263)
+confirmed one attachment `url` changed only `Expires` and `Signature`, with a
+stable `OSSAccessKeyId`, no unknown query keys, and at least one day of remaining
+validity. The three names and Unix-second expiry follow the
+[OSS V1 signed URL contract](https://www.alibabacloud.com/help/en/oss/developer-reference/ddd-signatures-to-urls).
+Public reports contain only allowlisted parameter names and coarse validity
+counts, never their values, hosts, paths or source IDs.
+
+`source_sync_urls.py` recognizes only credential-free HTTPS URLs containing
+exactly one of each of those three parameters. It never strips query parameters
+or reconstructs a URL. A previous complete URL is retained only when its exact
+location and signer match, it remains valid for more than 12 hours, the newly
+returned expiry is no earlier, every source field and attachment descriptor
+(including unknown fields, IDs and order) is otherwise identical, and the acquired
+asset results are identical. Unknown query parameters, other signing schemes,
+malformed or short-lived URLs are not normalized.
+
+Image/file acquisition always uses the newly returned URL before retention is
+considered. Changed bytes at the same location have a different content hash
+and cannot be hidden by URL retention. Audio/video remain link-only, so their
+binary contents are not verified; their source fields and descriptors must match.
+A signer, path, content, transcript, timestamp, descriptor or binary change adopts
+the complete fresh source response. At 12 hours remaining or less, the current
+URL replaces the prior one in Markdown, private raw-cache and private attachment
+manifest together. No stale URL is pinned indefinitely. Refresh requires another
+successful sync; this is not an always-live link service or evidence that an old
+signature has not been independently revoked.
+
+The private raw-cache is now a retained source snapshot: all source content is
+preserved, but an unexpired signing URL may come from a previous response under
+this policy. It is not an audit log of the latest transport/signature metadata.
+No extra private artifacts or URL maps are published. `attachment_urls_reused`
+reports per-pass bounded counts so a stable retained snapshot is not mistaken for
+proof that the source signing parameters themselves stayed identical. Exact
+whole-tree hash and mtime comparison, fixed-pair bounds and old-path checks remain
+unchanged. Expiry-driven refresh is intentional and may fail a repeat comparison
+if the refresh boundary is crossed between its two reads.
 
 The `full` workflow choice and `verify_shadow_repeat.py --full` remain available for future explicit full-library acceptance. They are never the default. Full mode still fails closed on incomplete pagination, malformed details, pending transcription or asset budgets; it does not publish. Full acceptance is separately limited to 55 minutes per command. A successful full shadow is still not a production cutover.
 
