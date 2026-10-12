@@ -96,6 +96,49 @@ attachment transfer, or destination publication/readback acceptance. The existin
 `full` mode still starts empty and lacks these migration guarantees; do not use it
 as evidence that the old vault has been safely migrated.
 
+### Pinned old-path map and a real binary sample
+
+`migration_check` is the bounded next gate after inventory, not a full migration.
+It pins the private repository commit, walks only the root/Raw/Get Git trees,
+and validates the Get tree and manifest using seven bounded metadata reads.
+Trees are capped at 6,000 entries and 256 MiB declared prior blob bytes, with
+2 MiB maximum tree/manifest responses (1 MiB for parent trees). Symlinks,
+submodules, unsafe paths, Unicode/case path aliases and missing indexed paths
+fail closed. Private object IDs and paths never reach the public report.
+
+Every existing Markdown path gets an explicitly synthetic placeholder in a
+temporary directory. The actual identity resolver must preserve all indexed API
+paths despite a changed candidate title/date and avoid overwriting occupied
+paths. Non-API IDs, missing-ID records and unindexed Markdown remain reserved.
+This tests the complete manifest-to-path mapping only: placeholders are not
+evidence that every real old Markdown header/body is valid or migrated.
+
+At most three indexed image-note candidates are inspected, then one selected
+note is read again: at most four Get detail calls, 2 MiB per response and 12 MiB
+aggregate response bytes including API-level retries. No list re-enumeration is
+needed. A candidate must have one or two supported image/file descriptors only.
+The selected real old Markdown is read at the pinned commit (2 MiB cap), checked
+against the Git blob hash/size and its actual identity header before replay.
+
+The binary check uses the production asset, URL-retention, Markdown and atomic
+storage helpers, not the full sync CLI. Each pass downloads fresh URLs with a
+2 MiB per-file / 4 MiB per-pass / two-asset ceiling. Two passes therefore permit
+at most 8 MiB of successful assets; three bounded transport attempts per asset
+bound body reads to 24 MiB plus 12 overflow-detection bytes. Existing per-attempt
+30-second limits and redirect/SSRF restrictions remain. The command stops after
+12 minutes. No audio/video bodies are downloaded. No new receipt or published
+watermark is written, and failed acquisition cannot change note/cache manifests.
+Successful assets are read back and checked for size/hash/MIME and rendered local
+links. Both whole temporary-tree hashes and mtimes must match on the repeat;
+all unselected placeholders must remain unchanged. Private temporary files are
+removed and only allowlisted aggregate evidence is emitted.
+
+Even success says `full_existing_body_replay: false`, `source_complete: false`
+and `published: false`. Full real-header/body replay, the inventory's absent old
+API identity, all source details, private destination readback and single-writer
+cutover remain separate gates. A failed bounded candidate must be diagnosed,
+not silently bypassed by an unbounded search or larger download.
+
 ### Expiring attachment links and exact repeats
 
 The [real parameter diagnostic](https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38260739263)
