@@ -169,7 +169,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
 
     for item in discovery["sources"]:
         source = item["path"]
-        if not item["exists"]:
+        if not item["exists"] or item.get("source_status") == "archive-only":
             continue
         source_path = ROOT / source.rstrip("/")
         source_candidates: list[Candidate] = []
@@ -202,6 +202,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
             "each discovered source is scanned recursively, so new files and subfolders under it are automatically included.",
             "Get voice/recorder candidates should be read before judging personal state.",
             "source_delta is read from the previous iteration-source-discovery snapshot when available.",
+            "archive-only retired sources remain discoverable but are excluded from active candidates.",
             "directory tree additions/removals are reported through source_delta as added_dirs and removed_dirs.",
         ],
     }
