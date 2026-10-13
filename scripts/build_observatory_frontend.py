@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -130,7 +131,16 @@ def resolve_path(target: str, current_dir: Path) -> Path | None:
 
 
 def path_to_uri(path: Path | None) -> str | None:
-    return path.as_uri() if path and path.exists() else None
+    if not path or not path.exists():
+        return None
+    resolved = path.resolve()
+    if resolved == OBS_ROOT or OBS_ROOT in resolved.parents:
+        relative = resolved.relative_to(OBS_ROOT).as_posix()
+    elif resolved == ROOT or ROOT in resolved.parents:
+        relative = '../' + resolved.relative_to(ROOT).as_posix()
+    else:
+        return None
+    return quote(relative, safe='/.-_')
 
 
 def parse_reference_item(raw: str, current_dir: Path) -> Reference:
@@ -287,7 +297,7 @@ def collect_entry(view: str, entry_dir: Path) -> dict:
             "title": tab_name,
             "display_title": TAB_DISPLAY[tab_name],
             "path": rel(file_path),
-            "uri": file_path.as_uri(),
+            "uri": path_to_uri(file_path),
             "frontmatter": frontmatter,
             "summary": summary,
             "sections": main_sections,
@@ -302,7 +312,7 @@ def collect_entry(view: str, entry_dir: Path) -> dict:
         "id": entry_dir.name,
         "label": entry_dir.name,
         "path": rel(entry_dir),
-        "uri": entry_dir.as_uri(),
+        "uri": path_to_uri(entry_dir),
         "updated_at": datetime.fromtimestamp(
             max((entry_dir / "个人状态.md").stat().st_mtime,
                 (entry_dir / "系统状态.md").stat().st_mtime,
@@ -349,7 +359,7 @@ def build_snapshot() -> dict:
             "current_period": entries[0]["id"],
             "current_uri": entries[0]["uri"],
             "entry_count": len(entries),
-            "entries": entries[:16],
+            "entries": entries,
         }
     return {
         "generated_at": derive_generated_at(views),
