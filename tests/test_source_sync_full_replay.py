@@ -40,7 +40,9 @@ class FullReplayTests(unittest.TestCase):
         def api(path, params, key, client, max_response_bytes=None, response_budget=None):
             if path == sync.LIST_PATH:
                 passes[0] += 1
-                return {'data': {'notes': [{'id':'1001'}, {'id':'1002'}], 'has_more':False}}
+                return {'data': {'notes': [
+                    {'id':'1001', 'updated_at':'2020-01-01T00:00:00Z'},
+                    {'id':'1002', 'updated_at':'2020-01-01T00:00:00Z'}], 'has_more':False}}
             value = note(params['id'])
             if params['id'] == '1001':
                 value['attachments'] = [{'type':'image','url':'https://example.com/PRIVATE.png'}]
@@ -80,6 +82,29 @@ class FullReplayTests(unittest.TestCase):
             work=Path(temp); root=self.seed(work)
             with self.assertRaisesRegex(replay.ReplayFailure,'repeat_changed'):
                 self.execute(root, work, changed=True)
+
+    def test_list_detail_version_mismatch_stops_before_any_note_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work=Path(temp); root=self.seed(work); before=snapshot(root)
+            def api(path, params, key, client, max_response_bytes=None, response_budget=None):
+                if path == sync.LIST_PATH:
+                    return {'data': {'notes': [
+                        {'id':'1001', 'updated_at':'2020-01-02T00:00:00Z'}],
+                        'has_more':False}}
+                return {'data': {'note':note('1001')}}
+            report={'segments_completed':0}
+            with patch.object(sync,'api_get',side_effect=api), \
+                    self.assertRaisesRegex(replay.ReplayFailure,'list_detail_mismatch'):
+                replay.one_pass(root, work/'checkpoint', 'KEY', 'CLIENT', report, lambda stage: None)
+            self.assertEqual(snapshot(root), before)
+
+    def test_missing_list_update_version_fails_closed(self):
+        with patch.object(sync,'fetch_note_pages',return_value=[(1,[{'id':'1001'}],False)]), \
+                self.assertRaisesRegex(replay.ReplayFailure,'list_detail_mismatch'):
+            replay.enumerate_ids('KEY','CLIENT',inventory.ResponseBudget(),{}, {})
+        safe=replay.safe_report({'error_code':'list_detail_mismatch','PRIVATE':'SECRET'})
+        self.assertEqual(safe['error_code'],'list_detail_mismatch')
+        self.assertNotIn('PRIVATE',json.dumps(safe))
 
     def test_asset_failure_keeps_old_notes_and_receipts_untouched(self):
         with tempfile.TemporaryDirectory() as temp:

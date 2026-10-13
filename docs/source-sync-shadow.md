@@ -253,6 +253,9 @@ its exact hash and mtime. That includes non-API, missing-ID, unenumerated, manua
 and old attachment files. New identities cannot take occupied paths. The entire second
 output tree must match first-pass hashes and mtimes exactly, with zero note writes.
 Real source edits are failures requiring diagnosis, never normalized into success.
+Each detail must also have the same `updated_at` value as its list entry. A missing
+list update value or a list/detail mismatch stops the replay before note writes;
+the public report exposes only `list_detail_mismatch`, never the value or note ID.
 
 Bounds are based on the observed 1,932 source IDs / 97 pages and 1,917 indexed prior
 API notes. Each pass permits at most 2,500 notes, 150 terminal-proven pages, 2 MiB per

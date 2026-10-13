@@ -35,7 +35,7 @@ SEGMENT = 64
 STAGES = ('snapshot', 'seed', 'list', 'detail', 'assets', 'write', 'preservation', 'compare')
 ERRORS = ('limit', 'source_failed', 'identity', 'unsupported_assets', 'asset_failed',
           'old_path_changed', 'old_file_changed', 'source_changed', 'repeat_changed',
-          'transcript_pending', 'unexpected', 'interrupted')
+          'transcript_pending', 'list_detail_mismatch', 'unexpected', 'interrupted')
 FLAGS = ('real_seed_verified', 'enumeration_complete', 'old_paths_preserved',
          'old_unselected_files_preserved', 'binary_readback_exact',
          'source_id_sets_equal', 'hashes_and_mtimes_equal')
@@ -112,7 +112,7 @@ def sync_paths(root):
             setattr(sync, name, value)
 
 
-def enumerate_ids(key, client, budget, report):
+def enumerate_ids(key, client, budget, report, versions=None):
     ids = []
     for page, batch, more in sync.fetch_note_pages(key, client, max_pages=MAX_PAGES,
             max_response_bytes=MAX_RESPONSE, response_budget=budget):
@@ -121,6 +121,11 @@ def enumerate_ids(key, client, budget, report):
             ident = detail_id(value)
             if not re.fullmatch(r'[0-9]{1,64}', ident):
                 raise ReplayFailure('identity')
+            if versions is not None:
+                updated = value.get('updated_at')
+                if not isinstance(updated, str) or not updated.strip():
+                    raise ReplayFailure('list_detail_mismatch')
+                versions[ident] = updated
             ids.append(ident)
             if len(ids) > MAX_NOTES:
                 raise ReplayFailure('limit')
@@ -130,7 +135,7 @@ def enumerate_ids(key, client, budget, report):
     return sorted(ids)
 
 
-def acquire_details(ids, key, client, pool, checkpoint, report):
+def acquire_details(ids, key, client, pool, checkpoint, report, versions=None):
     checkpoint.mkdir(parents=True)
     def fetch(ident):
         with pool.request() as budget:
@@ -140,6 +145,8 @@ def acquire_details(ids, key, client, pool, checkpoint, report):
         note = payload.get('note', payload)
         if detail_id(note) != ident or not isinstance(note.get('content'), str):
             raise ReplayFailure('identity')
+        if versions is not None and note.get('updated_at') != versions[ident]:
+            raise ReplayFailure('list_detail_mismatch')
         # Production downloader supports attachments; don't silently claim others.
         if any(note.get(k) for k in ('images', 'files', 'resources')):
             raise ReplayFailure('unsupported_assets')
@@ -193,10 +200,11 @@ def one_pass(root, checkpoint, key, client, report, stage, asset_fetch=None):
     pool = None
     try:
         stage('list')
-        ids = enumerate_ids(key, client, budget, report)
+        versions = {}
+        ids = enumerate_ids(key, client, budget, report, versions)
         pool = BytePool(MAX_API_BYTES, budget.used)
         stage('detail')
-        notes = acquire_details(ids, key, client, pool, checkpoint, report)
+        notes = acquire_details(ids, key, client, pool, checkpoint, report, versions)
         stage('assets')
         index = IdentityIndex(root, 'getnote', 'note_id')
         by_id = acquire_assets(root, notes, report, asset_fetch)
