@@ -43,6 +43,7 @@ class SourceRecord:
     path: str
     exists: bool
     registered: bool
+    source_status: str
     file_count: int
     markdown_file_count: int
     recent_mtime: str | None
@@ -63,11 +64,11 @@ def rel(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
-def read_registered_sources() -> set[str]:
+def read_registered_sources() -> dict[str, str]:
     if not REGISTRY.exists():
-        return set()
+        return {}
     text = REGISTRY.read_text(encoding="utf-8")
-    sources: set[str] = set()
+    sources: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line.startswith("- "):
@@ -78,7 +79,9 @@ def read_registered_sources() -> set[str]:
         raw = match.group(1).strip()
         if raw.startswith("Raw/") and raw.count("/") >= 2:
             parts = raw.rstrip("/").split("/")
-            sources.add("/".join(parts[:2]) + "/")
+            sources["/".join(parts[:2]) + "/"] = (
+                "archive-only" if "source_status=archive-only" in line else "active"
+            )
     return sources
 
 
@@ -106,7 +109,7 @@ def is_state_file(path: Path) -> bool:
     return any(part in STATE_DIR_HINTS for part in path.parts)
 
 
-def build_record(raw_path: str, registered: bool) -> SourceRecord:
+def build_record(raw_path: str, registered: bool, source_status: str = "active") -> SourceRecord:
     abs_path = ROOT / raw_path.rstrip("/")
     files = list(iter_files(abs_path)) if abs_path.exists() else []
     markdown_files = [p for p in files if p.suffix.lower() == ".md"]
@@ -125,6 +128,8 @@ def build_record(raw_path: str, registered: bool) -> SourceRecord:
         notes.append("historical_snapshot: sync workflow is documented as stopped")
     if raw_path == "Raw/05 Chat/":
         notes.append("iteration_runtime_evidence: contains decisions, fixes, and prior outputs")
+    if source_status == "archive-only":
+        notes.append("source_retired: historical lookup only; excluded from active iteration")
     if abs_path.exists() and files and not markdown_files:
         notes.append("auxiliary_only: no markdown corpus yet, keep out of iteration warnings")
 
@@ -132,6 +137,7 @@ def build_record(raw_path: str, registered: bool) -> SourceRecord:
         path=raw_path,
         exists=abs_path.exists(),
         registered=registered,
+        source_status=source_status,
         file_count=len(files),
         markdown_file_count=len(markdown_files),
         recent_mtime=(
@@ -148,11 +154,13 @@ def build_record(raw_path: str, registered: bool) -> SourceRecord:
 def discover(previous: dict | None = None) -> dict:
     registered = read_registered_sources()
     actual = list_raw_sources()
-    all_sources = sorted(registered | actual)
-    records = [build_record(src, src in registered) for src in all_sources]
+    all_sources = sorted(set(registered) | actual)
+    records = [build_record(src, src in registered, registered.get(src, "active")) for src in all_sources]
 
-    registered_existing = [r.path for r in records if r.registered and r.exists]
-    registered_missing = [r.path for r in records if r.registered and not r.exists]
+    registered_existing = [r.path for r in records if r.registered and r.exists and r.source_status == "active"]
+    registered_missing = [r.path for r in records if r.registered and not r.exists and r.source_status == "active"]
+    archive_only_existing = [r.path for r in records if r.registered and r.exists and r.source_status == "archive-only"]
+    archive_only_missing = [r.path for r in records if r.registered and not r.exists and r.source_status == "archive-only"]
     unregistered_existing = [
         r.path
         for r in records
@@ -181,6 +189,8 @@ def discover(previous: dict | None = None) -> dict:
         "summary": {
             "registered_existing": registered_existing,
             "registered_missing": registered_missing,
+            "archive_only_existing": archive_only_existing,
+            "archive_only_missing": archive_only_missing,
             "unregistered_existing": unregistered_existing,
             "auxiliary_unregistered": auxiliary_unregistered,
             "source_count": len(records),
@@ -255,6 +265,8 @@ def render_markdown(data: dict) -> str:
         "",
         f"- registered_existing: {len(data['summary']['registered_existing'])}",
         f"- registered_missing: {len(data['summary']['registered_missing'])}",
+        f"- archive_only_existing: {len(data['summary'].get('archive_only_existing', []))}",
+        f"- archive_only_missing: {len(data['summary'].get('archive_only_missing', []))}",
         f"- unregistered_existing: {len(data['summary']['unregistered_existing'])}",
         f"- tree_path_count: {data['summary'].get('tree_path_count', 0)}",
         "",
@@ -265,6 +277,8 @@ def render_markdown(data: dict) -> str:
         flags = []
         if item["registered"]:
             flags.append("registered")
+        if item.get("source_status") == "archive-only":
+            flags.append("archive-only")
         if item["exists"]:
             flags.append("exists")
         lines.append(
