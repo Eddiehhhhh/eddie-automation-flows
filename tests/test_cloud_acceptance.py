@@ -57,6 +57,38 @@ class HealthContractTests(unittest.TestCase):
         self.write('Raw/00 Meta/hermes-runtime-state.json', {'status': 'disabled_by_owner'})
         self.assertEqual(a.health(self.root, self.now)['hermes_policy'], 'disabled_by_owner')
 
+    def test_getnote_requires_specialized_zero_gap_proof(self):
+        proof = {'status': 'ok', 'checked_at': '2026-10-12T14:30:00+08:00',
+                 'state_error': None, 'last_sync_failed_count': 0,
+                 'cached_remote_missing_local_count': 0, 'local_duplicate_note_id_count': 0,
+                 'local_duplicate_extra_file_count': 0}
+        self.write('Raw/03 Get/03 State/sync-health.json', proof)
+        self.assertEqual(a.health(self.root, self.now)['getnote_sync'], 'healthy')
+        proof['cached_remote_missing_local_count'] = 1
+        self.write('Raw/03 Get/03 State/sync-health.json', proof)
+        self.assertEqual(a.health(self.root, self.now)['getnote_sync'], 'blocked')
+        proof['cached_remote_missing_local_count'] = 0
+        proof['checked_at'] = '2026-10-11T14:30:00+08:00'
+        self.write('Raw/03 Get/03 State/sync-health.json', proof)
+        self.assertEqual(a.health(self.root, self.now)['getnote_sync'], 'blocked')
+
+    def test_candidate_evidence_reads_full_bodies_and_blocks_escaping_paths(self):
+        self.write('Raw/01 Flomo/one.md', 'private one')
+        self.write('Raw/01 Flomo/two.md', 'private one')
+        items = [{'path': 'Raw/01 Flomo/one.md', 'evidence_field': 'created_at'},
+                 {'path': 'Raw/01 Flomo/two.md', 'evidence_field': 'mtime_weak'}]
+        evidence = a.candidate_evidence(self.root, {'candidates': items, 'counts': {'total_candidates': 2}})
+        self.assertEqual(evidence['files_read'], 2)
+        self.assertEqual(evidence['exact_body_duplicates'], 1)
+        self.assertEqual(evidence['weak_date_candidates'], 1)
+        self.assertNotIn('private one', json.dumps(evidence))
+        self.write('Raw/01 Flomo/two.md', 'private two')
+        self.assertNotEqual(evidence['evidence_digest'], a.candidate_evidence(self.root,
+            {'candidates': items, 'counts': {'total_candidates': 2}})['evidence_digest'])
+        items[0]['path'] = '../outside.md'
+        with self.assertRaisesRegex(ValueError, 'Invalid candidate'):
+            a.candidate_evidence(self.root, {'candidates': items, 'counts': {'total_candidates': 2}})
+
     def valid_report_state(self):
         self.write('Raw/09 ChatGPT/_daily-promotion-state.json', {
             'runs': {self.day: {'effective_status': 'success'}},
@@ -92,10 +124,12 @@ class HealthContractTests(unittest.TestCase):
         self.write('.gitignore', 'ignored/\n')
         self.write('ignored/private.txt', 'original')
         summary = {'audit': {'counts': {'total_candidates': 0, 'high_priority_candidates': 0}},
-                   'period': {'label': '2026-W41'}}
+                   'period': {'label': '2026-W41', 'window_end': '2026-10-11'}}
         def pipeline(*args, **kwargs):
-            self.write('ignored/private.txt', 'changed')
-            return SimpleNamespace(stdout=json.dumps(summary))
+            if 'run_iteration_pipeline.py' in str(args[0]):
+                self.write('ignored/private.txt', 'changed')
+                return SimpleNamespace(stdout=json.dumps(summary))
+            return SimpleNamespace(stdout=json.dumps({'candidates': [], 'counts': {'total_candidates': 0}}))
         with tempfile.TemporaryDirectory() as output, mock.patch.object(sys, 'argv',
                 ['cloud_acceptance.py', '--vault', str(self.root), '--output', str(Path(output)/'result.json')]), \
                 mock.patch.object(a, 'git', side_effect=[self.sha, '', '']), \
