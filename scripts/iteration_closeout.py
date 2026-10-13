@@ -1205,27 +1205,10 @@ def promote_selected_themes(
     exact_entries: dict[str, list[Entry]],
     observatory_paths: list[str],
 ) -> list[str]:
-    if not selected_themes:
-        return []
-    source_support = theme_source_support(exact_entries)
-    exact_support = theme_exact_support(exact_entries)
-    observatory_ref = quote_path(observatory_paths[-1])
-    all_exact_entries = [entry for entries in exact_entries.values() for entry in entries]
-    written: list[str] = []
-    for theme in selected_themes:
-        if len(source_support.get(theme.key, set())) < 2:
-            continue
-        if exact_support.get(theme.key, 0) < 2:
-            continue
-        seed_paths = gather_seed_paths(all_exact_entries, theme.key, limit=3)
-        block = build_promotion_block(mode, period, theme, seed_paths, observatory_ref)
-        if not block:
-            continue
-        page_path, lines = block
-        refs = [quote_path(path) for path in seed_paths] + [observatory_ref]
-        upsert_managed_period_block(page_path, period["label"], lines, refs)
-        written.append(rel(page_path))
-    return written
+    # Evidence volume and source count do not authorize stable personal facts.
+    # The closeout may propose candidates, but Wiki writes require a separate
+    # confirmed-fact transaction with exact destination revision checks.
+    return []
 
 
 def chat_path_for(mode: str, period: dict[str, str]) -> Path:
