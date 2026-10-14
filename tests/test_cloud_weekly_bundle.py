@@ -11,9 +11,217 @@ sys.path.insert(0, str(SCRIPTS))
 import cloud_weekly_bundle as bundle
 import iteration_closeout as closeout
 import build_observatory_frontend as frontend
+import iteration_source_discovery as discovery_module
+import iteration_incremental_audit as audit_module
 
 
 class CloudWeeklyBoundaryTests(unittest.TestCase):
+    def test_candidate_identity_ignores_source_snapshot_and_never_writes_wiki(self):
+        item = {"kind": "wiki", "target_path": "Wiki/05 Themes/example.md",
+                "proposed_text": "\n## Point\n", "source_refs": ["Raw/03 Get/source.md"]}
+        first = bundle.knowledge_candidate(item, "a" * 40)
+        second = bundle.knowledge_candidate(item, "b" * 40)
+        self.assertEqual(first["candidate_id"], second["candidate_id"])
+        self.assertNotEqual(first["source_sha"], second["source_sha"])
+        self.assertFalse(hasattr(bundle, "execute_approved_knowledge"))
+        self.assertFalse(hasattr(bundle, "prepare_knowledge_manifest"))
+        with self.assertRaisesRegex(ValueError, "Invalid knowledge target"):
+            bundle.knowledge_candidate({**item, "kind": "skill", "target_path": "Schema/Skills/example.md"}, "a")
+
+    def test_same_day_source_change_and_empty_input_preserve_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = "Raw/05 Chat/2026-10-14-艾迪宇宙每周迭代-2026-W41.md"
+            item = bundle.knowledge_candidate({"kind": "question", "target_path": "Wiki/07 Questions/待澄清.md",
+                "proposed_text": "\n## Question\n", "source_refs": ["Raw/03 Get/source.md"]}, "a" * 40)
+            bundle.append_weekly_receipt(root, path, "- run_key: `one`\n", [item], "2026-W41", "one")
+            receipt = root / path
+            original = receipt.read_bytes() + b"\n```weekly-knowledge-result-v1\n{\"status\":\"completed\"}\n```\n"
+            receipt.write_bytes(original)
+            bundle.append_weekly_receipt(root, path, "- run_key: `two`\n", [
+                bundle.knowledge_candidate({key: item[key] for key in
+                    ("kind", "target_path", "proposed_text", "source_refs")}, "b" * 40)], "2026-W41", "two")
+            self.assertTrue(receipt.read_bytes().startswith(original))
+            self.assertEqual(len(bundle.read_knowledge_candidates(root, "2026-W41")), 1)
+            after = receipt.read_bytes()
+            bundle.append_weekly_receipt(root, path, "- run_key: `two`\n", [], "2026-W41", "two")
+            self.assertEqual(receipt.read_bytes(), after)
+
+    def test_cross_day_and_cross_week_pending_candidates_remain_readable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            item = bundle.knowledge_candidate({"kind": "wiki", "target_path": "Wiki/topic.md",
+                "proposed_text": "\nPoint\n", "source_refs": ["Raw/source.md"]}, "a")
+            old = "Raw/05 Chat/2026-10-14-艾迪宇宙每周迭代-2026-W41.md"
+            bundle.append_weekly_receipt(root, old, "- run_key: `old`\n", [item], "2026-W41", "old")
+            self.assertEqual(bundle.weekly_receipt_path(root, "2026-W41", "2026-10-15"), old)
+            new = bundle.weekly_receipt_path(root, "2026-W42", "2026-10-21")
+            bundle.append_weekly_receipt(root, new, "- run_key: `new`\n", [], "2026-W42", "new")
+            self.assertEqual(len(bundle.read_knowledge_candidates(root)), 1)
+            self.assertEqual(bundle.read_knowledge_candidates(root)[0]["receipt_path"], old)
+
+    def test_jsonl_preserves_prefix_and_appends_only_five_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            index = root / "Raw/05 Chat/_index.jsonl"
+            index.parent.mkdir(parents=True)
+            old = b'{"ts":"old","agent":"x","action":"chat_saved","target":"other","summary":"old","run_key":"legacy"}\n'
+            index.write_bytes(old)
+            row = {"ts": "new", "agent": "Codex", "action": "chat_saved", "target": "new", "summary": "new"}
+            bundle.add_jsonl(root, "Raw/05 Chat/_index.jsonl", row, "ignored")
+            self.assertTrue(index.read_bytes().startswith(old))
+            self.assertEqual(set(json.loads(index.read_bytes().splitlines()[-1])), bundle.INDEX_FIELDS)
+            bundle.add_jsonl(root, "Raw/05 Chat/_index.jsonl", row, "different")
+            self.assertEqual(len(index.read_bytes().splitlines()), 2)
+            with self.assertRaisesRegex(ValueError, "exactly five"):
+                bundle.add_jsonl(root, "Raw/05 Chat/_index.jsonl", {**row, "run_key": "bad"}, "bad")
+
+    def test_produce_rerun_preserves_actual_results_and_old_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            period = "2026-W41"
+            receipt_path = f"Raw/05 Chat/2026-10-13-艾迪宇宙每周迭代-{period}.md"
+            item = bundle.knowledge_candidate({"kind": "wiki", "target_path": "Wiki/topic.md",
+                "proposed_text": "\nPoint\n", "source_refs": ["Raw/source.md"]}, "a" * 40)
+            bundle.append_weekly_receipt(root, receipt_path, "- run_key: `old`\n", [item], period, "old")
+            receipt = root / receipt_path
+            original = receipt.read_bytes() + b"\n## Confirmed knowledge result\ncompleted\n"
+            receipt.write_bytes(original)
+            for relative in ("Observatory/索引.md", "Observatory/weekly/索引.md", "Observatory/weekly/2026/索引.md"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Index\n")
+            for relative, value in (("Raw/00 Meta/iteration-weekly-latest.json", {"period": {"label": period}}),
+                                    ("Raw/00 Meta/iteration-weekly-closeout-latest.json",
+                                     {"period": period, "actual_wiki_updates": ["Wiki/topic.md"],
+                                      "knowledge_results": [{"status": "completed"}]}),
+                                    ("Raw/00 Meta/system4-acceptance.json",
+                                     {"daily": {"ready": False}, "weekly": {"start": period, "through": period,
+                                      "required": 1, "max_streak": 0, "weeks": {}}})):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value))
+            pages = {"period": period, "window_end": "2026-10-11", "tabs": {
+                name: f"date: {period}\n## 标签\n## 引用文章\n" for name in bundle.TABS},
+                "wiki_candidates": [], "skill_candidates": [], "confirmed_facts": [], "knowledge_candidates": []}
+            snapshot = {"views": {name: {"current_period": period if name == "weekly" else None, "entries": []}
+                                  for name in ("daily", "weekly", "monthly")}}
+            discovery = {"summary": {"registered_missing": [], "unregistered_existing": []}}
+            audit = {"counts": {"total_candidates": 0}, "candidates": []}
+            completeness = {"status": "complete", "gaps": [], "read_count": 0,
+                            "registered_examined": 0, "registered_total": 0,
+                            "synthesis_reference": "review", "semantic_review_run_id": "run", "selected_count": 0}
+            for source in ("b" * 40, "c" * 40):
+                with mock.patch.object(bundle, "git", side_effect=lambda _, *args: source if args[0] == "rev-parse" else ""), \
+                     mock.patch.object(discovery_module, "DEFAULT_OUTPUT", root / "missing.json"), \
+                     mock.patch.object(discovery_module, "discover", return_value=discovery), \
+                     mock.patch.object(audit_module, "audit", return_value=audit), \
+                     mock.patch.object(bundle, "validate_evidence", return_value=completeness), \
+                     mock.patch.object(frontend, "build_snapshot", return_value=snapshot), \
+                     mock.patch.object(frontend, "write_outputs"), \
+                     mock.patch.object(bundle, "verify_existing", return_value={"changed_count": 0}):
+                    bundle.produce(root, source, pages, "2026-10-14")
+            self.assertTrue(receipt.read_bytes().startswith(original))
+            self.assertEqual(len(bundle.read_knowledge_candidates(root, period)), 1)
+            closeout = json.loads((root / "Raw/00 Meta/iteration-weekly-closeout-latest.json").read_text())
+            self.assertEqual(closeout["actual_wiki_updates"], ["Wiki/topic.md"])
+            self.assertEqual(closeout["knowledge_results"], [{"status": "completed"}])
+            self.assertEqual(closeout["chat_record"], receipt_path)
+            latest_path = root / "Raw/00 Meta/iteration-weekly-latest.json"
+            later = json.loads(latest_path.read_text())
+            later["period"]["label"] = "2026-W42"
+            latest_path.write_text(json.dumps(later))
+            with mock.patch.object(bundle, "git", side_effect=lambda _, *args: "d" * 40 if args[0] == "rev-parse" else ""):
+                with self.assertRaisesRegex(ValueError, "Older week"):
+                    bundle.produce(root, "d" * 40, pages, "2026-10-14")
+            later["period"]["label"] = period
+            latest_path.write_text(json.dumps(later))
+            closeout["period"] = "2026-W40"
+            (root / "Raw/00 Meta/iteration-weekly-closeout-latest.json").write_text(json.dumps(closeout))
+            with mock.patch.object(bundle, "git", side_effect=lambda _, *args: "d" * 40 if args[0] == "rev-parse" else ""):
+                with self.assertRaisesRegex(ValueError, "period mismatch"):
+                    bundle.produce(root, "d" * 40, pages, "2026-10-14")
+
+    def test_same_run_key_cannot_reset_published_acceptance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            period, source = "2026-W41", "a" * 40
+            run_key = hashlib.sha256(f"weekly:{period}:{source}:cloud".encode()).hexdigest()
+            latest = root / "Raw/00 Meta/iteration-weekly-latest.json"
+            latest.parent.mkdir(parents=True)
+            latest.write_text(json.dumps({"period": {"label": period}, "run_key": run_key,
+                                          "production_publish": "remote_and_mobile_verified"}))
+            closeout = root / "Raw/00 Meta/iteration-weekly-closeout-latest.json"
+            closeout.write_text(json.dumps({"period": period, "run_key": run_key,
+                                            "production_acceptance": {"natural_run_id": "real-run"}}))
+            receipt = root / f"Raw/05 Chat/2026-10-14-艾迪宇宙每周迭代-{period}.md"
+            receipt.parent.mkdir(parents=True)
+            receipt.write_text("# Original\n## Verified\n")
+            before = {path: path.read_bytes() for path in (latest, closeout, receipt)}
+            pages = {"period": period, "window_end": "2026-10-11", "tabs": {
+                name: f"date: {period}\n## 标签\n## 引用文章\n" for name in bundle.TABS}}
+            with mock.patch.object(bundle, "git", side_effect=lambda _, *args: source if args[0] == "rev-parse" else ""):
+                with self.assertRaisesRegex(ValueError, "already published"):
+                    bundle.produce(root, source, pages, "2026-10-14")
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_untrusted_receipt_paths_fail_before_verify_or_acceptance_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            period, run_date, source = "2026-W41", "2026-10-14", "a" * 40
+            run_key = hashlib.sha256(f"weekly:{period}:{source}:cloud".encode()).hexdigest()
+            latest_path = root / "Raw/00 Meta/iteration-weekly-latest.json"
+            closeout_path = root / "Raw/00 Meta/iteration-weekly-closeout-latest.json"
+            system_path = root / "Raw/00 Meta/system4-acceptance.json"
+            latest_path.parent.mkdir(parents=True)
+            system_path.write_text("{}")
+            acceptance = {"remote_commit": "b" * 40, "remote_checked_at": "time",
+                "mobile_result_url": "https://example.invalid", "mobile_checked_at": "time",
+                "natural_run_id": "natural", "source_sha": source, "run_key": run_key}
+            paths = ("/tmp/other.md", "Raw/05 Chat/../other.md",
+                     "Raw/05 Chat/2026-10-14-艾迪宇宙每周迭代-2026-W40.md",
+                     "Raw/05 Chat/not-a-date-艾迪宇宙每周迭代-2026-W41.md")
+            for malicious in paths:
+                with self.subTest(malicious=malicious):
+                    latest_path.write_text(json.dumps({"period": {"label": period}, "run_key": run_key,
+                                                       "chat_record": malicious}))
+                    closeout_path.write_text(json.dumps({"period": period, "run_key": run_key,
+                                                         "chat_record": malicious,
+                                                         "source_completeness": "complete", "source_gaps": []}))
+                    before = {path: path.read_bytes() for path in (latest_path, closeout_path, system_path)}
+                    with mock.patch.object(bundle, "changed_paths", return_value=set()):
+                        with self.assertRaisesRegex(ValueError, "weekly receipt"):
+                            bundle.verify_existing(root, period, run_date, run_key)
+                    with mock.patch.object(bundle, "git", side_effect=lambda _, *args: "b" * 40 if args[0] == "rev-parse" else ""):
+                        with self.assertRaisesRegex(ValueError, "weekly receipt"):
+                            bundle.record_acceptance(root, source, {"period": period}, run_date, acceptance)
+                    self.assertEqual({path: path.read_bytes() for path in before}, before)
+            external = root / "elsewhere.md"
+            external.write_text("untouched")
+            canonical = root / f"Raw/05 Chat/{run_date}-艾迪宇宙每周迭代-{period}.md"
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical.symlink_to(external)
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                bundle.validate_weekly_receipt_path(root, canonical.relative_to(root).as_posix(), period)
+            latest_path.write_text(json.dumps({"period": {"label": period}, "run_key": run_key,
+                                               "chat_record": canonical.relative_to(root).as_posix()}))
+            closeout_path.write_text(json.dumps({"period": period, "run_key": run_key,
+                                                 "chat_record": canonical.relative_to(root).as_posix(),
+                                                 "source_completeness": "complete", "source_gaps": []}))
+            with mock.patch.object(bundle, "changed_paths", return_value=set()):
+                with self.assertRaisesRegex(ValueError, "escapes"):
+                    bundle.verify_existing(root, period, run_date, run_key)
+            with mock.patch.object(bundle, "git", side_effect=lambda _, *args: "b" * 40 if args[0] == "rev-parse" else ""):
+                with self.assertRaisesRegex(ValueError, "escapes"):
+                    bundle.record_acceptance(root, source, {"period": period}, run_date, acceptance)
+            self.assertEqual(external.read_text(), "untouched")
+            linked_root = root / "linked-checkout"
+            linked_root.mkdir()
+            (linked_root / "Raw").symlink_to(root / "Raw", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                bundle.validate_weekly_receipt_path(linked_root,
+                    f"Raw/05 Chat/{run_date}-艾迪宇宙每周迭代-{period}.md", period)
+
     def test_weekly_bundle_has_only_approved_sixteen_paths(self):
         paths = bundle.allowed_paths("2026-W41", "2026-10-14")
         self.assertEqual(len(paths), 16)
