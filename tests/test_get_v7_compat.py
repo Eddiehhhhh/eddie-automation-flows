@@ -12,6 +12,18 @@ class V7(unittest.TestCase):
         self.state={'notesByCanonicalId':{'api:11':{'updatedAt':self.ms,'filePath':'old/location.md','deleted':True,'fingerprint':'old'}}}
         self.mirror={'source_id':'11','path':'Raw/03 Get/03 纯文本记录/existing.md','exists':True,'updated_at':self.iso}
     def run_case(self):return recover_unchanged(self.summary,self.state,[self.mirror],1234)
+    def test_legacy_get_civil_time_contract_exactly_plus_eight(self):
+        value='2026-10-14 19:10:33'
+        self.assertEqual(timestamp_ms(value),self.ms)
+        self.assertEqual(timestamp_ms('  '+value+'  '),self.ms)
+        self.assertEqual(timestamp_format(value),'list_time_naive')
+        self.summary['updated_at']=value
+        self.assertEqual(self.run_case()['decision'],'skip')
+    def test_legacy_civil_time_rejects_other_formats_and_invalid_calendar(self):
+        for value in ('2026-10-14T19:10:33','2026-10-14','2026-1-04 19:10:33','2026-02-30 19:10:33',
+                      '2026-10-14 24:00:00','2026-10-14 19:10:60','2026-10-14 19:10:33.123'):
+            self.assertIsNone(timestamp_ms(value))
+        self.assertEqual(timestamp_ms('2024-02-29 00:00:00'),timestamp_ms('2024-02-29T00:00:00+08:00'))
     def test_numeric_seconds_milliseconds_and_strings_equal_iso(self):
         for value in (self.ms,self.ms/1000,str(self.ms),str(self.ms/1000)):
             self.assertEqual(timestamp_ms(value),self.ms)
@@ -21,9 +33,9 @@ class V7(unittest.TestCase):
         for value in (True,False,0,-1,float('nan'),float('inf'),'NaN','Infinity','1e999',1e30,{},[]):
             self.assertIsNone(timestamp_ms(value))
     def test_naive_remains_unknown_with_fixed_diagnostic(self):
-        self.assertIsNone(timestamp_ms('2026-04-23 18:29:55'))
-        self.assertEqual(timestamp_error('2026-04-23 18:29:55'),'list_version_timezone_missing')
-        self.assertEqual(timestamp_format('2026-04-23 18:29:55'),'list_time_naive')
+        self.assertIsNone(timestamp_ms('2026-04-23T18:29:55'))
+        self.assertEqual(timestamp_error('2026-04-23T18:29:55'),'list_version_timezone_missing')
+        self.assertEqual(timestamp_format('2026-04-23T18:29:55'),'list_time_naive')
     def test_matches_original_v7_skip_and_rebind(self):
         result=self.run_case();self.assertEqual(result['decision'],'skip')
         entry=result['state']['notesByCanonicalId']['api:11']

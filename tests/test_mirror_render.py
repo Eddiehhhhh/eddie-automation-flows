@@ -28,9 +28,21 @@ class RenderTests(unittest.TestCase):
    content,fields=render(self.note,[],Path('x.md'))
    self.assertEqual(fields['created_at'],value)
  def test_updated_naive_still_fails_before_renderer(self):
-  self.note['updated_at']='2026-04-23 18:29:55';before=snapshot(self.root)
+  self.note['updated_at']='2026-04-23T18:29:55';before=snapshot(self.root)
   with self.assertRaisesRegex(ParityFailure,'list_version_timezone_missing'):self.run_replay()
   self.assertEqual(snapshot(self.root),before);self.assertEqual(self.calls,[])
+ def test_legacy_naive_new_and_changed_two_passes(self):
+  self.note['updated_at']='2026-10-13 08:00:00'
+  result=self.run_replay()
+  self.assertEqual(result['first']['written_or_changed'],1)
+  self.assertEqual(result['second']['fresh_details'],0)
+  path=self.root/'03 纯文本记录'/'New title.md'
+  self.assertIn('2026-10-13T08:00:00+08:00',path.read_text())
+  self.note['updated_at']='2026-10-14 08:00:00';self.note['content']='changed text'
+  result=self.run_replay()
+  self.assertEqual(result['first']['written_or_changed'],1)
+  self.assertEqual(result['second']['fresh_details'],0)
+  self.assertIn('changed text',path.read_text())
  def test_numeric_new_with_existing_iso_manifest_two_passes(self):
   path=self.root/'legacy.md';path.write_text('old legacy')
   state=self.root/'03 State';state.mkdir()

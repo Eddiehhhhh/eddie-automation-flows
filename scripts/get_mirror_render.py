@@ -41,10 +41,14 @@ def destination(root,note,old_path=None):
  if (root/path).exists():raise ValueError('destination_collision')
  return path
 
-def render_time(value):
+def render_time(value, canonical_naive=False):
  # Existing ISO bytes stay unchanged. Numeric API epochs use the established
  # +08:00 frontmatter representation, without guessing any naive timezone.
  if value is None or value=='':return ''
+ if canonical_naive and isinstance(value,str) and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}',value.strip()):
+  ms=timestamp_ms(value)
+  if ms is None:raise ValueError('invalid_detail_time')
+  return dt.datetime.fromtimestamp(ms/1000,dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='seconds')
  if isinstance(value,str) and not re.fullmatch(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?',value.strip()):return value
  ms=timestamp_ms(value)
  if ms is None:raise ValueError('invalid_detail_time')
@@ -60,7 +64,7 @@ def render(note,assets,path):
  web=note.get('web_page') or {};web=web if isinstance(web,dict) else {}
  weburl=web.get('url') or (links[0] if links else '')
  fields={'source_system':'getnote','note_id':ident,'title':title_for(note),'note_type':kind,
-  'source':note.get('source') or '', 'created_at':render_time(note.get('created_at')), 'updated_at':render_time(note.get('updated_at')),
+  'source':note.get('source') or '', 'created_at':render_time(note.get('created_at')), 'updated_at':render_time(note.get('updated_at'),canonical_naive=True),
   'tags':names(note.get('tags')),'topics':names(note.get('topics')),'is_child_note':bool(note.get('is_child_note')),
   'parent_id':str(note.get('parent_id') or ''),'children_ids':[str(v) for v in note.get('children_ids') or []],
   'share_id':str(note.get('share_id') or ''),'web_url':weburl,'web_domain':urlsplit(weburl).netloc,

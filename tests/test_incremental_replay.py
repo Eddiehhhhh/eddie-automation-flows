@@ -18,6 +18,19 @@ class ReplayTests(unittest.TestCase):
   self.calls=[]
  def detail(self,ident):
   self.calls.append(ident);return deepcopy(self.summary)
+ def test_legacy_naive_cold_adopts_aware_mirror_then_zero_details(self):
+  self.summary['updated_at']='2026-10-12 08:00:00';before=r.snapshot(self.root)
+  result=r.replay(self.root,self.list,self.detail)
+  self.assertEqual(result['first']['adopted_after_detail'],1)
+  self.assertEqual(result['first']['list_time_naive'],1)
+  self.assertEqual(result['second']['cached_skipped'],1)
+  self.assertEqual(result['second']['fresh_details'],0)
+  self.assertEqual(r.snapshot(self.root),before)
+ def test_legacy_naive_wrong_detail_version_still_fails(self):
+  self.summary['updated_at']='2026-10-12 08:00:00';before=r.snapshot(self.root)
+  with self.assertRaisesRegex(r.ParityFailure,'source_changed_during_pass'):
+   r.replay(self.root,self.list,lambda _:dict(self.summary,updated_at='2026-10-12 08:00:02'))
+  self.assertEqual(r.snapshot(self.root),before)
  def test_numeric_list_and_detail_adopt_then_skip_aware_mirror(self):
   self.summary['updated_at']=1791763200
   result=r.replay(self.root,self.list,self.detail)
@@ -25,7 +38,7 @@ class ReplayTests(unittest.TestCase):
   self.assertEqual(result['second']['fresh_details'],0)
  def test_format_distribution_survives_list_version_failure(self):
   from source_sync_mirror_replay import safe_report
-  values=['2026-04-23 18:29:55',1791763200,'2026-10-12T00:00:00Z',None,True,'bad']
+  values=['2026-04-23T18:29:55',1791763200,'2026-10-12T00:00:00Z',None,True,'bad']
   summaries=[{'id':str(i+1),'updated_at':v} for i,v in enumerate(values)]
   progress=[]
   with self.assertRaisesRegex(r.ParityFailure,'list_version_timezone_missing'):

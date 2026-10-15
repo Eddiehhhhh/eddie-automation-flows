@@ -5,7 +5,7 @@ the existing plugin state and real mirror evidence. Source list freshness and
 authenticated execution approval are external responsibilities.
 """
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import PurePosixPath
 import math
 import re
@@ -26,10 +26,11 @@ def note_identity(note):
     return ident
 
 def timestamp_ms(value):
-    """v7 numeric seconds/milliseconds and explicit-zone ISO source timestamps.
+    """v7 numeric/ISO plus the existing Get v2 Shanghai civil-time contract.
 
     Numeric threshold is the original common.ts toTimestamp contract. Never
-    interpret timezone-free calendar text using the runner's local timezone.
+    use the runner's timezone. Only the legacy exact space-separated format
+    has an explicit +08:00 interpretation; other naive text stays unknown.
     """
     if isinstance(value,bool):return None
     numeric=isinstance(value,(int,float))
@@ -46,6 +47,15 @@ def timestamp_ms(value):
             return result
         except (ValueError,OverflowError,OSError):return None
     if not isinstance(value,str) or not value:return None
+    # Existing private Get v2 migration's explicit API->frontmatter contract:
+    # exactly YYYY-MM-DD HH:MM:SS is Shanghai civil time (+08:00).
+    # This does not infer the original JS runtime TZ or other naive formats.
+    if re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}',value):
+        try:
+            parsed=datetime.strptime(value,'%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone(timedelta(hours=8)))
+            result=parsed.timestamp()*1000
+            return result if result>0 else None
+        except (ValueError,OverflowError):return None
     try:
         parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
         if parsed.tzinfo is None:return None
@@ -66,6 +76,7 @@ def timestamp_error(value):
 
 def timestamp_format(value):
     if timestamp_ms(value) is not None:
+        if isinstance(value,str) and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}',value.strip()):return 'list_time_naive'
         if isinstance(value,(int,float)) or (isinstance(value,str) and re.fullmatch(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?',value.strip())):
             return 'list_time_epoch'
         return 'list_time_aware'
