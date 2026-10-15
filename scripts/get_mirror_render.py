@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import urlsplit,quote
-from get_v7_compat import api_id
+from get_v7_compat import api_id, timestamp_ms
 
 CATEGORIES={'audio':'01 语音记录','plain_text':'03 纯文本记录','link':'04 链接同步摘抄',
  'img_text':'05 图片笔记','recorder_audio':'99 录音卡笔记','recorder_flash_audio':'99 录音卡笔记'}
@@ -41,6 +41,15 @@ def destination(root,note,old_path=None):
  if (root/path).exists():raise ValueError('destination_collision')
  return path
 
+def render_time(value):
+ # Existing ISO bytes stay unchanged. Numeric API epochs use the established
+ # +08:00 frontmatter representation, without guessing any naive timezone.
+ if value is None or value=='':return ''
+ if isinstance(value,str) and not re.fullmatch(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?',value.strip()):return value
+ ms=timestamp_ms(value)
+ if ms is None:raise ValueError('invalid_detail_time')
+ return dt.datetime.fromtimestamp(ms/1000,dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='milliseconds')
+
 def render(note,assets,path):
  ident=api_id(note.get('note_id') or note.get('id'));kind=note.get('note_type')
  audio=note.get('audio') or {};audio=audio if isinstance(audio,dict) else {}
@@ -51,7 +60,7 @@ def render(note,assets,path):
  web=note.get('web_page') or {};web=web if isinstance(web,dict) else {}
  weburl=web.get('url') or (links[0] if links else '')
  fields={'source_system':'getnote','note_id':ident,'title':title_for(note),'note_type':kind,
-  'source':note.get('source') or '', 'created_at':note.get('created_at') or '', 'updated_at':note.get('updated_at') or '',
+  'source':note.get('source') or '', 'created_at':render_time(note.get('created_at')), 'updated_at':render_time(note.get('updated_at')),
   'tags':names(note.get('tags')),'topics':names(note.get('topics')),'is_child_note':bool(note.get('is_child_note')),
   'parent_id':str(note.get('parent_id') or ''),'children_ids':[str(v) for v in note.get('children_ids') or []],
   'share_id':str(note.get('share_id') or ''),'web_url':weburl,'web_domain':urlsplit(weburl).netloc,
@@ -103,7 +112,7 @@ class CompatibleWriter:
   path=self.root/'03 State'/'manifest.json'
   old=json.loads(path.read_text()) if path.exists() else {'notes':[]}
   rows=[row for row in old['notes'] if api_id(row.get('note_id')) not in self.rows]+list(self.rows.values())
-  rows.sort(key=lambda n:(n.get('updated_at') or n.get('created_at') or '',n['path']),reverse=True)
+  rows.sort(key=lambda n:(str(n.get('updated_at') or n.get('created_at') or ''),n['path']),reverse=True)
   generated=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='seconds')
   result={'source_system':'getnote','generated_at':generated,'count':len(rows),'counts_by_category':{},'counts_by_note_type':{},'notes':rows}
   for row in rows:

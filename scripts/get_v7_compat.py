@@ -5,8 +5,10 @@ the existing plugin state and real mirror evidence. Source list freshness and
 authenticated execution approval are external responsibilities.
 """
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
+import math
+import re
 
 
 def api_id(value):
@@ -24,14 +26,51 @@ def note_identity(note):
     return ident
 
 def timestamp_ms(value):
-    """Supported ISO source contract. Invalid/unknown values never mean unchanged."""
-    if not isinstance(value,str) or not value.strip(): return None
+    """v7 numeric seconds/milliseconds and explicit-zone ISO source timestamps.
+
+    Numeric threshold is the original common.ts toTimestamp contract. Never
+    interpret timezone-free calendar text using the runner's local timezone.
+    """
+    if isinstance(value,bool):return None
+    numeric=isinstance(value,(int,float))
+    if isinstance(value,str):
+        value=value.strip()
+        numeric=bool(re.fullmatch(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?',value))
+    if numeric:
+        try:
+            number=float(value)
+            if not math.isfinite(number) or number<=0:return None
+            result=number if number>1_000_000_000_000 else number*1000
+            # Constrain to representable source calendar dates, not infinity.
+            datetime.fromtimestamp(result/1000,tz=timezone.utc)
+            return result
+        except (ValueError,OverflowError,OSError):return None
+    if not isinstance(value,str) or not value:return None
     try:
         parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
-        # Never guess the runner timezone for an unqualified source timestamp.
         if parsed.tzinfo is None:return None
-        return parsed.timestamp()*1000
+        result=parsed.timestamp()*1000
+        return result if result>0 else None
     except (ValueError,OverflowError):return None
+
+def timestamp_error(value):
+    """Fixed metadata-only reason. Never returns the source value."""
+    if value is None or (isinstance(value,str) and not value.strip()):return 'list_version_missing'
+    if isinstance(value,bool) or not isinstance(value,(str,int,float)):return 'list_version_type'
+    if isinstance(value,str):
+        try:
+            parsed=datetime.fromisoformat(value.strip().replace('Z','+00:00'))
+            if parsed.tzinfo is None:return 'list_version_timezone_missing'
+        except ValueError:pass
+    return 'list_version_invalid'
+
+def timestamp_format(value):
+    if timestamp_ms(value) is not None:
+        if isinstance(value,(int,float)) or (isinstance(value,str) and re.fullmatch(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?',value.strip())):
+            return 'list_time_epoch'
+        return 'list_time_aware'
+    return {'list_version_missing':'list_time_missing','list_version_type':'list_time_type',
+            'list_version_timezone_missing':'list_time_naive'}.get(timestamp_error(value),'list_time_invalid')
 
 def state_timestamp(value):
     # Match JS Number for normal finite positive existing plugin epoch-ms fields.

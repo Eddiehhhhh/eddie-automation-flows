@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import tempfile
 import shutil
-from get_v7_compat import (note_identity, api_id, timestamp_ms, near, mirror_index,
+from get_v7_compat import (note_identity, api_id, timestamp_ms, timestamp_error, timestamp_format, near, mirror_index,
     recover_unchanged, local_mirror_matches_note)
 
 class ParityFailure(RuntimeError):
@@ -94,17 +94,20 @@ def _one_pass(root,state,list_complete,fetch_detail,now_ms,writer_factory=None,p
     before=snapshot(root)
     summaries,terminal=list_complete()
     if terminal is not True:raise ParityFailure('incomplete_list')
+    counts=dict(enumerated=len(summaries),cached_skipped=0,fresh_details=0,adopted_after_detail=0,new_or_changed=0,written_or_changed=0)
+    if progress is not None:progress.append(counts)
+    for item in summaries:
+        key=timestamp_format(item.get('updated_at'));counts[key]=counts.get(key,0)+1
     versions={}
     for item in summaries:
         ident=note_identity(item)
         version=timestamp_ms(item.get('updated_at'))
-        if not ident or ident in versions or version is None:raise ParityFailure('invalid_list_identity_version')
+        if not ident or ident in versions:raise ParityFailure('invalid_list_identity_version')
+        if version is None:raise ParityFailure(timestamp_error(item.get('updated_at')))
         versions[ident]=version
     mirrors=read_mirrors(root);validate_manifest(root,mirrors);index,conflicts=mirror_index(mirrors)
     if conflicts:raise ParityFailure('duplicate_mirror_identity')
     current=deepcopy(state)
-    counts=dict(enumerated=len(versions),cached_skipped=0,fresh_details=0,adopted_after_detail=0,new_or_changed=0,written_or_changed=0)
-    if progress is not None:progress.append(counts)
     writer=writer_factory(root) if writer_factory else None
     preserved=set();changed_paths=set()
     for summary in summaries:

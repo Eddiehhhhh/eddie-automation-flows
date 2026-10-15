@@ -22,6 +22,34 @@ class RenderTests(unittest.TestCase):
   def fetch(url,max_bytes):self.calls.append(url);return b'new-image','image/png'
   return CompatibleWriter(root,AssetStore(root,fetch=fetch))
  def run_replay(self):return replay(self.root,lambda:([deepcopy(self.note)],True),lambda _:deepcopy(self.note),self.factory)
+ def test_created_naive_and_unknown_text_remain_original_metadata(self):
+  for value in ('2026-04-23 18:29:55','unknown original value'):
+   self.note['created_at']=value
+   content,fields=render(self.note,[],Path('x.md'))
+   self.assertEqual(fields['created_at'],value)
+ def test_updated_naive_still_fails_before_renderer(self):
+  self.note['updated_at']='2026-04-23 18:29:55';before=snapshot(self.root)
+  with self.assertRaisesRegex(ParityFailure,'list_version_timezone_missing'):self.run_replay()
+  self.assertEqual(snapshot(self.root),before);self.assertEqual(self.calls,[])
+ def test_numeric_new_with_existing_iso_manifest_two_passes(self):
+  path=self.root/'legacy.md';path.write_text('old legacy')
+  state=self.root/'03 State';state.mkdir()
+  (state/'manifest.json').write_text(json.dumps({'notes':[{'note_id':'legacy-x','path':'legacy.md','title':'old','category':'','note_type':'unknown','updated_at':'2026-10-01T00:00:00Z','created_at':'2026-10-01T00:00:00Z'}]}))
+  self.note['updated_at']=1791849600000;self.note['created_at']='1791763200'
+  result=self.run_replay()
+  self.assertEqual(result['second']['fresh_details'],0)
+  rows=json.loads((state/'manifest.json').read_text())['notes']
+  self.assertTrue(all(isinstance(x['updated_at'],str) for x in rows))
+  content=(self.root/'03 纯文本记录'/'New title.md').read_text()
+  self.assertIn('2026-10-13T08:00:00.000+08:00',content)
+  self.assertEqual(path.read_text(),'old legacy')
+ def test_numeric_changed_keeps_old_path_two_passes(self):
+  path=self.root/'old.md';path.write_text('---\nnote_id: "123"\nupdated_at: "2026-10-12T00:00:00Z"\n---\nold body\n')
+  self.note['updated_at']=1791849600
+  result=self.run_replay()
+  self.assertEqual(result['first']['written_or_changed'],1)
+  self.assertEqual(result['second']['fresh_details'],0)
+  self.assertIn('new content',path.read_text())
  def test_new_note_second_skips_complete_manifest(self):
   result=self.run_replay()
   self.assertEqual(result['first']['written_or_changed'],1);self.assertEqual(result['second']['cached_skipped'],1)

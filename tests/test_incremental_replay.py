@@ -18,6 +18,22 @@ class ReplayTests(unittest.TestCase):
   self.calls=[]
  def detail(self,ident):
   self.calls.append(ident);return deepcopy(self.summary)
+ def test_numeric_list_and_detail_adopt_then_skip_aware_mirror(self):
+  self.summary['updated_at']=1791763200
+  result=r.replay(self.root,self.list,self.detail)
+  self.assertEqual(result['first']['adopted_after_detail'],1)
+  self.assertEqual(result['second']['fresh_details'],0)
+ def test_format_distribution_survives_list_version_failure(self):
+  from source_sync_mirror_replay import safe_report
+  values=['2026-04-23 18:29:55',1791763200,'2026-10-12T00:00:00Z',None,True,'bad']
+  summaries=[{'id':str(i+1),'updated_at':v} for i,v in enumerate(values)]
+  progress=[]
+  with self.assertRaisesRegex(r.ParityFailure,'list_version_timezone_missing'):
+   r.replay(self.root,lambda:(summaries,True),self.detail,progress=progress)
+  public=safe_report({'status':'failed','error':'list_version_timezone_missing','first':progress[0]})
+  for key in ('epoch','aware','naive','missing','type','invalid'):self.assertEqual(public['first']['list_time_'+key],1)
+  self.assertEqual(self.calls,[])
+  self.assertEqual(public['error'],'list_version_timezone_missing')
  def test_cold_adopt_then_skip_preserves_every_byte_path_mtime(self):
   before=r.snapshot(self.root);result=r.replay(self.root,self.list,self.detail)
   self.assertEqual(result['first']['fresh_details'],1)

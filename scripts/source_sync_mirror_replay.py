@@ -35,11 +35,11 @@ ASSET_ERROR_CODES = {
     'empty asset body': 'empty_body',
 }
 
-COUNTS=('enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
+COUNTS=('list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
         'pages','api_response_bytes','downloaded_assets','downloaded_bytes','asset_transfer_bytes')
 FLAGS=('data_bytes_paths_mtimes_unchanged','second_data_unchanged','state_lastSyncedAt_changed',
        'source_content_complete_claimed','renderer_exercised')
-ERRORS=('incomplete_list','invalid_list_identity_version','duplicate_mirror_identity','empty_mirror',
+ERRORS=('invalid_detail_time','list_version_missing','list_version_type','list_version_timezone_missing','list_version_invalid','incomplete_list','invalid_list_identity_version','duplicate_mirror_identity','empty_mirror',
  'detail_identity','source_changed_during_pass','source_changed_between_passes','second_pass_semantic_state_changed',
  'data_not_stable','old_unselected_data_modified','unexpected_data_mutation','unchanged_mirror_modified','invalid_manifest','manifest_path_escape',
  'duplicate_manifest_path','manifest_missing_file','manifest_identity_conflict','manifest_version_conflict',
