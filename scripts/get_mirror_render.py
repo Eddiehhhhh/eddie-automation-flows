@@ -164,5 +164,3 @@ def render_index(notes: list[dict[str, Any]], generated_at: str) -> str:
         ]
 
     return "\n".join(lines) + "\n"
-
-
