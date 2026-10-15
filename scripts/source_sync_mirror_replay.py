@@ -79,12 +79,69 @@ def safe_report(value):
   result['status']='mirror_replay_partial'
  return result
 
+def safe_preview_report(value):
+ result={'mode':'private_preview','status':'failed','published':False,'preview_only':True,'apply_ready':False,'source_content_complete_claimed':False,'pending_binary_verified':False}
+ if not isinstance(value,dict):return result
+ mapped=dict(value);mapped['status']={'private_preview_partial':'mirror_replay_partial','private_preview_ready_for_review':'mirror_replay_ok'}.get(value.get('status'),'failed')
+ clean=safe_report(mapped)
+ for key in ('first','second','error','rate_limit_reason','http_status','asset_error_code',*FLAGS):
+  if key in clean:result[key]=clean[key]
+ if value.get('error') in ('invalid_preview_source','invalid_preview_output','preview_head_changed','dirty_preview_source','untracked_preview_source','preview_deleted_path','preview_ignored_path','preview_source_changed','invalid_cloud_state','cloud_mirror_changed','conflicting_modes'):result['error']=value['error']
+ changed=value.get('changed_paths')
+ if type(changed) is int and 0<=changed<=25000:result['changed_paths']=changed
+ if 'changed_paths' in result and value.get('published') is False and value.get('preview_only') is True:
+  if clean['status']=='mirror_replay_partial':result['status']='private_preview_partial'
+  elif clean['status']=='mirror_replay_ok':result['status']='private_preview_ready_for_review'
+ return result
+
+def private_preview_main(args):
+ # An explicit CLI, no scheduler/publisher. Caller supplies a pinned private
+ # checkout; the output directory must remain private and is not an artifact.
+ from get_mirror_incremental_replay import prepare_private_preview
+ import source_sync_assets as assets
+ import source_sync_pack_seed as pack
+ import sync_getnote_to_raw as sync
+ from source_sync_rate import RequestPolicy,RateLimitFailure
+ from source_sync_full_replay import TransferBudget,failure_details
+ progress=[];stores=[];source=None
+ try:
+  if not (args.private_preview_vault and args.private_preview_output and args.expected_source_commit):raise ValueError('invalid_preview_source')
+  key,client=sync.load_credentials();policy=RequestPolicy();source=MirrorSource(key,client,policy)
+  def factory(root):
+   transfer=TransferBudget(200*1024*1024)
+   def fetch(url,max_bytes):
+    if time.monotonic()>=policy.deadline:raise RateLimitFailure(budget=True)
+    return assets.fetch_asset(url,max_bytes=max_bytes,transfer_budget=transfer)
+   store=assets.AssetStore(root,fetch=fetch,max_run=200*1024*1024,max_assets=256);stores.append(store)
+   return CompatibleWriter(root,store)
+  with pack.deadline(110*60):
+   result,counts=prepare_private_preview(args.private_preview_vault,args.private_preview_output,args.expected_source_commit,source.enumerate,source.detail,factory,progress)
+  public={**result,'mode':'private_preview','status':'private_preview_partial' if counts['pending'] else 'private_preview_ready_for_review',**counts,'source_content_complete_claimed':False,'pending_binary_verified':False}
+  public['first']={k:result['first'][k] for k in COUNTS if k in result['first']}
+  public['second']={k:result['second'][k] for k in COUNTS if k in result['second']}
+  public=safe_preview_report(public);print(json.dumps(public))
+  return 0 if public['status']=='private_preview_ready_for_review' else (2 if public['status']=='private_preview_partial' else 1)
+ except (Exception,SystemExit) as exc:
+  errors=('invalid_preview_source','invalid_preview_output','preview_head_changed','dirty_preview_source','untracked_preview_source','preview_deleted_path','preview_ignored_path','preview_source_changed','invalid_cloud_state','cloud_mirror_changed')
+  classified=failure_details('compare',exc)
+  code=str(exc);public={'mode':'private_preview','status':'failed','published':False,'preview_only':True,'source_content_complete_claimed':False,'error':code if code in ERRORS+errors else classified.get('error_code','source_failed')}
+  for key in ('rate_limit_reason','http_status'):
+   if key in classified:public[key]=classified[key]
+  if isinstance(exc,assets.AssetError):public['asset_error_code']=ASSET_ERROR_CODES.get(code,'other')
+  for i,which in enumerate(('first','second')):
+   if i<len(progress):public[which]={k:progress[i][k] for k in COUNTS if k in progress[i]}
+  print(json.dumps(public));return 1
+
 def main():
- p=argparse.ArgumentParser();p.add_argument('--publish-report',type=Path);p.add_argument('--pending-diagnostic',action='store_true');args=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--publish-report',type=Path);p.add_argument('--pending-diagnostic',action='store_true');p.add_argument('--private-preview-vault',type=Path);p.add_argument('--private-preview-output',type=Path);p.add_argument('--expected-source-commit');args=p.parse_args()
+ if args.private_preview_vault or args.private_preview_output or args.expected_source_commit:
+  if args.publish_report or args.pending_diagnostic:
+   print(json.dumps({'mode':'private_preview','status':'failed','error':'conflicting_modes','published':False,'preview_only':True}));return 1
+  return private_preview_main(args)
  if args.publish_report:
   try:result=json.loads(args.publish_report.read_text())
   except (OSError,ValueError):result={}
-  print(json.dumps(safe_report(result)));return 0
+  print(json.dumps(safe_preview_report(result) if isinstance(result,dict) and result.get('mode')=='private_preview' else safe_report(result)));return 0
  result={};progress=[];stats=[];stores=[];stage='seed';source=None
  try:
   import source_sync_assets as assets

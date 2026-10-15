@@ -6,9 +6,14 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, full]
         default: sample
         required: true
+      preview_source_commit:
+        description: Exact approved private source commit (private_preview only)
+        type: string
+        default: '4fbc69f2d41bc3c7da81eae8f0c91584f0923190'
+        required: false
       sample_pages:
         description: List pages to inspect for one ordinary note and one recording
         type: choice
@@ -25,7 +30,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ (inputs.mode == 'full_replay' || inputs.mode == 'mirror_replay' || inputs.mode == 'pending_diagnostic') && 120 || 60 }}
+    timeout-minutes: ${{ (inputs.mode == 'full_replay' || inputs.mode == 'mirror_replay' || inputs.mode == 'pending_diagnostic' || inputs.mode == 'private_preview') && 120 || 60 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -95,14 +100,51 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get bounded pending diagnostic' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_mirror_replay.py --pending-diagnostic
+      - name: Checkout pinned private Get subtree with suppressed diagnostics
+        if: inputs.mode == 'private_preview'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+        run: timeout 3m python scripts/run_private_command.py --label 'Get private source checkout' --stdout-file '${{ runner.temp }}/checkout-result.json' -- python scripts/get_private_preview_retention.py checkout --vault "$GITHUB_WORKSPACE/private-vault" --source-commit "$PREVIEW_SOURCE"
+      - name: Verify approved private recovery point before source reads
+        if: inputs.mode == 'private_preview'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+        run: timeout 3m python scripts/run_private_command.py --label 'Get private recovery point' --stdout-file '${{ runner.temp }}/backup-result.json' -- python scripts/get_private_preview_retention.py prepare --vault "$GITHUB_WORKSPACE/private-vault" --source-commit "$PREVIEW_SOURCE"
+      - name: Prepare and retain approved private Get preview
+        if: inputs.mode == 'private_preview'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+        run: |
+          umask 077
+          set +e
+          timeout --kill-after=60s 105m python scripts/run_private_command.py --label 'Get retained private preview' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_mirror_replay.py --private-preview-vault "$GITHUB_WORKSPACE/private-vault" --private-preview-output '${{ runner.temp }}/get-private-preview' --expected-source-commit "$PREVIEW_SOURCE"
+          preview_rc=$?
+          set -e
+          if [ "$preview_rc" != 0 ] && [ "$preview_rc" != 2 ]; then exit "$preview_rc"; fi
+          timeout --kill-after=30s 10m python scripts/run_private_command.py --label 'Get private preview retention' --stdout-file '${{ runner.temp }}/retention-result.json' -- python scripts/get_private_preview_retention.py retain --vault "$GITHUB_WORKSPACE/private-vault" --preview-output '${{ runner.temp }}/get-private-preview' --source-commit "$PREVIEW_SOURCE"
+          exit "$preview_rc"
+      - name: Remove ephemeral private checkout and preview
+        if: always() && inputs.mode == 'private_preview'
+        run: rm -rf -- "$GITHUB_WORKSPACE/private-vault" '${{ runner.temp }}/get-private-preview'
       - name: Publish aggregate evidence only
         if: always()
         env:
           RESULT: ${{ runner.temp }}/shadow-result.json
           MODE: ${{ inputs.mode }}
+          BACKUP_RESULT: ${{ runner.temp }}/backup-result.json
+          RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
-          if [ "$MODE" = mirror_replay ] || [ "$MODE" = pending_diagnostic ]; then
+          if [ "$MODE" = private_preview ]; then
+            python scripts/get_private_preview_retention.py --publish-report "$BACKUP_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+            python scripts/get_private_preview_retention.py --publish-report "$RETENTION_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$MODE" = mirror_replay ] || [ "$MODE" = pending_diagnostic ] || [ "$MODE" = private_preview ]; then
             python scripts/source_sync_mirror_replay.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ "$MODE" = full_replay ]; then
             python scripts/source_sync_full_replay.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,710 @@
+#!/usr/bin/env python3
+"""Retain an explicitly authorized Get preview on two fixed private refs only.
+
+This is content validation, not user authentication or production approval.
+The trusted caller owns approval of this repository, these refs and this data.
+No main update, merge, schedule, deletion or uncertain-write retry is supported.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import tempfile
+import urllib.error
+import urllib.request
+
+REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
+REMOTE_URL = 'https://github.com/' + REPOSITORY + '.git'
+GET = 'Raw/03 Get'
+BACKUP_REF = 'refs/heads/backup/get-cloud-cutover-20261015'
+PREVIEW_REF = 'refs/heads/preview/get-cloud-cutover-20261015'
+MAIN_REF = 'refs/heads/main'
+PLAN_PATH = GET + '/03 State/cloud-preview-plan.json'
+MAX_PLAN_BYTES = 16 * 1024 * 1024
+MAX_FILES = 6000
+MAX_BLOB_BYTES = 32 * 1024 * 1024
+MAX_GET_BYTES = 256 * 1024 * 1024
+ERROR_CODES = frozenset(('invalid_commit','invalid_json','outside_get_scope','unsafe_path','symlink_or_alias',
+ 'missing_directory','nonregular_file','file_budget','missing_token','invalid_checkout','unsafe_git_config',
+ 'git_operation_failed','unsupported_object_format','source_head_changed','invalid_source_commit',
+ 'duplicate_tree_path','remote_redirect_blocked','remote_read_failed','remote_response_budget',
+ 'remote_schema_invalid','ref_not_allowed','remote_ref_invalid','remote_commit_invalid','remote_blob_invalid',
+ 'repository_not_private_target','remote_main_changed','ref_creation_unconfirmed','ref_readback_mismatch',
+ 'backup_ref_conflict','backup_ref_readback_failed','backup_failed','nonregular_ignore_file',
+ 'ignored_preview_path','ignore_check_failed','preview_not_isolated','unplanned_output_file','invalid_plan',
+ 'nonregular_source','reserved_plan_path_exists','source_worktree_changed','preview_deletion_forbidden',
+ 'invalid_plan_row','invalid_plan_path','plan_old_bytes_mismatch','plan_new_bytes_mismatch',
+ 'unplanned_candidate_change','candidate_changed','local_blob_readback_failed','candidate_tree_mismatch',
+ 'existing_preview_conflict','remote_blob_readback_failed','preview_ref_changed','backup_not_verified',
+ 'preview_retention_failed','conflicting_modes','missing_preview_output','retention_failed',
+ 'checkout_failed','checkout_destination_exists','invalid_report','source_tree_budget','invalid_source_tree'))
+SHA = re.compile(r'[0-9a-f]{40}\Z')
+ROW_KEYS = {'path', 'action', 'old_blob', 'new_blob', 'old_sha256', 'new_sha256', 'old_bytes', 'new_bytes'}
+PLAN_KEYS = {'version', 'scope', 'source_commit', 'changes', 'pending', 'status', 'published', 'apply_ready', 'reason'}
+
+
+class RetentionFailure(RuntimeError):
+    """Only fixed codes may leave this module; never upstream errors or paths."""
+
+
+def fail(code):
+    raise RetentionFailure(code if code in ERROR_CODES else 'retention_failed')
+
+
+def oid(data):
+    return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def checked_sha(value):
+    if not isinstance(value, str) or not SHA.fullmatch(value):
+        fail('invalid_commit')
+    return value
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode() + b'\n'
+
+
+def strict_json(data):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                fail('invalid_json')
+            result[key] = value
+        return result
+    def constant(_):
+        fail('invalid_json')
+    try:
+        return json.loads(data, object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError):
+        fail('invalid_json')
+
+
+def safe_path(value):
+    if not isinstance(value, str) or not value.startswith(GET + '/'):
+        fail('outside_get_scope')
+    if '\\' in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        fail('unsafe_path')
+    if any(part in ('', '.', '..', '.git') for part in value.split('/')):
+        fail('unsafe_path')
+    return value
+
+
+def regular_root(path):
+    path = Path(path).absolute()
+    if '..' in path.parts or any(p.is_symlink() for p in (path, *path.parents)):
+        fail('symlink_or_alias')
+    if not path.is_dir():
+        fail('missing_directory')
+    return path.resolve()
+
+
+def file_bytes(path, limit=None):
+    path = Path(path)
+    if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+        fail('nonregular_file')
+    with path.open('rb') as stream:
+        value = stream.read() if limit is None else stream.read(limit + 1)
+    if limit is not None and len(value) > limit:
+        fail('file_budget')
+    return value
+
+
+def safe_environment(token=None):
+    # Do not inherit Git routing/tracing/config injection, proxies or auth helpers.
+    environment = {k: v for k, v in os.environ.items()
+                   if not k.startswith(('GIT_', 'GCM_')) and k not in ('PRIVATE_VAULT_TOKEN', 'SSH_ASKPASS', 'GETNOTE_API_KEY', 'GETNOTE_CLIENT_ID', 'GET_API_KEY', 'GET_CLIENT_ID')
+                   and not k.lower().endswith('_proxy') and k.lower() != 'all_proxy'}
+    environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false', GIT_NO_REPLACE_OBJECTS='1')
+    settings = [('credential.helper', ''), ('core.hooksPath', os.devnull),
+                ('http.followRedirects', 'false'), ('http.proxy', '')]
+    if token is not None:
+        if not isinstance(token, str) or not token or any(ord(c) <= 32 for c in token):
+            fail('missing_token')
+        auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
+        settings.append(('http.https://github.com/.extraheader', 'AUTHORIZATION: basic ' + auth))
+    environment['GIT_CONFIG_COUNT'] = str(len(settings))
+    for n, (key, value) in enumerate(settings):
+        environment['GIT_CONFIG_KEY_' + str(n)] = key
+        environment['GIT_CONFIG_VALUE_' + str(n)] = value
+    return environment
+
+
+class LocalGit:
+    def __init__(self, vault, token=None):
+        self.vault = regular_root(vault)
+        self.env = safe_environment(token)
+        # A normal checkout has a real .git directory. Do not follow external
+        # worktree pointers, alternates or repository-local URL rewrites.
+        if not (self.vault / '.git').is_dir() or (self.vault / '.git').is_symlink():
+            fail('invalid_checkout')
+        if (self.vault / '.git/objects/info/alternates').exists() or (self.vault / '.git/info/grafts').exists():
+            fail('unsafe_git_config')
+        raw = self.run('config', '--local', '--no-includes', '--name-only', '--list').decode().splitlines()
+        if any(key.lower().startswith(('url.', 'include.', 'includeif.', 'http.', 'credential.', 'filter.'))
+               or key.lower() in ('core.sshcommand', 'core.gitproxy', 'core.worktree', 'core.fsmonitor') for key in raw):
+            fail('unsafe_git_config')
+        allowed_remote = {'remote.origin.url', 'remote.origin.fetch', 'remote.origin.promisor', 'remote.origin.partialclonefilter'}
+        if any(key.lower().startswith('remote.') and key.lower() not in allowed_remote for key in raw):
+            fail('unsafe_git_config')
+        if self.run('for-each-ref', '--format=%(refname)', 'refs/replace').strip():
+            fail('unsafe_git_config')
+
+    def command(self, *args, data=None, env=None, cwd=None):
+        try:
+            return subprocess.run(['git', '-C', str(cwd or self.vault), *args], input=data,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=env or self.env, timeout=600, check=False)
+        except Exception:
+            fail('git_operation_failed')
+
+    def run(self, *args, data=None, env=None, cwd=None):
+        result = self.command(*args, data=data, env=env, cwd=cwd)
+        if result.returncode:
+            fail('git_operation_failed')
+        return result.stdout
+
+    def check_source(self, source):
+        checked_sha(source)
+        if self.run('remote').decode().splitlines() != ['origin'] or self.run('config', '--local', '--get-all', 'remote.origin.url').decode().splitlines() != [REMOTE_URL]:
+            fail('unsafe_git_config')
+        if self.run('rev-parse', '--show-object-format').strip() != b'sha1':
+            fail('unsupported_object_format')
+        if self.run('rev-parse', 'HEAD').decode().strip() != source:
+            fail('source_head_changed')
+        if self.run('cat-file', '-t', source).strip() != b'commit':
+            fail('invalid_source_commit')
+
+    def tree(self, revision):
+        result = {}
+        for record in self.run('ls-tree', '-rz', revision).split(b'\0'):
+            if not record:
+                continue
+            metadata, name = record.split(b'\t', 1)
+            mode, kind, blob = metadata.decode().split()
+            path = name.decode('utf-8')
+            if path in result:
+                fail('duplicate_tree_path')
+            result[path] = (mode, kind, checked_sha(blob))
+        return result
+
+    def blob(self, blob):
+        return self.run('cat-file', 'blob', checked_sha(blob))
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        fail('remote_redirect_blocked')
+
+
+class GitHubRemote:
+    """Fixed repository, read-only REST verification and create-only Git refs."""
+    def __init__(self, local, token):
+        self.local = local
+        self.token = token
+        # Validate before constructing any credential-bearing request.
+        safe_environment(token)
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+    def request(self, suffix, *, missing=False, maximum=1024 * 1024):
+        request = urllib.request.Request('https://api.github.com/repos/' + REPOSITORY + suffix,
+            headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
+                     'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'get-private-preview-retention'})
+        try:
+            with self.opener.open(request, timeout=60) as response:
+                if response.status != 200:
+                    fail('remote_read_failed')
+                data = response.read(maximum + 1)
+            if len(data) > maximum:
+                fail('remote_response_budget')
+            value = strict_json(data)
+            if not isinstance(value, dict):
+                fail('remote_schema_invalid')
+            return value
+        except urllib.error.HTTPError as error:
+            status = error.code
+            error.close()
+            if missing and status == 404:
+                return None
+            fail('remote_read_failed')
+        except RetentionFailure:
+            raise
+        except Exception:
+            fail('remote_read_failed')
+
+    def metadata(self):
+        return self.request('')
+
+    def ref(self, name):
+        if name not in (MAIN_REF, BACKUP_REF, PREVIEW_REF):
+            fail('ref_not_allowed')
+        value = self.request('/git/ref/' + name.removeprefix('refs/'), missing=True)
+        if value is None:
+            return None
+        if value.get('ref') != name or value.get('object', {}).get('type') != 'commit':
+            fail('remote_ref_invalid')
+        return checked_sha(value['object'].get('sha'))
+
+    def commit(self, commit):
+        value = self.request('/git/commits/' + checked_sha(commit))
+        if value.get('sha') != commit:
+            fail('remote_commit_invalid')
+        return {'tree': checked_sha(value.get('tree', {}).get('sha')),
+                'parents': [checked_sha(p.get('sha')) for p in value.get('parents', [])]}
+
+    def blob(self, blob, expected_size):
+        value = self.request('/git/blobs/' + checked_sha(blob), maximum=2 * expected_size + 65536)
+        if value.get('sha') != blob or value.get('encoding') != 'base64' or value.get('size') != expected_size:
+            fail('remote_blob_invalid')
+        try:
+            content = base64.b64decode(value['content'].replace('\n', ''), validate=True)
+        except (KeyError, TypeError, ValueError):
+            fail('remote_blob_invalid')
+        if len(content) != expected_size or oid(content) != blob:
+            fail('remote_blob_invalid')
+        return content
+
+    def check_source_budget(self, source):
+        # Walk only root/Raw tree metadata, then the Get subtree. No non-Get
+        # blob bodies are requested; truncated or oversized responses stop.
+        def entries(revision, recursive=False):
+            value = self.request('/git/trees/' + checked_sha(revision) + ('?recursive=1' if recursive else ''), maximum=16 * 1024 * 1024)
+            if value.get('truncated') is not False or not isinstance(value.get('tree'), list):
+                fail('invalid_source_tree')
+            return value['tree']
+        revision = self.commit(source)['tree']
+        for wanted in ('Raw', '03 Get'):
+            selected = [entry for entry in entries(revision) if entry.get('path') == wanted]
+            if len(selected) != 1 or selected[0].get('type') != 'tree' or selected[0].get('mode') != '040000':
+                fail('invalid_source_tree')
+            revision = checked_sha(selected[0].get('sha'))
+        count = total = 0
+        seen = set()
+        for entry in entries(revision, True):
+            path = safe_path(GET + '/' + entry.get('path', ''))
+            if path in seen:
+                fail('invalid_source_tree')
+            seen.add(path)
+            if entry.get('type') == 'tree' and entry.get('mode') == '040000':
+                continue
+            size = entry.get('size')
+            if entry.get('type') != 'blob' or entry.get('mode') not in ('100644', '100755') or type(size) is not int or size < 0:
+                fail('invalid_source_tree')
+            checked_sha(entry.get('sha'))
+            count += 1
+            total += size
+            if count > MAX_FILES or size > MAX_BLOB_BYTES or total > MAX_GET_BYTES:
+                fail('source_tree_budget')
+        if count == 0:
+            fail('invalid_source_tree')
+
+    def create_only(self, name, commit):
+        if name not in (BACKUP_REF, PREVIEW_REF):
+            fail('ref_not_allowed')
+        checked_sha(commit)
+        # An empty expected value means the branch must not exist at the server.
+        # No existing ref can be replaced, even on a race or branch rewind.
+        self.local.run('push', '--porcelain', '--no-verify',
+                       '--force-with-lease=' + name + ':', REMOTE_URL, commit + ':' + name)
+
+
+def remote_context(vault, token, remote):
+    token = token if token is not None else (None if remote is not None else os.environ.get('PRIVATE_VAULT_TOKEN'))
+    local = LocalGit(vault, token)
+    return local, remote if remote is not None else GitHubRemote(local, token)
+
+
+def preflight(local, remote, source, *, allow_main_drift=False):
+    local.check_source(source)
+    metadata = remote.metadata()
+    if metadata.get('full_name') != REPOSITORY or metadata.get('private') is not True:
+        fail('repository_not_private_target')
+    main = remote.ref(MAIN_REF)
+    if main is None or (not allow_main_drift and main != source):
+        fail('remote_main_changed')
+    checked_sha(main)
+    if remote.commit(source).get('tree') != local.run('rev-parse', source + '^{tree}').decode().strip():
+        fail('invalid_source_commit')
+    return main
+
+
+def create_once(remote, ref, commit):
+    # Never retry a possibly successful mutation. Both success and uncertainty
+    # require the same bounded readback. The caller validates the resulting tree.
+    try:
+        remote.create_only(ref, commit)
+    except Exception:
+        observed = remote.ref(ref)
+        if observed != commit:
+            fail('ref_creation_unconfirmed')
+        return 'created_verified_after_uncertain_response'
+    if remote.ref(ref) != commit:
+        fail('ref_readback_mismatch')
+    return 'created_verified'
+
+
+def prepare_backup(vault, source_commit, *, token=None, remote=None):
+    try:
+        local, remote = remote_context(vault, token, remote)
+        preflight(local, remote, source_commit)
+        current = remote.ref(BACKUP_REF)
+        if current is not None and current != source_commit:
+            fail('backup_ref_conflict')
+        status = 'existing_verified' if current == source_commit else create_once(remote, BACKUP_REF, source_commit)
+        if remote.ref(BACKUP_REF) != source_commit:
+            fail('backup_ref_readback_failed')
+        if remote.ref(MAIN_REF) != source_commit:
+            fail('remote_main_changed')
+        return {'status': 'backup_' + status, 'backup_verified': True, 'main_updated': False, 'source_unchanged': True}
+    except RetentionFailure:
+        raise
+    except Exception:
+        fail('backup_failed')
+
+
+def files(root):
+    root = regular_root(root)
+    result = {}
+    total = 0
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        for name in directories + filenames:
+            path = Path(directory) / name
+            if path.is_symlink():
+                fail('symlink_or_alias')
+        for name in filenames:
+            path = Path(directory) / name
+            relative = safe_path(GET + '/' + path.relative_to(root).as_posix())
+            size = path.stat().st_size
+            total += size
+            if len(result) >= MAX_FILES or size > MAX_BLOB_BYTES or total > MAX_GET_BYTES:
+                fail('source_tree_budget')
+            data = file_bytes(path, MAX_BLOB_BYTES)
+            result[relative] = (oid(data), sha256(data), len(data))
+    return result
+
+
+def check_ignored(local, source_tree, candidate, paths):
+    relevant = {str(Path(path).parent) for path in paths}
+    def needed(path):
+        if Path(path).name != '.gitignore':
+            return False
+        parent = str(Path(path).parent)
+        return parent == '.' or any(p == parent or p.startswith(parent + '/') for p in relevant)
+    ignores = {}
+    for path, (mode, kind, blob) in source_tree.items():
+        if not needed(path):
+            continue
+        if mode not in ('100644', '100755') or kind != 'blob':
+            fail('nonregular_ignore_file')
+        ignores[path] = local.blob(blob)
+    with tempfile.TemporaryDirectory(prefix='get-preview-ignore-') as temporary:
+        root = Path(temporary)
+        local.run('init', '-q', cwd=root, env=safe_environment())
+        for candidate_rules in (False, True):
+            rules = dict(ignores)
+            if candidate_rules:
+                for path in candidate.rglob('.gitignore'):
+                    relative = GET + '/' + path.relative_to(candidate).as_posix()
+                    if needed(relative):
+                        rules[relative] = file_bytes(path)
+            for path, data in rules.items():
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            result = local.command('-c', 'core.excludesFile=' + os.devnull, 'check-ignore', '--no-index', '-z', '--stdin',
+                                   data=('\0'.join(paths) + '\0').encode(), cwd=root, env=safe_environment())
+            if result.returncode == 0:
+                fail('ignored_preview_path')
+            if result.returncode != 1:
+                fail('ignore_check_failed')
+
+
+def build_preview(local, output, source):
+    local.check_source(source)
+    output = regular_root(output)
+    if output.is_relative_to(local.vault) or local.vault.is_relative_to(output):
+        fail('preview_not_isolated')
+    if {p.name for p in output.iterdir()} != {'candidate', 'plan.json'}:
+        fail('unplanned_output_file')
+    candidate = regular_root(output / 'candidate')
+    plan_bytes = file_bytes(output / 'plan.json', MAX_PLAN_BYTES)
+    plan = strict_json(plan_bytes)
+    if not isinstance(plan, dict) or set(plan) != PLAN_KEYS or (type(plan.get('version')) is not int or plan['version'] != 1) or plan.get('scope') != 'get-private-preview':
+        fail('invalid_plan')
+    if plan.get('source_commit') != source or plan.get('published') is not False or plan.get('apply_ready') is not False:
+        fail('invalid_plan')
+    if type(plan.get('pending')) is not int or plan['pending'] < 0 or plan.get('status') != ('partial' if plan['pending'] else 'complete'):
+        fail('invalid_plan')
+    rows = plan.get('changes')
+    if not isinstance(rows, list):
+        fail('invalid_plan')
+    source_tree = local.tree(source)
+    source_get = {p: entry for p, entry in source_tree.items() if p.startswith(GET + '/')}
+    for path, (mode, kind, _) in source_get.items():
+        safe_path(path)
+        if mode not in ('100644', '100755') or kind != 'blob':
+            fail('nonregular_source')
+    if PLAN_PATH in source_tree:
+        fail('reserved_plan_path_exists')
+    source_files = files(local.vault / GET)
+    if set(source_files) != set(source_get) or any(source_files[p][0] != source_get[p][2] for p in source_get):
+        fail('source_worktree_changed')
+    after = files(candidate)
+    if PLAN_PATH in after:
+        fail('reserved_plan_path_exists')
+    if set(source_get) - set(after):
+        fail('preview_deletion_forbidden')
+    expected = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != ROW_KEYS:
+            fail('invalid_plan_row')
+        if any(type(row.get(k)) is not int or row[k] < 0 for k in ('old_bytes', 'new_bytes')):
+            fail('invalid_plan_row')
+        path = safe_path(row.get('path'))
+        if path in expected or path == PLAN_PATH or path not in after:
+            fail('invalid_plan_path')
+        old = source_files.get(path)
+        new = after[path]
+        if row['action'] != ('modify' if old else 'add'):
+            fail('preview_deletion_forbidden')
+        if (row['old_blob'], row['old_sha256'], row['old_bytes']) != (old if old else (None, None, 0)):
+            fail('plan_old_bytes_mismatch')
+        if (row['new_blob'], row['new_sha256'], row['new_bytes']) != new:
+            fail('plan_new_bytes_mismatch')
+        expected[path] = row
+    actual = {p for p in after if p not in source_get or after[p][0] != source_get[p][2]}
+    if actual != set(expected):
+        fail('unplanned_candidate_change')
+    payload = {p: file_bytes(candidate / Path(p).relative_to(GET)) for p in expected}
+    # Keep the actual private review plan, including partial state. It never
+    # becomes an authorization document or a production completion receipt.
+    payload[PLAN_PATH] = canonical(plan)
+    if len(after) + 1 > MAX_FILES or sum(item[2] for item in after.values()) + len(payload[PLAN_PATH]) > MAX_GET_BYTES:
+        fail('source_tree_budget')
+    check_ignored(local, source_tree, candidate, list(payload))
+    for path, data in payload.items():
+        if path != PLAN_PATH and (oid(data), sha256(data), len(data)) != after[path]:
+            fail('candidate_changed')
+    with tempfile.TemporaryDirectory(prefix='get-preview-index-') as temporary:
+        environment = dict(local.env, GIT_INDEX_FILE=str(Path(temporary) / 'index'))
+        local.run('read-tree', source, env=environment)
+        for path, data in payload.items():
+            blob = local.run('hash-object', '-w', '--stdin', data=data, env=environment).decode().strip()
+            if blob != oid(data):
+                fail('local_blob_readback_failed')
+            mode = source_tree[path][0] if path in source_tree else '100644'
+            local.run('update-index', '--add', '--cacheinfo', mode + ',' + blob + ',' + path, env=environment)
+        tree = checked_sha(local.run('write-tree', env=environment).decode().strip())
+        candidate_tree = local.tree(tree)
+        wanted = dict(source_tree)
+        for path, data in payload.items():
+            wanted[path] = (source_tree[path][0] if path in source_tree else '100644', 'blob', oid(data))
+        if candidate_tree != wanted:
+            fail('candidate_tree_mismatch')
+        for path, data in payload.items():
+            if local.blob(candidate_tree[path][2]) != data:
+                fail('local_blob_readback_failed')
+        timestamp = local.run('show', '-s', '--format=%ct', source).decode().strip()
+        if not timestamp.isdigit():
+            fail('invalid_source_commit')
+        environment.update(GIT_AUTHOR_NAME='Get preview retention', GIT_AUTHOR_EMAIL='preview@example.invalid',
+                           GIT_COMMITTER_NAME='Get preview retention', GIT_COMMITTER_EMAIL='preview@example.invalid',
+                           GIT_AUTHOR_DATE='@' + timestamp + ' +0000', GIT_COMMITTER_DATE='@' + timestamp + ' +0000')
+        commit = checked_sha(local.run('commit-tree', tree, '-p', source, '-m', 'Retain private Get cloud migration preview', env=environment).decode().strip())
+    local.check_source(source)
+    if files(candidate) != after or file_bytes(output / 'plan.json', MAX_PLAN_BYTES) != plan_bytes:
+        fail('candidate_changed')
+    return {'commit': commit, 'tree': tree, 'payload': payload, 'pending': plan['pending'], 'changed_paths': len(rows)}
+
+
+def verify_preview(remote, commit, source, prepared):
+    value = remote.commit(commit)
+    if value != {'tree': prepared['tree'], 'parents': [source]}:
+        fail('existing_preview_conflict')
+    for data in prepared['payload'].values():
+        if remote.blob(oid(data), len(data)) != data:
+            fail('remote_blob_readback_failed')
+    if remote.ref(PREVIEW_REF) != commit:
+        fail('preview_ref_changed')
+
+
+def retain_private_preview(vault, output, source_commit, *, token=None, remote=None):
+    try:
+        local, remote = remote_context(vault, token, remote)
+        preflight(local, remote, source_commit, allow_main_drift=True)
+        if remote.ref(BACKUP_REF) != source_commit:
+            fail('backup_not_verified')
+        prepared = build_preview(local, output, source_commit)
+        # No rebase or ref refresh can replace the caller's pinned baseline.
+        preflight(local, remote, source_commit, allow_main_drift=True)
+        current = remote.ref(PREVIEW_REF)
+        if current is None:
+            status = create_once(remote, PREVIEW_REF, prepared['commit'])
+            current = prepared['commit']
+        else:
+            status = 'existing_verified'
+        verify_preview(remote, current, source_commit, prepared)
+        if remote.ref(BACKUP_REF) != source_commit:
+            fail('backup_ref_readback_failed')
+        final_main = remote.ref(MAIN_REF)
+        if final_main is None:
+            fail('remote_main_changed')
+        checked_sha(final_main)
+        return {'status': 'preview_' + status, 'preview_retained': True, 'preview_only': True, 'backup_verified': True,
+                'main_advanced': final_main != source_commit,
+                'main_updated': False, 'published': False, 'apply_ready': False, 'source_unchanged': True,
+                'pending': prepared['pending'], 'source_status': 'partial' if prepared['pending'] else 'complete',
+                'changed_paths': prepared['changed_paths']}
+    except RetentionFailure:
+        raise
+    except Exception:
+        fail('preview_retention_failed')
+
+
+def checkout_private(vault, source_commit, *, token=None):
+    """Fresh sparse checkout only. Token is never saved in argv or repository config."""
+    try:
+        source_commit = checked_sha(source_commit)
+        destination = Path(vault).absolute()
+        if '..' in destination.parts or any(p.is_symlink() for p in (destination, *destination.parents)):
+            fail('symlink_or_alias')
+        if destination.exists():
+            fail('checkout_destination_exists')
+        token = token if token is not None else os.environ.get('PRIVATE_VAULT_TOKEN')
+        remote = GitHubRemote(None, token)
+        metadata = remote.metadata()
+        if metadata.get('full_name') != REPOSITORY or metadata.get('private') is not True:
+            fail('repository_not_private_target')
+        if remote.ref(MAIN_REF) != source_commit:
+            fail('remote_main_changed')
+        remote.check_source_budget(source_commit)
+        destination.mkdir(mode=0o700, parents=True)
+        environment = safe_environment(token)
+        result = subprocess.run(['git', '-C', str(destination), 'init', '-q'], env=environment,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
+        if result.returncode:
+            fail('checkout_failed')
+        local = LocalGit(destination, token)
+        local.run('remote', 'add', 'origin', REMOTE_URL)
+        local.run('config', 'remote.origin.promisor', 'true')
+        local.run('config', 'remote.origin.partialclonefilter', 'blob:none')
+        local.run('config', 'core.sparseCheckout', 'true')
+        local.run('config', 'core.sparseCheckoutCone', 'false')
+        (destination / '.git/info/sparse-checkout').write_text('/.gitignore\n/Raw/.gitignore\n/Raw/03 Get/\n')
+        local.run('fetch', '--depth=1', '--filter=blob:none', '--no-tags', 'origin', source_commit)
+        local.run('checkout', '--detach', source_commit)
+        local.check_source(source_commit)
+        if remote.ref(MAIN_REF) != source_commit:
+            fail('remote_main_changed')
+        return {'status': 'private_checkout_verified', 'checkout_verified': True,
+                'source_unchanged': True, 'main_updated': False}
+    except RetentionFailure:
+        raise
+    except Exception:
+        fail('checkout_failed')
+
+
+def public_report(value):
+    """A strict presentation filter, never authentication or independent proof."""
+    statuses = {'private_checkout_verified', 'retention_failed'}
+    for prefix in ('backup_', 'preview_'):
+        statuses.update(prefix + suffix for suffix in ('existing_verified', 'created_verified', 'created_verified_after_uncertain_response'))
+    valid = isinstance(value, dict) and isinstance(value.get('status'), str) and value['status'] in statuses
+    if valid and value['status'] != 'retention_failed':
+        valid = value.get('source_unchanged') is True and value.get('main_updated') is False
+        if value['status'].startswith('backup_'):
+            valid = valid and value.get('backup_verified') is True
+        elif value['status'] == 'private_checkout_verified':
+            valid = valid and value.get('checkout_verified') is True
+        else:
+            valid = (valid and value.get('backup_verified') is True and value.get('preview_retained') is True
+                     and value.get('preview_only') is True and value.get('apply_ready') is False
+                     and value.get('published') is False and type(value.get('pending')) is int
+                     and 0 <= value['pending'] <= 1000000 and type(value.get('changed_paths')) is int
+                     and 0 <= value['changed_paths'] <= 1000000
+                     and value.get('source_status') == ('partial' if value['pending'] else 'complete')
+                     and type(value.get('main_advanced')) is bool)
+    if not valid:
+        value = {'status': 'retention_failed', 'error': 'invalid_report'}
+    result = {'status': value['status'], 'main_updated': False, 'published': False}
+    if value['status'] == 'retention_failed':
+        error = value.get('error')
+        result['error'] = error if isinstance(error, str) and error in ERROR_CODES else 'retention_failed'
+        return result
+    for field in ('backup_verified', 'preview_retained', 'preview_only', 'checkout_verified', 'source_unchanged', 'main_advanced'):
+        if type(value.get(field)) is bool:
+            result[field] = value[field]
+    if 'apply_ready' in value:
+        result['apply_ready'] = False
+    for field in ('pending', 'changed_paths'):
+        if type(value.get(field)) is int and 0 <= value[field] <= 1000000:
+            result[field] = value[field]
+    if value.get('source_status') in ('partial', 'complete'):
+        result['source_status'] = value['source_status']
+    return result
+
+
+def main(argv=None):
+    class QuietParser(argparse.ArgumentParser):
+        def error(self, message):
+            fail('conflicting_modes')
+    parser = QuietParser(description='Authorized fixed private preview retention only')
+    # Accept the requested checkout subcommand while keeping the other two
+    # established flag interfaces unchanged for the workflow caller.
+    parser.add_argument('operation', nargs='?', choices=('checkout', 'prepare', 'retain'))
+    parser.add_argument('--prepare-backup', action='store_true')
+    parser.add_argument('--vault', type=Path)
+    parser.add_argument('--preview-output', type=Path)
+    parser.add_argument('--source-commit')
+    parser.add_argument('--publish-report', type=Path)
+    try:
+        args = parser.parse_args(argv)
+    except RetentionFailure:
+        print(json.dumps(public_report({'status': 'retention_failed', 'error': 'conflicting_modes'})))
+        return 1
+    try:
+        if args.publish_report is not None:
+            if args.operation or args.prepare_backup or args.vault or args.preview_output or args.source_commit:
+                fail('conflicting_modes')
+            result = public_report(strict_json(file_bytes(args.publish_report, 1024 * 1024)))
+            print(json.dumps(result, sort_keys=True))
+            return 0  # The summary step must not replace the actual operation exit code.
+        if args.vault is None or args.source_commit is None:
+            fail('invalid_checkout')
+        if args.operation == 'checkout':
+            if args.prepare_backup or args.preview_output is not None:
+                fail('conflicting_modes')
+            result = checkout_private(args.vault, args.source_commit)
+        elif args.prepare_backup or args.operation == 'prepare':
+            if args.preview_output is not None or args.operation == 'retain':
+                fail('conflicting_modes')
+            result = prepare_backup(args.vault, args.source_commit)
+        else:
+            if args.preview_output is None:
+                fail('missing_preview_output')
+            result = retain_private_preview(args.vault, args.preview_output, args.source_commit)
+        print(json.dumps(public_report(result), sort_keys=True))
+        return 2 if result.get('pending') else 0
+    except RetentionFailure as error:
+        print(json.dumps(public_report({'status': 'retention_failed', 'error': str(error)})))
+        return 0 if args.publish_report is not None else 1
+    except Exception:
+        print(json.dumps(public_report({'status': 'retention_failed', 'error': 'retention_failed'})))
+        return 0 if args.publish_report is not None else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

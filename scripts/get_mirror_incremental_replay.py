@@ -239,9 +239,9 @@ def stable_state(state):
         for key in ('detailHash','groups','signingHash'):item.pop(key,None)
     return result
 
-def replay(root,list_complete,fetch_detail,writer_factory=None,progress=None):
+def replay(root,list_complete,fetch_detail,writer_factory=None,progress=None,initial_state=None,state_sink=None):
     initial=snapshot(root)
-    first,c1,v1=one_pass(root,{},list_complete,fetch_detail,1000,writer_factory,progress)
+    first,c1,v1=one_pass(root,deepcopy(initial_state or {}),list_complete,fetch_detail,1000,writer_factory,progress)
     after_first=snapshot(root)
     second,c2,v2=one_pass(root,first,list_complete,fetch_detail,2000,writer_factory,progress)
     if v1!=v2:raise ParityFailure('source_changed_between_passes')
@@ -252,6 +252,7 @@ def replay(root,list_complete,fetch_detail,writer_factory=None,progress=None):
     c2['pending_signing_refreshed']=sum(first['pendingById'][ident]['detailHash']!=item['detailHash'] for ident,item in second.get('pendingById',{}).items())
     if stable_state(first)!=stable_state(second):raise ParityFailure('second_pass_semantic_state_changed')
     if snapshot(root)!=after_first:raise ParityFailure('data_not_stable')
+    if state_sink is not None:state_sink(deepcopy(second))
     return {'mode':'mirror_incremental_parity','first':c1,'second':c2,
         'data_bytes_paths_mtimes_unchanged':snapshot(root)==initial,'second_data_unchanged':True,'state_lastSyncedAt_changed':bool(c2['cached_skipped']),
         'pending_set_stable':True,'source_content_complete_claimed':False,'renderer_exercised':bool(c1['written_or_changed'])}
@@ -308,3 +309,157 @@ def main():
     print(json.dumps(result,sort_keys=True))
 
 if __name__=='__main__':main()
+
+def cloud_version_valid(value):
+    return type(value) is int and 0<value<=253402300799999
+
+def cloud_export_version(value):
+    if type(value) not in (int,float) or not (0<value<=253402300799999) or int(value)!=value:raise ParityFailure('invalid_cloud_state')
+    return int(value)
+
+# LOCAL PRODUCTION DRAFT ONLY: proposed one-file state, not deployed or approved.
+def export_cloud_state(root,state):
+    """Serialize only successfully verified mirror versions; no source bodies/URLs.
+
+    The caller must commit this exact payload atomically with its verified data.
+    Generating it in a preview is not a published watermark or authorization.
+    """
+    mirrors=read_mirrors(root);index,conflicts=mirror_index(mirrors)
+    if conflicts:raise ParityFailure('duplicate_mirror_identity')
+    if not validate_manifest(root,mirrors):raise ParityFailure('invalid_manifest')
+    notes={}
+    for canonical,entry in state.get('notesByCanonicalId',{}).items():
+        ident=canonical[4:] if canonical.startswith('api:') else ''
+        mirror=index.get(ident)
+        if not ident or not mirror or entry.get('deleted') or not mirror['body_present']:
+            raise ParityFailure('invalid_cloud_state')
+        if entry.get('filePath')!=mirror['path'] or not near(entry.get('updatedAt'),timestamp_ms(mirror['updated_at'])):
+            raise ParityFailure('invalid_cloud_state')
+        notes[canonical]={'updatedAt':cloud_export_version(entry['updatedAt']),'filePath':mirror['path'],
+            'stem':Path(mirror['path']).stem,'deleted':False,
+            'mirrorSha256':hashlib.sha256((root/mirror['path']).read_bytes()).hexdigest()}
+    pending={ident:{'updatedAt':cloud_export_version(entry['updatedAt'])} for ident,entry in state.get('pendingById',{}).items()}
+    payload=load_cloud_state(root,{'version':1,'contract':'get-v7-cloud-mirror-1','source_system':'getnote','notesByCanonicalId':notes,'pendingById':pending})
+    if len(json.dumps(payload,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode())>2*1024*1024:raise ParityFailure('invalid_cloud_state')
+    return payload
+
+def load_cloud_state(root,payload):
+    """Unknown/edited/missing mirrors are never silently treated as unchanged."""
+    if payload is None:return {}
+    if not isinstance(payload,dict) or set(payload)!={'version','contract','source_system','notesByCanonicalId','pendingById'} or type(payload.get('version')) is not int or payload.get('version')!=1 or payload.get('contract')!='get-v7-cloud-mirror-1' or payload.get('source_system')!='getnote':
+        raise ParityFailure('invalid_cloud_state')
+    notes=payload['notesByCanonicalId'];pending=payload['pendingById']
+    if not isinstance(notes,dict) or not isinstance(pending,dict) or len(notes)>2500 or len(pending)>2500:raise ParityFailure('invalid_cloud_state')
+    if len(set(notes)|{'api:'+str(ident) for ident in pending})>2500:raise ParityFailure('invalid_cloud_state')
+    mirrors=read_mirrors(root);index,conflicts=mirror_index(mirrors)
+    if conflicts:raise ParityFailure('duplicate_mirror_identity')
+    if not validate_manifest(root,mirrors):raise ParityFailure('invalid_manifest')
+    for canonical,entry in notes.items():
+        if not isinstance(canonical,str) or not canonical.startswith('api:') or not isinstance(entry,dict):raise ParityFailure('invalid_cloud_state')
+        ident=canonical[4:];mirror=index.get(ident)
+        if not ident.isascii() or not ident.isdigit() or len(ident)>64:raise ParityFailure('invalid_cloud_state')
+        if set(entry)!={'updatedAt','filePath','stem','deleted','mirrorSha256'} or entry['deleted'] is not False or not mirror or not mirror['body_present']:
+            raise ParityFailure('invalid_cloud_state')
+        if not cloud_version_valid(entry['updatedAt']) or entry['filePath']!=mirror['path'] or entry['stem']!=Path(mirror['path']).stem or not near(entry['updatedAt'],timestamp_ms(mirror['updated_at'])):
+            raise ParityFailure('invalid_cloud_state')
+        if entry['mirrorSha256']!=hashlib.sha256((root/mirror['path']).read_bytes()).hexdigest():raise ParityFailure('cloud_mirror_changed')
+    for ident,entry in pending.items():
+        if not isinstance(ident,str) or not ident.isascii() or not ident.isdigit() or len(ident)>64 or not isinstance(entry,dict) or set(entry)!={'updatedAt'} or not cloud_version_valid(entry['updatedAt']):raise ParityFailure('invalid_cloud_state')
+    return deepcopy(payload)
+
+def read_cloud_state(root,path):
+    """Bound and strictly parse a state blob from the same pinned private checkout.
+
+    The caller must establish repository/commit provenance before calling; this
+    function cannot authenticate a user or make an arbitrary state blob trusted.
+    """
+    path=Path(path)
+    if any(parent.is_symlink() for parent in path.parents):raise ParityFailure('invalid_cloud_state')
+    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):raise ParityFailure('invalid_cloud_state')
+    if not path.exists():return {}
+    if not path.is_file():raise ParityFailure('invalid_cloud_state')
+    with path.open('rb') as stream:data=stream.read(2*1024*1024+1)
+    if len(data)>2*1024*1024:raise ParityFailure('invalid_cloud_state')
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result:raise ParityFailure('invalid_cloud_state')
+            result[key]=value
+        return result
+    def reject(_):raise ParityFailure('invalid_cloud_state')
+    try:payload=json.loads(data,object_pairs_hook=unique,parse_constant=reject)
+    except (ValueError,UnicodeError,RecursionError):raise ParityFailure('invalid_cloud_state')
+    if payload is None:raise ParityFailure('invalid_cloud_state')
+    return load_cloud_state(root,payload)
+
+
+def prepare_private_preview(vault,output,expected_commit,list_complete,fetch_detail,writer_factory,progress=None):
+    """Retain a private candidate plus exact diff; never commit/push or apply.
+
+    Expected SHA binds a previously authenticated checkout, not user approval.
+    Caller must verify private repo visibility and authorized source access.
+    """
+    import subprocess
+    import re
+    vault=Path(vault);output=Path(output)
+    if any(part.is_symlink() for path in (vault,output) for part in (path,*path.parents)):raise ParityFailure('invalid_preview_source')
+    vault=vault.resolve()
+    if not re.fullmatch('[a-f0-9]{40}',expected_commit):raise ParityFailure('invalid_preview_source')
+    def git(*args):
+        result=subprocess.run(['git','-C',str(vault),*args],capture_output=True,check=False)
+        if result.returncode:raise ParityFailure('invalid_preview_source')
+        return result.stdout
+    if git('rev-parse','HEAD').decode().strip()!=expected_commit:raise ParityFailure('preview_head_changed')
+    if git('status','--porcelain','--untracked-files=all','--','Raw/03 Get'):raise ParityFailure('dirty_preview_source')
+    if output.exists() or output.is_symlink() or output.resolve().is_relative_to(vault) or vault.is_relative_to(output.resolve()):raise ParityFailure('invalid_preview_output')
+    source=vault/'Raw'/'03 Get'
+    if any(part.is_symlink() for part in (source,*source.parents)):raise ParityFailure('invalid_preview_source')
+    before=snapshot(source)
+    tree={}
+    for record in git('ls-tree','-rz',expected_commit,'--','Raw/03 Get').split(b'\0'):
+        if not record:continue
+        metadata,name=record.split(b'\t',1);mode,kind,sha=metadata.decode().split()
+        if mode not in ('100644','100755') or kind!='blob':raise ParityFailure('invalid_preview_source')
+        path=name.decode();relative=Path(path).relative_to('Raw/03 Get').as_posix();tree[relative]=sha
+    if set(tree)!=set(before):raise ParityFailure('untracked_preview_source')
+    for relative,sha in tree.items():
+        data=(source/relative).read_bytes()
+        if hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()!=sha:raise ParityFailure('dirty_preview_source')
+    if not validate_manifest(source,read_mirrors(source)):raise ParityFailure('invalid_manifest')
+    output.mkdir(parents=True,mode=0o700)
+    try:
+        candidate=output/'candidate';shutil.copytree(source,candidate,symlinks=True)
+        state_path=Path('03 State/cloud-sync-state.json')
+        initial=read_cloud_state(candidate,candidate/state_path);accepted=[]
+        result=replay(candidate,list_complete,fetch_detail,writer_factory,progress,initial_state=initial,state_sink=accepted.append)
+        state=export_cloud_state(candidate,accepted[0])
+        encoded=json.dumps(state,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode()+b'\n'
+        if len(encoded)>2*1024*1024:raise ParityFailure('invalid_cloud_state')
+        target=candidate/state_path
+        if not target.exists() or target.read_bytes()!=encoded:target.write_bytes(encoded)
+        pending=sorted(state['pendingById'])
+        receipt={'source_system':'getnote','scope':'full','enumerated':result['first']['enumerated'],'complete':not pending,'pending':len(pending)}
+        for rel,value in [('03 State/receipt.json',receipt),('03 State/pending.json',{'source_system':'getnote','pending_ids':pending})]:
+            path=candidate/rel;data=(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\n').encode()
+            if not path.exists() or path.read_bytes()!=data:path.write_bytes(data)
+        after=snapshot(candidate)
+        if set(before)-set(after):raise ParityFailure('preview_deleted_path')
+        changes=[]
+        for rel in sorted(after):
+            old=before.get(rel);new=after[rel]
+            if old and old[0]==new[0]:continue
+            # Ask Git's actual ignore rules, never force-add ignored new notes.
+            ignored=subprocess.run(['git','-C',str(vault),'check-ignore','--no-index','-q','--','Raw/03 Get/'+rel],capture_output=True)
+            if ignored.returncode==0:raise ParityFailure('preview_ignored_path')
+            if ignored.returncode!=1:raise ParityFailure('invalid_preview_source')
+            old_bytes=(source/rel).read_bytes() if old else None;new_bytes=(candidate/rel).read_bytes()
+            def blob(data):return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() if data is not None else None
+            changes.append({'path':'Raw/03 Get/'+rel,'action':'modify' if old else 'add','old_blob':blob(old_bytes),'new_blob':blob(new_bytes),'old_sha256':old[0] if old else None,'new_sha256':new[0],'old_bytes':len(old_bytes) if old_bytes is not None else 0,'new_bytes':len(new_bytes)})
+        if git('rev-parse','HEAD').decode().strip()!=expected_commit or snapshot(source)!=before:raise ParityFailure('preview_source_changed')
+        # This file is PRIVATE, includes paths; never print or upload publicly.
+        plan={'version':1,'scope':'get-private-preview','source_commit':expected_commit,'changes':changes,'pending':len(pending),'status':'partial' if pending else 'complete','published':False,'apply_ready':False,'reason':'production_apply_jsonl_health_and_publish_gates_pending'}
+        (output/'plan.json').write_text(json.dumps(plan,ensure_ascii=False,indent=2)+'\n')
+        return result,{'changed_paths':len(changes),'pending':len(pending),'published':False,'preview_only':True}
+    except BaseException:
+        shutil.rmtree(output)
+        raise
