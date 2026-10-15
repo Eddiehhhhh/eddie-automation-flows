@@ -438,5 +438,261 @@ class TransportAndCliTests(unittest.TestCase):
             self.assertEqual([call.args[0] for call in request.call_args_list], ['/git/trees/' + 'a' * 40, '/git/trees/' + 'b' * 40, '/git/trees/' + 'c' * 40 + '?recursive=1'])
 
 
+class VerifyRetainedTests(unittest.TestCase):
+    setUpBase = RetentionTests.setUp
+    git = RetentionTests.git
+    preview = RetentionTests.preview
+
+    def setUp(self):
+        self.setUpBase()
+        self.binary_path = r.GET + '/02 Assets/existing.bin'
+        binary = self.vault / self.binary_path
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b'old\x00\xffbinary\r\n')
+        self.git('add', '.'); self.git('commit', '-qm', 'binary source')
+        self.source = self.git('rev-parse', 'HEAD').strip()
+        self.remote = FakeRemote(self.local, self.source)
+        self.preview()
+        planfile = self.output / 'plan.json'
+        self.plan = json.loads(planfile.read_text())
+        for path, data in ((self.binary_path, b'new\x00\xfebinary\r\n'),
+                           (r.GET + '/02 Assets/new.bin', bytes(range(256)))):
+            target = self.output / 'candidate' / Path(path).relative_to(r.GET)
+            target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
+            old = (self.vault / path).read_bytes() if (self.vault / path).exists() else None
+            self.plan['changes'].append({'path': path, 'action': 'modify' if old is not None else 'add',
+                'old_blob': r.oid(old) if old is not None else None, 'new_blob': r.oid(data),
+                'old_sha256': r.sha256(old) if old is not None else None, 'new_sha256': r.sha256(data),
+                'old_bytes': len(old) if old is not None else 0, 'new_bytes': len(data)})
+        self.plan.update(pending=9, status='partial')
+        planfile.write_bytes(r.canonical(self.plan))
+        self.prepared = r.build_preview(self.local, self.output, self.source)
+        self.candidate = self.prepared['commit']
+        self.bare = self.work / 'read-remote.git'
+        self.git('update-ref', r.BACKUP_REF, self.source)
+        self.git('update-ref', r.PREVIEW_REF, self.candidate)
+        self.git('clone', '--bare', str(self.vault), str(self.bare), root=self.work)
+        self.git('config', 'uploadpack.allowFilter', 'true', root=self.bare)
+        self.git('config', 'uploadpack.allowReachableSHA1InWant', 'true', root=self.bare)
+        self.remote.refs.update({r.BACKUP_REF: self.source, r.PREVIEW_REF: self.candidate})
+        self.wants = []
+        self.target = self.work / 'fresh-readback'
+        def budget(commit):
+            result = {}
+            raw = subprocess.check_output(['git', '-C', str(self.bare), 'ls-tree', '-rlz', commit, '--', r.GET])
+            for record in raw.split(b'\0'):
+                if record:
+                    meta, name = record.split(b'\t'); mode, kind, blob, size = meta.decode().split()
+                    result[name.decode()] = (mode, kind, blob, int(size))
+            return result
+        self.remote.check_source_budget = budget
+
+    def opener(self):
+        from email.message import Message
+        test = self
+        class Response(io.BytesIO):
+            status = 200
+            def __init__(self, data, kind):
+                super().__init__(data); self.headers = Message()
+                self.headers['content-type'] = kind
+        class LocalUploadPack:
+            def open(self, request, timeout):
+                test.assertTrue(request.full_url.startswith(r.pack_seed.GIT_URL + '/'))
+                args = ['git', 'upload-pack', '--stateless-rpc']
+                if request.data is None:
+                    args.append('--advertise-refs')
+                    kind = 'application/x-git-upload-pack-advertisement'
+                else:
+                    kind = 'application/x-git-upload-pack-result'
+                    import re
+                    test.wants.append(set(x.decode() for x in re.findall(rb'want ([a-f0-9]{40})\n', request.data)))
+                args.append(str(test.bare))
+                result = subprocess.run(args, input=request.data, capture_output=True,
+                    env={**r.safe_environment(), 'GIT_PROTOCOL': 'version=2'}, timeout=20, check=True)
+                return Response(result.stdout, kind)
+        return LocalUploadPack()
+
+    @contextlib.contextmanager
+    def transport(self):
+        with patch.object(r, 'REMOTE_URL', self.bare.as_uri()), \
+             patch.object(r.pack_seed, 'opener', self.opener), \
+             patch.object(r.LocalGit, 'blob', side_effect=AssertionError('no implicit body reads')), \
+             patch.object(self.remote, 'blob', side_effect=AssertionError('no serial REST bodies')), \
+             patch.object(self.remote, 'create_only', side_effect=AssertionError('no remote write')), \
+             patch.object(r.GitHubRemote, 'create_only', side_effect=AssertionError('no remote write')):
+            yield
+
+    def verify(self):
+        with self.transport():
+            return r.verify_retained(self.target, self.source, self.candidate,
+                                     token='synthetic-token', remote=self.remote)
+
+    def replace_candidate(self, changes):
+        # Offline fixture construction only; recovery itself has no writer.
+        with tempfile.TemporaryDirectory() as temporary:
+            env = dict(self.local.env, GIT_INDEX_FILE=str(Path(temporary) / 'index'))
+            self.local.run('read-tree', self.candidate, env=env)
+            for path, data in changes.items():
+                if data is None:
+                    self.local.run('update-index', '--force-remove', '--', path, env=env)
+                else:
+                    blob = self.local.run('hash-object', '-w', '--stdin', data=data, env=env).decode().strip()
+                    self.local.run('update-index', '--add', '--cacheinfo', '100644,' + blob + ',' + path, env=env)
+            tree = self.local.run('write-tree', env=env).decode().strip()
+            env.update(GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                       GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+            self.candidate = self.local.run('commit-tree', tree, '-p', self.source, '-m', 'fixture', env=env).decode().strip()
+        self.git('fetch', '--quiet', str(self.vault), self.candidate, root=self.bare)
+        self.remote.refs[r.PREVIEW_REF] = self.candidate
+
+    def test_real_partial_clone_and_bounded_upload_pack_verify_binary_without_writes(self):
+        initial = self.git('show-ref', root=self.bare)
+        self.remote.refs[r.MAIN_REF] = 'c' * 40  # A newer main is reported, never rebased.
+        value = self.verify()
+        self.assertEqual(value['status'], 'preview_readback_verified')
+        self.assertTrue(value['main_advanced']); self.assertFalse(value['apply_ready'])
+        self.assertEqual(value['pending'], 9); self.assertEqual(value['source_status'], 'partial')
+        self.assertEqual(value['verified_paths'], len(self.plan['changes']))
+        self.assertEqual(value['verified_bytes'], sum(row['new_bytes'] for row in self.plan['changes']))
+        self.assertEqual(self.remote.writes, []); self.assertEqual(self.git('show-ref', root=self.bare), initial)
+        self.assertEqual(len(self.wants), 2)
+        plan_blob = r.oid(r.canonical(self.plan))
+        self.assertEqual(self.wants[0], {plan_blob})
+        self.assertEqual(self.wants[1], {row[k] for row in self.plan['changes'] for k in ('old_blob', 'new_blob') if row[k]})
+        forbidden = self.local.tree(self.source)['Wiki/unrelated.md'][2]
+        self.assertTrue(all(forbidden not in wanted for wanted in self.wants))
+        inventory = self.git('cat-file', '--batch-all-objects', '--batch-check=%(objecttype)', root=self.target)
+        self.assertNotIn('blob', inventory)
+        self.assertFalse((self.target / r.GET).exists())
+        self.assertEqual(r.public_report(value), value)
+
+    def test_binary_sha256_corruption_is_rejected(self):
+        row = next(row for row in self.plan['changes'] if row['path'] == self.binary_path)
+        row['new_sha256'] = '0' * 64
+        self.replace_candidate({r.PLAN_PATH: r.canonical(self.plan)})
+        with self.assertRaisesRegex(r.RetentionFailure, 'retained_payload_mismatch') as caught:
+            self.verify()
+        self.assertEqual(caught.exception.verification_stage, 'payload')
+        self.assertEqual(self.remote.writes, [])
+
+    def test_unplanned_non_get_diff_rejected_before_payload(self):
+        self.replace_candidate({'Wiki/unrelated.md': b'changed privately'})
+        with self.assertRaisesRegex(r.RetentionFailure, 'retained_tree_mismatch'):
+            self.verify()
+        self.assertEqual(len(self.wants), 1)
+
+    def test_deleted_source_file_rejected(self):
+        self.replace_candidate({self.binary_path: None})
+        with self.assertRaises(r.RetentionFailure): self.verify()
+        self.assertEqual(len(self.wants), 1)
+
+    def test_preview_commit_is_explicitly_bound_before_any_download(self):
+        self.remote.refs[r.PREVIEW_REF] = self.source
+        with self.assertRaisesRegex(r.RetentionFailure, 'preview_ref_changed'): self.verify()
+        self.assertFalse(self.target.exists()); self.assertEqual(self.wants, [])
+
+    def test_end_ref_race_fails_without_write_or_retry(self):
+        original = self.remote.ref
+        calls = []
+        def ref(name):
+            if name == r.PREVIEW_REF:
+                calls.append(name)
+                return self.candidate if len(calls) == 1 else self.source
+            return original(name)
+        with patch.object(self.remote, 'ref', side_effect=ref):
+            with self.assertRaisesRegex(r.RetentionFailure, 'preview_ref_changed') as caught: self.verify()
+        self.assertEqual(caught.exception.verification_stage, 'refs')
+        self.assertEqual(len(self.wants), 2); self.assertEqual(self.remote.writes, [])
+
+    def test_pack_corruption_fails_and_no_fallback(self):
+        original = r.pack_seed.fetch_pack
+        def corrupt(*args, **kwargs):
+            used = original(*args, **kwargs)
+            if len(self.wants) == 2:
+                path = args[2]; body = bytearray(path.read_bytes()); body[-1] ^= 1; path.write_bytes(body)
+            return used
+        with patch.object(r.pack_seed, 'fetch_pack', side_effect=corrupt):
+            with self.assertRaisesRegex(r.RetentionFailure, 'retained_readback_failed'): self.verify()
+        self.assertEqual(len(self.wants), 2); self.assertEqual(self.remote.writes, [])
+
+    def test_cli_real_recovery_partial_and_summary(self):
+        out = io.StringIO()
+        with self.transport(), patch.object(r, 'GitHubRemote', return_value=self.remote), \
+             patch.dict(os.environ, {'PRIVATE_VAULT_TOKEN': 'synthetic-token'}), contextlib.redirect_stdout(out):
+            code = r.main(['verify-retained', '--vault', str(self.target), '--source-commit', self.source,
+                           '--preview-commit', self.candidate])
+        self.assertEqual(code, 2, out.getvalue())
+        report = self.work / 'report.json'; report.write_text(out.getvalue())
+        process = subprocess.run([sys.executable, r.__file__, '--publish-report', str(report)], capture_output=True, text=True)
+        self.assertEqual(process.returncode, 0); self.assertEqual(process.stderr, '')
+        result = json.loads(process.stdout)
+        self.assertEqual(result['status'], 'preview_readback_verified')
+        self.assertTrue(result['plan_verified']); self.assertEqual(result['pending'], 9)
+        for private in (self.source, self.candidate, self.binary_path, 'synthetic-token'):
+            self.assertNotIn(private, process.stdout)
+
+    def test_old_or_new_body_budget_stops_before_payload_transfer(self):
+        with patch.object(r, 'MAX_GET_BYTES', 1):
+            with self.assertRaisesRegex(r.RetentionFailure, 'source_tree_budget'): self.verify()
+        self.assertEqual(len(self.wants), 1)
+
+    def test_visibility_and_backup_mismatch_stop_before_download(self):
+        self.remote.info['private'] = False
+        with self.assertRaisesRegex(r.RetentionFailure, 'repository_not_private_target'): self.verify()
+        self.remote.info['private'] = True
+        self.remote.refs[r.BACKUP_REF] = 'a' * 40
+        with self.assertRaisesRegex(r.RetentionFailure, 'backup_not_verified'): self.verify()
+        self.assertFalse(self.target.exists()); self.assertEqual(self.wants, [])
+
+    def test_source_parent_mismatch_stops_before_download(self):
+        original = self.remote.commit
+        def commit(sha):
+            value = original(sha)
+            if sha == self.candidate: value['parents'] = [self.source, self.source]
+            return value
+        with patch.object(self.remote, 'commit', side_effect=commit):
+            with self.assertRaisesRegex(r.RetentionFailure, 'existing_preview_conflict'): self.verify()
+        self.assertFalse(self.target.exists()); self.assertEqual(self.wants, [])
+
+    def test_missing_body_fails_without_second_transport(self):
+        original = r.pack_seed.fetch_pack
+        def missing(*args, **kwargs):
+            if len(self.wants) == 1: raise ValueError('private missing blob detail')
+            return original(*args, **kwargs)
+        with patch.object(r.pack_seed, 'fetch_pack', side_effect=missing):
+            with self.assertRaisesRegex(r.RetentionFailure, 'retained_readback_failed') as caught: self.verify()
+        self.assertEqual(caught.exception.verification_stage, 'payload')
+        self.assertEqual(len(self.wants), 1); self.assertEqual(self.remote.writes, [])
+
+    def test_duplicate_plan_path_is_rejected_before_payload(self):
+        self.plan['changes'].append(deepcopy(self.plan['changes'][0]))
+        self.replace_candidate({r.PLAN_PATH: r.canonical(self.plan)})
+        with self.assertRaisesRegex(r.RetentionFailure, 'invalid_plan_path'): self.verify()
+        self.assertEqual(len(self.wants), 1)
+
+    def test_readback_report_requires_complete_proof_flags(self):
+        value = self.verify()
+        for field in ('backup_verified', 'preview_retained', 'source_unchanged', 'plan_verified'):
+            forged = dict(value, **{field: False})
+            self.assertEqual(r.public_report(forged)['status'], 'retention_failed')
+        for field, bad in (('verified_paths', True), ('verified_bytes', -1), ('verification_stage', 'payload')):
+            self.assertEqual(r.public_report(dict(value, **{field: bad}))['status'], 'retention_failed')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(r.main(['verify-retained', '--vault', 'unused', '--source-commit', self.source]), 1)
+        self.assertEqual(json.loads(out.getvalue())['error'], 'missing_preview_commit')
+
+    def test_existing_local_directory_is_not_remote_readback_evidence(self):
+        self.target.mkdir()
+        with self.assertRaisesRegex(r.RetentionFailure, 'checkout_destination_exists'): self.verify()
+        self.assertEqual(self.wants, [])
+
+    def test_boolean_plan_version_rejected(self):
+        self.plan['version'] = True
+        self.replace_candidate({r.PLAN_PATH: r.canonical(self.plan)})
+        with self.assertRaisesRegex(r.RetentionFailure, 'invalid_plan'): self.verify()
+        self.assertEqual(len(self.wants), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

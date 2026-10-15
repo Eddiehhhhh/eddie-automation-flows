@@ -6,13 +6,18 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, full]
         default: sample
         required: true
       preview_source_commit:
-        description: Exact approved private source commit (private_preview only)
+        description: Exact approved private source commit (private_preview / verify_retained)
         type: string
         default: '4fbc69f2d41bc3c7da81eae8f0c91584f0923190'
+        required: false
+      retained_preview_commit:
+        description: Exact existing private preview commit (verify_retained only)
+        type: string
+        default: 'dab0abf680075e3f073b225872be010c3ae99561'
         required: false
       sample_pages:
         description: List pages to inspect for one ordinary note and one recording
@@ -128,8 +133,15 @@ jobs:
           if [ "$preview_rc" != 0 ] && [ "$preview_rc" != 2 ]; then exit "$preview_rc"; fi
           timeout --kill-after=30s 10m python scripts/run_private_command.py --label 'Get private preview retention' --stdout-file '${{ runner.temp }}/retention-result.json' -- python scripts/get_private_preview_retention.py retain --vault "$GITHUB_WORKSPACE/private-vault" --preview-output '${{ runner.temp }}/get-private-preview' --source-commit "$PREVIEW_SOURCE"
           exit "$preview_rc"
+      - name: Verify existing retained private preview without Get reads or writes
+        if: inputs.mode == 'verify_retained'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+          RETAINED_PREVIEW: ${{ inputs.retained_preview_commit }}
+        run: timeout --kill-after=30s 10m python scripts/run_private_command.py --label 'Get retained preview readback only' --stdout-file '${{ runner.temp }}/retention-result.json' -- python scripts/get_private_preview_retention.py verify-retained --vault "$GITHUB_WORKSPACE/private-vault" --source-commit "$PREVIEW_SOURCE" --preview-commit "$RETAINED_PREVIEW"
       - name: Remove ephemeral private checkout and preview
-        if: always() && inputs.mode == 'private_preview'
+        if: always() && (inputs.mode == 'private_preview' || inputs.mode == 'verify_retained')
         run: rm -rf -- "$GITHUB_WORKSPACE/private-vault" '${{ runner.temp }}/get-private-preview'
       - name: Publish aggregate evidence only
         if: always()
@@ -140,6 +152,10 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
+          if [ "$MODE" = verify_retained ]; then
+            python scripts/get_private_preview_retention.py --publish-report "$RETENTION_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$MODE" = private_preview ]; then
             python scripts/get_private_preview_retention.py --publish-report "$BACKUP_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
             python scripts/get_private_preview_retention.py --publish-report "$RETENTION_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"

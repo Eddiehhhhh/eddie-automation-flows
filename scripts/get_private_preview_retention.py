@@ -14,11 +14,14 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import stat
 import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+
+import source_sync_pack_seed as pack_seed
 
 REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
 REMOTE_URL = 'https://github.com/' + REPOSITORY + '.git'
@@ -44,7 +47,9 @@ ERROR_CODES = frozenset(('invalid_commit','invalid_json','outside_get_scope','un
  'unplanned_candidate_change','candidate_changed','local_blob_readback_failed','candidate_tree_mismatch',
  'existing_preview_conflict','remote_blob_readback_failed','preview_ref_changed','backup_not_verified',
  'preview_retention_failed','conflicting_modes','missing_preview_output','retention_failed',
- 'checkout_failed','checkout_destination_exists','invalid_report','source_tree_budget','invalid_source_tree'))
+ 'checkout_failed','checkout_destination_exists','invalid_report','source_tree_budget','invalid_source_tree',
+ 'missing_preview_commit','retained_preview_missing','retained_plan_missing','retained_readback_failed',
+ 'retained_tree_mismatch','retained_payload_mismatch','retained_blob_missing'))
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 ROW_KEYS = {'path', 'action', 'old_blob', 'new_blob', 'old_sha256', 'new_sha256', 'old_bytes', 'new_bytes'}
 PLAN_KEYS = {'version', 'scope', 'source_commit', 'changes', 'pending', 'status', 'published', 'apply_ready', 'reason'}
@@ -167,7 +172,8 @@ class LocalGit:
         try:
             return subprocess.run(['git', '-C', str(cwd or self.vault), *args], input=data,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  env=env or self.env, timeout=600, check=False)
+                                  env=env or self.env, timeout=getattr(self, 'timeout', 600), check=False,
+                                  preexec_fn=getattr(self, 'child_limits', None))
         except Exception:
             fail('git_operation_failed')
 
@@ -293,6 +299,7 @@ class GitHubRemote:
             revision = checked_sha(selected[0].get('sha'))
         count = total = 0
         seen = set()
+        blobs = {}
         for entry in entries(revision, True):
             path = safe_path(GET + '/' + entry.get('path', ''))
             if path in seen:
@@ -304,12 +311,14 @@ class GitHubRemote:
             if entry.get('type') != 'blob' or entry.get('mode') not in ('100644', '100755') or type(size) is not int or size < 0:
                 fail('invalid_source_tree')
             checked_sha(entry.get('sha'))
+            blobs[path] = (entry['mode'], 'blob', entry['sha'], size)
             count += 1
             total += size
             if count > MAX_FILES or size > MAX_BLOB_BYTES or total > MAX_GET_BYTES:
                 fail('source_tree_budget')
         if count == 0:
             fail('invalid_source_tree')
+        return blobs
 
     def create_only(self, name, commit):
         if name not in (BACKUP_REF, PREVIEW_REF):
@@ -617,9 +626,241 @@ def checkout_private(vault, source_commit, *, token=None):
         fail('checkout_failed')
 
 
+
+def readback_checkout(destination, preview_commit, token):
+    """Fresh object-only partial checkout. No worktree, filters or non-Get blobs.
+
+    Fetching two commit generations supplies the candidate and source tree
+    metadata. Payload bodies are fetched explicitly by a bounded batch later.
+    This function only changes a new local directory, never a remote ref.
+    """
+    destination = Path(destination).absolute()
+    if '..' in destination.parts or any(p.is_symlink() for p in (destination, *destination.parents)):
+        fail('symlink_or_alias')
+    if destination.exists():
+        fail('checkout_destination_exists')
+    destination.mkdir(mode=0o700, parents=True)
+    environment = safe_environment(token)
+    result = subprocess.run(['git', '-C', str(destination), 'init', '-q'], env=environment,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
+    if result.returncode:
+        fail('checkout_failed')
+    local = LocalGit(destination, token)
+    local.run('remote', 'add', 'origin', REMOTE_URL)
+    local.run('config', 'remote.origin.promisor', 'true')
+    local.run('config', 'remote.origin.partialclonefilter', 'blob:none')
+    local.run('config', 'core.sparseCheckout', 'true')
+    local.run('config', 'core.sparseCheckoutCone', 'false')
+    (destination / '.git/info/sparse-checkout').write_text('/Raw/03 Get/\n')
+    # Disable implicit per-object fetching: every payload fetch below is an
+    # explicit batch of validated Get blob OIDs, never a full clone fallback.
+    local.env['GIT_NO_LAZY_FETCH'] = '1'
+    local.timeout = 120
+    def metadata_limits():
+        pack_seed.child_limits()
+        resource.setrlimit(resource.RLIMIT_FSIZE, (pack_seed.MAX_PACK, pack_seed.MAX_PACK))
+    local.child_limits = metadata_limits
+    local.run('fetch', '--depth=2', '--filter=blob:none', '--no-tags', '--no-recurse-submodules',
+              '--no-write-fetch-head', 'origin', checked_sha(preview_commit))
+    local.run('update-ref', '--no-deref', 'HEAD', preview_commit)
+    local.check_source(preview_commit)
+    # A server which ignored blob:none must not silently widen this recovery.
+    inventory = local.run('cat-file', '--batch-all-objects', '--batch-check=%(objecttype)')
+    if any(kind not in (b'commit', b'tree') for kind in inventory.splitlines()):
+        fail('retained_tree_mismatch')
+    return local
+
+
+def fetch_readback_blobs(token, entries, directory, remaining, protocol):
+    """Reuse the exact-object bounded Git transfer, in a fresh offline store.
+
+    The only remote wants are validated Get blob identities. No local cache,
+    promisor fetch, non-Get body or alternate transport can satisfy this proof.
+    """
+    paths = {'objects/' + checked_sha(blob): {'sha': blob, 'size': size}
+             for blob, size in entries.items()}
+    expected = pack_seed.expected_blobs(paths)
+    if remaining <= 0:
+        fail('source_tree_budget')
+    directory.mkdir(mode=0o700)
+    pack = directory / 'readback.pack'
+    used = pack_seed.fetch_pack(token, expected, pack, maximum=remaining, protocol=protocol)
+    pack_seed.verify_materialize(pack, directory / 'objects.git', expected, paths, directory / 'data')
+    return {blob: directory / 'data' / 'objects' / blob for blob in expected}, used
+
+
+def validate_retained_plan(plan, source, before, after, before_metadata, after_metadata):
+    if not isinstance(plan, dict) or set(plan) != PLAN_KEYS:
+        fail('invalid_plan')
+    if (type(plan.get('version')) is not int or plan['version'] != 1
+            or plan.get('scope') != 'get-private-preview' or plan.get('source_commit') != source
+            or plan.get('published') is not False or plan.get('apply_ready') is not False
+            or type(plan.get('pending')) is not int or not 0 <= plan['pending'] <= MAX_FILES
+            or plan.get('status') != ('partial' if plan['pending'] else 'complete')
+            or not isinstance(plan.get('reason'), str)):
+        fail('invalid_plan')
+    rows = plan.get('changes')
+    if not isinstance(rows, list) or len(rows) > MAX_FILES:
+        fail('invalid_plan')
+    expected = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != ROW_KEYS:
+            fail('invalid_plan_row')
+        path = safe_path(row.get('path'))
+        if path == PLAN_PATH or path in expected or path not in after:
+            fail('invalid_plan_path')
+        if any(type(row.get(key)) is not int or not 0 <= row[key] <= MAX_BLOB_BYTES for key in ('old_bytes', 'new_bytes')):
+            fail('invalid_plan_row')
+        if not isinstance(row.get('new_sha256'), str) or re.fullmatch('[0-9a-f]{64}', row['new_sha256']) is None:
+            fail('invalid_plan_row')
+        checked_sha(row.get('new_blob'))
+        old, new = before.get(path), after[path]
+        if new[1] != 'blob' or new[0] not in ('100644', '100755'):
+            fail('nonregular_source')
+        if row['action'] != ('modify' if old else 'add'):
+            fail('preview_deletion_forbidden')
+        if old is None:
+            if row['old_blob'] is not None or row['old_sha256'] is not None or row['old_bytes'] != 0 or new[0] != '100644':
+                fail('plan_old_bytes_mismatch')
+        else:
+            if (old[1] != 'blob' or old[0] not in ('100644', '100755') or old[0] != new[0]
+                    or row['old_blob'] != old[2] or row['old_bytes'] != before_metadata[path][3]
+                    or not isinstance(row['old_sha256'], str) or re.fullmatch('[0-9a-f]{64}', row['old_sha256']) is None):
+                fail('plan_old_bytes_mismatch')
+        if row['new_blob'] != new[2] or row['new_bytes'] != after_metadata[path][3]:
+            fail('plan_new_bytes_mismatch')
+        expected[path] = row
+    if PLAN_PATH in before or after.get(PLAN_PATH, ())[:2] != ('100644', 'blob'):
+        fail('reserved_plan_path_exists')
+    if set(before) - set(after):
+        fail('preview_deletion_forbidden')
+    actual = {path for path in set(before) | set(after) if before.get(path) != after.get(path)}
+    # Equality covers modes, additions, removals, every non-Get subtree and the
+    # dedicated review-plan blob. No unplanned file can hide outside Get.
+    if actual != set(expected) | {PLAN_PATH}:
+        fail('retained_tree_mismatch')
+    return expected
+
+
+def verify_retained(vault, source_commit, preview_commit, *, token=None, remote=None):
+    """Read an already-retained candidate without source API or any remote write.
+
+    A new local object database and explicit Git batch fetch establish fresh
+    remote payload reads. This verifies retained bytes and their plan, not
+    upstream completeness, the nine pending originals or production readiness.
+    """
+    stage = 'preflight'
+    try:
+        source_commit, preview_commit = checked_sha(source_commit), checked_sha(preview_commit)
+        token = token if token is not None else (None if remote is not None else os.environ.get('PRIVATE_VAULT_TOKEN'))
+        remote = remote if remote is not None else GitHubRemote(None, token)
+        metadata = remote.metadata()
+        if metadata.get('full_name') != REPOSITORY or metadata.get('private') is not True:
+            fail('repository_not_private_target')
+        if remote.ref(BACKUP_REF) != source_commit:
+            fail('backup_not_verified')
+        if remote.ref(PREVIEW_REF) != preview_commit:
+            fail('preview_ref_changed')
+        preview_info, source_info = remote.commit(preview_commit), remote.commit(source_commit)
+        if preview_info.get('parents') != [source_commit]:
+            fail('existing_preview_conflict')
+        if remote.ref(MAIN_REF) is None:
+            fail('remote_main_changed')
+        stage = 'metadata'
+        before_metadata = remote.check_source_budget(source_commit)
+        after_metadata = remote.check_source_budget(preview_commit)
+        if PLAN_PATH not in after_metadata or after_metadata[PLAN_PATH][3] > MAX_PLAN_BYTES:
+            fail('retained_plan_missing')
+        stage = 'fetch'
+        local = readback_checkout(vault, preview_commit, token)
+        for commit, info in ((source_commit, source_info), (preview_commit, preview_info)):
+            if local.run('rev-parse', commit + '^{tree}').decode().strip() != info.get('tree'):
+                fail('invalid_source_commit')
+        # Validate the raw local parent field too; replacement/graft mechanisms
+        # remain disabled and forbidden in this fresh checkout.
+        headers = local.run('cat-file', '-p', preview_commit).split(b'\n\n', 1)[0].splitlines()
+        if [line[7:].decode() for line in headers if line.startswith(b'parent ')] != [source_commit]:
+            fail('existing_preview_conflict')
+        before, after = local.tree(source_commit), local.tree(preview_commit)
+        for tree, indexed in ((before, before_metadata), (after, after_metadata)):
+            selected = {path: entry for path, entry in tree.items() if path.startswith(GET + '/')}
+            if selected != {path: entry[:3] for path, entry in indexed.items()}:
+                fail('retained_tree_mismatch')
+        stage = 'plan'
+        plan_blob = after[PLAN_PATH][2]
+        pack_bytes = sum(p.stat().st_size for p in (local.vault / '.git/objects/pack').glob('*.pack'))
+        protocol = pack_seed.capabilities(token)
+        with tempfile.TemporaryDirectory(prefix='get-retained-plan-') as temporary:
+            materialized, used = fetch_readback_blobs(token, {plan_blob: after_metadata[PLAN_PATH][3]},
+                Path(temporary) / 'plan', pack_seed.MAX_PACK - pack_bytes, protocol)
+            plan_bytes = file_bytes(materialized[plan_blob], MAX_PLAN_BYTES)
+        pack_bytes += used
+        if len(plan_bytes) > MAX_PLAN_BYTES or len(plan_bytes) != after_metadata[PLAN_PATH][3] or oid(plan_bytes) != plan_blob:
+            fail('retained_payload_mismatch')
+        plan = strict_json(plan_bytes)
+        # The retention helper wrote this canonical representation. Reject
+        # alternate serialization or trailing extra content in a retained plan.
+        if canonical(plan) != plan_bytes:
+            fail('invalid_plan')
+        stage = 'tree'
+        expected = validate_retained_plan(plan, source_commit, before, after, before_metadata, after_metadata)
+        stage = 'payload'
+        requested = {}
+        for row in expected.values():
+            for prefix in ('old', 'new'):
+                blob, size = row[prefix + '_blob'], row[prefix + '_bytes']
+                if blob is not None:
+                    if blob in requested and requested[blob] != size:
+                        fail('invalid_plan_row')
+                    requested[blob] = size
+        if (len(requested) + 1 > MAX_FILES
+                or sum(requested.values()) + len(plan_bytes) > MAX_GET_BYTES):
+            fail('source_tree_budget')
+        verified_bytes = 0
+        if requested:
+            with tempfile.TemporaryDirectory(prefix='get-retained-payload-') as temporary:
+                materialized, used = fetch_readback_blobs(token, requested, Path(temporary) / 'payload',
+                    pack_seed.MAX_PACK - pack_bytes, protocol)
+                for row in expected.values():
+                    for prefix in ('old', 'new'):
+                        blob = row[prefix + '_blob']
+                        if blob is None:
+                            continue
+                        data = file_bytes(materialized[blob])
+                        if (oid(data) != blob or sha256(data) != row[prefix + '_sha256'] or len(data) != row[prefix + '_bytes']):
+                            fail('retained_payload_mismatch')
+                        if prefix == 'new':
+                            verified_bytes += len(data)
+        # The public counts refer to plan-listed changed outputs; the separate
+        # plan_verified flag and byte count account for the additional plan file.
+        stage = 'refs'
+        local.check_source(preview_commit)
+        if remote.ref(PREVIEW_REF) != preview_commit:
+            fail('preview_ref_changed')
+        if remote.ref(BACKUP_REF) != source_commit:
+            fail('backup_ref_readback_failed')
+        final_main = remote.ref(MAIN_REF)
+        if final_main is None:
+            fail('remote_main_changed')
+        checked_sha(final_main)
+        return {'status': 'preview_readback_verified', 'backup_verified': True, 'preview_retained': True,
+                'preview_only': True, 'main_updated': False, 'published': False, 'apply_ready': False,
+                'source_unchanged': True, 'main_advanced': final_main != source_commit,
+                'pending': plan['pending'], 'source_status': plan['status'], 'changed_paths': len(expected),
+                'verified_paths': len(expected), 'verified_bytes': verified_bytes,
+                'plan_verified': True, 'verified_plan_bytes': len(plan_bytes), 'verification_stage': 'verified'}
+    except RetentionFailure as error:
+        error.verification_stage = stage
+        raise
+    except Exception:
+        error = RetentionFailure('retained_readback_failed')
+        error.verification_stage = stage
+        raise error from None
+
+
 def public_report(value):
     """A strict presentation filter, never authentication or independent proof."""
-    statuses = {'private_checkout_verified', 'retention_failed'}
+    statuses = {'private_checkout_verified', 'retention_failed', 'preview_readback_verified'}
     for prefix in ('backup_', 'preview_'):
         statuses.update(prefix + suffix for suffix in ('existing_verified', 'created_verified', 'created_verified_after_uncertain_response'))
     valid = isinstance(value, dict) and isinstance(value.get('status'), str) and value['status'] in statuses
@@ -637,14 +878,21 @@ def public_report(value):
                      and 0 <= value['changed_paths'] <= 1000000
                      and value.get('source_status') == ('partial' if value['pending'] else 'complete')
                      and type(value.get('main_advanced')) is bool)
+    if valid and value['status'] == 'preview_readback_verified':
+        valid = (value.get('plan_verified') is True and value.get('verification_stage') == 'verified'
+                 and type(value.get('verified_paths')) is int and value['verified_paths'] == value['changed_paths']
+                 and type(value.get('verified_bytes')) is int and 0 <= value['verified_bytes'] <= MAX_GET_BYTES
+                 and type(value.get('verified_plan_bytes')) is int and 0 < value['verified_plan_bytes'] <= MAX_PLAN_BYTES)
     if not valid:
         value = {'status': 'retention_failed', 'error': 'invalid_report'}
     result = {'status': value['status'], 'main_updated': False, 'published': False}
     if value['status'] == 'retention_failed':
         error = value.get('error')
         result['error'] = error if isinstance(error, str) and error in ERROR_CODES else 'retention_failed'
+        if value.get('verification_stage') in ('preflight', 'metadata', 'fetch', 'plan', 'tree', 'payload', 'refs'):
+            result['verification_stage'] = value['verification_stage']
         return result
-    for field in ('backup_verified', 'preview_retained', 'preview_only', 'checkout_verified', 'source_unchanged', 'main_advanced'):
+    for field in ('backup_verified', 'preview_retained', 'preview_only', 'checkout_verified', 'source_unchanged', 'main_advanced', 'plan_verified'):
         if type(value.get(field)) is bool:
             result[field] = value[field]
     if 'apply_ready' in value:
@@ -654,6 +902,9 @@ def public_report(value):
             result[field] = value[field]
     if value.get('source_status') in ('partial', 'complete'):
         result['source_status'] = value['source_status']
+    if value['status'] == 'preview_readback_verified':
+        for field in ('verified_paths', 'verified_bytes', 'verified_plan_bytes', 'verification_stage'):
+            result[field] = value[field]
     return result
 
 
@@ -664,11 +915,12 @@ def main(argv=None):
     parser = QuietParser(description='Authorized fixed private preview retention only')
     # Accept the requested checkout subcommand while keeping the other two
     # established flag interfaces unchanged for the workflow caller.
-    parser.add_argument('operation', nargs='?', choices=('checkout', 'prepare', 'retain'))
+    parser.add_argument('operation', nargs='?', choices=('checkout', 'prepare', 'retain', 'verify-retained'))
     parser.add_argument('--prepare-backup', action='store_true')
     parser.add_argument('--vault', type=Path)
     parser.add_argument('--preview-output', type=Path)
     parser.add_argument('--source-commit')
+    parser.add_argument('--preview-commit')
     parser.add_argument('--publish-report', type=Path)
     try:
         args = parser.parse_args(argv)
@@ -677,14 +929,22 @@ def main(argv=None):
         return 1
     try:
         if args.publish_report is not None:
-            if args.operation or args.prepare_backup or args.vault or args.preview_output or args.source_commit:
+            if args.operation or args.prepare_backup or args.vault or args.preview_output or args.source_commit or args.preview_commit:
                 fail('conflicting_modes')
             result = public_report(strict_json(file_bytes(args.publish_report, 1024 * 1024)))
             print(json.dumps(result, sort_keys=True))
             return 0  # The summary step must not replace the actual operation exit code.
         if args.vault is None or args.source_commit is None:
             fail('invalid_checkout')
-        if args.operation == 'checkout':
+        if args.preview_commit is not None and args.operation != 'verify-retained':
+            fail('conflicting_modes')
+        if args.operation == 'verify-retained':
+            if args.prepare_backup or args.preview_output is not None:
+                fail('conflicting_modes')
+            if args.preview_commit is None:
+                fail('missing_preview_commit')
+            result = verify_retained(args.vault, args.source_commit, args.preview_commit)
+        elif args.operation == 'checkout':
             if args.prepare_backup or args.preview_output is not None:
                 fail('conflicting_modes')
             result = checkout_private(args.vault, args.source_commit)
@@ -699,7 +959,7 @@ def main(argv=None):
         print(json.dumps(public_report(result), sort_keys=True))
         return 2 if result.get('pending') else 0
     except RetentionFailure as error:
-        print(json.dumps(public_report({'status': 'retention_failed', 'error': str(error)})))
+        print(json.dumps(public_report({'status': 'retention_failed', 'error': str(error), 'verification_stage': getattr(error, 'verification_stage', None)})))
         return 0 if args.publish_report is not None else 1
     except Exception:
         print(json.dumps(public_report({'status': 'retention_failed', 'error': 'retention_failed'})))
