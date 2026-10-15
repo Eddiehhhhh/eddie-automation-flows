@@ -281,3 +281,31 @@ Only fixed aggregate counts, booleans and fixed failure categories reach public 
 `source_complete=true` is possible only for a successful ephemeral full replay; it
 never means publication or production cutover. The old `full` empty-directory mode is
 not a migration acceptance gate.
+
+
+
+### Full replay failure observability
+
+Full replay reuses the sync CLI's fixed API failure categories instead of hiding
+all terminal API failures behind `source_failed`: `api_auth`, `api_rate_limited`,
+`api_transport`, `api_rejected`, `api_redirect`, and `response_limit`. Malformed
+JSON/encoding and known invalid response framing/pagination report
+`response_invalid`; fixed identity validation remains `identity`. Existing replay,
+asset and budget failures retain their original categories.
+
+An HTTP status is published only as a bounded integer (400–599), extracted from
+the sync helper's exact locally generated HTTP failure message, and only alongside
+an appropriate API category. Unknown list/detail exceptions retain `source_failed`
+with an allowlisted coarse Python failure kind; exception names, messages, nested
+causes, response bodies, headers, note IDs and URLs are never published. No actual
+retry count is claimed because the existing API helper does not expose one.
+
+This is diagnostic-only: no note is skipped, no failure becomes success, and no
+request, concurrency, retry, timeout, transfer, publication or cleanup policy is
+changed. The API still attempts at most five times per logical request: HTTP 429
+and API code 10202 use the existing response-directed delay (default 10 seconds),
+while retryable HTTP 5xx and transport errors wait five seconds. A logical detail
+failure still aborts before assets and note writes. The successful-detail counter
+reflects concurrent completion order and must not be interpreted as the index or
+identity of the failing note. Synthetic diagnostic tests cannot recover the cause
+of an older run whose private error was already discarded.

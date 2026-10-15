@@ -18,7 +18,7 @@ import source_sync_assets as assets
 import source_sync_inventory as inventory
 import source_sync_migration_check as migration
 import source_sync_pack_seed as pack
-from source_sync_sample import detail_id
+from source_sync_sample import detail_id, FixedSampleError
 import sync_getnote_to_raw as sync
 from source_sync_store import IdentityIndex, json_text, write_if_changed
 from verify_shadow_repeat import snapshot
@@ -36,6 +36,11 @@ STAGES = ('snapshot', 'seed', 'list', 'detail', 'assets', 'write', 'preservation
 ERRORS = ('limit', 'source_failed', 'identity', 'unsupported_assets', 'asset_failed',
           'old_path_changed', 'old_file_changed', 'source_changed', 'repeat_changed',
           'transcript_pending', 'list_detail_mismatch', 'unexpected', 'interrupted')
+API_ERRORS = ('api_auth', 'api_rate_limited', 'api_transport', 'api_rejected',
+              'api_redirect', 'response_limit', 'response_invalid')
+ERRORS += API_ERRORS
+FAILURE_KINDS = ('value_error', 'type_error', 'attribute_error', 'key_error',
+                 'os_error', 'system_exit', 'other')
 FLAGS = ('real_seed_verified', 'enumeration_complete', 'old_paths_preserved',
          'old_unselected_files_preserved', 'binary_readback_exact',
          'source_id_sets_equal', 'hashes_and_mtimes_equal')
@@ -267,6 +272,46 @@ def replay(root, work, key, client, report, asset_fetch=None):
     report['status'] = 'full_replay_ok'
 
 
+def failure_details(stage, error):
+    """Classify failures without publishing exception text or upstream values.
+
+    Reuse the sync CLI's fixed public codes. HTTP status is accepted only from
+    its exact locally generated HTTP message, never parsed from a URL/body.
+    No retry count is inferred: the existing API helper does not expose it.
+    """
+    if isinstance(error, ReplayFailure):
+        return {'error_code': error.code}
+    if isinstance(error, (inventory.SourceLimit, TimeoutError)):
+        return {'error_code': 'limit'}
+    if isinstance(error, assets.AssetError):
+        return {'error_code': 'asset_failed'}
+    if stage not in ('list', 'detail'):
+        return {'error_code': 'source_failed'}
+    if isinstance(error, FixedSampleError):
+        return {'error_code': 'identity'}
+    if isinstance(error, (json.JSONDecodeError, UnicodeError)):
+        return {'error_code': 'response_invalid'}
+    code = sync.safe_error_code(stage, error)
+    result = {'error_code': code if code in API_ERRORS else 'source_failed'}
+    if isinstance(error, RuntimeError):
+        message = str(error)
+        match = re.fullmatch(r'GetNote HTTP ([45][0-9]{2})', message)
+        if match:
+            result['http_status'] = int(match[1])
+        elif message in ('invalid Get response length', 'incomplete Get response body',
+                         'invalid Get list payload', 'invalid has_more',
+                         'official cursor response missing has_more',
+                         'empty page claims more records'):
+            result['error_code'] = 'response_invalid'
+    if result['error_code'] == 'source_failed':
+        result['failure_kind'] = next((kind for cls, kind in (
+            (ValueError, 'value_error'), (TypeError, 'type_error'),
+            (AttributeError, 'attribute_error'), (KeyError, 'key_error'),
+            (OSError, 'os_error'), (SystemExit, 'system_exit'))
+            if isinstance(error, cls)), 'other')
+    return result
+
+
 def safe_report(value):
     out = {'scope':'real_baseline_full_replay', 'status':'failed', 'source_complete':False,
            'published':False}
@@ -282,6 +327,11 @@ def safe_report(value):
         out['stage'] = value['stage']
     if value.get('error_code') in ERRORS:
         out['error_code'] = value['error_code']
+    if (out.get('error_code') in ('api_auth', 'api_rate_limited', 'api_rejected')
+            and type(value.get('http_status')) is int and 400 <= value['http_status'] <= 599):
+        out['http_status'] = value['http_status']
+    if out.get('error_code') == 'source_failed' and value.get('failure_kind') in FAILURE_KINDS:
+        out['failure_kind'] = value['failure_kind']
     passes = value.get('passes')
     if isinstance(passes, list) and len(passes) <= 2:
         out['passes'] = [{k:p[k] for k in PASS_COUNTS if type(p.get(k)) is int
@@ -327,9 +377,7 @@ def main():
             with pack.deadline(110*60):
                 replay(root, work, key, client, report)
     except (Exception, SystemExit) as error:
-        report['error_code'] = (error.code if isinstance(error, ReplayFailure) else
-            'limit' if isinstance(error, (inventory.SourceLimit, TimeoutError)) else
-            'asset_failed' if isinstance(error, assets.AssetError) else 'source_failed')
+        report.update(failure_details(report.get('stage'), error))
     safe = safe_report(report)
     print(json.dumps(safe))
     return 0 if safe['status'] == 'full_replay_ok' else 1
