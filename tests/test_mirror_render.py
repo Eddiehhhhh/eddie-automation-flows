@@ -225,3 +225,49 @@ class RenderTests(unittest.TestCase):
   self.assertNotIn('private',json.dumps(result));self.assertNotIn('secret',json.dumps(result))
 
 if __name__=='__main__':unittest.main()
+
+class PendingDiagnosticsTests(unittest.TestCase):
+ def test_signature_groups_preserve_all_fields_and_signed_rotation_still_fails(self):
+  from get_mirror_incremental_replay import pending_signature,pending_differences
+  old={'id':'123','audio':{'play_url':'https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=a'},'content':'body','unknown':None}
+  def compare(new):return pending_differences({'123':{'updatedAt':1,**pending_signature(old)}},{'123':{'updatedAt':1,**pending_signature(new)}})
+  new=deepcopy(old);new['audio']['play_url']=new['audio']['play_url'].replace('Signature=a','Signature=b')
+  changes=compare(new);self.assertEqual(changes['pending_signing_only'],1);self.assertEqual(changes['pending_changed_notes'],1);self.assertEqual(changes['pending_audio_changed'],1)
+  new['content']='different';self.assertEqual(compare(new)['pending_signing_only'],0);self.assertEqual(compare(new)['pending_body_changed'],1)
+  for url in ('https://example.test/b?OSSAccessKeyId=k&Expires=1999999999&Signature=b','https://example.test/a?OSSAccessKeyId=other&Expires=1999999999&Signature=b','https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=b&x-oss-process=resize'):
+   new=deepcopy(old);new['audio']['play_url']=url;self.assertEqual(compare(new)['pending_signing_only'],0)
+  new=deepcopy(old);del new['unknown'];self.assertEqual(compare(new)['pending_other_changed'],1)
+ def test_diagnostic_limits_no_writer_and_no_full_success(self):
+  from get_mirror_incremental_replay import diagnose_pending
+  with tempfile.TemporaryDirectory() as folder:
+   root=Path(folder);before=snapshot(root);calls=[]
+   notes=[{'id':str(i),'updated_at':'2026-10-13 08:00:00','note_type':'recorder_audio','content':'summary'} for i in range(1,101)]
+   def fetch(i):calls.append(i);return deepcopy(notes[int(i)-1])
+   result=diagnose_pending(root,lambda:(notes,True),fetch)
+   self.assertEqual(len(calls),18);self.assertEqual(result['first']['diagnostic_rechecks'],9);self.assertEqual(result['first']['fresh_details'],9)
+   self.assertEqual(snapshot(root),before);self.assertEqual(safe_report(result)['status'],'pending_diagnostic_no_change')
+   self.assertFalse(safe_report(result)['source_content_complete_claimed'])
+   calls.clear()
+   for note in notes:note['note_type']='plain_text'
+   result=diagnose_pending(root,lambda:(notes,True),fetch)
+   self.assertEqual(len(calls),64);self.assertEqual(result['first']['pending'],0)
+   self.assertEqual(safe_report(result)['status'],'pending_diagnostic_no_candidates');self.assertTrue(safe_report(result)['diagnostic_truncated'])
+   result['first']['written_or_changed']=1;self.assertEqual(safe_report(result)['status'],'failed')
+ def test_diagnostic_content_and_version_changed_remain_non_success(self):
+  from get_mirror_incremental_replay import diagnose_pending
+  with tempfile.TemporaryDirectory() as folder:
+   note={'id':'123','updated_at':'2026-10-13 08:00:00','note_type':'recorder_audio','content':'summary'};calls=[]
+   def fetch(i):
+    calls.append(i);return {**note,'content':'changed' if len(calls)==2 else 'summary','updated_at':'2026-10-13 09:00:00' if len(calls)==2 else note['updated_at']}
+   result=diagnose_pending(Path(folder),lambda:([note],True),fetch)
+   self.assertEqual(result['first']['pending_body_changed'],1);self.assertEqual(result['first']['pending_version_changed'],1)
+   self.assertEqual(safe_report(result)['status'],'pending_diagnostic_changed')
+ def test_main_replay_differences_in_progress_still_fail(self):
+  with tempfile.TemporaryDirectory() as folder:
+   root=Path(folder);calls=[];progress=[];note={'id':'123','updated_at':'2026-10-13 08:00:00','note_type':'recorder_audio','content':'summary'}
+   def fetch(i):calls.append(i);return {**note,'content':'changed' if len(calls)==2 else 'summary'}
+   with self.assertRaisesRegex(ParityFailure,'pending_changed_between_passes'):
+    replay(root,lambda:([note],True),fetch,progress=progress)
+   self.assertEqual(progress[1]['pending_body_changed'],1);self.assertEqual(progress[1]['pending_changed_notes'],1)
+   public=safe_report({'status':'failed','error':'pending_changed_between_passes','second':{**progress[1],'secret':'never'}})
+   self.assertEqual(public['second']['pending_body_changed'],1);self.assertNotIn('secret',str(public))

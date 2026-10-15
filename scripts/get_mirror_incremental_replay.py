@@ -21,6 +21,44 @@ from get_mirror_render import transcript_pending, validate_note_shape
 class ParityFailure(RuntimeError):
     pass
 
+DIFF_KEYS=('pending_changed_notes','pending_identity_changed','pending_version_changed',
+ 'pending_body_changed','pending_audio_changed','pending_attachments_changed',
+ 'pending_other_changed','pending_signing_only')
+
+def private_hash(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+
+def pending_signature(detail):
+    # Hash every field; diagnostic groups never replace the whole-object gate.
+    from source_sync_urls import oss_v1_url
+    groups={'body':{},'audio':{},'attachments':{},'other':{}}
+    for key,value in detail.items():
+        group='body' if key in ('content','title','ref_content') else ('audio' if key in ('audio','audio_url','audio_transcript','audio_duration') else ('attachments' if key in ('attachments','images','files','resources') else 'other'))
+        groups[group][key]=value
+    def signing_view(value,key=''):
+        if isinstance(value,dict):return {k:signing_view(v,k) for k,v in value.items()}
+        if isinstance(value,list):return [signing_view(v,key) for v in value]
+        if key in ('url','original_url','download_url','play_url','audio_url'):
+            parsed=oss_v1_url(value)
+            if parsed:
+                location,params,_=parsed
+                return {'__diagnostic_oss_v1__':list(location),'signer':params['OSSAccessKeyId']}
+        return value
+    return {'detailHash':private_hash(detail),'groups':{k:private_hash(v) for k,v in groups.items()},'signingHash':private_hash(signing_view(detail))}
+
+def pending_differences(left,right):
+    result={k:0 for k in DIFF_KEYS}
+    result['pending_identity_changed']=len(set(left)^set(right))
+    for ident in set(left)&set(right):
+        a,b=left[ident],right[ident]
+        result['pending_version_changed']+=int(a['updatedAt']!=b['updatedAt'])
+        if a['detailHash']==b['detailHash']:continue
+        result['pending_changed_notes']+=1
+        for group in ('body','audio','attachments','other'):
+            result['pending_'+group+'_changed']+=int(a['groups'][group]!=b['groups'][group])
+        result['pending_signing_only']+=int(a['signingHash']==b['signingHash'])
+    return result
+
 def snapshot(root):
     result={}
     for path in sorted(root.rglob('*')):
@@ -142,7 +180,7 @@ def _one_pass(root,state,list_complete,fetch_detail,now_ms,writer_factory=None,p
             validate_note_shape({**summary,**detail})
             if transcript_pending({**summary,**detail}):
                 counts['pending']+=1
-                pending[ident]={'updatedAt':detail_version,'detailHash':hashlib.sha256(json.dumps(detail,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()}
+                pending[ident]={'updatedAt':detail_version,**pending_signature(detail)}
                 if mirror:preserved.add(mirror['path'])
                 # Pending originals never become successfully mirrored state.
                 continue
@@ -190,12 +228,52 @@ def replay(root,list_complete,fetch_detail,writer_factory=None,progress=None):
     after_first=snapshot(root)
     second,c2,v2=one_pass(root,first,list_complete,fetch_detail,2000,writer_factory,progress)
     if v1!=v2:raise ParityFailure('source_changed_between_passes')
-    if first.get('pendingById',{})!=second.get('pendingById',{}):raise ParityFailure('pending_changed_between_passes')
+    if first.get('pendingById',{})!=second.get('pendingById',{}):
+        differences=pending_differences(first.get('pendingById',{}),second.get('pendingById',{}))
+        c2.update(differences)
+        raise ParityFailure('pending_changed_between_passes')
     if stable_state(first)!=stable_state(second):raise ParityFailure('second_pass_semantic_state_changed')
     if snapshot(root)!=after_first:raise ParityFailure('data_not_stable')
     return {'mode':'mirror_incremental_parity','first':c1,'second':c2,
         'data_bytes_paths_mtimes_unchanged':snapshot(root)==initial,'second_data_unchanged':True,'state_lastSyncedAt_changed':bool(c2['cached_skipped']),
         'pending_set_stable':True,'source_content_complete_claimed':False,'renderer_exercised':bool(c1['written_or_changed'])}
+
+def diagnose_pending(root,list_complete,fetch_detail,progress=None):
+    before=snapshot(root)
+    summaries,terminal=list_complete()
+    if terminal is not True:raise ParityFailure('incomplete_list')
+    versions={}
+    counts={'enumerated':len(summaries),'fresh_details':0,'pending':0,'diagnostic_probed':0,'diagnostic_rechecks':0,**{k:0 for k in DIFF_KEYS}}
+    if progress is not None:progress.append(counts)
+    for item in summaries:
+        ident=note_identity(item);version=timestamp_ms(item.get('updated_at'))
+        if not ident or ident in versions:raise ParityFailure('invalid_list_identity_version')
+        if version is None:raise ParityFailure(timestamp_error(item.get('updated_at')))
+        versions[ident]=version
+    mirrors=read_mirrors(root);validate_manifest(root,mirrors);index,conflicts=mirror_index(mirrors)
+    if conflicts:raise ParityFailure('duplicate_mirror_identity')
+    for summary in summaries[:64]:
+        ident=note_identity(summary);detail=fetch_detail(ident);counts['fresh_details']+=1;counts['diagnostic_probed']+=1
+        if note_identity(detail)!=ident:raise ParityFailure('detail_identity')
+        version=timestamp_ms(detail.get('updated_at'))
+        if not near(version,versions[ident]):raise ParityFailure('source_changed_during_pass')
+        mirror=index.get(ident)
+        if mirror and not mirror['body_present']:raise ParityFailure('empty_mirror')
+        if local_mirror_matches_note(mirror,{'sourceIds':{'api':ident},'updatedAt':version},0):continue
+        validate_note_shape({**summary,**detail})
+        if not transcript_pending({**summary,**detail}):continue
+        counts['pending']+=1
+        again=fetch_detail(ident);counts['diagnostic_rechecks']+=1
+        if note_identity(again)!=ident:raise ParityFailure('detail_identity')
+        again_version=timestamp_ms(again.get('updated_at'))
+        if again_version is None:raise ParityFailure('source_changed_during_pass')
+        validate_note_shape({**summary,**again})
+        changes=pending_differences({ident:{'updatedAt':version,**pending_signature(detail)}},{ident:{'updatedAt':again_version,**pending_signature(again)}})
+        for key,value in changes.items():counts[key]+=value
+        if counts['pending']>=9:break
+    if snapshot(root)!=before:raise ParityFailure('unexpected_data_mutation')
+    return {'status':'pending_diagnostic_changed' if any(counts[k] for k in DIFF_KEYS) else ('pending_diagnostic_no_change' if counts['pending'] else 'pending_diagnostic_no_candidates'),
+        'diagnostic_truncated':counts['diagnostic_probed']<len(summaries),'first':counts,'diagnostic_only':True,'source_content_complete_claimed':False}
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--synthetic-local-smoke',type=Path,required=True)

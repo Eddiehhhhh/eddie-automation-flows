@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 
-from get_mirror_incremental_replay import replay,read_mirrors,validate_manifest
+from get_mirror_incremental_replay import replay,read_mirrors,validate_manifest,diagnose_pending,DIFF_KEYS
 from get_mirror_source import MirrorSource
 from get_mirror_render import CompatibleWriter
 
@@ -35,9 +35,9 @@ ASSET_ERROR_CODES = {
     'empty asset body': 'empty_body',
 }
 
-COUNTS=('pending','list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
+COUNTS=DIFF_KEYS+('diagnostic_probed','diagnostic_rechecks','pending','list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
         'pages','api_response_bytes','downloaded_assets','downloaded_bytes','asset_transfer_bytes')
-FLAGS=('pending_set_stable','data_bytes_paths_mtimes_unchanged','second_data_unchanged','state_lastSyncedAt_changed',
+FLAGS=('diagnostic_truncated','diagnostic_only','pending_set_stable','data_bytes_paths_mtimes_unchanged','second_data_unchanged','state_lastSyncedAt_changed',
        'source_content_complete_claimed','renderer_exercised')
 ERRORS=('pending_changed_between_passes','invalid_detail_time','list_version_missing','list_version_type','list_version_timezone_missing','list_version_invalid','incomplete_list','invalid_list_identity_version','duplicate_mirror_identity','empty_mirror',
  'detail_identity','source_changed_during_pass','source_changed_between_passes','second_pass_semantic_state_changed',
@@ -65,6 +65,11 @@ def safe_report(value):
  if value.get('asset_error_code') in tuple(sorted(set(ASSET_ERROR_CODES.values())))+('other',):result['asset_error_code']=value['asset_error_code']
  if value.get('failure_kind') in ('value_error','type_error','attribute_error','key_error','os_error','system_exit','other'):result['failure_kind']=value['failure_kind']
  first=result.get('first',{});second=result.get('second',{})
+ if value.get('status') in ('pending_diagnostic_changed','pending_diagnostic_no_change','pending_diagnostic_no_candidates') and value.get('diagnostic_only') is True and 'error' not in result:
+  if first.get('enumerated',0)>0 and first.get('diagnostic_probed',-1)<=first['enumerated'] and first.get('pending',-1)<=first.get('diagnostic_probed',-1) and all(first.get(k,0)==0 for k in ('written_or_changed','downloaded_assets','downloaded_bytes','asset_transfer_bytes')) and 0<=first.get('diagnostic_rechecks',-1)<=9 and 0<=first.get('diagnostic_probed',-1)<=64 and first.get('diagnostic_rechecks')==first.get('pending') and first.get('fresh_details')==first.get('diagnostic_probed') and all(k in first for k in DIFF_KEYS):
+   changed=any(first[k] for k in DIFF_KEYS)
+   result['status']='pending_diagnostic_changed' if changed else ('pending_diagnostic_no_change' if first['pending'] else 'pending_diagnostic_no_candidates')
+   result['diagnostic_truncated']=first['diagnostic_probed']<first['enumerated']
  def valid(c):
   required=('enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed')
   return all(k in c for k in required) and c['enumerated']>0 and c['cached_skipped']+c['fresh_details']==c['enumerated'] and c['adopted_after_detail']+c['new_or_changed']+c.get('pending',0)==c['fresh_details'] and c['written_or_changed']==c['new_or_changed']
@@ -75,7 +80,7 @@ def safe_report(value):
  return result
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--publish-report',type=Path);args=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--publish-report',type=Path);p.add_argument('--pending-diagnostic',action='store_true');args=p.parse_args()
  if args.publish_report:
   try:result=json.loads(args.publish_report.read_text())
   except (OSError,ValueError):result={}
@@ -118,12 +123,15 @@ def main():
     nonlocal stage
     stage='detail'
     value=source.detail(ident);stats[-1]['api_response_bytes']=source.budget.used;return value
-   with pack.deadline(110*60):result=replay(root,enumerate_source,detail,writer_factory=factory,progress=progress)
+   with pack.deadline(110*60):
+    result=diagnose_pending(root,enumerate_source,detail,progress=progress) if args.pending_diagnostic else replay(root,enumerate_source,detail,writer_factory=factory,progress=progress)
    stats[-1]['api_response_bytes']=source.budget.used
-   for i,which in enumerate(('first','second')):
-    result[which].update(stats[i]);store,transfer=stores[i]
+   for i,which in enumerate(('first',) if args.pending_diagnostic else ('first','second')):
+    result[which].update(stats[i])
+    if args.pending_diagnostic:continue
+    store,transfer=stores[i]
     result[which].update(downloaded_assets=len(store.memo),downloaded_bytes=store.bytes,asset_transfer_bytes=transfer.used)
-   result['status']='mirror_replay_partial' if result['first'].get('pending',0) else 'mirror_replay_ok'
+   if not args.pending_diagnostic:result['status']='mirror_replay_partial' if result['first'].get('pending',0) else 'mirror_replay_ok'
  except (Exception,SystemExit) as exc:
   # Preserve only already validated public progress and fixed classifications.
   from source_sync_full_replay import failure_details
@@ -143,6 +151,6 @@ def main():
   if source is not None and stats and source.budget is not None:
    result.setdefault('first' if len(stats)==1 else 'second',{})['api_response_bytes']=source.budget.used
  public=safe_report(result);print(json.dumps(public))
- return 0 if public['status']=='mirror_replay_ok' else (2 if public['status']=='mirror_replay_partial' else 1)
+ return 0 if public['status']=='mirror_replay_ok' else (2 if public['status'] in ('mirror_replay_partial','pending_diagnostic_no_change','pending_diagnostic_no_candidates') else 1)
 
 if __name__=='__main__':raise SystemExit(main())
