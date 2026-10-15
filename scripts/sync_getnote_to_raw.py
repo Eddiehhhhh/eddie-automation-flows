@@ -95,7 +95,7 @@ def json_loads_tolerant(text: str) -> Any:
     return json.JSONDecoder(strict=False).decode(text)
 
 
-def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None, response_budget=None) -> Any:
+def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None, response_budget=None, request_policy=None) -> Any:
     if path not in (LIST_PATH, DETAIL_PATH):
         raise ValueError("unsupported Get API path")
     query = urllib.parse.urlencode(params)
@@ -116,6 +116,8 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
         urllib.request.HTTPSHandler(context=ssl.create_default_context()),
     )
     for attempt in range(5):
+        if request_policy is not None:
+            request_policy.before_request()
         read_limit = max_response_bytes
         if response_budget is not None:
             read_limit = response_budget.read_limit(read_limit)
@@ -157,6 +159,9 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
             if isinstance(data, dict) and data.get("success") is False:
                 err = data.get("error") or {}
                 code = err.get("code")
+                if request_policy is not None and code in (10202, 42900, 10201):
+                    request_policy.rate_limited(attempt, data=data)
+                    continue
                 if code == 10202 and attempt < 4:
                     retry_after = data.get("rate_limit", {}).get("retry_after", 10)
                     time.sleep(int(retry_after))
@@ -169,6 +174,32 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
             if 300 <= exc.code < 400:
                 exc.close()
                 raise RuntimeError("GetNote redirect blocked") from None
+            if exc.code == 429 and request_policy is not None:
+                # Never publish the body. Read at most 8 KiB + overflow sentinel,
+                # inside the existing byte allowance; retain only fixed reason.
+                try:
+                    size = min(8193, read_limit + 1) if read_limit is not None else 8193
+                    try:
+                        raw = exc.read(size)
+                    except http.client.IncompleteRead as error:
+                        if response_budget is not None:
+                            response_budget.consume(len(error.partial))
+                        raise
+                    if response_budget is not None:
+                        response_budget.consume(len(raw))
+                    if read_limit is not None and len(raw) > read_limit:
+                        raise RuntimeError("Get response byte limit reached")
+                    data = None
+                    if len(raw) <= 8192:
+                        try:
+                            data = json.loads(raw)
+                        except (ValueError, UnicodeError):
+                            pass
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                finally:
+                    exc.close()
+                request_policy.rate_limited(attempt, retry_after, data, 429)
+                continue
             if exc.code == 429 and attempt < 4:
                 retry_after = exc.headers.get("Retry-After")
                 exc.close()
@@ -225,7 +256,7 @@ def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor", p
     return [selected["ordinary"], selected["recording"]], read_pages
 
 
-def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", max_response_bytes=None, response_budget=None):
+def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", max_response_bytes=None, response_budget=None, request_policy=None):
     """Official cursor contract, plus explicit plugin since_id compatibility.
 
     Never use time order to infer completeness. Caps and cursor cycles fail closed.
@@ -238,6 +269,8 @@ def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", ma
         options = {"max_response_bytes": max_response_bytes}
         if response_budget is not None:
             options["response_budget"] = response_budget
+        if request_policy is not None:
+            options["request_policy"] = request_policy
         data = api_get(LIST_PATH, params, api_key, client_id, **options)
         payload = data.get("data", data)
         batch = payload if isinstance(payload, list) else next((payload[k] for k in ("notes", "list", "records", "items") if k in payload), None)

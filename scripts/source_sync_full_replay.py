@@ -18,6 +18,7 @@ import source_sync_assets as assets
 import source_sync_inventory as inventory
 import source_sync_migration_check as migration
 import source_sync_pack_seed as pack
+from source_sync_rate import RequestPolicy, RateLimitFailure, REASONS
 from source_sync_sample import detail_id, FixedSampleError
 import sync_getnote_to_raw as sync
 from source_sync_store import IdentityIndex, json_text, write_if_changed
@@ -117,10 +118,11 @@ def sync_paths(root):
             setattr(sync, name, value)
 
 
-def enumerate_ids(key, client, budget, report, versions=None):
+def enumerate_ids(key, client, budget, report, versions=None, request_policy=None):
     ids = []
+    options = {"request_policy": request_policy} if request_policy is not None else {}
     for page, batch, more in sync.fetch_note_pages(key, client, max_pages=MAX_PAGES,
-            max_response_bytes=MAX_RESPONSE, response_budget=budget):
+            max_response_bytes=MAX_RESPONSE, response_budget=budget, **options):
         report['pages'] = page
         for value in batch:
             ident = detail_id(value)
@@ -140,12 +142,13 @@ def enumerate_ids(key, client, budget, report, versions=None):
     return sorted(ids)
 
 
-def acquire_details(ids, key, client, pool, checkpoint, report, versions=None):
+def acquire_details(ids, key, client, pool, checkpoint, report, versions=None, request_policy=None):
     checkpoint.mkdir(parents=True)
+    options = {"request_policy": request_policy} if request_policy is not None else {}
     def fetch(ident):
         with pool.request() as budget:
             payload = sync.api_get(sync.DETAIL_PATH, {'id': ident, 'image_quality': 'original'},
-                key, client, max_response_bytes=MAX_RESPONSE, response_budget=budget)
+                key, client, max_response_bytes=MAX_RESPONSE, response_budget=budget, **options)
         payload = payload.get('data', payload)
         note = payload.get('note', payload)
         if detail_id(note) != ident or not isinstance(note.get('content'), str):
@@ -199,17 +202,17 @@ def acquire_assets(root, notes, report, fetch=None):
     return by_id
 
 
-def one_pass(root, checkpoint, key, client, report, stage, asset_fetch=None):
+def one_pass(root, checkpoint, key, client, report, stage, asset_fetch=None, request_policy=None):
     started = time.monotonic()
     budget = inventory.ResponseBudget(64*MIB)
     pool = None
     try:
         stage('list')
         versions = {}
-        ids = enumerate_ids(key, client, budget, report, versions)
+        ids = enumerate_ids(key, client, budget, report, versions, request_policy)
         pool = BytePool(MAX_API_BYTES, budget.used)
         stage('detail')
-        notes = acquire_details(ids, key, client, pool, checkpoint, report, versions)
+        notes = acquire_details(ids, key, client, pool, checkpoint, report, versions, request_policy)
         stage('assets')
         index = IdentityIndex(root, 'getnote', 'note_id')
         by_id = acquire_assets(root, notes, report, asset_fetch)
@@ -238,7 +241,7 @@ def preserved_files(root, before, old_index, ids):
     return unchanged
 
 
-def replay(root, work, key, client, report, asset_fetch=None):
+def replay(root, work, key, client, report, asset_fetch=None, request_policy=None):
     before = snapshot(root)
     old_index = IdentityIndex(root, 'getnote', 'note_id')
     prior_ids = None
@@ -246,7 +249,7 @@ def replay(root, work, key, client, report, asset_fetch=None):
         part = dict.fromkeys(PASS_COUNTS, 0)
         report['passes'].append(part)
         ids, index = one_pass(root, work/('pass-'+str(number)), key, client, part,
-                             lambda stage: report.update(stage=stage), asset_fetch)
+                             lambda stage: report.update(stage=stage), asset_fetch, request_policy)
         report['stage'] = 'preservation'
         if any(index.paths.get(i) != path for i, path in old_index.paths.items()):
             raise ReplayFailure('old_path_changed')
@@ -279,6 +282,12 @@ def failure_details(stage, error):
     its exact locally generated HTTP message, never parsed from a URL/body.
     No retry count is inferred: the existing API helper does not expose it.
     """
+    if isinstance(error, RateLimitFailure):
+        out = {'error_code': 'limit' if error.budget else 'api_rate_limited',
+               'rate_limit_reason': error.reason}
+        if error.http_status == 429:
+            out['http_status'] = 429
+        return out
     if isinstance(error, ReplayFailure):
         return {'error_code': error.code}
     if isinstance(error, (inventory.SourceLimit, TimeoutError)):
@@ -342,6 +351,8 @@ def safe_report(value):
         and p['api_response_bytes'] <= MAX_API_BYTES and p['downloaded_assets'] <= MAX_ASSETS
         and p['asset_transfer_bytes'] <= MAX_ASSET_BYTES and p['pending'] == 0
         for p in out.get('passes', [])))
+    if value.get('rate_limit_reason') in REASONS + ('unknown',) and out.get('error_code') in ('api_rate_limited', 'limit'):
+        out['rate_limit_reason'] = value['rate_limit_reason']
     if value.get('status') == 'full_replay_ok' and valid and all(out.get(k) is True for k in FLAGS):
         out.update(status='full_replay_ok', source_complete=True)
     return out
@@ -375,7 +386,7 @@ def main():
             # SIGALRM interrupts the main thread; active workers may still unwind.
             # The outer 115min command timeout remains the true hard bound.
             with pack.deadline(110*60):
-                replay(root, work, key, client, report)
+                replay(root, work, key, client, report, request_policy=RequestPolicy())
     except (Exception, SystemExit) as error:
         report.update(failure_details(report.get('stage'), error))
     safe = safe_report(report)

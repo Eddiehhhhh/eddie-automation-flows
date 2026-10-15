@@ -35,9 +35,9 @@ class FullReplayTests(unittest.TestCase):
         write_if_changed(root/'_assets'/'old.bin', 'PRIVATE OLD BINARY')
         return root
 
-    def execute(self, root, work, changed=False, pending=False, fail_assets=False):
+    def execute(self, root, work, changed=False, pending=False, fail_assets=False, request_policy=None):
         passes = [0]
-        def api(path, params, key, client, max_response_bytes=None, response_budget=None):
+        def api(path, params, key, client, max_response_bytes=None, response_budget=None, request_policy=None):
             if path == sync.LIST_PATH:
                 passes[0] += 1
                 return {'data': {'notes': [
@@ -258,7 +258,7 @@ class FullReplayTests(unittest.TestCase):
     def test_main_failure_is_nonzero_redacted_and_temporary_data_is_removed(self):
         private = 'PRIVATE_BODY id=987654321 https://private.invalid/?token=SECRET'
         roots = []
-        def fail(root, work, key, client, report):
+        def fail(root, work, key, client, report, request_policy=None):
             roots.append(work)
             (work/'private-checkpoint.json').write_text(private)
             report.update(stage='detail')

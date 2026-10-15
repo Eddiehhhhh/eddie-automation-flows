@@ -309,3 +309,36 @@ failure still aborts before assets and note writes. The successful-detail counte
 reflects concurrent completion order and must not be interpreted as the index or
 identity of the failing note. Synthetic diagnostic tests cannot recover the cause
 of an older run whose private error was already discarded.
+### Full replay request pacing and rate-limit stops
+
+Only the real full-replay CLI opts into a shared request policy. Other sync
+callers retain their existing request behavior. Both passes, list pages, detail
+workers and all retries share starts spaced at least one second apart. This is
+a conservative operating policy, not a claimed official QPS allowance. Three
+workers can have requests in flight, but cannot independently burst retries.
+HTTP 429 and API rate errors use shared 60/120/240/480-second backoff plus bounded
+0–5-second jitter, with the existing maximum five attempts. A longer server
+Retry-After (seconds or timezone-aware HTTP date) is honored; a wait that reaches
+the remaining 110-minute replay deadline fails closed instead of being shortened.
+Locks are released while waiting and all workers recheck stop/deadline each second.
+The workflow's 115-minute command / 120-minute job bounds remain unchanged.
+
+The official same-host OpenAPI reference describes error.reason values:
+qps_global, qps_bucket, quota_day, quota_month, not_member. Only these fixed
+strings (or unknown) may reach aggregate output. Quota/day/month or nonmembership
+stops all queued calls immediately; already in-flight requests may finish. No
+credential rotation, bypass, extra endpoint or skipped record is introduced.
+429 error bodies are privately read up to 8192 bytes plus an overflow sentinel,
+charged to the existing response budget, and never logged. Oversized/malformed
+bodies yield unknown, not raw text. API code 42900 without a reason also stops
+rather than repeatedly probing a quota. An observed HTTP 429 alone cannot prove
+which quota period or QPS limit applies.
+
+Official reference: https://doc.biji.com/docs/WOxgwObNNiyMHWk1dl0cJqSxnEd
+The separate open-api.biji.com knowledge-recall API is a different host/product;
+its published 2 QPS / 5000-per-day figures are not applied here. Example quota
+numbers in the same-host docs are not this account's measured allowance.
+At the observed 1940 notes, two passes need 3880 detail + 194 list requests:
+about 68 minutes of start-spacing budget, plus response, retry and asset time.
+This is not a completion guarantee; exhaustion remains a failed incomplete run.
+Temporary first-pass writes, if any, are never published to the original vault.
