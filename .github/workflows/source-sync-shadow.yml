@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, full]
         default: sample
         required: true
       sample_pages:
@@ -25,7 +25,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.mode == 'full_replay' && 120 || 60 }}
+    timeout-minutes: ${{ (inputs.mode == 'full_replay' || inputs.mode == 'mirror_replay') && 120 || 60 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -81,6 +81,13 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get real full replay' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_full_replay.py
+      - name: Replay bounded incremental mirror twice on private temporary seed
+        if: inputs.mode == 'mirror_replay'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get incremental mirror replay' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_mirror_replay.py
       - name: Publish aggregate evidence only
         if: always()
         env:
@@ -88,7 +95,9 @@ jobs:
           MODE: ${{ inputs.mode }}
         run: |
           set -o pipefail
-          if [ "$MODE" = full_replay ]; then
+          if [ "$MODE" = mirror_replay ]; then
+            python scripts/source_sync_mirror_replay.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$MODE" = full_replay ]; then
             python scripts/source_sync_full_replay.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ "$MODE" = pack_seed ]; then
             python scripts/source_sync_pack_seed.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
