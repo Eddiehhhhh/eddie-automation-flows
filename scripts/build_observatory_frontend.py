@@ -1091,8 +1091,13 @@ def render_html(snapshot: dict) -> str:
 </body>
 </html>
 """
-    html_text = html_text.replace("__DATA_JSON__", escape(data_json))
-    return html_text.replace("{{", "{").replace("}}", "}")
+    # Normalize template braces before inserting data, so nested JSON objects
+    # and literal braces inside source text are never rewritten.
+    html_text = html_text.replace("{{", "{").replace("}}", "}")
+    # application/json script contents are raw text: HTML entities are not
+    # decoded. JSON escapes preserve the payload while preventing </script>.
+    safe_json = data_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return html_text.replace("__DATA_JSON__", safe_json)
 
 
 def stable_write_text(path: Path, text: str) -> bool:

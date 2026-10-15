@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -13,6 +14,37 @@ import iteration_closeout as closeout
 import build_observatory_frontend as frontend
 import iteration_source_discovery as discovery_module
 import iteration_incremental_audit as audit_module
+
+
+class ObservatoryEmbeddedJsonTests(unittest.TestCase):
+    def embedded_json(self, snapshot):
+        rendered = frontend.render_html(snapshot)
+        match = re.search(r'<script id="observatory-data" type="application/json">(.*?)</script>',
+                          rendered, re.DOTALL)
+        self.assertIsNotNone(match)
+        # Script text is raw text in HTML; entities must not need unescaping.
+        return rendered, match.group(1), json.loads(match.group(1))
+
+    def test_script_json_round_trips_quotes_unicode_and_ampersands(self):
+        snapshot = {"title": 'A "quoted" title & 中文', "empty": {}, "values": [True, None, 3]}
+        _, _, parsed = self.embedded_json(snapshot)
+        self.assertEqual(parsed, snapshot)
+
+    def test_template_brace_normalization_does_not_change_payload(self):
+        snapshot = {"nested": {"child": {"value": "{{literal}} and }}"}}, "empty": {}}
+        rendered, _, parsed = self.embedded_json(snapshot)
+        self.assertEqual(parsed, snapshot)
+        self.assertIn("function update(nextState) {", rendered)
+        self.assertNotIn("function update(nextState) {{", rendered)
+
+    def test_script_terminators_are_json_escaped_without_losing_data(self):
+        snapshot = {"text": '</script><script>alert("example")</script><!-- & > < 中文'}
+        rendered, payload, parsed = self.embedded_json(snapshot)
+        self.assertEqual(parsed, snapshot)
+        self.assertNotIn("<", payload)
+        self.assertNotIn(">", payload)
+        self.assertNotIn("&", payload)
+        self.assertEqual(rendered.count("</script>"), 2)
 
 
 class CloudWeeklyBoundaryTests(unittest.TestCase):
