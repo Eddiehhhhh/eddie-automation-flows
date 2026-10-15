@@ -54,6 +54,18 @@ def render_time(value, canonical_naive=False):
  if ms is None:raise ValueError('invalid_detail_time')
  return dt.datetime.fromtimestamp(ms/1000,dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='milliseconds')
 
+def validate_note_shape(note):
+ for field,kind in [('attachments',list),('children_ids',list),('audio',dict),('web_page',dict)]:
+  if note.get(field) is not None and not isinstance(note[field],kind):raise ValueError('invalid_attachment')
+ attachments=note.get('attachments') or []
+ if not isinstance(attachments,list) or any(not isinstance(a,dict) or not isinstance(a.get('url'),str) or not a.get('url') for a in attachments):raise ValueError('invalid_attachment')
+
+def transcript_pending(note):
+ if note.get('note_type') not in RECORDINGS:return False
+ audio=note.get('audio')
+ if audio is not None and not isinstance(audio,dict):raise ValueError('invalid_attachment')
+ return not text((audio or {}).get('original'))
+
 def render(note,assets,path):
  ident=api_id(note.get('note_id') or note.get('id'));kind=note.get('note_type')
  audio=note.get('audio') or {};audio=audio if isinstance(audio,dict) else {}
@@ -90,10 +102,8 @@ class CompatibleWriter:
  def __init__(self,root,asset_store):self.root=Path(root);self.store=asset_store;self.rows={}
  def write(self,summary,detail,old_path):
   note={**summary,**detail}
-  for field,kind in [('attachments',list),('children_ids',list),('audio',dict),('web_page',dict)]:
-   if note.get(field) is not None and not isinstance(note[field],kind):raise ValueError('invalid_attachment')
+  validate_note_shape(note)
   attachments=note.get('attachments') or []
-  if not isinstance(attachments,list) or any(not isinstance(a,dict) or not isinstance(a.get('url'),str) or not a.get('url') for a in attachments):raise ValueError('invalid_attachment')
   note['attachments']=[{**a,'original_url':a['url']} for a in attachments]
   # Validate pending before any binary write/download.
   render(note,[],Path(old_path or 'placeholder.md'))

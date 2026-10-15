@@ -35,11 +35,11 @@ ASSET_ERROR_CODES = {
     'empty asset body': 'empty_body',
 }
 
-COUNTS=('list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
+COUNTS=('pending','list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
         'pages','api_response_bytes','downloaded_assets','downloaded_bytes','asset_transfer_bytes')
-FLAGS=('data_bytes_paths_mtimes_unchanged','second_data_unchanged','state_lastSyncedAt_changed',
+FLAGS=('pending_set_stable','data_bytes_paths_mtimes_unchanged','second_data_unchanged','state_lastSyncedAt_changed',
        'source_content_complete_claimed','renderer_exercised')
-ERRORS=('invalid_detail_time','list_version_missing','list_version_type','list_version_timezone_missing','list_version_invalid','incomplete_list','invalid_list_identity_version','duplicate_mirror_identity','empty_mirror',
+ERRORS=('pending_changed_between_passes','invalid_detail_time','list_version_missing','list_version_type','list_version_timezone_missing','list_version_invalid','incomplete_list','invalid_list_identity_version','duplicate_mirror_identity','empty_mirror',
  'detail_identity','source_changed_during_pass','source_changed_between_passes','second_pass_semantic_state_changed',
  'data_not_stable','old_unselected_data_modified','unexpected_data_mutation','unchanged_mirror_modified','invalid_manifest','manifest_path_escape',
  'duplicate_manifest_path','manifest_missing_file','manifest_identity_conflict','manifest_version_conflict',
@@ -67,9 +67,11 @@ def safe_report(value):
  first=result.get('first',{});second=result.get('second',{})
  def valid(c):
   required=('enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed')
-  return all(k in c for k in required) and c['enumerated']>0 and c['cached_skipped']+c['fresh_details']==c['enumerated'] and c['adopted_after_detail']+c['new_or_changed']==c['fresh_details'] and c['written_or_changed']==c['new_or_changed']
+  return all(k in c for k in required) and c['enumerated']>0 and c['cached_skipped']+c['fresh_details']==c['enumerated'] and c['adopted_after_detail']+c['new_or_changed']+c.get('pending',0)==c['fresh_details'] and c['written_or_changed']==c['new_or_changed']
  if value.get('status')=='mirror_replay_ok' and 'error' not in result and valid(first) and valid(second) and first['enumerated']==second['enumerated'] and second['fresh_details']==0 and result.get('second_data_unchanged') is True:
-  result['status']='mirror_replay_ok'
+  if first.get('pending',0)==second.get('pending',0)==0:result['status']='mirror_replay_ok'
+ if value.get('status')=='mirror_replay_partial' and 'error' not in result and valid(first) and valid(second) and first['enumerated']==second['enumerated'] and first.get('pending',0)>0 and first.get('pending')==second.get('pending') and second['fresh_details']==second['pending'] and second['new_or_changed']==0 and second['written_or_changed']==0 and second['adopted_after_detail']==0 and result.get('second_data_unchanged') is True and result.get('pending_set_stable') is True and all(second.get(k,0)==0 for k in ('downloaded_assets','downloaded_bytes','asset_transfer_bytes')):
+  result['status']='mirror_replay_partial'
  return result
 
 def main():
@@ -121,7 +123,7 @@ def main():
    for i,which in enumerate(('first','second')):
     result[which].update(stats[i]);store,transfer=stores[i]
     result[which].update(downloaded_assets=len(store.memo),downloaded_bytes=store.bytes,asset_transfer_bytes=transfer.used)
-   result['status']='mirror_replay_ok'
+   result['status']='mirror_replay_partial' if result['first'].get('pending',0) else 'mirror_replay_ok'
  except (Exception,SystemExit) as exc:
   # Preserve only already validated public progress and fixed classifications.
   from source_sync_full_replay import failure_details
@@ -141,6 +143,6 @@ def main():
   if source is not None and stats and source.budget is not None:
    result.setdefault('first' if len(stats)==1 else 'second',{})['api_response_bytes']=source.budget.used
  public=safe_report(result);print(json.dumps(public))
- return 0 if public['status']=='mirror_replay_ok' else 1
+ return 0 if public['status']=='mirror_replay_ok' else (2 if public['status']=='mirror_replay_partial' else 1)
 
 if __name__=='__main__':raise SystemExit(main())

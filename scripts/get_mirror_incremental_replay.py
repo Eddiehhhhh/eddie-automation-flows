@@ -16,6 +16,8 @@ import shutil
 from get_v7_compat import (note_identity, api_id, timestamp_ms, timestamp_error, timestamp_format, near, mirror_index,
     recover_unchanged, local_mirror_matches_note)
 
+from get_mirror_render import transcript_pending, validate_note_shape
+
 class ParityFailure(RuntimeError):
     pass
 
@@ -94,7 +96,7 @@ def _one_pass(root,state,list_complete,fetch_detail,now_ms,writer_factory=None,p
     before=snapshot(root)
     summaries,terminal=list_complete()
     if terminal is not True:raise ParityFailure('incomplete_list')
-    counts=dict(enumerated=len(summaries),cached_skipped=0,fresh_details=0,adopted_after_detail=0,new_or_changed=0,written_or_changed=0)
+    counts=dict(enumerated=len(summaries),cached_skipped=0,fresh_details=0,adopted_after_detail=0,new_or_changed=0,written_or_changed=0,pending=0)
     if progress is not None:progress.append(counts)
     for item in summaries:
         key=timestamp_format(item.get('updated_at'));counts[key]=counts.get(key,0)+1
@@ -108,11 +110,13 @@ def _one_pass(root,state,list_complete,fetch_detail,now_ms,writer_factory=None,p
     mirrors=read_mirrors(root);validate_manifest(root,mirrors);index,conflicts=mirror_index(mirrors)
     if conflicts:raise ParityFailure('duplicate_mirror_identity')
     current=deepcopy(state)
+    prior_pending=current.pop('pendingById',{})
+    pending={}
     writer=writer_factory(root) if writer_factory else None
     preserved=set();changed_paths=set()
     for summary in summaries:
         ident=note_identity(summary)
-        decision=recover_unchanged(summary,current,mirrors,now_ms)
+        decision=recover_unchanged(summary,current,mirrors,now_ms) if ident not in prior_pending else {'decision':'detail'}
         mirror=index.get(ident)
         # Additional migration-integrity guard: do not certify an empty mirror.
         if mirror and not mirror['body_present']:raise ParityFailure('empty_mirror')
@@ -135,6 +139,14 @@ def _one_pass(root,state,list_complete,fetch_detail,now_ms,writer_factory=None,p
                 'stem':Path(mirror['path']).stem,'deleted':False,'lastSyncedAt':now_ms}
             counts['adopted_after_detail']+=1;preserved.add(mirror['path'])
         else:
+            validate_note_shape({**summary,**detail})
+            if transcript_pending({**summary,**detail}):
+                counts['pending']+=1
+                pending[ident]={'updatedAt':detail_version,'detailHash':hashlib.sha256(json.dumps(detail,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()}
+                if mirror:preserved.add(mirror['path'])
+                # Pending originals never become successfully mirrored state.
+                continue
+            if ident in prior_pending:raise ParityFailure('pending_changed_between_passes')
             counts['new_or_changed']+=1
             if writer is None:raise ParityFailure('original_renderer_required')
             path=writer.write(summary,detail,mirror['path'] if mirror else None)
@@ -143,6 +155,7 @@ def _one_pass(root,state,list_complete,fetch_detail,now_ms,writer_factory=None,p
                 'deleted':False,'lastSyncedAt':now_ms}
             changed_paths.add(path)
             counts['written_or_changed']+=1
+    if pending:current['pendingById']=pending
     if writer is not None:writer.finish()
     after=snapshot(root)
     allowed=changed_paths|{'03 State/manifest.json','02 Index/全部笔记.md'} if changed_paths else set()
@@ -177,11 +190,12 @@ def replay(root,list_complete,fetch_detail,writer_factory=None,progress=None):
     after_first=snapshot(root)
     second,c2,v2=one_pass(root,first,list_complete,fetch_detail,2000,writer_factory,progress)
     if v1!=v2:raise ParityFailure('source_changed_between_passes')
+    if first.get('pendingById',{})!=second.get('pendingById',{}):raise ParityFailure('pending_changed_between_passes')
     if stable_state(first)!=stable_state(second):raise ParityFailure('second_pass_semantic_state_changed')
     if snapshot(root)!=after_first:raise ParityFailure('data_not_stable')
     return {'mode':'mirror_incremental_parity','first':c1,'second':c2,
         'data_bytes_paths_mtimes_unchanged':snapshot(root)==initial,'second_data_unchanged':True,'state_lastSyncedAt_changed':bool(c2['cached_skipped']),
-        'source_content_complete_claimed':False,'renderer_exercised':bool(c1['written_or_changed'])}
+        'pending_set_stable':True,'source_content_complete_claimed':False,'renderer_exercised':bool(c1['written_or_changed'])}
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--synthetic-local-smoke',type=Path,required=True)

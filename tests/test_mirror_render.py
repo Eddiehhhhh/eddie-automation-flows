@@ -83,8 +83,77 @@ class RenderTests(unittest.TestCase):
   self.run_replay();self.assertEqual(self.calls,[])
  def test_transcript_pending_preserves_old(self):
   self.note['note_type']='recorder_audio';before=snapshot(self.root)
-  with self.assertRaisesRegex(ValueError,'transcript_pending'):self.run_replay()
+  result=self.run_replay()
+  self.assertEqual(result['first']['pending'],1);self.assertEqual(result['second']['pending'],1)
   self.assertEqual(snapshot(self.root),before)
+ def test_pending_existing_changed_keeps_old_and_does_not_mark_success(self):
+  from get_mirror_incremental_replay import one_pass
+  path=self.root/'old.md';path.write_text('---\nnote_id: "123"\nupdated_at: "2026-10-12T00:00:00Z"\n---\nold original\n')
+  self.note['note_type']='recorder_audio';before=snapshot(self.root)
+  state,counts,versions=one_pass(self.root,{},lambda:([self.note],True),lambda _:self.note,1000,self.factory)
+  self.assertNotIn('api:123',state.get('notesByCanonicalId',{}))
+  self.assertIn('123',state['pendingById']);self.assertEqual(counts['pending'],1)
+  self.assertEqual(snapshot(self.root),before);self.assertEqual(self.calls,[])
+ def test_historical_matching_recording_is_not_new_pending_quality_gate(self):
+  path=self.root/'old.md';path.write_text('---\nnote_id: "123"\nupdated_at: "2026-10-13T00:00:00Z"\n---\nhistorical content\n')
+  self.note['note_type']='recorder_audio';before=snapshot(self.root)
+  result=self.run_replay()
+  self.assertEqual(result['first']['adopted_after_detail'],1)
+  self.assertEqual(result['first']['pending'],0);self.assertEqual(result['second']['fresh_details'],0)
+  self.assertEqual(snapshot(self.root),before)
+ def test_mixed_normal_and_pending_two_passes_partial_public_accounting(self):
+  pending={**self.note,'id':'456','note_type':'recorder_audio','title':'pending','attachments':[{'type':'image','url':'https://example.test/not-downloaded.png'}]}
+  notes=[self.note,pending];byid={n['id']:n for n in notes};calls=[]
+  def detail(ident):calls.append(ident);return deepcopy(byid[ident])
+  result=replay(self.root,lambda:(deepcopy(notes),True),detail,self.factory)
+  self.assertEqual(calls,['123','456','456']);self.assertEqual(self.calls,[])
+  self.assertEqual(result['first']['written_or_changed'],1)
+  self.assertEqual(result['second']['written_or_changed'],0)
+  self.assertEqual(result['second']['fresh_details'],1)
+  public=safe_report({**result,'status':'mirror_replay_partial'})
+  self.assertEqual(public['status'],'mirror_replay_partial');self.assertFalse(public['source_content_complete_claimed'])
+  serialized=json.dumps(public)
+  for secret in ('456','detailHash','updatedAt','not-downloaded'):self.assertNotIn(secret,serialized)
+  self.assertEqual(safe_report({**result,'status':'mirror_replay_ok'})['status'],'failed')
+ def test_pending_same_version_content_change_is_not_stable(self):
+  self.note['note_type']='recorder_audio';calls=[]
+  def detail(ident):
+   calls.append(ident);return {**self.note,'content':'first' if len(calls)==1 else 'changed'}
+  with self.assertRaisesRegex(ParityFailure,'pending_changed_between_passes'):
+   replay(self.root,lambda:([deepcopy(self.note)],True),detail,self.factory)
+ def test_pending_becoming_ready_stops_before_second_write(self):
+  self.note['note_type']='recorder_audio';calls=[];before=snapshot(self.root)
+  def detail(ident):
+   calls.append(ident);return {**self.note,'audio':{} if len(calls)==1 else {'original':'ready'}}
+  with self.assertRaisesRegex(ParityFailure,'pending_changed_between_passes'):
+   replay(self.root,lambda:([deepcopy(self.note)],True),detail,self.factory)
+  self.assertEqual(snapshot(self.root),before)
+ def test_pending_invalid_audio_type_is_still_failure(self):
+  for value in (['bad'],[],False,''):
+   self.note.update(note_type='recorder_audio',audio=value)
+   with self.assertRaisesRegex(ValueError,'invalid_attachment'):self.run_replay()
+ def test_pending_malformed_other_fields_still_fail(self):
+  self.note['note_type']='recorder_audio'
+  for field,value in [('attachments',{}),('attachments',[{}]),('children_ids',{}),('web_page',[])]:
+   saved=deepcopy(self.note);self.note[field]=value
+   with self.assertRaisesRegex(ValueError,'invalid_attachment'):self.run_replay()
+   self.note=saved
+ def test_pending_ready_on_next_independent_replay_can_complete(self):
+  self.note['note_type']='recorder_audio'
+  first=self.run_replay();self.assertEqual(first['first']['pending'],1)
+  self.note['audio']={'original':'now ready'}
+  result=self.run_replay()
+  self.assertEqual(result['first']['pending'],0);self.assertEqual(result['first']['written_or_changed'],1)
+  self.assertEqual(result['second']['fresh_details'],0)
+ def test_new_pending_source_id_second_pass_is_source_change_failure(self):
+  calls=[];pending={**self.note,'id':'456','note_type':'recorder_audio'}
+  def listing():
+   calls.append(1);return (deepcopy([self.note] if len(calls)==1 else [self.note,pending]),True)
+  with self.assertRaisesRegex(ParityFailure,'source_changed_between_passes'):
+   replay(self.root,listing,lambda i:deepcopy(self.note if i=='123' else pending),self.factory)
+ def test_partial_report_requires_pending_stability_flag(self):
+  self.note['note_type']='recorder_audio';result=self.run_replay();result['status']='mirror_replay_partial'
+  result.pop('pending_set_stable');self.assertEqual(safe_report(result)['status'],'failed')
  def test_original_and_summary_distinct(self):
   self.note['note_type']='recorder_audio';self.note['audio']={'original':'actual original'}
   content,fields=render(self.note,[],Path('x.md'))
