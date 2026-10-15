@@ -35,7 +35,7 @@ ASSET_ERROR_CODES = {
     'empty asset body': 'empty_body',
 }
 
-COUNTS=DIFF_KEYS+('diagnostic_probed','diagnostic_rechecks','pending','list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
+COUNTS=DIFF_KEYS+('pending_signing_refreshed','diagnostic_probed','diagnostic_rechecks','pending','list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
         'pages','api_response_bytes','downloaded_assets','downloaded_bytes','asset_transfer_bytes')
 FLAGS=('diagnostic_truncated','diagnostic_only','pending_set_stable','data_bytes_paths_mtimes_unchanged','second_data_unchanged','state_lastSyncedAt_changed',
        'source_content_complete_claimed','renderer_exercised')
@@ -49,7 +49,7 @@ ERRORS=('pending_changed_between_passes','invalid_detail_time','list_version_mis
 
 def safe_report(value):
  value=value if isinstance(value,dict) else {}
- result={'mode':'mirror_incremental_replay','status':'failed','source_content_complete_claimed':False}
+ result={'mode':'mirror_incremental_replay','status':'failed','source_content_complete_claimed':False,'pending_binary_verified':False}
 
  for key in FLAGS:
   if key!='source_content_complete_claimed' and type(value.get(key)) is bool:result[key]=value[key]
@@ -74,8 +74,8 @@ def safe_report(value):
   required=('enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed')
   return all(k in c for k in required) and c['enumerated']>0 and c['cached_skipped']+c['fresh_details']==c['enumerated'] and c['adopted_after_detail']+c['new_or_changed']+c.get('pending',0)==c['fresh_details'] and c['written_or_changed']==c['new_or_changed']
  if value.get('status')=='mirror_replay_ok' and 'error' not in result and valid(first) and valid(second) and first['enumerated']==second['enumerated'] and second['fresh_details']==0 and result.get('second_data_unchanged') is True:
-  if first.get('pending',0)==second.get('pending',0)==0:result['status']='mirror_replay_ok'
- if value.get('status')=='mirror_replay_partial' and 'error' not in result and valid(first) and valid(second) and first['enumerated']==second['enumerated'] and first.get('pending',0)>0 and first.get('pending')==second.get('pending') and second['fresh_details']==second['pending'] and second['new_or_changed']==0 and second['written_or_changed']==0 and second['adopted_after_detail']==0 and result.get('second_data_unchanged') is True and result.get('pending_set_stable') is True and all(second.get(k,0)==0 for k in ('downloaded_assets','downloaded_bytes','asset_transfer_bytes')):
+  if first.get('pending',0)==second.get('pending',0)==second.get('pending_signing_refreshed',0)==0:result['status']='mirror_replay_ok'
+ if value.get('status')=='mirror_replay_partial' and 'error' not in result and valid(first) and valid(second) and first['enumerated']==second['enumerated'] and first.get('pending',0)>0 and first.get('pending')==second.get('pending') and second.get('pending_signing_refreshed',0)<=second['pending'] and second['fresh_details']==second['pending'] and second['new_or_changed']==0 and second['written_or_changed']==0 and second['adopted_after_detail']==0 and result.get('second_data_unchanged') is True and result.get('pending_set_stable') is True and all(second.get(k,0)==0 for k in ('downloaded_assets','downloaded_bytes','asset_transfer_bytes')):
   result['status']='mirror_replay_partial'
  return result
 

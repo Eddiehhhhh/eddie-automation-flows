@@ -271,3 +271,58 @@ class PendingDiagnosticsTests(unittest.TestCase):
    self.assertEqual(progress[1]['pending_body_changed'],1);self.assertEqual(progress[1]['pending_changed_notes'],1)
    public=safe_report({'status':'failed','error':'pending_changed_between_passes','second':{**progress[1],'secret':'never'}})
    self.assertEqual(public['second']['pending_body_changed'],1);self.assertNotIn('secret',str(public))
+
+class PendingSigningTests(unittest.TestCase):
+ def run_pair(self,change):
+  with tempfile.TemporaryDirectory() as folder:
+   root=Path(folder);calls=[];progress=[]
+   note={'id':'123','updated_at':'2026-10-13 08:00:00','note_type':'recorder_audio','content':'summary','attachments':[{'type':'image','url':'https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=a'}]}
+   def fetch(i):
+    calls.append(i);value=deepcopy(note)
+    if len(calls)==2:change(value)
+    return value
+   result=replay(root,lambda:([note],True),fetch,progress=progress)
+   self.assertEqual(snapshot(root),{});self.assertEqual(len(calls),2)
+   return result
+ def test_strict_attachment_signature_refresh_is_partial_not_binary_verified(self):
+  result=self.run_pair(lambda n:n['attachments'][0].update(url=n['attachments'][0]['url'].replace('Signature=a','Signature=b').replace('1999999999','2000000000')))
+  self.assertEqual(result['second']['pending_signing_refreshed'],1)
+  public=safe_report({**result,'status':'mirror_replay_partial'})
+  self.assertEqual(public['status'],'mirror_replay_partial');self.assertFalse(public['pending_binary_verified']);self.assertFalse(public['source_content_complete_claimed'])
+ def test_non_signing_changes_still_fail(self):
+  changes=[lambda n:n.update(content='changed'),lambda n:n.update(extra='new'),lambda n:n.update(audio={'original':'ready'}),lambda n:n['attachments'][0].update(type='file')]
+  for suffix in ('&resize=small','&Signature=duplicate'):
+   changes.append(lambda n,s=suffix:n['attachments'][0].update(url=n['attachments'][0]['url']+s))
+  for old,new in (('/a?','/b?'),('example.test','other.test'),('OSSAccessKeyId=k','OSSAccessKeyId=j'),('https:','http:')):
+   changes.append(lambda n,a=old,b=new:n['attachments'][0].update(url=n['attachments'][0]['url'].replace(a,b)))
+  for change in changes:
+   with self.subTest(change=change),self.assertRaisesRegex(ParityFailure,'pending_changed_between_passes'):self.run_pair(change)
+ def test_audio_url_and_nested_unknown_url_not_exempt(self):
+  for change in (lambda n:n.update(audio={'play_url':'https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=b'}),lambda n:n['attachments'][0].update(extra={'url':'https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=b'})):
+   with self.assertRaisesRegex(ParityFailure,'pending_changed_between_passes'):self.run_pair(change)
+ def test_normalized_marker_cannot_collide_with_original_object(self):
+  from get_mirror_incremental_replay import pending_signature
+  url='https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=a'
+  a={'attachments':[{'url':'https://example.test/plain','original_url':url}]}
+  b={'attachments':[{'url':'https://example.test/plain','original_url':['strict-oss-v1',['https','example.test','/a',''],'k']}]}
+  self.assertNotEqual(pending_signature(a)['metadataHash'],pending_signature(b)['metadataHash'])
+ def test_unknown_malformed_signatures_not_normalized(self):
+  from get_mirror_incremental_replay import pending_signature
+  for url in ('https://example.test/a?OSSAccessKeyId=k&Expires=notnumber&Signature=a','https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=a&x-oss-process=resize','https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=a&Signature=a'):
+   a={'attachments':[{'url':url}]};b={'attachments':[{'url':url.replace('Signature=a','Signature=b')}]}
+   self.assertNotEqual(pending_signature(a)['metadataHash'],pending_signature(b)['metadataHash'])
+
+ def test_attachment_metadata_order_fragment_missing_and_supported_positions(self):
+  from get_mirror_incremental_replay import pending_signature
+  url='https://example.test/a?OSSAccessKeyId=k&Expires=1999999999&Signature=a'
+  def h(v):return pending_signature(v)['metadataHash']
+  for field in ('url','original_url','download_url'):
+   a={'attachments':[{'url':url,field:url}]};b=deepcopy(a);b['attachments'][0][field]=url.replace('Signature=a','Signature=b')
+   self.assertEqual(h(a),h(b))
+   b['attachments'][0][field]+='#different';self.assertNotEqual(h(a),h(b))
+  a={'attachments':[{'url':url,'name':'a'},{'url':url,'name':'b'}]};b=deepcopy(a);b['attachments'].reverse();self.assertNotEqual(h(a),h(b))
+  b=deepcopy(a);b['unknown']=None;self.assertNotEqual(h(a),h(b))
+ def test_report_rejects_inconsistent_refreshed_count(self):
+  result=self.run_pair(lambda n:n['attachments'][0].update(url=n['attachments'][0]['url'].replace('Signature=a','Signature=b')))
+  result['status']='mirror_replay_partial';result['second']['pending_signing_refreshed']=2
+  self.assertEqual(safe_report(result)['status'],'failed')

@@ -29,7 +29,8 @@ def private_hash(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
 
 def pending_signature(detail):
-    # Hash every field; diagnostic groups never replace the whole-object gate.
+    # Keep raw and diagnostic hashes; only strict attachment signing metadata
+    # has a separate source-metadata comparison, never a binary-content claim.
     from source_sync_urls import oss_v1_url
     groups={'body':{},'audio':{},'attachments':{},'other':{}}
     for key,value in detail.items():
@@ -44,7 +45,21 @@ def pending_signature(detail):
                 location,params,_=parsed
                 return {'__diagnostic_oss_v1__':list(location),'signer':params['OSSAccessKeyId']}
         return value
-    return {'detailHash':private_hash(detail),'groups':{k:private_hash(v) for k,v in groups.items()},'signingHash':private_hash(signing_view(detail))}
+    normalized=deepcopy(detail)
+    # Only these descriptor positions have live signing-only evidence. Tag both
+    # raw and normalized values so malformed object values cannot collide.
+    attachments=normalized.get('attachments')
+    if isinstance(attachments,list):
+        for item in attachments:
+            if not isinstance(item,dict):continue
+            for key in ('url','original_url','download_url'):
+                if key not in item:continue
+                parsed=oss_v1_url(item[key])
+                if parsed:
+                    location,params,_=parsed
+                    item[key]=['strict-oss-v1',list(location),params['OSSAccessKeyId']]
+                else:item[key]=['raw-value',item[key]]
+    return {'metadataHash':private_hash(normalized),'detailHash':private_hash(detail),'groups':{k:private_hash(v) for k,v in groups.items()},'signingHash':private_hash(signing_view(detail))}
 
 def pending_differences(left,right):
     result={k:0 for k in DIFF_KEYS}
@@ -220,6 +235,8 @@ def one_pass(root,state,list_complete,fetch_detail,now_ms,writer_factory=None,pr
 def stable_state(state):
     result=deepcopy(state)
     for item in result.get('notesByCanonicalId',{}).values():item.pop('lastSyncedAt',None)
+    for item in result.get('pendingById',{}).values():
+        for key in ('detailHash','groups','signingHash'):item.pop(key,None)
     return result
 
 def replay(root,list_complete,fetch_detail,writer_factory=None,progress=None):
@@ -228,10 +245,11 @@ def replay(root,list_complete,fetch_detail,writer_factory=None,progress=None):
     after_first=snapshot(root)
     second,c2,v2=one_pass(root,first,list_complete,fetch_detail,2000,writer_factory,progress)
     if v1!=v2:raise ParityFailure('source_changed_between_passes')
-    if first.get('pendingById',{})!=second.get('pendingById',{}):
+    if stable_state(first).get('pendingById',{})!=stable_state(second).get('pendingById',{}):
         differences=pending_differences(first.get('pendingById',{}),second.get('pendingById',{}))
         c2.update(differences)
         raise ParityFailure('pending_changed_between_passes')
+    c2['pending_signing_refreshed']=sum(first['pendingById'][ident]['detailHash']!=item['detailHash'] for ident,item in second.get('pendingById',{}).items())
     if stable_state(first)!=stable_state(second):raise ParityFailure('second_pass_semantic_state_changed')
     if snapshot(root)!=after_first:raise ParityFailure('data_not_stable')
     return {'mode':'mirror_incremental_parity','first':c1,'second':c2,
