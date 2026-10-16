@@ -312,10 +312,11 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         # One discovery may encounter the same immutable controller repeatedly.
         # Deduplicate only after exact deterministic-byte verification; no cache
         # survives this call or accepts a policy learned from a workflow.
-        if verified_controllers is None or run['head_sha'] not in verified_controllers:
-            controller.verify_remote(client, run['head_sha'], policy)
+        controller_key = (run['head_sha'], run['event'])
+        if verified_controllers is None or controller_key not in verified_controllers:
+            controller.verify_remote(client, run['head_sha'], policy, event=run['event'])
             if verified_controllers is not None:
-                verified_controllers.add(run['head_sha'])
+                verified_controllers.add(controller_key)
     except ProvenanceFailure as exc:
         if str(exc) == 'provenance_controller_mismatch':
             return None  # Historical other code is never an anchor.
@@ -442,7 +443,7 @@ def verify_execution(client, policy, execution, trigger):
                 'event': 'schedule' if trigger == 'schedule' else 'workflow_dispatch'}
     if any(row.get(key) != value for key, value in expected.items()):
         fail('provenance_execution')
-    controller.verify_remote(client, execution['controller_sha'], policy)
+    controller.verify_remote(client, execution['controller_sha'], policy, event=row['event'])
 
 
 def prepare_with_public_provenance(reader, evidence, parent, source, client, policy, policy_sha256, *, bootstrap=entry.BOOTSTRAP, trigger='schedule', preview=None, exclude_run_id=None, exclude_run_attempt=None):

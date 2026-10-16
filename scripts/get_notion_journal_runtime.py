@@ -327,7 +327,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
         root = '/actions/runs/' + str(run_id)
         run = _terminal_run(client.json(root + '/attempts/' + str(run_attempt)), policy)
         if run['id'] != run_id or run['run_attempt'] != run_attempt: fail('journal_provenance_run')
-        controller.verify_remote(client, run['head_sha'], policy)
+        controller.verify_remote(client, run['head_sha'], policy, event=run['event'])
         reviewed = controller.expected_bytes(policy)
         if (reviewed.count(('      - name: ' + NOTION_STEP).encode()) != 1
                 or reviewed.count(b'        id: notion_sync') != 1):
