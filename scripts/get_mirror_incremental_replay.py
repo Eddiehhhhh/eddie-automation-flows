@@ -667,3 +667,192 @@ def replay_faithful(root,list_complete,fetch_detail,writer_factory,progress=None
             'conflicts':len(second['conflictsById']),'data_bytes_paths_mtimes_unchanged':snapshot(root)==initial,
             'second_data_unchanged':True,'state_lastSyncedAt_changed':False,'pending_set_stable':True,
             'source_content_complete_claimed':False,'renderer_exercised':bool(c1['written_or_changed'])}
+
+# Local-only preparation for the separately approved legacy capture scope.
+# These helpers perform no HTTP, file, state, Git or ref write.
+CAPTURE_CONTRACT='get-legacy-source-observation-1'
+CENSUS_CONTRACT='get-legacy-census-1'
+
+def capture_json_bytes(value):
+    # Compact deterministic semantic JSON. Decimal spelling avoids Python's
+    # exponential->fixed float expansion, without changing float-vs-int type.
+    from decimal import Decimal
+    import math
+    def encode(item):
+        if item is None:return 'null'
+        if type(item) is bool:return 'true' if item else 'false'
+        if type(item) is int:return str(item)
+        if type(item) is float:
+            if not math.isfinite(item):raise ValueError('nonfinite')
+            number=Decimal(str(item)).normalize();fixed=format(number,'f')
+            scientific=format(number,'e');mantissa,exponent=scientific.split('e')
+            scientific=mantissa+'e'+str(int(exponent))
+            if '.' not in fixed:fixed+='.'+'0'
+            return min((fixed,scientific),key=lambda token:(len(token),token))
+        if isinstance(item,str):return json.dumps(item,ensure_ascii=False)
+        if isinstance(item,list):return '['+','.join(encode(v) for v in item)+']'
+        if isinstance(item,dict) and all(isinstance(k,str) for k in item):return '{'+','.join(encode(k)+':'+encode(item[k]) for k in sorted(item))+'}'
+        raise ValueError('unsupported')
+    try:return (encode(value)+'\n').encode('utf-8')
+    except (TypeError,ValueError,UnicodeError,RecursionError):raise ParityFailure('capture_invalid_json')
+
+def strict_capture_json(raw,maximum=2*1024*1024):
+    """Lossless semantic decode; separately retain the exact wire-byte hash."""
+    if not isinstance(raw,bytes) or not raw or len(raw)>maximum:raise ParityFailure('capture_response_budget')
+    def pairs(items):
+        result={}
+        for key,value in items:
+            if key in result:raise ValueError('duplicate')
+            result[key]=value
+        return result
+    def constant(_):raise ValueError('nonfinite')
+    def exact_float(token):
+        from decimal import Decimal
+        import math
+        value=float(token)
+        if not math.isfinite(value) or Decimal(token)!=Decimal(str(value)):raise ValueError('lossy number')
+        return value
+    try:value=json.loads(raw.decode('utf-8'),object_pairs_hook=pairs,parse_constant=constant,parse_float=exact_float)
+    except (UnicodeError,ValueError,RecursionError):raise ParityFailure('capture_invalid_json')
+    capture_json_bytes(value)  # Reject non-finite numeric overflow and surrogates.
+    if not isinstance(value,dict):raise ParityFailure('capture_invalid_json')
+    return value
+
+def freeze_legacy_census(summaries,terminal,legacy_paths,pending_ids,source_commit,get_tree,captured_at,page_receipts=None):
+    """Freeze full list items once; the snapshot is never a current-state claim."""
+    import re
+    if terminal is not True or not isinstance(summaries,list) or not 1<=len(summaries)<=2500:raise ParityFailure('incomplete_list')
+    if any(not isinstance(v,str) or not re.fullmatch('[0-9a-f]{40}',v) for v in (source_commit,get_tree)):raise ParityFailure('capture_source_identity')
+    raw_source_version(captured_at)
+    if not isinstance(legacy_paths,dict) or not isinstance(pending_ids,(set,list,tuple)):raise ParityFailure('capture_cohort')
+    items={}
+    for item in summaries:
+        if not isinstance(item,dict):raise ParityFailure('capture_cohort')
+        ident=note_identity(item)
+        if not re.fullmatch('[0-9]{1,64}',ident) or ident in items:raise ParityFailure('capture_cohort')
+        raw_source_version(item.get('updated_at'));items[ident]=deepcopy(item)
+    selected={};pending=set(pending_ids)
+    if any(not isinstance(ident,str) or not re.fullmatch('[0-9]{1,64}',ident) for ident in pending):raise ParityFailure('capture_cohort')
+    for ident,item in legacy_paths.items():
+        if ident in pending:continue
+        if not isinstance(item,dict) or set(item)!={'filePath','gitBlob','sha256'}:raise ParityFailure('capture_mirror')
+        path=item['filePath']
+        if not isinstance(path,str) or path.startswith('/') or '\\' in path or '..' in Path(path).parts or not path.endswith('.md') or not isinstance(item['gitBlob'],str) or not re.fullmatch('[0-9a-f]{40}',item['gitBlob']) or not isinstance(item['sha256'],str) or not re.fullmatch('[0-9a-f]{64}',item['sha256']):raise ParityFailure('capture_mirror')
+        selected[ident]=deepcopy(item)
+    if not 1<=len(selected)<=1923 or len({v['filePath'] for v in selected.values()})!=len(selected):raise ParityFailure('capture_cohort')
+    census={'contract':CENSUS_CONTRACT,'source_commit':source_commit,'get_tree':get_tree,'captured_at':captured_at,
+        'list_complete_at_capture':True,'current_completeness_claimed':False,'pending_ids':sorted(pending),
+        'page_receipts':deepcopy(page_receipts or []),'source_missing_ids':sorted(set(selected)-set(items)),'eligible':{k:selected[k] for k in sorted(selected)},'summaries':{k:items[k] for k in sorted(items)}}
+    validate_legacy_census(census)
+    encoded=capture_json_bytes(census)
+    if len(encoded)>16*1024*1024:raise ParityFailure('capture_census_budget')
+    return census,hashlib.sha256(encoded).hexdigest()
+
+def validate_legacy_census(census):
+    import re
+    keys={'contract','source_commit','get_tree','captured_at','list_complete_at_capture','current_completeness_claimed','pending_ids','source_missing_ids','eligible','summaries','page_receipts'}
+    if not isinstance(census,dict) or set(census)!=keys or census['contract']!=CENSUS_CONTRACT or census['list_complete_at_capture'] is not True or census['current_completeness_claimed'] is not False:raise ParityFailure('capture_invalid_census')
+    for key in ('source_commit','get_tree'):
+        if not isinstance(census[key],str) or not re.fullmatch('[a-f0-9]{40}',census[key]):raise ParityFailure('capture_invalid_census')
+    raw_source_version(census['captured_at'])
+    eligible=census['eligible'];summaries=census['summaries']
+    if not isinstance(eligible,dict) or not 1<=len(eligible)<=1923 or not isinstance(summaries,dict) or not 1<=len(summaries)<=2500:raise ParityFailure('capture_invalid_census')
+    for key in ('pending_ids','source_missing_ids'):
+        value=census[key]
+        if not isinstance(value,list) or any(not isinstance(v,str) or not re.fullmatch('[0-9]{1,64}',v) for v in value) or value!=sorted(set(value)):raise ParityFailure('capture_invalid_census')
+    if set(eligible)&set(census['pending_ids']) or set(census['source_missing_ids'])!=set(eligible)-set(summaries):raise ParityFailure('capture_invalid_census')
+    paths=set()
+    for ident,item in eligible.items():
+        if not isinstance(ident,str) or not re.fullmatch('[0-9]{1,64}',ident) or not isinstance(item,dict) or set(item)!={'filePath','gitBlob','sha256'}:raise ParityFailure('capture_invalid_census')
+        path=item['filePath']
+        if not isinstance(path,str) or not path or path.startswith('/') or '\\' in path or any(p in ('','.','..','.git') for p in path.split('/')) or any(ord(c)<32 or ord(c)==127 for c in path) or not path.endswith('.md') or path in paths:raise ParityFailure('capture_invalid_census')
+        paths.add(path)
+        for key,width in (('gitBlob',40),('sha256',64)):
+            if not isinstance(item[key],str) or not re.fullmatch('[a-f0-9]{'+str(width)+'}',item[key]):raise ParityFailure('capture_invalid_census')
+    for ident,item in summaries.items():
+        if not isinstance(ident,str) or not re.fullmatch('[0-9]{1,64}',ident) or not isinstance(item,dict) or note_identity(item)!=ident:raise ParityFailure('capture_invalid_census')
+        raw_source_version(item.get('updated_at'))
+    receipts=census['page_receipts']
+    if not isinstance(receipts,list) or len(receipts)>150:raise ParityFailure('capture_invalid_census')
+    seen=[]
+    for index,receipt in enumerate(receipts,1):
+        if not isinstance(receipt,dict) or set(receipt)!={'sequence','wire_bytes','wire_sha256','semantic_sha256','items_sha256','ids','has_more'} or type(receipt['sequence']) is not int or receipt['sequence']!=index or type(receipt['wire_bytes']) is not int or not 1<=receipt['wire_bytes']<=2*1024*1024 or type(receipt['has_more']) is not bool or receipt['has_more']!=(index<len(receipts)) or not isinstance(receipt['ids'],list):raise ParityFailure('capture_invalid_census')
+        for key in ('wire_sha256','semantic_sha256','items_sha256'):
+            if not isinstance(receipt[key],str) or not re.fullmatch('[a-f0-9]{64}',receipt[key]):raise ParityFailure('capture_invalid_census')
+        if any(not isinstance(i,str) or i not in summaries for i in receipt['ids']):raise ParityFailure('capture_invalid_census')
+        seen.extend(receipt['ids'])
+        if hashlib.sha256(capture_json_bytes([summaries[i] for i in receipt['ids']])).hexdigest()!=receipt['items_sha256']:raise ParityFailure('capture_invalid_census')
+    if receipts and (len(seen)!=len(set(seen)) or set(seen)!=set(summaries)):raise ParityFailure('capture_invalid_census')
+    if len(capture_json_bytes(census))>16*1024*1024:raise ParityFailure('capture_census_budget')
+    return census
+
+def observation_detail(record):
+    payload=record['payload'].get('data',record['payload'])
+    return payload.get('note',payload)
+
+def capture_presence(note):
+    result={}
+    for path in SOURCE_TEXT_FIELDS:
+        value=note;present=True
+        for key in path.split('.'):
+            if not isinstance(value,dict) or key not in value:present=False;break
+            value=value[key]
+        result[path]='absent' if not present else ('null' if value is None else ('empty' if value=='' else ('nonempty_text' if isinstance(value,str) else 'unsupported_type')))
+    return result
+
+def observation_disposition(summary,detail):
+    try:observed=raw_source_version(detail.get('updated_at'))
+    except ParityFailure:return None,'source_version_unsupported'
+    expected=raw_source_version(summary.get('updated_at'))
+    try:validate_note_shape(detail);source_text_fields({**summary,**detail});pending=transcript_pending({**summary,**detail})
+    except (ValueError,ParityFailure,TypeError):return observed,'source_shape_unsupported'
+    return observed,('source_version_changed' if observed!=expected else ('source_transcript_unavailable' if pending else 'observed_unreconciled'))
+
+def make_legacy_observation(census,census_sha256,ident,raw_response,old_bytes,captured_at,*,_prevalidated_census=False):
+    """Bind fresh source to preserved local bytes, without adopting a mirror."""
+    if not _prevalidated_census:
+        validate_legacy_census(census)
+        if census.get('contract')!=CENSUS_CONTRACT or hashlib.sha256(capture_json_bytes(census)).hexdigest()!=census_sha256:raise ParityFailure('capture_census_changed')
+    if ident not in census['eligible']:raise ParityFailure('capture_unselected_identity')
+    raw_source_version(captured_at)
+    if ident in census['source_missing_ids']:raise ParityFailure('capture_source_missing')
+    mirror=census['eligible'][ident]
+    if not isinstance(old_bytes,bytes) or hashlib.sha256(old_bytes).hexdigest()!=mirror['sha256'] or hashlib.sha1(b'blob '+str(len(old_bytes)).encode()+b'\0'+old_bytes).hexdigest()!=mirror['gitBlob']:raise ParityFailure('capture_mirror_changed')
+    from source_sync_mirror_replay import legacy_document
+    fields,_=legacy_document(old_bytes)
+    if fields.get('note_id')!=ident:raise ParityFailure('capture_mirror_identity')
+    envelope=strict_capture_json(raw_response)
+    if envelope.get('success') is False:raise ParityFailure('capture_api_error')
+    payload=envelope.get('data',envelope)
+    if not isinstance(payload,dict):raise ParityFailure('capture_invalid_detail')
+    detail=payload.get('note',payload)
+    if not isinstance(detail,dict) or note_identity(detail)!=ident:raise ParityFailure('capture_detail_identity')
+    summary=census['summaries'][ident];expected=raw_source_version(summary.get('updated_at'))
+    observed,disposition=observation_disposition(summary,detail)
+    present=capture_presence({**summary,**detail})
+    detail_bytes=capture_json_bytes(detail)
+    return {'contract':CAPTURE_CONTRACT,'identity':ident,'census_sha256':census_sha256,'captured_at':captured_at,
+        'expected_source_version':expected,'observed_source_version':observed,'summary_sha256':hashlib.sha256(capture_json_bytes(summary)).hexdigest(),
+        'detail_sha256':hashlib.sha256(detail_bytes).hexdigest(),'wire_response_sha256':hashlib.sha256(raw_response).hexdigest(),
+        'hash_contract':'canonical-semantic-json-v1; wire-response-sha256-separate','payload':envelope,'source_text_fields':present,
+        'mirror':deepcopy(mirror),'disposition':disposition,'mirror_adopted':False,'origin':'observed-unreconciled',
+        'current_completeness_claimed':False}
+
+def verify_legacy_observation(census,census_sha256,record,receipt_sha256,*,_prevalidated_census=False):
+    """Resume may trust verified receipts, never a matching version token alone."""
+    import re
+    if hashlib.sha256(capture_json_bytes(record)).hexdigest()!=receipt_sha256:raise ParityFailure('capture_receipt_changed')
+    expected_keys={'contract','identity','census_sha256','captured_at','expected_source_version','observed_source_version','summary_sha256','detail_sha256','wire_response_sha256','hash_contract','payload','source_text_fields','mirror','disposition','mirror_adopted','origin','current_completeness_claimed'}
+    if not isinstance(record,dict) or set(record)!=expected_keys or record['contract']!=CAPTURE_CONTRACT or record['origin']!='observed-unreconciled' or record['mirror_adopted'] is not False or record['current_completeness_claimed'] is not False:raise ParityFailure('capture_invalid_receipt')
+    if not _prevalidated_census:
+        validate_legacy_census(census)
+        if census.get('contract')!=CENSUS_CONTRACT or hashlib.sha256(capture_json_bytes(census)).hexdigest()!=census_sha256:raise ParityFailure('capture_census_changed')
+    if record['census_sha256']!=census_sha256:raise ParityFailure('capture_census_changed')
+    ident=record['identity']
+    if ident not in census['eligible'] or record['mirror']!=census['eligible'][ident]:raise ParityFailure('capture_unselected_identity')
+    raw_source_version(record['captured_at']);detail=observation_detail(record);summary=census['summaries'][ident]
+    if not isinstance(detail,dict) or note_identity(detail)!=ident:raise ParityFailure('capture_detail_identity')
+    if record['source_text_fields']!=capture_presence({**summary,**detail}) or record['summary_sha256']!=hashlib.sha256(capture_json_bytes(summary)).hexdigest() or record['detail_sha256']!=hashlib.sha256(capture_json_bytes(detail)).hexdigest():raise ParityFailure('capture_payload_changed')
+    expected=raw_source_version(summary.get('updated_at'));observed,disposition=observation_disposition(summary,detail)
+    if record['expected_source_version']!=expected or record['observed_source_version']!=observed or record['disposition']!=disposition or not isinstance(record['wire_response_sha256'],str) or not re.fullmatch('[0-9a-f]{64}',record['wire_response_sha256']) or record['hash_contract']!='canonical-semantic-json-v1; wire-response-sha256-separate':raise ParityFailure('capture_invalid_receipt')
+    return ident

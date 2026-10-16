@@ -95,7 +95,7 @@ def json_loads_tolerant(text: str) -> Any:
     return json.JSONDecoder(strict=False).decode(text)
 
 
-def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None, response_budget=None, request_policy=None) -> Any:
+def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None, response_budget=None, request_policy=None, capture_raw=False) -> Any:
     if path not in (LIST_PATH, DETAIL_PATH):
         raise ValueError("unsupported Get API path")
     query = urllib.parse.urlencode(params)
@@ -154,8 +154,12 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
                     if expected is not None and size != expected:
                         raise RuntimeError("incomplete Get response body")
                     raw = b"".join(chunks)
-                body = raw.decode("utf-8", errors="replace")
-            data = json_loads_tolerant(body)
+                body = None if capture_raw else raw.decode("utf-8", errors="replace")
+            if capture_raw:
+                from get_mirror_incremental_replay import strict_capture_json
+                data = strict_capture_json(raw)
+            else:
+                data = json_loads_tolerant(body)
             if isinstance(data, dict) and data.get("success") is False:
                 err = data.get("error") or {}
                 code = err.get("code")
@@ -167,7 +171,18 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
                     time.sleep(int(retry_after))
                     continue
                 raise RuntimeError(f"GetNote API error {code}")
-            return data
+            return raw if capture_raw else data
+        except http.client.IncompleteRead:
+            if not capture_raw:raise
+            if capture_raw and attempt < 4:
+                time.sleep(5)
+                continue
+            raise RuntimeError("GetNote incomplete body") from None
+        except RuntimeError as error:
+            if capture_raw and str(error) == "incomplete Get response body" and attempt < 4:
+                time.sleep(5)
+                continue
+            raise
         except RedirectBlocked:
             raise RuntimeError("GetNote redirect blocked") from None
         except urllib.error.HTTPError as exc:

@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, full]
         default: sample
         required: true
       preview_source_commit:
@@ -35,7 +35,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ (inputs.mode == 'full_replay' || inputs.mode == 'mirror_replay' || inputs.mode == 'pending_diagnostic' || inputs.mode == 'private_preview') && 120 || 60 }}
+    timeout-minutes: ${{ (inputs.mode == 'full_replay' || inputs.mode == 'mirror_replay' || inputs.mode == 'pending_diagnostic' || inputs.mode == 'private_preview' || inputs.mode == 'legacy_capture') && 120 || 60 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -140,6 +140,13 @@ jobs:
           PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
           RETAINED_PREVIEW: ${{ inputs.retained_preview_commit }}
         run: timeout --kill-after=30s 10m python scripts/run_private_command.py --label 'Get retained preview readback only' --stdout-file '${{ runner.temp }}/retention-result.json' -- python scripts/get_private_preview_retention.py verify-retained --vault "$GITHUB_WORKSPACE/private-vault" --source-commit "$PREVIEW_SOURCE" --preview-commit "$RETAINED_PREVIEW"
+      - name: Capture approved legacy source observations on private reconciliation branch
+        if: inputs.mode == 'legacy_capture'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get bounded private legacy capture' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_capture.py
       - name: Remove ephemeral private checkout and preview
         if: always() && (inputs.mode == 'private_preview' || inputs.mode == 'verify_retained')
         run: rm -rf -- "$GITHUB_WORKSPACE/private-vault" '${{ runner.temp }}/get-private-preview'
@@ -152,6 +159,10 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
+          if [ "$MODE" = legacy_capture ]; then
+            python scripts/get_legacy_capture.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$MODE" = verify_retained ]; then
             python scripts/get_private_preview_retention.py --publish-report "$RETENTION_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
