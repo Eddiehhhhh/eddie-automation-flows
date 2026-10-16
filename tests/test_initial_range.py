@@ -152,4 +152,46 @@ class Tests(unittest.TestCase):
   with self.assertRaises(m.Blocked):m.reconstruct_proof(template,p.digest(template),note_id='9'*19,page_id=P,source_path=proof['source']['path'])
   bad=deepcopy(template);bad['proof_sha256']='f'*64
   with self.assertRaises(m.Blocked):m.reconstruct_proof(bad,p.digest(bad),note_id=N,page_id=P,source_path=proof['source']['path'])
+class DiagnosticTests(unittest.TestCase):
+ fixture=Tests.fixture
+ hash_fixture=Tests.hash_fixture
+ def test_diagnostic_exact_alignment_is_read_only_and_bounded(self):
+  ev,data,target,proof=self.hash_fixture();before=deepcopy(target);decision=m.propose_from_git(proof,p.digest(proof),data,target,DS)
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertTrue(m.valid_diagnostic(out));self.assertEqual(out['alignment'],'unique_best');self.assertEqual(out['best_exact_roots'],2);self.assertEqual(out['best_mismatched_roots'],0);self.assertEqual(target,before);self.assertEqual(m.propose_from_git(proof,p.digest(proof),data,target,DS),decision)
+  self.assertEqual(out['schema']['stage'],'complete');self.assertEqual(out['expected_root_type_counts'],{'heading_3':1,'paragraph':1})
+ def test_diagnostic_fixed_text_annotation_link_and_heading_categories(self):
+  for category in ('text','annotations','link','heading'):
+   ev,data,target,proof=self.hash_fixture();row=target['recursive_blocks'][4]
+   if category=='text':row['payload']['rich_text']=[p.text_run('Changed private text')]
+   if category=='annotations':row['payload']['rich_text'][0]['annotations']['italic']=True
+   if category=='link':row['payload']['rich_text'][0]['text']['link']={'url':'https://private.invalid/secret'}
+   if category=='heading':target['recursive_blocks'][3]['type']='heading_2'
+   out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertTrue(m.valid_diagnostic(out));self.assertEqual(out['best_difference_max_counts'],{category:1});self.assertEqual(m.propose_from_git(proof,p.digest(proof),data,target,DS)['reason'],'no_unique_range')
+   for private in ('Changed private text','private.invalid',N,P,proof['source']['path']):self.assertNotIn(private,json.dumps(out))
+ def test_payload_schema_failure_has_fixed_stage_and_does_not_hide_root_alignment(self):
+  ev,data,target,proof=self.hash_fixture();target['recursive_blocks'][4]['payload']['PRIVATE_KEY']='PRIVATE_VALUE'
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertTrue(m.valid_diagnostic(out));self.assertEqual(out['schema']['stage'],'payload_keys');self.assertEqual(out['schema']['failure_type_counts'],{'paragraph':1});self.assertEqual(out['best_difference_max_counts'],{'payload_schema':1});self.assertNotIn('PRIVATE',json.dumps(out))
+  target['recursive_blocks'][4]['payload'].pop('PRIVATE_KEY');target['recursive_blocks'][3]['payload']['is_toggleable']=True
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertEqual(out['schema']['stage'],'heading_toggle');self.assertEqual(out['best_difference_max_counts'],{'heading':1,'payload_schema':1})
+ def test_non_text_rich_item_and_bad_annotation_stage_are_fixed(self):
+  ev,data,target,proof=self.hash_fixture();row=target['recursive_blocks'][4]
+  row['payload']['rich_text']=[{'type':'PRIVATE_MENTION','PRIVATE_KEY':'PRIVATE_VALUE'}]
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertEqual(out['schema']['stage'],'rich_text_kind');self.assertNotIn('PRIVATE',json.dumps(out));self.assertTrue(m.valid_diagnostic(out))
+  row['payload']['rich_text']=[p.text_run('Body')];row['payload']['rich_text'][0]['annotations']['bold']='invalid'
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertEqual(out['schema']['stage'],'annotations');self.assertTrue(m.valid_diagnostic(out))
+ def test_duplicate_full_root_alignment_reports_tie_without_relaxing_match(self):
+  ev,data,target,proof=self.hash_fixture();wanted=m.reconstructed_roots(data,N,proof['source']['path']);target=snapshot(wanted+wanted)
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertEqual(out['alignment'],'tied_best');self.assertEqual(out['best_ties'],2);self.assertEqual(m.propose_from_git(proof,p.digest(proof),data,target,DS)['reason'],'no_unique_range');self.assertTrue(m.valid_diagnostic(out))
+ def test_table_and_children_diagnostics_preserve_strict_full_subtrees(self):
+  body='| Name | Value |\n| --- | --- |\n| A | B |';history='<callout icon="📝" color="gray_bg">\n\tNotice\n</callout>\n\n'+body
+  ev,data,target,_=self.fixture(history);data=('---\nnote_id: '+json.dumps(N)+'\n---\n'+body+'\n\n---\nsource: api\nupdated: 2026-10-16T00:00:00Z\ncanonicalId: api:'+N+'\n').encode();ev['source'].update(blob=p.git_blob(data),sha256=p.digest(data));proof=m.build_hash_proof(ev,p.digest(ev),data)
+  table=next(x for x in target['recursive_blocks'] if x['type']=='table');table['payload']['has_column_header']=False
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertEqual(out['best_difference_max_counts'],{'table':1});self.assertTrue(m.valid_diagnostic(out))
+  table['payload']['has_column_header']=True;removed=table['children_ids'].pop();target['recursive_blocks']=[x for x in target['recursive_blocks'] if x['id']!=removed]
+  out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertEqual(out['best_difference_max_counts'],{'children':1});self.assertTrue(m.valid_diagnostic(out))
+  table['payload']['table_width']=3;out=m.snapshot_diagnostic(target);self.assertEqual(out['stage'],'table_shape')
+ def test_bad_proof_and_diagnostic_schema_never_expose_source_or_raw_values(self):
+  ev,data,target,proof=self.hash_fixture();out=m.diagnose_from_git(proof,'f'*64,data,target,DS);self.assertEqual(out['expected_roots'],0);self.assertEqual(out['alignment'],'not_available')
+  for change in ({'alignment':'PRIVATE'},{'expected_roots':True},{'best_difference_max_counts':{'PRIVATE':1}},{'extra':'PRIVATE'}):self.assertFalse(m.valid_diagnostic(dict(out,**change)))
+  for target in (None,[],{'complete':True,'native_blocks_available':True,'recursive_blocks':[]}):self.assertTrue(m.valid_diagnostic(m.blank_diagnostic(target)))
 if __name__=='__main__':unittest.main()

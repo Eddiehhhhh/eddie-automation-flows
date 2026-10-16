@@ -245,6 +245,7 @@ jobs:
       - name: Read two pinned Notion pages and plan without writes
         if: inputs.mode == 'notion_readonly'
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
@@ -254,6 +255,17 @@ jobs:
           set -euo pipefail
           test "$APPLY" != true
           test -z "$APPROVED_PAYLOAD_SHA256"
+          PYTHONPATH=scripts python - <<'PYGUARD'
+          import json, os
+          from get_notion_writer_guard import WriterGuard, Blocked
+          try:
+              guard = WriterGuard(os.environ.get('GITHUB_TOKEN'))
+              guard()
+              print(json.dumps({'old_writer_guard': 'verified', 'requests': guard.diagnostics['requests'], 'writes': 0}))
+          except Blocked as exc:
+              print(json.dumps({'old_writer_guard': 'blocked', 'reason': str(exc), 'writes': 0}))
+              raise SystemExit(1)
+          PYGUARD
           timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion two-page read-only observation' --stdout-file '${{ runner.temp }}/notion-readonly-result.json' -- python scripts/get_notion_readonly.py --expected-parent "$EXPECTED_PARENT"
 
       - name: Publish aggregate evidence only

@@ -205,6 +205,7 @@ class HistoricalRangeIntegrationTests(unittest.TestCase):
         out=r.historical_ranges(remote,mapping,blobs,snapshots,template,p.digest(template))
         self.assertEqual(out['proofs'],1);self.assertEqual(out['candidates'],1);self.assertEqual(out['managed_blocks'],2);self.assertEqual(out['protected_blocks'],4)
         self.assertEqual(calls,[template['source_commit']])
+        self.assertEqual(out['diagnostics'][0]['expected_roots'],2);self.assertEqual(out['diagnostics'][0]['schema']['stage'],'complete')
         for secret in (h.N,h.P,'Nested title','Historical preview notice','Raw/03 Get'):self.assertNotIn(secret,json.dumps(out))
     def test_old_membership_and_current_blob_must_both_match(self):
         h,template,mapping,blobs,snapshots,remote,calls=self.fixture();remote.check_source_budget=lambda _:{}
@@ -215,6 +216,15 @@ class HistoricalRangeIntegrationTests(unittest.TestCase):
         h,template,mapping,blobs,snapshots,remote,calls=self.fixture();snapshots[h.N]['recursive_blocks'][-2]['payload']['rich_text']=[p.text_run('Human edit')]
         out=r.historical_ranges(remote,mapping,blobs,snapshots,template,p.digest(template));self.assertEqual(out['blocked'],1);self.assertEqual(out['reason_counts'],{'no_unique_range':1});self.assertEqual(out['managed_blocks'],0)
     def test_new_aggregate_filter_rejects_forged_counts_and_keys(self):
-        valid={'proofs':1,'candidates':1,'blocked':0,'unproven_notes':1,'managed_blocks':39,'protected_blocks':8,'reason_counts':{}}
+        valid={'proofs':1,'candidates':1,'blocked':0,'unproven_notes':1,'managed_blocks':39,'protected_blocks':8,'reason_counts':{},'diagnostics':[r.historical.blank_diagnostic(None)]}
         self.assertTrue(r.valid_historical(valid))
         for change in ({'proofs':True},{'candidates':2},{'reason_counts':{'PRIVATE':1}},{'extra':'PRIVATE'},{'managed_blocks':-1}):self.assertFalse(r.valid_historical(dict(valid,**change)))
+
+    def test_diagnostic_public_filter_rejects_raw_values_and_unknown_categories(self):
+        h,template,mapping,blobs,snapshots,remote,calls=self.fixture()
+        out=r.historical_ranges(remote,mapping,blobs,snapshots,template,p.digest(template))
+        out['unproven_notes']=1
+        self.assertTrue(r.valid_historical(out))
+        for field,value in (('alignment','PRIVATE'),('best_difference_max_counts',{'PRIVATE':1}),('extra','PRIVATE')):
+            from copy import deepcopy
+            bad=deepcopy(out);bad['diagnostics'][0][field]=value;self.assertFalse(r.valid_historical(bad))

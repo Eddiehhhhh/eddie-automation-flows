@@ -154,7 +154,7 @@ def read_committed_sources(remote, parent, snapshots):
 
 def historical_ranges(remote,mapping,blobs,snapshots,template=HISTORICAL_TEMPLATE,expected_template_sha=HISTORICAL_TEMPLATE_SHA):
     """One independently reviewed historical proof; observations grant no ownership."""
-    out={'proofs':0,'candidates':0,'blocked':0,'unproven_notes':len(mapping),'managed_blocks':0,'protected_blocks':0,'reason_counts':{}}
+    out={'proofs':0,'candidates':0,'blocked':0,'unproven_notes':len(mapping),'managed_blocks':0,'protected_blocks':0,'reason_counts':{},'diagnostics':[]}
     if planner.digest(template)!=expected_template_sha:fail('source_anchor')
     for ident,row in mapping.items():
         if planner.digest(ident)!=template['note_id_sha256']:continue
@@ -165,6 +165,9 @@ def historical_ranges(remote,mapping,blobs,snapshots,template=HISTORICAL_TEMPLAT
         prior=remote.check_source_budget(proof['source']['commit']).get(row['path'])
         if prior is None or prior[:3]!=('100644','blob',proof['source']['blob']) or row['md_blob']!=proof['source']['blob']:fail('source_anchor')
         result=historical.propose_from_git(proof,template['proof_sha256'],blobs[row['md_blob']],snapshot,row['data_source_id'])
+        diagnostic=historical.diagnose_from_git(proof,template['proof_sha256'],blobs[row['md_blob']],snapshot,row['data_source_id'])
+        if not historical.valid_diagnostic(diagnostic):fail('planner_failed')
+        out['diagnostics'].append(diagnostic)
         safe=historical.public_summary(result);out['proofs']+=1;out['unproven_notes']-=1
         if safe['decision']=='candidate':out['candidates']+=1
         else:
@@ -174,11 +177,13 @@ def historical_ranges(remote,mapping,blobs,snapshots,template=HISTORICAL_TEMPLAT
 
 
 def valid_historical(value):
-    keys={'proofs','candidates','blocked','unproven_notes','managed_blocks','protected_blocks','reason_counts'}
+    keys={'proofs','candidates','blocked','unproven_notes','managed_blocks','protected_blocks','reason_counts','diagnostics'}
     if not isinstance(value,dict) or set(value)!=keys:return False
-    for key in keys-{'reason_counts'}:
+    for key in keys-{'reason_counts','diagnostics'}:
         cap=2*planner.MAX_BLOCKS if key in ('managed_blocks','protected_blocks') else 2
         if type(value[key]) is not int or not 0<=value[key]<=cap:return False
+    diagnostics=value['diagnostics']
+    if not isinstance(diagnostics,list) or len(diagnostics)!=value['proofs'] or any(not historical.valid_diagnostic(x) for x in diagnostics):return False
     reasons=value['reason_counts']
     return isinstance(reasons,dict) and not set(reasons)-historical.REASONS and all(type(n) is int and 0<=n<=2 for n in reasons.values()) and sum(reasons.values())==value['blocked'] and value['candidates']+value['blocked']==value['proofs'] and value['proofs']+value['unproven_notes']==2
 

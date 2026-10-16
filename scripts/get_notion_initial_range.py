@@ -346,3 +346,215 @@ def reconstruct_proof(template,expected_template_sha,*,note_id,page_id,source_pa
         return proof
     except Blocked:raise
     except Exception:fail('evidence_invalid')
+
+# Diagnostics are deliberately non-authoritative. They cannot supply ownership,
+# a normalized target, a replacement baseline, or a relaxed matching decision.
+DIAGNOSTIC_CONTRACT='get-notion-range-diagnostic-1'
+DIAGNOSTIC_TYPES=frozenset(p.KINDS)|{'other'}
+DIAGNOSTIC_STAGES=frozenset(('complete','envelope','row_identity','row_shape','payload_kind',
+    'payload_keys','payload_shape','rich_text_shape','rich_text_kind','annotations','link',
+    'heading_toggle','table_shape','asset_binding','children','snapshot_tree_other'))
+DIFFERENCES=frozenset(('text','annotations','link','table','heading','children','block_type','payload_schema','other_payload'))
+ALIGNMENTS=frozenset(('not_available','unique_best','tied_best','insufficient_roots','budget'))
+
+def diagnostic_kind(kind):return kind if isinstance(kind,str) and kind in p.KINDS else 'other'
+def increment(counts,key):counts[key]=counts.get(key,0)+1
+
+def rich_stage(values):
+    if not isinstance(values,list):return 'rich_text_shape'
+    for row in values:
+        if not isinstance(row,dict) or row.get('type')!='text':return 'rich_text_kind'
+        text=row.get('text');annotations=row.get('annotations',{})
+        if not isinstance(text,dict) or set(text)-{'content','link'} or not isinstance(text.get('content'),str):return 'rich_text_shape'
+        if not isinstance(annotations,dict) or set(annotations)-set(p.ANNOTATIONS):return 'annotations'
+        ann={**p.ANNOTATIONS,**annotations}
+        if any(type(ann[k]) is not bool for k in p.ANNOTATIONS if k!='color') or not isinstance(ann['color'],str):return 'annotations'
+        link=text.get('link')
+        if link is not None and (not isinstance(link,dict) or set(link)!={'url'} or not isinstance(link['url'],str)):return 'link'
+    return 'complete'
+
+def payload_stage(kind,payload):
+    try:p.normalize_payload(kind,payload);return 'complete'
+    except Exception:pass
+    if not isinstance(kind,str) or kind not in p.KINDS:return 'payload_kind'
+    if not isinstance(payload,dict):return 'payload_shape'
+    if kind in p.TEXT_KINDS:
+        allowed={'rich_text','color'}
+        if kind=='to_do':allowed.add('checked')
+        if kind=='code':allowed|={'language','caption'}
+        if kind=='callout':allowed.add('icon')
+        if kind.startswith('heading_'):allowed.add('is_toggleable')
+        if set(payload)-allowed:return 'payload_keys'
+        stage=rich_stage(payload.get('rich_text'))
+        if stage!='complete':return stage
+        if not isinstance(payload.get('color','default'),str):return 'annotations'
+        if kind.startswith('heading_') and payload.get('is_toggleable',False) is not False:return 'heading_toggle'
+        if kind=='code':
+            stage=rich_stage(payload.get('caption',[]))
+            if stage!='complete':return stage
+        return 'payload_shape'
+    if kind=='image':return 'asset_binding'
+    if kind=='table_row' and isinstance(payload.get('cells'),list):
+        for cell in payload['cells']:
+            stage=rich_stage(cell)
+            if stage!='complete':return stage
+    if kind in ('table','table_row'):return 'table_shape'
+    return 'payload_keys' if payload else 'payload_shape'
+
+def snapshot_diagnostic(snapshot):
+    out={'stage':'envelope','native_blocks':0,'native_roots':0,'root_type_counts':{},'all_type_counts':{},'failure_stage_counts':{},'failure_type_counts':{}}
+    if not isinstance(snapshot,dict) or snapshot.get('complete') is not True or snapshot.get('native_blocks_available') is not True:return out
+    try:
+        if len(p.encoded(snapshot))>p.MAX_TARGET:return out
+        page=p.notion_id(snapshot.get('page_id'));rows=snapshot.get('recursive_blocks')
+        if not isinstance(rows,list) or len(rows)>p.MAX_BLOCKS or not isinstance(snapshot.get('properties_raw'),dict):return out
+        out['native_blocks']=len(rows);nodes={};first=None
+        for row in rows:
+            stage='complete';kind=diagnostic_kind(row.get('type')) if isinstance(row,dict) else 'other'
+            increment(out['all_type_counts'],kind)
+            if not isinstance(row,dict):stage='row_shape'
+            else:
+                try:
+                    bid=p.notion_id(row.get('id'));parent=p.notion_id(row.get('parent_id'))
+                    if bid in nodes or bid==page:stage='row_identity'
+                    else:nodes[bid]=row
+                    if parent==page:out['native_roots']+=1;increment(out['root_type_counts'],kind)
+                except Exception:stage='row_identity'
+                children=row.get('children_ids')
+                if stage=='complete':
+                    try:
+                        if not isinstance(children,list):raise ValueError()
+                        ids=[p.notion_id(x) for x in children]
+                        if len(set(ids))!=len(ids) or type(row.get('has_children')) is not bool or row['has_children']!=bool(ids):raise ValueError()
+                    except Exception:stage='row_shape'
+                if stage=='complete':stage=payload_stage(row.get('type'),row.get('payload'))
+            if stage!='complete':
+                if first is None:first=stage
+                increment(out['failure_stage_counts'],stage);increment(out['failure_type_counts'],kind)
+        try:p.snapshot_tree(snapshot);out['stage']='complete';return out
+        except Exception:pass
+        if first is not None:out['stage']=first;return out
+        # Individual payloads are valid: distinguish table shape from graph
+        # traversal errors without exposing any native identifiers.
+        for row in rows:
+            if row['type']=='table':
+                children=[nodes.get(x) for x in row['children_ids']]
+                if not children or any(x is None or x.get('type')!='table_row' or len(x['payload']['cells'])!=row['payload']['table_width'] for x in children):
+                    out['stage']='table_shape';out['failure_stage_counts']={'table_shape':1};out['failure_type_counts']={'table':1};return out
+        out['stage']='children';out['failure_stage_counts']={'children':1};return out
+    except Exception:
+        out['stage']='snapshot_tree_other';return out
+
+def blank_diagnostic(snapshot):
+    return {'contract':DIAGNOSTIC_CONTRACT,'schema':snapshot_diagnostic(snapshot),
+        'expected_roots':0,'expected_root_type_counts':{},'alignment':'not_available',
+        'windows_considered':0,'best_ties':0,'best_exact_roots':0,'best_mismatched_roots':0,
+        'best_difference_min_counts':{},'best_difference_max_counts':{},'ownership_adopted':False}
+
+def diagnose_from_git(proof,expected_proof_sha,source_data,snapshot,data_source_id):
+    """Fixed aggregates only. Existing proof and exact match gates are unchanged.
+
+    Best alignment compares WHOLE source roots, including full child subtrees.
+    Ties report category min/max across equally best windows, never a chosen ID,
+    position, fragment, token, property, unknown key, text or URL.
+    """
+    out=blank_diagnostic(snapshot)
+    result=propose_from_git(proof,expected_proof_sha,source_data,snapshot,data_source_id)
+    if result.get('decision')!='candidate' and result.get('reason')!='no_unique_range':return out
+    try:
+        expected=reconstructed_roots(source_data,proof['note_id'],proof['source']['path'])
+        out['expected_roots']=len(expected)
+        for row in expected:increment(out['expected_root_type_counts'],diagnostic_kind(row['type']))
+        nodes,roots,_=raw_tree(snapshot,proof['note_id'],p.notion_id(data_source_id),p.notion_id(proof['page_id']))
+        if len(roots)<len(expected):out['alignment']='insufficient_roots';return out
+        if len(roots)>256 or len(expected)>256:out['alignment']='budget';return out
+        cache={};comparisons=[0]
+        def actual(bid):
+            if bid not in cache:
+                node=nodes[bid];stage=payload_stage(node['type'],node['payload'])
+                payload=p.normalize_payload(node['type'],node['payload']) if stage=='complete' else node['payload']
+                cache[bid]={'type':node['type'],'payload':payload,'children':[actual(x) for x in node['children_ids']],'stage':stage}
+            return cache[bid]
+        def rich(items):
+            normalized=p.normalize_rich(items)
+            return canonical_semantics([{'type':'paragraph','payload':{'rich_text':normalized},'children':[]}])[0]['payload']['rich_text']
+        def profile(items,key):
+            parts=[]
+            for item in items:
+                value=item['annotations'] if key=='annotations' else item['text']['link'];length=len(item['text']['content'])
+                if parts and same(parts[-1][0],value):parts[-1][1]+=length
+                else:parts.append([value,length])
+            return parts
+        def text_difference(left,right):
+            try:left=rich(left);right=rich(right)
+            except Exception:return {'payload_schema'}
+            diff=set()
+            if ''.join(x['text']['content'] for x in left)!=''.join(x['text']['content'] for x in right):diff.add('text')
+            else:
+                if not same(profile(left,'annotations'),profile(right,'annotations')):diff.add('annotations')
+                if not same(profile(left,'link'),profile(right,'link')):diff.add('link')
+            return diff
+        def difference(left,right):
+            comparisons[0]+=1
+            if comparisons[0]>20000:raise OverflowError()
+            diff=set();lk=left['type'];rk=right['type'];lp=left['payload'];rp=right['payload']
+            if lk!=rk:diff.add('heading' if lk.startswith('heading_') and rk.startswith('heading_') else 'block_type')
+            if right['stage']!='complete':
+                diff.add('payload_schema')
+                category={'annotations':'annotations','link':'link','heading_toggle':'heading','table_shape':'table','rich_text_shape':'text','rich_text_kind':'text'}.get(right['stage'])
+                if category:diff.add(category)
+            if not isinstance(rp,dict):rp={}
+            for field in ('rich_text','caption'):
+                if field in lp or field in rp:diff|=text_difference(lp.get(field,[]),rp.get(field,[]))
+            if lp.get('color','default')!=rp.get('color','default'):diff.add('annotations')
+            if lk.startswith('heading_') and rp.get('is_toggleable',False) is not False:diff.add('heading')
+            if lk=='table' or rk=='table':
+                if any(lp.get(k)!=rp.get(k) for k in ('table_width','has_column_header','has_row_header')):diff.add('table')
+            if 'cells' in lp or 'cells' in rp:
+                lc=lp.get('cells');rc=rp.get('cells')
+                if not isinstance(lc,list) or not isinstance(rc,list) or len(lc)!=len(rc):diff.add('table')
+                if isinstance(lc,list) and isinstance(rc,list):
+                    for a,b in zip(lc,rc):diff|=text_difference(a,b)
+            if any(lp.get(k)!=rp.get(k) for k in ('checked','language','icon')):diff.add('other_payload')
+            if len(left['children'])!=len(right['children']):diff.add('children')
+            for a,b in zip(left['children'],right['children']):diff|=difference(a,b)
+            return diff
+        best=None;ties=[]
+        for start in range(len(roots)-len(expected)+1):
+            counts={};mismatches=0
+            for wanted,bid in zip(expected,roots[start:start+len(expected)]):
+                diff=difference(wanted,actual(bid))
+                if diff:mismatches+=1
+                for category in diff:increment(counts,category)
+            score=(mismatches,sum(counts.values()));out['windows_considered']+=1
+            if best is None or score<best:best=score;ties=[counts]
+            elif score==best:ties.append(counts)
+        out.update(alignment='unique_best' if len(ties)==1 else 'tied_best',best_ties=len(ties),best_exact_roots=len(expected)-best[0],best_mismatched_roots=best[0],
+            best_difference_min_counts={k:min(x.get(k,0) for x in ties) for k in sorted(DIFFERENCES) if any(x.get(k,0) for x in ties)},
+            best_difference_max_counts={k:max(x.get(k,0) for x in ties) for k in sorted(DIFFERENCES) if any(x.get(k,0) for x in ties)})
+    except OverflowError:out['alignment']='budget'
+    except Exception:out['alignment']='not_available'
+    return out
+
+def valid_diagnostic(value):
+    """Reject arbitrary keys/strings/values before anything reaches public logs."""
+    try:
+        if not isinstance(value,dict) or set(value)!=set(blank_diagnostic(None)) or value['contract']!=DIAGNOSTIC_CONTRACT or value['ownership_adopted'] is not False or value['alignment'] not in ALIGNMENTS:return False
+        def count(x):return type(x) is int and 0<=x<=p.MAX_BLOCKS
+        def counts(x,keys):return isinstance(x,dict) and not set(x)-keys and all(count(n) for n in x.values())
+        for key in ('expected_roots','windows_considered','best_ties','best_exact_roots','best_mismatched_roots'):
+            if not count(value[key]):return False
+        if not counts(value['expected_root_type_counts'],DIAGNOSTIC_TYPES) or sum(value['expected_root_type_counts'].values())!=value['expected_roots']:return False
+        for key in ('best_difference_min_counts','best_difference_max_counts'):
+            if not counts(value[key],DIFFERENCES):return False
+        if set(value['best_difference_min_counts'])!=set(value['best_difference_max_counts']) or any(value['best_difference_min_counts'][k]>value['best_difference_max_counts'][k] for k in value['best_difference_min_counts']):return False
+        schema=value['schema']
+        if not isinstance(schema,dict) or set(schema)!=set(snapshot_diagnostic(None)) or schema['stage'] not in DIAGNOSTIC_STAGES:return False
+        if not count(schema['native_blocks']) or not count(schema['native_roots']) or schema['native_roots']>schema['native_blocks']:return False
+        for key in ('root_type_counts','all_type_counts','failure_type_counts'):
+            if not counts(schema[key],DIAGNOSTIC_TYPES):return False
+        if sum(schema['root_type_counts'].values())!=schema['native_roots'] or sum(schema['all_type_counts'].values())!=schema['native_blocks'] or not counts(schema['failure_stage_counts'],DIAGNOSTIC_STAGES):return False
+        if value['alignment'] in ('unique_best','tied_best'):
+            if value['best_exact_roots']+value['best_mismatched_roots']!=value['expected_roots'] or not 1<=value['best_ties']<=value['windows_considered']:return False
+        return True
+    except Exception:return False
