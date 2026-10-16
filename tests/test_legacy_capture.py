@@ -351,3 +351,51 @@ class ReportAndPageReceiptTests(unittest.TestCase):
         census['page_receipts']=[receipt];validate_legacy_census(census)
         census['page_receipts'][0]['ids']=['1']
         with self.assertRaises(ParityFailure):validate_legacy_census(census)
+
+class PartialCloneCaptureTests(unittest.TestCase):
+    def test_object_only_clone_commit_and_cas_without_old_blob_fetch_or_identity(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);src=root/'source';src.mkdir();bare=root/'remote.git'
+            def git(where,*args,**kwargs):
+                return subprocess.check_output(['git','-C',str(where),*args],stderr=subprocess.DEVNULL,**kwargs)
+            git(src,'init','-q');git(src,'config','user.name','Fixture');git(src,'config','user.email','fixture@example.invalid')
+            (src/'Raw/03 Get').mkdir(parents=True);(src/'Raw/03 Get/old.md').write_text('Old note remains byte exact')
+            (src/'non-Get.txt').write_text('Non-Get stays unchanged');git(src,'add','.');git(src,'commit','-qm','base')
+            base=git(src,'rev-parse','HEAD').decode().strip();old_blob=git(src,'rev-parse','HEAD:Raw/03 Get/old.md').decode().strip()
+            subprocess.check_call(['git','clone','-q','--bare',str(src),str(bare)],stderr=subprocess.DEVNULL)
+            git(bare,'config','uploadpack.allowFilter','true');git(bare,'config','uploadpack.allowAnySHA1InWant','true')
+            original_refs=git(bare,'show-ref');url=bare.as_uri()
+            with patch.object(c.retention,'REMOTE_URL',url):
+                local=c.retention.readback_checkout(root/'partial',base,'synthetic-fixture-token')
+                local.env.pop('EMAIL',None)
+                for key in ('GIT_AUTHOR_NAME','GIT_AUTHOR_EMAIL','GIT_COMMITTER_NAME','GIT_COMMITTER_EMAIL'):
+                    local.env.pop(key,None)
+                self.assertNotEqual(local.command('config','user.name').returncode,0)
+                self.assertNotEqual(local.command('cat-file','-e',old_blob).returncode,0)
+                # Actual former production failure, not a mocked Git command.
+                local.run('read-tree',base)
+                b=local.run('hash-object','-w','--stdin',data=b'{}').decode().strip()
+                local.run('update-index','--add','--cacheinfo','100644,'+b+','+c.CENSUS)
+                self.assertNotEqual(local.command('write-tree').returncode,0)
+                index_before=(local.vault/'.git/index').read_bytes()
+                first=c.make_commit(local,base,{c.CENSUS:b'{}',c.LEDGER:b'{"batch":1}'})
+                self.assertEqual((local.vault/'.git/index').read_bytes(),index_before)
+                remote=c.Remote(local,'synthetic-fixture-token');remote.cas(None,first)
+                self.assertEqual(git(bare,'rev-parse',c.REF).decode().strip(),first)
+                second=c.make_commit(local,first,{c.LEDGER:b'{"batch":2}'})
+                remote.cas(first,second)
+                self.assertEqual(git(bare,'show',second+':'+c.LEDGER),b'{"batch":2}')
+                self.assertEqual(local.tree(base),{p:v for p,v in local.tree(second).items() if not p.startswith(c.PREFIX)})
+                self.assertNotEqual(local.command('cat-file','-e',old_blob).returncode,0)
+                self.assertEqual(git(bare,'show-ref').replace((second+' '+c.REF+'\n').encode(),b''),original_refs)
+                self.assertEqual(local.run('rev-parse','HEAD').decode().strip(),base)
+    def test_git_preparation_error_reports_fixed_stage_without_private_stderr(self):
+        fixture=GitCaptureTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        original=fixture.local.run
+        def failed(*args,**kwargs):
+            if args[0]=='write-tree':raise c.retention.RetentionFailure('git_operation_failed')
+            return original(*args,**kwargs)
+        with patch.object(fixture.local,'run',side_effect=failed):
+            with self.assertRaisesRegex(ParityFailure,'^capture_git_tree_write$'):
+                c.make_commit(fixture.local,fixture.head,fixture.files)
+        self.assertEqual(c.public_report({'error':'capture_git_tree_write'})['error'],'capture_git_tree_write')

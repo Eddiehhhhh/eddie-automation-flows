@@ -35,6 +35,7 @@ PROTECTED={retention.BACKUP_REF:LEGACY_SOURCE,retention.PREVIEW_REF:LEGACY_OLD_P
 ERRORS={'capture_target','capture_refs_changed','capture_scope_changed','capture_census_changed','capture_invalid_census','capture_receipt_changed','capture_invalid_receipt','capture_invalid_detail','capture_detail_identity','capture_mirror_changed','capture_mirror_identity','capture_source_changed','capture_commit_cap','capture_raw_budget','capture_total_budget','capture_batch_budget','capture_invalid_ledger','capture_uncertain_write','capture_ref_conflict','capture_readback','capture_invalid_json','capture_response_budget','capture_api_error','capture_unselected_identity','capture_source_missing','capture_census_budget','capture_cohort','capture_mirror','capture_source_identity','incomplete_list','capture_failed','capture_source_failed','capture_ledger_budget','capture_existing_ref','capture_unsupported'}
 
 ERRORS |= set(retention.ERROR_CODES)
+ERRORS |= {'capture_git_tree_read','capture_git_index','capture_git_blob','capture_git_tree_write','capture_git_commit'}
 
 def fail(code):raise ParityFailure(code if code in ERRORS else 'capture_failed')
 def digest(value):return hashlib.sha256(value).hexdigest()
@@ -214,20 +215,34 @@ def validate_ledger(census,ledger,records):
     return sorted(remaining)
 
 def make_commit(local,parent,files):
-    before=local.tree(parent)
+    def checked(stage,operation,*args,**kwargs):
+        try:return operation(*args,**kwargs)
+        except retention.RetentionFailure:fail(stage)
+    before=checked('capture_git_tree_read',local.tree,parent)
     if not files or any(not p.startswith(PREFIX) for p in files):fail('capture_scope_changed')
-    local.run('read-tree',parent)
-    for path,data in files.items():
-        retention.safe_path(path)
-        blob=local.run('hash-object','-w','--stdin',data=data).decode().strip()
-        if blob!=retention.oid(data):fail('capture_readback')
-        local.run('update-index','--add','--cacheinfo','100644,'+blob+','+path)
-    tree=local.run('write-tree').decode().strip()
-    env=dict(local.env);env.update(GIT_AUTHOR_NAME='Get reconciliation',GIT_AUTHOR_EMAIL='get-reconciliation@users.noreply.github.com',GIT_COMMITTER_NAME='Get reconciliation',GIT_COMMITTER_EMAIL='get-reconciliation@users.noreply.github.com')
-    commit=local.run('commit-tree',tree,'-p',parent,'-m','Retain bounded private Get reconciliation evidence',env=env).decode().strip()
-    after=local.tree(commit)
+    with tempfile.TemporaryDirectory(prefix='get-capture-index-') as temporary:
+        env=dict(local.env,GIT_INDEX_FILE=str(Path(temporary)/'index'))
+        checked('capture_git_index',local.run,'read-tree',parent,env=env)
+        for path,data in files.items():
+            retention.safe_path(path)
+            blob=checked('capture_git_blob',local.run,'hash-object','-w','--stdin',data=data,env=env).decode().strip()
+            if blob!=retention.oid(data):fail('capture_readback')
+            checked('capture_git_index',local.run,'update-index','--add','--cacheinfo','100644,'+blob+','+path,env=env)
+        # Existing blob OIDs are retained from the verified parent tree. They
+        # intentionally are absent from this object-only clone; do not lazily
+        # fetch them merely to write tree metadata. Every new blob is present
+        # and read back below, and the complete resulting tree is checked.
+        tree=checked('capture_git_tree_write',local.run,'write-tree','--missing-ok',env=env).decode().strip()
+        after=checked('capture_git_tree_read',local.tree,tree)
+        wanted=dict(before)
+        for path,data in files.items():
+            wanted[path]=('100644','blob',retention.oid(data))
+            if checked('capture_git_blob',local.blob,retention.oid(data))!=data:fail('capture_readback')
+        if after!=wanted:fail('capture_scope_changed')
+        env.update(GIT_AUTHOR_NAME='Get reconciliation',GIT_AUTHOR_EMAIL='get-reconciliation@users.noreply.github.com',GIT_COMMITTER_NAME='Get reconciliation',GIT_COMMITTER_EMAIL='get-reconciliation@users.noreply.github.com')
+        commit=checked('capture_git_commit',local.run,'commit-tree',tree,'-p',parent,'-m','Retain bounded private Get reconciliation evidence',env=env).decode().strip()
     changed={p for p in set(before)|set(after) if before.get(p)!=after.get(p)}
-    if changed!=set(files) or any(after[p] != ('100644','blob',retention.oid(data)) for p,data in files.items()):fail('capture_scope_changed')
+    if changed!=set(files):fail('capture_scope_changed')
     return commit
 
 def publish_batch(local,remote,census,expected,files,token,readback):
