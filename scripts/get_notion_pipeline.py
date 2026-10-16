@@ -8,9 +8,10 @@ from copy import deepcopy
 from collections import Counter
 import get_notion_executor as e
 import get_notion_live_transport as t
+from get_notion_preserved_image import IMAGE_FAILURES
 
 CONTRACT='get-notion-bounded-pipeline-1'
-REASONS=frozenset(e.REASONS)|frozenset(('policy_invalid','policy_changed','scope_changed','permission_denied','read_transport_failed','read_api_failed','wrong_schema','incomplete_pagination','invalid_cohort','response_budget','malformed_response'))
+REASONS=frozenset(e.REASONS)|frozenset(('policy_invalid','policy_changed','scope_changed','permission_denied','read_transport_failed','read_api_failed','wrong_schema','incomplete_pagination','invalid_cohort','response_budget','malformed_response','asset_permission_denied'))
 
 
 def policy(value,expected):
@@ -57,7 +58,7 @@ def wire_allowlist(plan,api):
     return frozenset(keys)
 
 
-def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply=False,writers_guard,initial_scope=None,retry_conflicts=False,approved_plan_sha256=None,create_recovery=None,approved_recovery_sha=None,empty_plan_settle=None):
+def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply=False,writers_guard,initial_scope=None,retry_conflicts=False,approved_plan_sha256=None,create_recovery=None,approved_recovery_sha=None,empty_plan_settle=None,snapshot_adapter=None):
     stage='policy';attempted=False; prior_attempt=None
     try:
         if type(apply) is not bool or type(retry_conflicts) is not bool:e.fail('approval_missing')
@@ -84,15 +85,16 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             publication.check(plan['publication']);ids=[r['note_id'] for r in plan['records']]
         else:ids=pending(publication,state,engine_policy,initial_scope,retry_conflicts)
         stage='native_read';snapshots={}
-        api=t.API(request,approved['data_source_id'],ids,data_source_pin=approved['data_source_pin'],database_pin=approved['database_pin']) if ids else None
+        api=t.API(request,approved['data_source_id'],ids,data_source_pin=approved['data_source_pin'],database_pin=approved['database_pin'],snapshot_adapter=snapshot_adapter) if ids else None
         for ident in ids:snapshots[ident]=api.read_note(ident)
         if journal is None:
-            stage='prepare';plan=e.prepare(publication,state,sha,snapshots,engine_policy,initial_scope=initial_scope,expected_scope_sha=approved['initial_scope_sha256'],retry_conflicts=retry_conflicts)
+            stage='prepare';plan=e.prepare(publication,state,sha,snapshots,engine_policy,initial_scope=initial_scope,expected_scope_sha=approved['initial_scope_sha256'],retry_conflicts=retry_conflicts,preserved_images=getattr(snapshot_adapter,'bindings',{}))
         if apply and approved_plan_sha256 is not None and e.digest(plan)!=approved_plan_sha256:e.fail('approval_missing')
         stage='final_guard';publication.check(plan['publication'])
         if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
         counts=Counter(r['action'] for r in plan['records']);reasons=Counter(r['reason'] for r in plan['records'] if r['action']=='blocked')
-        report={'contract':CONTRACT,'status':'prepared','source_mode':plan['source_mode'],'plan_sha256':e.digest(plan),'journal_sha256':sha,'selected':len(plan['records']),'deferred':len(plan['deferred_ids']),'retained_conflicts':len(plan['skipped_conflicts']),'actions':dict(counts),'reason_counts':dict(reasons),'native_notes_read':len(ids),'get_requests':0,'asset_downloads':0,'external_write_attempts':None if prior_attempt else 0,'write_state':'unknown' if prior_attempt else 'not_attempted','prior_journal_effects':'unresolved' if prior_attempt else 'none','complete_library_claimed':False}
+        report={'contract':CONTRACT,'status':'prepared','source_mode':plan['source_mode'],'plan_sha256':e.digest(plan),'journal_sha256':sha,'selected':len(plan['records']),'deferred':len(plan['deferred_ids']),'retained_conflicts':len(plan['skipped_conflicts']),'actions':dict(counts),'reason_counts':dict(reasons),'native_notes_read':len(ids),'get_requests':0,'asset_downloads':getattr(snapshot_adapter,'downloads',0),'external_write_attempts':None if prior_attempt else 0,'write_state':'unknown' if prior_attempt else 'not_attempted','prior_journal_effects':'unresolved' if prior_attempt else 'none','complete_library_claimed':False}
+        if snapshot_adapter is not None:report['image_binding']=snapshot_adapter.report()
         if not apply:return public_report(report)
         stage='execute';attempted=True
         if api is not None:
@@ -108,11 +110,12 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             if not callable(empty_plan_settle):e.fail('journal_failed')
             settled=empty_plan_settle(deepcopy(plan),e.digest(plan))
             e.p.hex_hash(settled,64)
-        report.update(status='executed',execution=safe,external_write_attempts=safe.get('external_write_attempts',0),write_state=safe.get('write_state','unknown'))
+        report.update(status='executed',asset_downloads=getattr(snapshot_adapter,'downloads',0),execution=safe,external_write_attempts=safe.get('external_write_attempts',0),write_state=safe.get('write_state','unknown'))
+        if snapshot_adapter is not None:report['image_binding']=snapshot_adapter.report()
         return public_report(report)
     except Exception as exc:
         reason=str(exc);reason=reason if reason in REASONS else 'other'
-        return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,'external_write_attempts':None if attempted or prior_attempt is not False else 0,'write_state':'unknown' if attempted or prior_attempt is not False else 'not_attempted','complete_library_claimed':False}
+        return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,'asset_downloads':getattr(snapshot_adapter,'downloads',0),'external_write_attempts':None if attempted or prior_attempt is not False else 0,'write_state':'unknown' if attempted or prior_attempt is not False else 'not_attempted','complete_library_claimed':False}
 
 
 def public_report(value):
@@ -122,13 +125,17 @@ def public_report(value):
         for key in ('plan_sha256','journal_sha256'):e.p.hex_hash(value[key],64)
         for key,cap in (('selected',50),('deferred',2500),('retained_conflicts',2500),('native_notes_read',50)):
             if type(value[key]) is not int or not 0<=value[key]<=cap:return unknown
-        if value['get_requests']!=0 or type(value['get_requests']) is not int or value['asset_downloads']!=0 or type(value['asset_downloads']) is not int or value['complete_library_claimed'] is not False:return unknown
+        if value['get_requests']!=0 or type(value['get_requests']) is not int or type(value['asset_downloads']) is not int or not 0<=value['asset_downloads']<=200 or value['complete_library_claimed'] is not False:return unknown
         actions=value['actions'];reasons=value['reason_counts']
         if not isinstance(actions,dict) or set(actions)-{'create','update','noop','blocked'} or any(type(n) is not int or not 0<=n<=50 for n in actions.values()) or sum(actions.values())!=value['selected']:return unknown
         if not isinstance(reasons,dict) or set(reasons)-e.REASONS or any(type(n) is not int or not 0<=n<=50 for n in reasons.values()) or sum(reasons.values())!=actions.get('blocked',0):return unknown
         if value['source_mode'] not in ('initial_review','changed_content'):return unknown
         keep=('contract','status','source_mode','plan_sha256','journal_sha256','selected','deferred','retained_conflicts','actions','reason_counts','native_notes_read','get_requests','asset_downloads','external_write_attempts','write_state','prior_journal_effects','complete_library_claimed')
         clean={k:deepcopy(value[k]) for k in keep}
+        if 'image_binding' in value:
+            image=value['image_binding']
+            if not isinstance(image,dict) or set(image)!={'verified','failures','host'} or image['host'] not in ('not_observed','exact_known_s3','exact_prod_files_secure','other') or type(image['verified']) is not int or not 0<=image['verified']<=1 or not isinstance(image['failures'],dict) or set(image['failures'])-IMAGE_FAILURES or any(type(n) is not int or not 0<n<=1 for n in image['failures'].values()) or image['verified']+sum(image['failures'].values())>1:return unknown
+            clean['image_binding']=deepcopy(image)
         if value['prior_journal_effects'] not in ('none','unresolved'):return unknown
         if value['status']=='prepared':
             if value['prior_journal_effects']=='none':

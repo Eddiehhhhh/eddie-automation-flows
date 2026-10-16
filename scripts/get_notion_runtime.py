@@ -17,6 +17,7 @@ import get_notion_outbox as outbox
 import get_notion_pipeline as pipeline
 import get_notion_live_transport as transport
 import get_notion_readonly as ro
+import get_notion_preserved_image as preserved_image
 import get_notion_writer_guard as old_writers
 import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
@@ -30,7 +31,7 @@ PRODUCTION_ACTIVATED=False
 CONTRACT='get-notion-standing-runtime-1'
 MAX_RUN_RECORDS=10
 STAGES={'input','policy','writers','clone','journal','source','initial','queue','execute','final'}
-ERRORS={'notion_activation_pending','notion_context','notion_scope','notion_state_anchor','notion_source_changed','notion_initial_source','notion_schema','notion_marker','notion_failed','notion_journal_busy','writer_guard_permission','writer_guard_quota','writer_gate_unknown','journal_provenance_missing'}
+ERRORS={'notion_activation_pending','notion_context','notion_scope','notion_state_anchor','notion_source_changed','notion_initial_source','notion_schema','notion_marker','notion_failed','notion_journal_busy','writer_guard_permission','writer_guard_quota','writer_gate_unknown','journal_provenance_missing','asset_permission_denied','permission_denied'}
 
 
 def fail(code):raise ValueError(code) from None
@@ -49,6 +50,8 @@ def scope_for(public_policy):
         'allow_archive_owned_roots':True,'property_updates':False,'uploads':False,
         'data_source_pin':transport.native.DATA_SOURCE_PIN,'database_pin':transport.native.DATABASE_PIN,
         'initial_proof_sha256':ro.HISTORICAL_TEMPLATE['proof_sha256'],
+        'initial_image_proof_sha256':preserved_image.TEMPLATE['proof_sha256'],
+        'preserve_existing_image_only':True,
         'initial_two_first':True,'unknown_existing_pages':'isolate','plan_authorization':'standing_bounded'}
 
 
@@ -79,8 +82,16 @@ def initial_inputs(local,remote,parent,request):
     batch,mapping,blobs=ro.read_committed_sources(remote,parent,snapshots)
     cohort={'commit':parent,'records':{ident:{'path':row['path'],'blob':row['md_blob'],'sha256':e.digest(blobs[row['md_blob']])} for ident,row in mapping.items()}}
     for oid,data in blobs.items():m.import_blob(local,data,oid)
+    publication=e.GitPublication(local.vault,parent,parent,parent,initial_cohort=cohort,expected_initial_sha=e.digest(cohort))
+    publication.image_adapter=preserved_image.Adapter(publication,request)
     initial_scope={};candidates=0
     for ident,row in mapping.items():
+        if e.p.digest(ident)==preserved_image.TEMPLATE['note_id_sha256']:
+            snapshots[ident]=publication.image_adapter(snapshots[ident],ident)
+            result=preserved_image.initial_proposal(publication,ident,snapshots[ident],row['data_source_id'],remote)
+            if result.get('executor_scope') is not None:
+                initial_scope[ident]=result['executor_scope'];candidates+=1
+            continue
         if e.p.digest(ident)!=ro.HISTORICAL_TEMPLATE['note_id_sha256']:continue
         proof=ro.historical.reconstruct_proof(ro.HISTORICAL_TEMPLATE,ro.HISTORICAL_TEMPLATE_SHA,note_id=ident,page_id=row['page_id'],source_path=row['path'])
         old=remote.check_source_budget(proof['source']['commit']).get(row['path'])
@@ -88,7 +99,6 @@ def initial_inputs(local,remote,parent,request):
         result=ro.historical.propose_from_git(proof,ro.HISTORICAL_TEMPLATE['proof_sha256'],blobs[row['md_blob']],snapshots[ident],row['data_source_id'])
         if result.get('decision')=='candidate' and result.get('executor_scope') is not None:
             initial_scope[ident]=result['executor_scope'];candidates+=1
-    publication=e.GitPublication(local.vault,parent,parent,parent,initial_cohort=cohort,expected_initial_sha=e.digest(cohort))
     return publication,initial_scope,next(iter(mapping.values()))['data_source_id'],{'initial_notes':2,'initial_range_candidates':candidates}
 
 
@@ -103,6 +113,10 @@ def initial_resume(local,remote,root,plan,token,policy_hash):
     scope={};ds=plan['policy']['data_source_id']
     for row in plan['records']:
         ident=row['note_id']
+        if e.p.digest(ident)==preserved_image.TEMPLATE['note_id_sha256'] and 'before' in row:
+            result=preserved_image.initial_proposal(publication,ident,row['before'],ds,remote)
+            if result.get('executor_scope') is not None:scope[ident]=result['executor_scope']
+            continue
         if e.p.digest(ident)!=ro.HISTORICAL_TEMPLATE['note_id_sha256'] or 'before' not in row:continue
         snapshot=row['before'];src=desc['records'][ident]
         proof=ro.historical.reconstruct_proof(ro.HISTORICAL_TEMPLATE,ro.HISTORICAL_TEMPLATE_SHA,note_id=ident,page_id=snapshot['page_id'],source_path=src['path'])
@@ -156,10 +170,11 @@ def dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,write
         receipts=state['engine_state']['receipts']
         if receipts:ds=next(iter(receipts.values()))['data_source_id']
         else:ds=next(iter(transport.native.collect(request)['snapshots'].values()))['parent_data_source']
+    image_adapter=getattr(pub,'image_adapter',None) or preserved_image.Adapter(pub,request)
     policy=engine_policy(request,ds,scope,apply)
     adapter=outbox.EngineStore(store)
     def settle(plan,approved):return outbox.settle_empty_plan(store,sha,plan,approved)
-    result=pipeline.run(pub,adapter,request,policy,e.digest(policy),apply=apply,writers_guard=writers_guard,initial_scope=scope,empty_plan_settle=settle,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha)
+    result=pipeline.run(pub,adapter,request,policy,e.digest(policy),apply=apply,writers_guard=writers_guard,initial_scope=scope,empty_plan_settle=settle,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,snapshot_adapter=image_adapter)
     final,final_sha=store.read()
     return {**result,**counts,'queued':len(final['pending_by_id']),'outer_journal_sha256':final_sha,'source_chain_complete':final['last_enqueued_publication']==final['observed_publication_tip']}
 
@@ -175,7 +190,7 @@ def safe_result(value):
         known_no_attempt=trusted_shape and value.get('write_state')=='not_attempted' and type(value.get('external_write_attempts')) is int and value['external_write_attempts']==0
         return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,
             'write_state':'not_attempted' if known_no_attempt else 'unknown',
-            'external_write_attempts':0 if known_no_attempt else None,'complete_library_claimed':False}
+            'external_write_attempts':0 if known_no_attempt else None,'asset_downloads':value.get('asset_downloads') if type(value.get('asset_downloads')) is int and 0<=value['asset_downloads']<=200 else None,'complete_library_claimed':False}
     base=pipeline.public_report(value)
     if value.get('status') in ('queue_empty','queue_partial'):
         try:
@@ -184,11 +199,12 @@ def safe_result(value):
             base={k:value[k] for k in ('status','queued','source_chain_complete','journal_sha256','write_state','external_write_attempts')}
         except Exception:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
     if base.get('status')=='failed':return base
-    for key,cap in (('initial_notes',2),('initial_range_candidates',1),('queued',2500)):
+    for key,cap in (('initial_notes',2),('initial_range_candidates',2),('queued',2500)):
         if type(value.get(key)) is not int or not 0<=value[key]<=cap:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
         base[key]=value[key]
     if 'outer_journal_sha256' in value:e.p.hex_hash(value['outer_journal_sha256'],64);base['outer_journal_sha256']=value['outer_journal_sha256']
-    base.update(contract=CONTRACT,complete_library_claimed=False,asset_downloads=0,get_requests=0)
+    base.update(contract=CONTRACT,complete_library_claimed=False,get_requests=0)
+    if 'asset_downloads' not in base:base['asset_downloads']=0
     return base
 
 
@@ -280,7 +296,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         reason=str(exc);reason=reason if reason in ERRORS else 'notion_failed'
         return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,
             'write_state':'unknown' if write_possible or prior_effects is not False else 'not_attempted',
-            'external_write_attempts':None if write_possible or prior_effects is not False else 0,'complete_library_claimed':False}
+            'external_write_attempts':None if write_possible or prior_effects is not False else 0,'asset_downloads':getattr(exc,'asset_downloads',None) if type(getattr(exc,'asset_downloads',None)) is int and 0<=exc.asset_downloads<=200 else None,'complete_library_claimed':False}
 
 
 def main(argv=None):

@@ -73,6 +73,23 @@ def rules_sha256():
     return digest(hashes)
 
 
+def check_preserved_bindings(bindings, *, page=None, managed=(), protected=None, view=None):
+    if bindings=={}:return {}
+    if not isinstance(bindings,dict) or set(bindings)!={'preserved_existing_image'}:fail('state_invalid')
+    row=bindings['preserved_existing_image']
+    keys={'path','git_blob','sha256','preserved_block_id','page_id','projection_sha256'}
+    if not isinstance(row,dict) or set(row)!=keys:fail('state_invalid')
+    p.safe_path(row['path']);p.hex_hash(row['git_blob'],40);p.hex_hash(row['sha256'],64);p.hex_hash(row['projection_sha256'],64)
+    bid=p.notion_id(row['preserved_block_id']);pid=p.notion_id(row['page_id'])
+    if page is not None and pid!=page or bid in managed or protected is not None and bid not in protected:fail('missing_asset')
+    if view is not None:
+        node=view['nodes'].get(bid)
+        if node is None or node['type']!='image' or node['payload'].get('kind')!='notion_existing_image_block' or node['payload']['sha256']!=row['sha256'] or node['parent_id']!=pid:fail('missing_asset')
+        owned_roots=[i for i in view['roots'] if i in managed]
+        if not owned_roots or view['roots'].index(bid)>=min(view['roots'].index(i) for i in owned_roots):fail('missing_asset')
+    return deepcopy(bindings)
+
+
 def check_state(value):
     try:
         if not isinstance(value, dict) or set(value) != {'contract', 'receipts', 'failures', 'journal'} or value['contract'] != CONTRACT or not isinstance(value['receipts'], dict) or not isinstance(value['failures'], dict): fail('state_invalid')
@@ -92,6 +109,7 @@ def check_state(value):
                     block_id=p.notion_id(block['id']);p.hex_hash(block['normalized_hash'],64)
                     if block_id in seen:fail('state_invalid')
                     seen.add(block_id)
+            check_preserved_bindings(row['asset_bindings'],page=row['page_id'],managed=[x['id'] for x in row['managed_blocks']],protected=[x['id'] for x in row['protected_blocks']])
             if not row['managed_blocks'] and 'creation_plan_sha256' not in row:fail('state_invalid')
         for ident,row in value['failures'].items():
             p.note_id(ident)
@@ -254,6 +272,7 @@ def target(snapshot, ident, data_source):
         if p.notion_id(snapshot.get('parent_data_source')) != data_source: fail('wrong_parent')
         nodes, roots, order, semantic = p.snapshot_tree(snapshot)
     except Blocked: raise
+    except p.Blocked as exc: fail('missing_asset' if str(exc)=='missing_asset' else 'target_invalid')
     except Exception: fail('target_invalid')
     if not isinstance(snapshot.get('last_edited_time'),str) or not snapshot['last_edited_time']: fail('target_invalid')
     return {'page_id': page, 'data_source_id': data_source, 'note_id': ident,
@@ -281,14 +300,15 @@ def semantic(nodes, root):
             'children': [semantic(nodes, child) for child in row['children_ids']]}
 
 
-def receipt(snapshot, ident, data_source, managed, publication, source):
+def receipt(snapshot, ident, data_source, managed, publication, source, asset_bindings=None):
     view = target(snapshot, ident, data_source)
     if view is None or set(managed) - set(view['nodes']): fail('readback_mismatch')
+    bindings=check_preserved_bindings(asset_bindings or {},page=view['page_id'],managed=managed,protected=[i for i in view['order'] if i not in managed],view=view)
     return {'note_id': ident, 'page_id': view['page_id'], 'data_source_id': data_source,
         'source_commit': publication['commit'], 'md_blob': source['blob'], 'renderer_version': p.RENDERER,
         'managed_blocks': [{'id': i, 'normalized_hash': p.block_hash(view['nodes'][i])} for i in view['order'] if i in managed],
         'protected_blocks': [{'id': i, 'normalized_hash': p.block_hash(view['nodes'][i])} for i in view['order'] if i not in managed],
-        'properties_baseline': deepcopy(view['properties']), 'asset_bindings': {}, 'readback_verified': True}
+        'properties_baseline': deepcopy(view['properties']), 'asset_bindings': bindings, 'readback_verified': True}
 
 
 def request_blocks(blocks):
@@ -362,7 +382,7 @@ def propose_initial_scope(publication, snapshots, data_source_id, previous_previ
 
 
 def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets=None,
-            initial_scope=None, expected_scope_sha=None, retry_conflicts=False):
+            initial_scope=None, expected_scope_sha=None, retry_conflicts=False, preserved_images=None):
     """Create an exact private approval plan; existing unowned pages block.
 
     An initial_scope is optional and must itself be externally approved and
@@ -377,6 +397,8 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
     if any(type(policy[k]) is not bool for k in ('allow_create','allow_archive','format_accepted')) or policy['id_property'] != '笔记 ID' or not isinstance(policy['title_property'], str) or not policy['title_property']: fail('approval_missing')
     if policy['title_property'] == policy['id_property']: fail('approval_missing')
     policy = {**policy, 'data_source_id':data_source}
+    preserved_images={} if preserved_images is None else preserved_images
+    if not isinstance(preserved_images,dict):fail('missing_asset')
     initial_scope = {} if initial_scope is None else initial_scope
     if not isinstance(initial_scope, dict) or (initial_scope and digest(initial_scope) != expected_scope_sha): fail('approval_missing')
     publication.check(publication.descriptor)
@@ -398,10 +420,12 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         row = {'note_id': ident, 'source': source, 'action': 'blocked', 'reason': None}
         try:
             snapshot = snapshots.get(ident); view = target(snapshot, ident, data_source)
+            if preserved_images.get(ident) is not None and view is None:fail('missing_asset')
             data = publication.read(ident)
             rendered, bindings, warnings = p.render_markdown(data, ident, assets or {}, source['path'],
-                publication.descriptor['content_tree'])
+                publication.descriptor['content_tree'],preserved_image=preserved_images.get(ident))
             row.update(rendered=rendered, before_sha256=digest(view), warnings=warnings, asset_bindings_sha256=digest(bindings), source_assets={v['path']:v['git_blob'] for v in bindings.values()})
+            row['preserved_asset_bindings']=bindings if preserved_images.get(ident) is not None else {}
             publication.check_assets(row['source_assets'])
             if not policy['format_accepted']: fail('format_not_approved')
             if not p.writer_gate(policy): fail('writer_gate_unknown')
@@ -425,8 +449,12 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                     if not isinstance(scope, dict) or set(scope) != {'page_id','snapshot_sha256','managed_block_ids'} or scope['page_id'] != view['page_id'] or scope['snapshot_sha256'] != digest(view): fail('missing_block_ownership')
                     managed = scope['managed_block_ids']
                     if not isinstance(managed, list) or not managed or len(managed) != len(set(managed)) or any(i not in view['nodes'] for i in managed): fail('missing_block_ownership')
-                    prior = receipt(snapshot, ident, data_source, managed, publication.descriptor, source)
+                    prior = receipt(snapshot, ident, data_source, managed, publication.descriptor, source,row['preserved_asset_bindings'])
                 if prior is None: fail('missing_block_ownership')
+                fresh_assets=check_preserved_bindings(row['preserved_asset_bindings'],page=view['page_id'],managed=[x['id'] for x in prior['managed_blocks']],protected=[i for i in view['order'] if i not in {x['id'] for x in prior['managed_blocks']}],view=view)
+                old_assets=prior.get('asset_bindings',{})
+                def identities(values):return {k:{kk:vv for kk,vv in v.items() if kk!='projection_sha256'} for k,v in values.items()}
+                if not same(identities(old_assets),identities(fresh_assets)):fail('missing_asset')
                 if prior.get('managed_blocks') == []:
                     origin = prior.get('creation_plan_sha256')
                     if not isinstance(origin,str) or len(origin)!=64 or any(c not in '0123456789abcdef' for c in origin) or prior.get('readback_verified') is not True or prior.get('page_id')!=view['page_id'] or prior.get('data_source_id')!=data_source or prior.get('note_id')!=ident or prior.get('renderer_version')!=p.RENDERER:
@@ -439,7 +467,7 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                     'content_tree': publication.descriptor['content_tree'], 'content_sha256': {source['path']: source['sha256']}}
                 mapping = {'path': source['path'], 'md_blob': source['blob'], 'page_id': view['page_id'], 'data_source_id': data_source}
                 validation_policy = {**policy, 'allowlist':[ident], 'ownership_sha256':{ident:digest(prior)}}
-                validated = p.record_plan(ident, batch, mapping, {source['blob']:data}, assets or {}, snapshot, prior, validation_policy)
+                validated = p.record_plan(ident, batch, mapping, {source['blob']:data}, assets or {}, snapshot, prior, validation_policy,preserved_image=preserved_images.get(ident))
                 if validated['decision'] == 'blocked': fail(validated['reason_codes'][0])
                 managed = [x['id'] for x in prior['managed_blocks']]
                 roots = [x for x in view['roots'] if x in managed]
@@ -556,7 +584,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 snapshot = read_target(api, ident, data_source)
                 if target_sha(snapshot, ident, data_source) != row['before_sha256']: fail('target_changed')
                 if row['action'] == 'noop':
-                    value['receipts'][ident] = receipt(snapshot, ident, data_source, row['managed'], plan['publication'], row['source'])
+                    value['receipts'][ident] = receipt(snapshot, ident, data_source, row['managed'], plan['publication'], row['source'],row.get('preserved_asset_bindings'))
                     if row.get('creation_plan_sha256'): value['receipts'][ident]['creation_plan_sha256']=row['creation_plan_sha256']
                     value['failures'].pop(ident,None)
                     counts['noop'] += 1; journal['index'] += 1
@@ -602,7 +630,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 except Exception: fail('readback_mismatch')
                 managed = created(snapshot, row, data_source, response)
                 publication.check(plan['publication'])
-                value['receipts'][ident] = receipt(snapshot, ident, data_source, managed, plan['publication'], row['source'])
+                value['receipts'][ident] = receipt(snapshot, ident, data_source, managed, plan['publication'], row['source'],row.get('preserved_asset_bindings'))
                 value['receipts'][ident]['creation_plan_sha256']=approved_plan_sha
                 value['failures'].pop(ident,None)
                 counts['created'] += 1; journal.update(index=journal['index']+1, operation=None)
@@ -655,7 +683,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
             final = read_target(api,ident,data_source)
             if target_sha(final,ident,data_source) != target_sha(operation['working'],ident,data_source): fail('target_changed')
             publication.check(plan['publication'])
-            value['receipts'][ident] = receipt(final,ident,data_source,operation['managed'],plan['publication'],row['source'])
+            value['receipts'][ident] = receipt(final,ident,data_source,operation['managed'],plan['publication'],row['source'],row.get('preserved_asset_bindings'))
             if row.get('creation_plan_sha256'): value['receipts'][ident]['creation_plan_sha256']=row['creation_plan_sha256']
             value['failures'].pop(ident,None)
             counts['updated'] += 1; journal.update(index=journal['index']+1,operation=None)

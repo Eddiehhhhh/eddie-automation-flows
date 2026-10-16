@@ -129,7 +129,8 @@ def wire_blocks(rows):
 
 class API:
     """Executor interface. Approval of writes is separate from read allowlist."""
-    def __init__(self,request,data_source_id,note_ids,*,approved_writes=(),data_source_pin=native.DATA_SOURCE_PIN,database_pin=native.DATABASE_PIN):
+    def __init__(self,request,data_source_id,note_ids,*,approved_writes=(),data_source_pin=native.DATA_SOURCE_PIN,database_pin=native.DATABASE_PIN,snapshot_adapter=None):
+        self.snapshot_adapter=snapshot_adapter
         self.request=request;self.source=native.uuid(data_source_id)
         if native.sha(self.source)!=data_source_pin:fail('wrong_parent')
         if not isinstance(note_ids,list) or not 1<=len(note_ids)<=50 or any(not isinstance(i,str) or not re.fullmatch('[0-9]{19}',i) for i in note_ids) or len(set(note_ids))!=len(note_ids):fail('invalid_cohort')
@@ -170,7 +171,7 @@ class API:
         self.page_roots[page]=[x['id'] for x in result['recursive_blocks'] if x['parent_id']==page]
         self.known_pages.add(page);self.known_blocks.update(x['id'] for x in result['recursive_blocks'])
         result['asset_blockers']=['native_image_binding_required'] if any(x['type']=='image' for x in result['recursive_blocks']) else []
-        return result
+        return self.snapshot_adapter(result,ident) if self.snapshot_adapter is not None else result
     def _write(self,method,path,body):
         key=fingerprint(method,path,body)
         if key not in self.approved or key in self.attempted:fail('write_not_authorized_or_already_attempted')

@@ -214,9 +214,14 @@ def normalize_payload(kind, payload):
     elif kind == 'image':
         # Collector must resolve the persistent upload identity against an
         # independently confirmed asset binding. Signed URLs are never identity.
-        if set(value) != {'file_identity', 'sha256', 'caption'}:
-            stop('missing_asset')
-        value['file_identity'] = notion_id(value['file_identity'])
+        if value.get('kind') == 'notion_existing_image_block':
+            if set(value) != {'kind','block_id','sha256','byte_count','mime','caption'} or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= MAX_ASSET or value['mime'] != 'image/jpeg':
+                stop('missing_asset')
+            value['block_id'] = notion_id(value['block_id'])
+        else:
+            if set(value) != {'file_identity', 'sha256', 'caption'}:
+                stop('missing_asset')
+            value['file_identity'] = notion_id(value['file_identity'])
         hex_hash(value['sha256'], 64)
         value['caption'] = normalize_rich(value['caption'])
     return value
@@ -251,8 +256,25 @@ def source_body(data, ident):
     return body
 
 
-def render_markdown(data, ident, assets, source_path, content_tree):
+def render_markdown(data, ident, assets, source_path, content_tree, *, preserved_image=None):
     """Native preview subset. Unsupported input is blocked, never flattened."""
+    if preserved_image is not None:
+        # A preserved native block is not a writable file identity. Only the
+        # strict source projection may omit its already-present image reference.
+        from get_notion_image_projection import project_image_source
+        if not isinstance(preserved_image,dict) or set(preserved_image)!={'source_binding','source_binding_sha256','native_binding'}:stop('missing_asset')
+        source_binding=preserved_image['source_binding'];native_binding=preserved_image['native_binding']
+        try:projected=project_image_source(data,ident,source_path,content_tree,source_binding,preserved_image['source_binding_sha256'])
+        except ValueError:stop('missing_asset')
+        if not isinstance(native_binding,dict) or native_binding.get('kind')!='notion_existing_image_block' or native_binding.get('readback_verified') is not True:stop('missing_asset')
+        for left,right in (('asset_path','asset_path'),('asset_blob','git_blob'),('asset_sha256','content_sha256'),('asset_bytes','byte_count')):
+            if projected[left]!=native_binding.get(right):stop('missing_asset')
+        rendered,used,warnings=render_markdown(projected['markdown_bytes'],ident,assets,source_path,content_tree)
+        if used:stop('missing_asset')
+        binding={'path':native_binding['asset_path'],'git_blob':native_binding['git_blob'],
+            'sha256':native_binding['content_sha256'],'preserved_block_id':native_binding['block_id'],
+            'page_id':native_binding['page_id'],'projection_sha256':projected['projection_sha256']}
+        return rendered,{'preserved_existing_image':binding},warnings+['existing_image_block_preserved']
     lines = source_body(data, ident).splitlines()
     output = []; warnings = []; used = {}; index = 0
     def bound_image(reference, caption=''):
@@ -388,6 +410,8 @@ def snapshot_tree(snapshot):
         children = [notion_id(x) for x in row['children_ids']]
         if len(children) != len(set(children)) or type(row.get('has_children')) is not bool or row['has_children'] != bool(children): stop('incomplete_target_read')
         nodes[ident] = {'id': ident, 'parent_id': parent, 'type': row.get('type'), 'payload': normalize_payload(row.get('type'), row.get('payload')), 'children_ids': children}
+        if nodes[ident]['type']=='image' and nodes[ident]['payload'].get('kind')=='notion_existing_image_block':
+            if nodes[ident]['payload']['block_id']!=ident or children:stop('missing_asset')
         order.append(ident)
     roots = [i for i in order if nodes[i]['parent_id'] == page]; visited = []
     def walk(ident, depth):
@@ -424,7 +448,7 @@ def writer_gate(policy):
     return isinstance(rows, dict) and set(rows) == wanted and all(isinstance(v, dict) and v.get('disabled') is True and type(v.get('active_runs')) is int and v['active_runs'] == 0 for v in rows.values())
 
 
-def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy):
+def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy, *, preserved_image=None):
     result = {'note_id': ident, 'mode': 'read_only', 'apply_ready': False, 'decision': 'blocked', 'reason_codes': [],
         'target': None, 'source_commit': batch.get('commit'), 'source_blob': None, 'renderer_version': RENDERER,
         'before_hash': None, 'after_hash': None, 'operations': [], 'protected_fields': ['all_page_properties', 'all_unowned_blocks'],
@@ -441,7 +465,7 @@ def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy)
         if not isinstance(data, bytes) or git_blob(data) != source_blob: stop('incomplete_source')
         expected_sha = batch['content_sha256'].get(source_path)
         if not isinstance(expected_sha, str) or digest(data) != expected_sha: stop('incomplete_source')
-        rendered, bindings, warnings = render_markdown(data, ident, assets, source_path, batch['content_tree'])
+        rendered, bindings, warnings = render_markdown(data, ident, assets, source_path, batch['content_tree'], preserved_image=preserved_image)
         result['after_hash'] = digest(rendered); result['render_warnings'] = warnings
         result['asset_bindings_sha256'] = digest(bindings)
         if not isinstance(snapshot, dict): stop('missing_target')

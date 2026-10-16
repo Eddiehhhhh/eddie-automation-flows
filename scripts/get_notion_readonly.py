@@ -59,7 +59,7 @@ def fail(reason, status=None):
 def read_route(method, path):
     return ((method == 'POST' and path == '/search') or
         (method == 'POST' and re.fullmatch(r'/data_sources/[0-9a-f]{32}/query', path)) or
-        (method == 'GET' and re.fullmatch(r'/(pages|data_sources)/[0-9a-f]{32}', path)) or
+        (method == 'GET' and re.fullmatch(r'/(pages|data_sources|blocks)/[0-9a-f]{32}', path)) or
         (method == 'GET' and re.fullmatch(r'/blocks/[0-9a-f]{32}/children\?page_size=100(?:&start_cursor=[A-Za-z0-9%+_.~-]+)?', path)))
 
 
