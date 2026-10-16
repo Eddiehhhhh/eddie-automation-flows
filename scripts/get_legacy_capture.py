@@ -35,6 +35,7 @@ LEDGER_CONTRACT='get-legacy-capture-ledger-1'
 PROTECTED={retention.BACKUP_REF:LEGACY_SOURCE,retention.PREVIEW_REF:LEGACY_OLD_PREVIEW,retention.FIDELITY_PREVIEW_REF:LEGACY_NEW_PREVIEW}
 ERRORS={'capture_target','capture_refs_changed','capture_scope_changed','capture_census_changed','capture_invalid_census','capture_receipt_changed','capture_invalid_receipt','capture_invalid_detail','capture_detail_identity','capture_mirror_changed','capture_mirror_identity','capture_source_changed','capture_commit_cap','capture_raw_budget','capture_total_budget','capture_batch_budget','capture_invalid_ledger','capture_uncertain_write','capture_ref_conflict','capture_readback','capture_invalid_json','capture_response_budget','capture_api_error','capture_unselected_identity','capture_source_missing','capture_census_budget','capture_cohort','capture_mirror','capture_source_identity','incomplete_list','capture_failed','capture_source_failed','capture_ledger_budget','capture_existing_ref','capture_unsupported'}
 
+ERRORS |= {'capture_adapter_import','capture_adapter_prepare','capture_adapter_parent','capture_adapter_readback'}
 ERRORS |= set(retention.ERROR_CODES)
 ERRORS |= {'capture_git_tree_read','capture_git_index','capture_git_blob','capture_git_tree_write','capture_git_commit','capture_invalid_report','capture_readback_ref_stale','capture_readback_ref_changed','capture_readback_ref_transport','capture_readback_commit_transport','capture_readback_parent','capture_readback_tree','capture_readback_blob_size','capture_readback_blob_hash','capture_readback_payload','capture_readback_pack_capabilities','capture_readback_pack','capture_readback_blob_read'}
 
@@ -163,6 +164,18 @@ def public_report(value):
         valid_owned=all(type(value.get(key)) is int and 0<=value[key]<=result.get('captured',-1) for key in OWNERSHIP_KEYS)
         if valid_owned and sum(value[key] for key in OWNERSHIP_KEYS)==result['captured']:
             result.update({key:value[key] for key in OWNERSHIP_KEYS})
+        else:result.update(status='failed',error='capture_invalid_report')
+    adapter_keys={'adapter_candidate_verified','adapter_managed','adapter_conflicts','adapter_pending','adapter_state_bytes','adapter_changed_paths','adapter_parent_commit','adapter_candidate_commit','adapter_candidate_tree','adapter_state_sha256'}
+    if any(key in value for key in adapter_keys):
+        numbers=('adapter_managed','adapter_conflicts','adapter_pending','adapter_state_bytes','adapter_changed_paths')
+        hashes={'adapter_parent_commit':40,'adapter_candidate_commit':40,'adapter_candidate_tree':40,'adapter_state_sha256':64}
+        valid_adapter=(value.get('adapter_candidate_verified') is True and result.get('verification_only') is True and result.get('status')=='retained_capture_verified'
+            and all(type(value.get(key)) is int and 0<=value[key]<=8*MIB for key in numbers)
+            and value['adapter_managed']==result.get('owned_span_proposals_ready')
+            and value['adapter_managed']+value['adapter_conflicts']==result.get('eligible')
+            and value['adapter_pending']==9 and value['adapter_changed_paths']==1 and value['adapter_state_bytes']>0
+            and all(isinstance(value.get(key),str) and re.fullmatch('[a-f0-9]{'+str(width)+'}',value[key]) for key,width in hashes.items()))
+        if valid_adapter:result.update({key:value[key] for key in adapter_keys})
         else:result.update(status='failed',error='capture_invalid_report')
     return result
 
@@ -498,7 +511,7 @@ def verify_scope_history(local,head,census,ledger,remote):
     if len(chain)!=ledger['capture_batches']+int(ledger['finalized']):fail('capture_invalid_ledger')
     # Immutable payloads appear once; ledger versions count each newly retained
     # blob across Git history. Server supplies only ledger bytes here.
-    previous=base_tree;total=0
+    previous=base_tree;total=0;ledger_entries={}
     for position,(commit,_) in enumerate(reversed(chain)):
         current=local.tree(commit)
         changed={p for p in set(previous)|set(current) if previous.get(p)!=current.get(p)}
@@ -506,6 +519,7 @@ def verify_scope_history(local,head,census,ledger,remote):
         if any(p!=LEDGER and p in previous for p in changed):fail('capture_scope_changed')
         if any(v!=current.get(p) for p,v in base_tree.items()):fail('capture_scope_changed')
         metadata=scope_metadata(remote,commit)
+        ledger_row=metadata[LEDGER];ledger_entries[PREFIX+'history-ledgers/'+ledger_row[2]+'.json']=ledger_row
         if (CENSUS in changed)!=(position==0) or sum(p.startswith(PREFIX+'observations/') for p in changed)>50 or sum(metadata[p][3] for p in changed)>MAX_BATCH:fail('capture_invalid_ledger')
         if ledger['finalized'] and position==len(chain)-1 and changed!={LEDGER}:fail('capture_invalid_ledger')
         for path in changed:
@@ -513,6 +527,7 @@ def verify_scope_history(local,head,census,ledger,remote):
             total+=metadata[path][3]
         previous=current
     if total!=ledger['retained_bytes'] or total>MAX_TOTAL:fail('capture_invalid_ledger')
+    return ledger_entries
 
 def retain_verified_ledger_blob(local,data,expected_oid):
     """Keep the already-verified mutable-path base for Git delta packing.
@@ -523,6 +538,51 @@ def retain_verified_ledger_blob(local,data,expected_oid):
     if len(data)>MIB or retention.oid(data)!=expected_oid:fail('capture_invalid_ledger')
     blob=local.run('hash-object','-w','--stdin',data=data).decode().strip()
     if blob!=expected_oid or local.blob(blob)!=data:fail('capture_readback')
+
+def adapter_candidate_report(local,remote,head,census,ledger,records,old,history_metadata,token,root):
+    """Temporary state-only proposal using retained evidence; zero Get/writes."""
+    import get_legacy_adapter as adapter
+    parent,_=guard(remote,census)
+    if remote.ref(REF)!=head:fail('capture_ref_conflict')
+    try:
+        local.run('fetch','--depth=1','--filter=blob:none','--no-tags','--no-recurse-submodules','--no-write-fetch-head','origin',parent)
+        if len(history_metadata)>40 or any(row[3]>MIB for row in history_metadata.values()):fail('capture_adapter_import')
+        historical=fetch_blobs(remote,history_metadata,token,root/'adapter-ledgers')
+        payload={CENSUS:capture_json_bytes(census),LEDGER:capture_json_bytes(ledger),**historical}
+        payload.update({record_path(i):capture_json_bytes(v) for i,v in records.items()})
+        payload.update({retention.GET+'/'+census['eligible'][i]['filePath']:data for i,data in old.items()})
+        head_tree=local.tree(head);source_tree=local.tree(census['source_commit']);total=0;seen=set()
+        for path,data in payload.items():
+            expected=(history_metadata.get(path) or head_tree.get(path) or source_tree.get(path))
+            if expected is None or expected[:2]!=('100644','blob') or retention.oid(data)!=expected[2]:fail('capture_adapter_import')
+            blob=expected[2]
+            if blob in seen:continue
+            seen.add(blob);total+=len(data)
+            if total>MAX_TOTAL:fail('capture_adapter_import')
+            if local.run('hash-object','-w','--stdin',data=data).decode().strip()!=blob:fail('capture_adapter_import')
+    except ParityFailure:raise
+    except Exception:fail('capture_adapter_import')
+    try:
+        reader=adapter.OfflineGit(local.vault)
+        anchor={'capture_commit':head,'census_sha256':digest(payload[CENSUS]),'ledger_sha256':digest(payload[LEDGER])}
+        evidence=adapter.CaptureEvidence(reader,anchor);current=adapter.git_current(reader,parent,evidence);state=adapter.initial_state(evidence,current)
+        refs=local.run('show-ref','--head')
+        plan=adapter.git_candidate(reader,parent,state,{},current,operation='adoption')
+        again=adapter.git_candidate(reader,parent,state,{},current,operation='adoption')
+        if plan!=again or local.run('show-ref','--head')!=refs or len(plan['changes'])!=1 or plan['changes'][0]['path']!=adapter.STATE:fail('capture_adapter_readback')
+        state_bytes=reader.read(plan['candidate_commit'],retention.GET+'/'+adapter.STATE,adapter.MAX_STATE)
+        if state_bytes!=capture_json_bytes(state) or digest(state_bytes)!=plan['state_sha256']:fail('capture_adapter_readback')
+    except ParityFailure as exc:
+        if str(exc) in ERRORS:raise
+        fail('capture_adapter_prepare')
+    except Exception:fail('capture_adapter_prepare')
+    latest,_=guard(remote,census)
+    if latest!=parent:fail('capture_adapter_parent')
+    if remote.ref(REF)!=head:fail('capture_ref_conflict')
+    return {'adapter_candidate_verified':True,'adapter_managed':len(state['legacyById']),'adapter_conflicts':len(state['conflictsById']),
+      'adapter_pending':len(state['pending_ids']),'adapter_state_bytes':len(state_bytes),'adapter_changed_paths':1,
+      'adapter_parent_commit':parent,'adapter_candidate_commit':plan['candidate_commit'],'adapter_candidate_tree':plan['candidate_tree'],'adapter_state_sha256':plan['state_sha256']}
+
 
 def run(token,source,work,*,verify_only=False):
     remote=Remote(None,token);source.capture_metrics={};remote.metrics=source.capture_metrics
@@ -562,7 +622,7 @@ def run(token,source,work,*,verify_only=False):
                 if capture_json_bytes(value)!=data:fail('capture_invalid_receipt')
                 records[ident]=value
             remaining=validate_ledger(census,ledger,records)
-            verify_scope_history(local,head,census,ledger,remote)
+            history_metadata=verify_scope_history(local,head,census,ledger,remote)
             guard(remote,census)
             if remote.ref(REF)!=head:fail('capture_ref_conflict')
             source_meta=remote.check_source_budget(census['source_commit'])
@@ -614,7 +674,9 @@ def run(token,source,work,*,verify_only=False):
             result.update({key:sum(v['observation']['disposition']==key for v in records.values()) for key in ('source_version_changed','source_transcript_unavailable')})
         else:_,result=capture_batches(census,ledger,records,source,old,commit)
         result.update(reconciliation_counts(census,records,old))
-        if verify_only:result.update(ownership_proposal_counts(census,records,old))
+        if verify_only:
+            result.update(ownership_proposal_counts(census,records,old))
+            if ledger['finalized'] and not remaining:result.update(adapter_candidate_report(local,remote,head,census,ledger,records,old,history_metadata,token,root))
         guard(remote,census)
         if remote.ref(REF)!=head:fail('capture_ref_conflict')
         result.update({key:remote.metrics.get(key,0) for key in ('cas_attempts','cas_retries','readback_ref_attempts','readback_stale_ref_observations')})

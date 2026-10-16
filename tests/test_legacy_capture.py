@@ -361,6 +361,8 @@ class RunIntegrationTests(unittest.TestCase):
                 self.assertEqual(verified['status'],'retained_capture_verified');self.assertEqual(verified['fresh_details'],0);self.assertEqual(remote.writes,before)
                 self.assertEqual(c.public_report(verified)['status'],'retained_capture_verified')
                 self.assertEqual(verified['owned_span_structure_conflicts'],1923);self.assertEqual(verified['owned_span_proposals_ready'],0)
+                self.assertTrue(verified['adapter_candidate_verified']);self.assertEqual(verified['adapter_managed'],0);self.assertEqual(verified['adapter_conflicts'],1923);self.assertEqual(verified['adapter_pending'],9);self.assertEqual(verified['adapter_changed_paths'],1)
+                self.assertEqual(verified['adapter_parent_commit'],main);self.assertEqual(source.list_calls,1);self.assertEqual(len(source.detail_calls),1923)
             self.assertEqual(local.tree(main),{p:v for p,v in local.tree(remote.current).items() if not p.startswith(c.PREFIX)})
             self.assertEqual(git('rev-parse','HEAD').decode().strip(),main)
 
@@ -583,3 +585,45 @@ class VerifyOnlyCliTests(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs['verify_only']);self.assertFalse(hasattr(run.call_args.args[1],'detail_raw'))
         clean=json.loads(output.call_args.args[0]);self.assertEqual(clean['status'],'retained_capture_verified');self.assertTrue(clean['verification_only'])
         self.assertEqual(c.public_report(clean),clean)
+
+class AdapterVerificationIntegrationTests(unittest.TestCase):
+    def fixture(self):
+        import test_legacy_adapter
+        fixture=test_legacy_adapter.LegacyAdapterTests(methodName='test_capture_history_and_exact_first_adoption_state_only')
+        fixture.setUp();self.addCleanup(fixture.doCleanups)
+        return fixture
+    def invoke(self,fixture,*,race=False,corrupt=False):
+        local=fixture.reader.local;original=local.run
+        history=c.verify_scope_history(local,fixture.head,fixture.evidence.census,fixture.evidence.ledger,fixture.reader)
+        class Remote:
+            def ref(self,name):return fixture.head
+            def cas(self,*args):raise AssertionError('Remote writes forbidden')
+        def execute(*args,**kwargs):return b'' if args[0]=='fetch' else original(*args,**kwargs)
+        def fetch(remote,metadata,token,path):
+            result={key:local.blob(row[2]) for key,row in metadata.items()}
+            if corrupt:result[next(iter(result))]=b'Corrupt receipt'
+            return result
+        guarded=[(fixture.source,fixture.evidence.census['get_tree']),(('f'*40 if race else fixture.source),fixture.evidence.census['get_tree'])]
+        with patch.object(local,'run',side_effect=execute),patch.object(c,'guard',side_effect=guarded),patch.object(c,'fetch_blobs',side_effect=fetch):
+            return c.adapter_candidate_report(local,Remote(),fixture.head,fixture.evidence.census,fixture.evidence.ledger,fixture.evidence.records,fixture.old,history,'synthetic',fixture.base)
+    def test_actual_temporary_candidate_uses_existing_evidence_only(self):
+        fixture=self.fixture();before=fixture.git('show-ref');result=self.invoke(fixture)
+        self.assertTrue(result['adapter_candidate_verified']);self.assertEqual(result['adapter_managed'],2);self.assertEqual(result['adapter_conflicts'],3);self.assertEqual(result['adapter_pending'],9);self.assertEqual(result['adapter_changed_paths'],1)
+        self.assertEqual(before,fixture.git('show-ref'));self.assertEqual(result['adapter_parent_commit'],fixture.source)
+        self.assertNotIn('Exact source',json.dumps(result));self.assertNotIn('1.md',json.dumps(result))
+    def test_parent_race_and_corrupt_import_fail_closed(self):
+        for options,error in [({'race':True},'capture_adapter_parent'),({'corrupt':True},'capture_adapter_import')]:
+            fixture=self.fixture();before=fixture.git('show-ref')
+            with self.assertRaisesRegex(ParityFailure,error):self.invoke(fixture,**options)
+            self.assertEqual(before,fixture.git('show-ref'))
+    def report(self):
+        return {'status':'retained_capture_verified','verification_only':True,'eligible':5,'captured':5,'remaining':0,'source_missing':0,'capture_batches':1,'raw_bytes':100,'retained_bytes':200,'refs_verified':True,'readback_verified':True,
+          **{key:0 for key in c.OWNERSHIP_KEYS},'owned_span_proposals_ready':2,'owned_span_structure_conflicts':3,
+          'adapter_candidate_verified':True,'adapter_managed':2,'adapter_conflicts':3,'adapter_pending':9,'adapter_state_bytes':1000,'adapter_changed_paths':1,'adapter_parent_commit':'a'*40,'adapter_candidate_commit':'b'*40,'adapter_candidate_tree':'c'*40,'adapter_state_sha256':'d'*64}
+    def test_public_candidate_hashes_are_bounded_and_private_payload_is_removed(self):
+        result=c.public_report({**self.report(),'private_notes':['secret'],'path':'private.md','mirror_adopted':1,'apply_ready':True})
+        self.assertEqual(result['status'],'retained_capture_verified');self.assertTrue(result['adapter_candidate_verified']);self.assertEqual(c.public_report(result),result)
+        self.assertNotIn('private_notes',result);self.assertNotIn('path',result);self.assertEqual(result['mirror_adopted'],0);self.assertFalse(result['apply_ready'])
+    def test_contradictory_candidate_report_never_claims_verified(self):
+        for delta in ({'adapter_managed':3},{'adapter_pending':8},{'adapter_changed_paths':2},{'adapter_state_sha256':{}},{'adapter_state_bytes':9*c.MIB},{'owned_span_proposals_ready':4},{'verification_only':False}):
+            result=c.public_report({**self.report(),**delta});self.assertEqual(result['status'],'failed');self.assertNotIn('adapter_candidate_verified',result)
