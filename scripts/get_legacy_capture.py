@@ -49,6 +49,8 @@ REVIEW_KEYS=('review_whole_body_exact','review_whole_body_different','review_ren
       'review_legacy_content_section_exact','review_legacy_section_ambiguous',
       'review_known_source_text_all_accounted','review_known_source_text_partial','review_known_source_text_empty',
       'review_known_legacy_text_regions_extra','review_asset_reference_review_required','review_frontmatter_bytes_preserved','review_other_legacy_regions_unclassified')
+OWNERSHIP_KEYS=('owned_span_proposals_ready','owned_span_unmapped_source_text','owned_span_unmapped_legacy_text','owned_span_reference_conflicts','owned_span_structure_conflicts','owned_span_source_unresolved','owned_span_other_conflicts')
+
 REVIEW_MARKERS=('## 🧠 摘要\n','## 📝 正文\n','## 🔗 来源\n','## 📎 附件\n')
 REVIEW_DUPLICATE_BODY='（正文与摘要一致，已省略重复内容）\n\n'
 
@@ -117,6 +119,24 @@ def reconciliation_counts(census,records,old):
     return dict(counts)
 
 
+def ownership_proposal_counts(census,records,old):
+    """Pure local proposals from already verified receipts; never adopts/writes."""
+    from get_legacy_owned_spans import propose_ownership
+    counts={key:0 for key in OWNERSHIP_KEYS};census_hash=digest(capture_json_bytes(census))
+    reasons={'source_text_unmapped':'owned_span_unmapped_source_text','source_text_empty':'owned_span_unmapped_source_text',
+        'legacy_named_text_unmapped':'owned_span_unmapped_legacy_text','legacy_references_unresolved':'owned_span_reference_conflicts',
+        'legacy_structure_ambiguous':'owned_span_structure_conflicts','legacy_text_scalar_unsupported':'owned_span_structure_conflicts',
+        'source_capture_unresolved':'owned_span_source_unresolved','source_shape_unsupported':'owned_span_source_unresolved'}
+    for ident,value in records.items():
+        observation=value['observation']
+        try:
+            proposal=propose_ownership(census,observation,old[ident],observation_sha256=digest(capture_json_bytes(observation)),_prevalidated_census=True,census_sha256=census_hash)
+            if proposal['blocked_from_apply'] is not True or proposal['mirror_adopted'] is not False:raise ValueError('unsafe proposal')
+            counts['owned_span_proposals_ready']+=1
+        except ParityFailure as exc:counts[reasons.get(str(exc),'owned_span_other_conflicts')]+=1
+        except (ValueError,TypeError,KeyError,UnicodeError):counts['owned_span_other_conflicts']+=1
+    return counts
+
 def public_report(value):
     result={'mode':'legacy_capture','status':'failed','main_updated':False,'mirror_adopted':0,'apply_ready':False,'source_content_complete_claimed':False,'legacy_regions_complete_claimed':False}
     if not isinstance(value,dict):return result
@@ -138,6 +158,11 @@ def public_report(value):
                 and sum(value[k] for k in ('review_known_source_text_all_accounted','review_known_source_text_partial','review_known_source_text_empty'))==result['captured']
                 and value['review_frontmatter_bytes_preserved']==result['captured'])
         if valid_review:result.update({key:value[key] for key in REVIEW_KEYS})
+        else:result.update(status='failed',error='capture_invalid_report')
+    if any(key in value for key in OWNERSHIP_KEYS):
+        valid_owned=all(type(value.get(key)) is int and 0<=value[key]<=result.get('captured',-1) for key in OWNERSHIP_KEYS)
+        if valid_owned and sum(value[key] for key in OWNERSHIP_KEYS)==result['captured']:
+            result.update({key:value[key] for key in OWNERSHIP_KEYS})
         else:result.update(status='failed',error='capture_invalid_report')
     return result
 
@@ -589,6 +614,7 @@ def run(token,source,work,*,verify_only=False):
             result.update({key:sum(v['observation']['disposition']==key for v in records.values()) for key in ('source_version_changed','source_transcript_unavailable')})
         else:_,result=capture_batches(census,ledger,records,source,old,commit)
         result.update(reconciliation_counts(census,records,old))
+        if verify_only:result.update(ownership_proposal_counts(census,records,old))
         guard(remote,census)
         if remote.ref(REF)!=head:fail('capture_ref_conflict')
         result.update({key:remote.metrics.get(key,0) for key in ('cas_attempts','cas_retries','readback_ref_attempts','readback_stale_ref_observations')})

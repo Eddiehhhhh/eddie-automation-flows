@@ -360,6 +360,7 @@ class RunIntegrationTests(unittest.TestCase):
                 verified=c.run('synthetic',SimpleNamespace(capture_metrics={}),root,verify_only=True)
                 self.assertEqual(verified['status'],'retained_capture_verified');self.assertEqual(verified['fresh_details'],0);self.assertEqual(remote.writes,before)
                 self.assertEqual(c.public_report(verified)['status'],'retained_capture_verified')
+                self.assertEqual(verified['owned_span_structure_conflicts'],1923);self.assertEqual(verified['owned_span_proposals_ready'],0)
             self.assertEqual(local.tree(main),{p:v for p,v in local.tree(remote.current).items() if not p.startswith(c.PREFIX)})
             self.assertEqual(git('rev-parse','HEAD').decode().strip(),main)
 
