@@ -27,6 +27,18 @@ PREVIEW_STATE_SHA='d05c1aa4773421d0d73a60a6d1cf430158440422a31d89c006accc524e600
 KNOWN={'id','note_id','title','content','note_type','source','created_at','updated_at','tags','topics',
  'is_child_note','parent_id','children_ids','share_id','ref_content','audio','web_page','audio_url',
  'audio_duration','audio_transcript','attachments','note_url'}
+EXTENSIONS={'children_count','chapter_timeline','version','meeting_todos','timestamps','content_state','display_title','entry_type','reference','metadata_state','timeline'}
+
+CONFLICT_REASONS={'source_unknown_fields','source_metadata_shape','source_structured_text_unmapped','source_payload_incomplete','source_shape_unsupported','source_shadowed_field','source_transcript_pending','source_text_missing','source_version_race','detail_identity','detail_required','source_missing','preview_source_changed','preview_render_changed','asset_materialization_required','identity_reserved','destination_collision','local_note_edited','source_note_type_changed','source_created_changed','source_unknown_changed','source_field_missing','baseline_missing','canonical_budget','canonical_note_budget','other'}
+
+def reason_counts(conflicts):
+    result={}
+    for reason in conflicts.values():
+        key=reason if reason in CONFLICT_REASONS else 'other';result[key]=result.get(key,0)+1
+    return result
+
+def valid_reason_counts(value,total):
+    return isinstance(value,dict) and not set(value)-CONFLICT_REASONS and all(type(v) is int and 0<=v<=MAX_RECORDS for v in value.values()) and sum(value.values())==total
 
 
 def fail(code):raise raw.ParityFailure(code)
@@ -81,7 +93,7 @@ def initial_registry(evidence,legacy_state,legacy_sha,current):
     reserved.update({ident:'existing_unmanaged' for ident in present if ident not in reserved})
     return {'contract':CONTRACT,'local_proposal_only':True,'apply_ready':False,
       'capture_anchor':deepcopy(evidence.anchor),'legacy_state_sha256':legacy_sha,
-      'reserved':reserved,'newById':{},'conflictsById':{}}
+      'reserved':reserved,'newById':{},'conflictsById':{},'scan_cursor':None}
 
 
 def validate_registry(state,expected_sha,evidence,legacy_state,legacy_sha,current):
@@ -89,13 +101,14 @@ def validate_registry(state,expected_sha,evidence,legacy_state,legacy_sha,curren
     base=initial_registry(evidence,legacy_state,legacy_sha,current)
     if not isinstance(state,dict) or set(state)!=set(base) or state.get('contract')!=CONTRACT or state.get('local_proposal_only') is not True or state.get('apply_ready') is not False or state.get('capture_anchor')!=evidence.anchor:fail('canonical_state_schema')
     new=state['newById'];reserved=state['reserved'];conflicts=state['conflictsById']
+    if state['scan_cursor'] is not None:identity(state['scan_cursor'])
     if any(not isinstance(x,dict) for x in (new,reserved,conflicts)) or set(new)&set(reserved):fail('canonical_owner_overlap')
     authoritative=set(legacy_state['legacyById'])|set(legacy_state['conflictsById'])|set(legacy_state['pending_ids'])
     if set(new)&authoritative:fail('canonical_owner_overlap')
     if {i:k for i,k in base['reserved'].items() if i not in new}!=reserved:fail('canonical_reserved_changed')
     if state['legacy_state_sha256']!=legacy_sha:fail('canonical_legacy_binding')
     present=inventory(current);paths=set();legacy_paths={row['filePath'] for row in evidence.census['eligible'].values()}
-    keys={'filePath','mirror_sha256','baseline_blob','source_version','summary_sha256','source_sha256','unknown_sha256','text_fields','created_at','preview_anchor'}
+    keys={'filePath','mirror_sha256','baseline_blob','source_version','summary_sha256','source_sha256','unknown_sha256','text_fields','created_at','preview_anchor','source_metadata'}
     for ident,row in new.items():
         identity(ident)
         if not isinstance(row,dict) or set(row)!=keys:fail('canonical_state_schema')
@@ -106,6 +119,8 @@ def validate_registry(state,expected_sha,evidence,legacy_state,legacy_sha,curren
         legacy.checked(row['baseline_blob'],40)
         if not raw._raw_valid(row['source_version']) or not raw._raw_valid(row['created_at']):fail('canonical_state_schema')
         if not isinstance(row['text_fields'],list) or row['text_fields']!=sorted(set(row['text_fields'])) or set(row['text_fields'])-set(raw.SOURCE_TEXT_FIELDS):fail('canonical_state_schema')
+        if not isinstance(row['source_metadata'],dict):fail('canonical_state_schema')
+        validate_extensions(row['source_metadata'],metadata_only=True)
         anchor=row['preview_anchor']
         if anchor is not None and (not isinstance(anchor,dict) or set(anchor)!={'commit','state_sha256','blob'}):fail('canonical_state_schema')
         if anchor is not None:
@@ -148,25 +163,93 @@ def source_note(summary,detail):
     note={**summary,**detail};validate_note_shape(note);raw.source_text_fields(note)
     validate_metadata(note)
     if set(text_fields(summary))-set(text_fields(note)):fail('source_text_missing')
-    if set(note)-KNOWN:fail('source_unknown_fields')
+    if set(note)-KNOWN-EXTENSIONS:fail('source_unknown_fields')
+    validate_extensions(note)
     if note.get('note_url') not in (None,'','https://www.biji.com/note/'+note_identity(note)):fail('source_unknown_fields')
-    for name,allowed in [('audio',{'original','transcript','play_url','duration'}),('web_page',{'url','content','excerpt'})]:
+    for name,allowed in [('audio',{'original','transcript','play_url','duration','sentences'}),('web_page',{'url','content','excerpt'})]:
         if note.get(name) and set(note[name])-allowed:fail('source_unknown_fields')
     for nested,flat in [('transcript','audio_transcript'),('play_url','audio_url'),('duration','audio_duration')]:
         first=(note.get('audio') or {}).get(nested);second=note.get(flat)
         if first not in (None,'',0) and second not in (None,'',0) and legacy.encoded(first)!=legacy.encoded(second):fail('source_shadowed_field')
-    for field in ('tags','topics'):
-        values=note.get(field)
-        if values is not None and (not isinstance(values,list) or any(not isinstance(x,dict) or set(x)!={'name'} or not isinstance(x['name'],str) for x in values)):fail('source_unknown_fields')
-    # Existing remote audio/video/link policy only; no implicit binary fetching.
-    for item in note.get('attachments') or []:
-        if item.get('type') not in ('audio','video','link'):fail('asset_materialization_required')
-        if set(item)-{'type','url'}:fail('source_unknown_fields')
+    validate_collections(note)
     if transcript_pending(note):fail('source_transcript_pending')
     raw.raw_source_version(note.get('created_at'))
     return note
 
 
+def validate_collections(note):
+    for field in ('tags','topics'):
+        values=note.get(field)
+        if values is not None and (not isinstance(values,list) or any(not isinstance(x,dict) or 'name' not in x or set(x)-({'id','name','type'} if field=='tags' else {'id','name'}) or not isinstance(x['name'],str) or ('id' in x and (type(x['id']) not in (str,int))) or ('type' in x and not isinstance(x['type'],str)) for x in values)):fail('source_unknown_fields')
+    # Existing remote audio/video/link policy only; no implicit binary fetching.
+    for item in note.get('attachments') or []:
+        if item.get('type') not in ('audio','video','link'):fail('asset_materialization_required')
+        if set(item)-{'type','url','title','size','duration'}:fail('source_unknown_fields')
+        if 'title' in item and not isinstance(item['title'],str):fail('source_shape_unsupported')
+        if 'size' in item and (type(item['size']) is not int or item['size']<0):fail('source_shape_unsupported')
+    for item in note.get('attachments') or []:
+        value=item.get('duration')
+        if value is not None and (type(value) not in (int,float) or not __import__('math').isfinite(value) or value<0):fail('source_shape_unsupported')
+
+def source_metadata(note):
+    # Exact secondary metadata remains in the same private registry. Timed
+    # sentence/chapter text is retained here, not claimed as rendered in MD.
+    # This replaces one current metadata value, never appends snapshots.
+    result=deepcopy({k:v for k,v in note.items() if k in EXTENSIONS|{'tags','topics','attachments'}})
+    if isinstance(note.get('audio'),dict) and 'sentences' in note['audio']:result['audio']={'sentences':deepcopy(note['audio']['sentences'])}
+    return result
+
+def metadata_missing(before,after):
+    if isinstance(before,dict):
+        return not isinstance(after,dict) or any(k not in after or metadata_missing(v,after[k]) for k,v in before.items())
+    if isinstance(before,list):
+        if not isinstance(after,list) or len(after)<len(before):return True
+        return any(metadata_missing(x,y) for x,y in zip(before,after))
+    return before not in (None,'',False,0) and after in (None,'',[],{},False,0)
+
+def immutable_unknown_hash(note):
+    value=deepcopy({k:v for k,v in note.items() if k not in EXTENSIONS})
+    if isinstance(value.get('audio'),dict):value['audio'].pop('sentences',None)
+    return raw._source_unknown_hash(value)
+
+def validate_extensions(note,*,metadata_only=False):
+    if metadata_only and set(note)-EXTENSIONS-{'tags','topics','attachments','audio'}:fail('canonical_state_schema')
+    if metadata_only:
+        validate_note_shape(note);validate_collections(note)
+        if 'audio' in note and (not isinstance(note['audio'],dict) or set(note['audio'])!={'sentences'}):fail('canonical_state_schema')
+    sentences=(note.get('audio') or {}).get('sentences')
+    if sentences is not None:
+        if not isinstance(sentences,list):fail('source_metadata_shape')
+        for row in sentences:
+            if not isinstance(row,dict) or set(row)!={'end_ms','files','is_me','speaker_id','speaker_name','start_ms','text'}:fail('source_metadata_shape')
+            if any(type(row[k]) is not int or row[k]<0 for k in ('start_ms','end_ms')) or row['end_ms']<row['start_ms'] or type(row['is_me']) is not bool or type(row['speaker_id']) not in (str,int) or not isinstance(row['speaker_name'],str) or not isinstance(row['text'],str) or not isinstance(row['files'],list):fail('source_metadata_shape')
+            if row['files']:fail('asset_materialization_required')
+    for key in ('children_count','version'):
+        if key in note and (type(note[key]) is not int or note[key]<0):fail('source_metadata_shape')
+    for key in ('display_title','entry_type'):
+        if key in note and not isinstance(note[key],str):fail('source_metadata_shape')
+    for key in ('chapter_timeline','meeting_todos'):
+        if key not in note:continue
+        value=note[key]
+        if not isinstance(value,dict) or set(value)!={'items','source'} or not isinstance(value['items'],list) or not isinstance(value['source'],str):fail('source_metadata_shape')
+        if key=='meeting_todos' and value['items']:fail('source_structured_text_unmapped')
+        if key=='chapter_timeline':
+            for row in value['items']:
+                if not isinstance(row,dict) or set(row)!={'start_ms','title'} or type(row['start_ms']) is not int or row['start_ms']<0 or not isinstance(row['title'],str):fail('source_metadata_shape')
+    if 'timeline' in note:
+        value=note['timeline']
+        if not isinstance(value,dict) or set(value)!={'moments','resources','schema_version','version'} or any(type(value[k]) is not int or value[k]<0 for k in ('schema_version','version')) or any(not isinstance(value[k],list) for k in ('moments','resources')):fail('source_metadata_shape')
+        if value['moments'] or value['resources']:fail('source_structured_text_unmapped')
+    if 'reference' in note and note['reference'] is not None:fail('source_structured_text_unmapped')
+    if 'timestamps' in note:
+        value=note['timestamps']
+        if not isinstance(value,dict) or set(value)!={'created_at','edited_at','record_updated_at'}:fail('source_metadata_shape')
+        for item in value.values():raw.raw_source_version(item)
+    for key,fields,expected in [('content_state',{'content','ref_content'},'full'),('metadata_state',{'reference','topics'},'complete')]:
+        if key not in note:continue
+        value=note[key]
+        if not isinstance(value,dict) or set(value)!=fields or any(not isinstance(v,str) for v in value.values()):fail('source_metadata_shape')
+        if any(v!=expected for v in value.values()):fail('source_payload_incomplete')
 
 
 def validate_metadata(note):
@@ -239,9 +322,9 @@ def new_path(note,ident):
 def record(note,summary,path,data,anchor=None):
     return {'filePath':path,'mirror_sha256':legacy.sha(data),'baseline_blob':legacy.retention.oid(data),
       'source_version':raw.raw_source_version(note['updated_at']),'summary_sha256':raw._source_content_hash(summary),
-      'source_sha256':raw._source_content_hash(note),'unknown_sha256':raw._source_unknown_hash(note),
+      'source_sha256':raw._source_content_hash(note),'unknown_sha256':immutable_unknown_hash(note),
       'text_fields':text_fields(note),'created_at':raw.raw_source_version(note['created_at']),
-      'preview_anchor':deepcopy(anchor)}
+      'preview_anchor':deepcopy(anchor),'source_metadata':source_metadata(note)}
 
 
 def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None):
@@ -250,9 +333,10 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
     items=legacy.source_snapshot(summaries,terminal);preview=preview or {};selected=list(selected_new)
     if len(selected)>MAX_NEW or len(selected)!=len(set(selected)):fail('canonical_selection')
     for ident in selected:identity(ident)
-    present=inventory(current);occupied=set(current);changes={};conflicts={};counts=dict.fromkeys(('created','preview_imported','updated','unchanged','conflicted','detail_required'),0)
+    present=inventory(current);occupied=set(current);changes={};conflicts=deepcopy(state['conflictsById']);counts=dict.fromkeys(('created','preview_imported','updated','state_only','unchanged','conflicted','detail_required'),0)
     targets=sorted(set(state['newById'])|set(selected))
     for ident in targets:
+        conflicts.pop(ident,None)
         old=state['newById'].get(ident)
         try:
             if ident in (baseline_errors or {}):fail(baseline_errors[ident])
@@ -272,14 +356,15 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
             if old:
                 if json_header(before)['note_type']!=note.get('note_type'):fail('source_note_type_changed')
                 if raw.raw_source_version(note['created_at'])!=old['created_at']:fail('source_created_changed')
-                if raw._source_unknown_hash(note)!=old['unknown_sha256']:fail('source_unknown_changed')
+                if immutable_unknown_hash(note)!=old['unknown_sha256']:fail('source_unknown_changed')
+                if metadata_missing(old['source_metadata'],source_metadata(note)):fail('source_field_missing')
                 if set(old['text_fields'])-set(text_fields(note)):fail('source_text_missing')
                 data=render_exact(note,path)
                 # No silently emptied named metadata or removed fields.
                 old_fields=json_header(before);new_fields=json_header(data)
                 empty=(None,'',[],{},0,False)
                 if set(old_fields)-set(new_fields) or any(v not in empty and new_fields.get(k) in empty for k,v in old_fields.items() if k!='updated_at'):fail('source_field_missing')
-                anchor=old['preview_anchor'];outcome='updated'
+                anchor=old['preview_anchor'];outcome='updated' if data!=before else 'state_only'
             elif ident in preview:
                 saved=preview[ident];entry=saved['entry'];path=path_ok(entry['filePath'])
                 if path in occupied:fail('destination_collision')

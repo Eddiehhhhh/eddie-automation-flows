@@ -260,10 +260,10 @@ def verify_plan(reader,plan,files):
     if sum(map(len,files.values()))>MAX_CHANGED_BYTES or transaction_bytes(reader,parent,commit)!=plan.get('transaction_bytes'):fail('manual_budget')
 
 
-def publish(reader,remote,plan,files,expected_plan_sha,readback,*,sleep=time.sleep,writers_guard=disabled_writers,checkpoint=None):
+def publish(reader,remote,plan,files,expected_plan_sha,readback,*,sleep=time.sleep,writers_guard=disabled_writers,checkpoint=None,verifier=None):
     """One CAS maximum. Uncertain writes are read back, never repeated here."""
     if a.sha(a.encoded(plan))!=expected_plan_sha:fail('manual_plan')
-    verify_plan(reader,plan,files);parent=plan['parent_commit'];commit=plan['candidate_commit']
+    (verifier or verify_plan)(reader,plan,files);parent=plan['parent_commit'];commit=plan['candidate_commit']
     guard(remote,parent)
     if not files:return {'main_updated':False,'cas_attempts':0,'readback_verified':True}
     writers_guard();guard(remote,parent)
@@ -456,7 +456,7 @@ def prepare_canonical_preview(reader,evidence,parent,current,preview,source,*,st
       'detail_receipts':receipts,'reference_receipts':references,'registry_sha256':plan['registry_sha256'],'changes':plan['changes']}
     result={'status':'canonical_preview_candidate_verified','main_updated':False,'cas_attempts':0,'apply_ready':False,
       'current_preserved':True,'readback_verified':True,'selected':CANONICAL_COUNT,'notes_proposed':len(changes),
-      'conflicted':counts['conflicted'],'changed_paths':len(files),'changed_bytes':sum(map(len,files.values())),
+      'conflicted':counts['conflicted'],'conflict_reason_counts':n.reason_counts(proposed['conflictsById']),'changed_paths':len(files),'changed_bytes':sum(map(len,files.values())),
       'source_details':len(details),'details_unavailable':unavailable,'legacy_managed':len(legacy['legacyById']),
       'legacy_conflicts':len(legacy['conflictsById']),'legacy_pending':len(legacy['pending_ids']),'legacy_deferred':legacy_deferred,
       'imported_audio_notes':audio_notes,'imported_empty_plain_text_notes':empty_text_notes,
@@ -507,6 +507,10 @@ def public_canonical_report(value):
         except Exception:return clean
     for key in ('detail_requests','api_requests','http_attempts','http_retries'):
         if type(value.get(key)) is int and 0<=value[key]<=c.MAX_RAW:out[key]=value[key]
+    import get_canonical_writer as n
+    reasons=value.get('conflict_reason_counts',{})
+    if not n.valid_reason_counts(reasons,value['conflicted']):return clean
+    out['conflict_reason_counts']=reasons
     out.update(status='canonical_preview_candidate_verified',main_updated=False,cas_attempts=0,apply_ready=False,current_preserved=True,readback_verified=True,refs_verified=True,asset_downloads=0,reference_content_verified=False)
     return out
 

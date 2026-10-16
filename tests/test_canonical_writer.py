@@ -30,6 +30,54 @@ class CanonicalTests(unittest.TestCase):
                 if len(result)>maximum:raise AssertionError('Unbounded')
                 return result
         return n.preview_records(Reader(),'a'*40,a.sha(payload)),values
+    def standard_metadata(self):
+        return {'children_count':0,'version':0,'entry_type':'ai','display_title':'Alternate complete source title',
+          'timestamps':{'created_at':'2026-10-16 01:02:03','edited_at':'2026-10-16 01:02:04','record_updated_at':'2026-10-16 01:02:04'},
+          'content_state':{'content':'full','ref_content':'full'},'metadata_state':{'reference':'complete','topics':'complete'},
+          'chapter_timeline':{'items':[],'source':'summary_markdown_rules'},'meeting_todos':{'items':[],'source':'summary_markdown_rules'},'reference':None,
+          'tags':[{'id':'tag-synthetic','name':'Exact tag','type':'manual'}],'topics':[{'id':17,'name':'Topic'}],
+          'attachments':[{'type':'audio','url':'https://example.invalid/a.mp3','title':'Exact recording title','size':12}]}
+    def test_real_api_metadata_shape_preserved_and_preview_bytes_unchanged(self):
+        note=self.note(**self.standard_metadata());preview,_=self.preview(note)
+        state,writes,counts=self.plan({'200':note},['200'],preview=preview)
+        self.assertEqual(counts['preview_imported'],1);self.assertEqual(next(iter(writes.values())),preview['200']['bytes'])
+        self.assertEqual(state['newById']['200']['source_metadata'],self.standard_metadata())
+        repeat,changes,_=self.plan({'200':note},state=state,current={**self.current,**writes},details={})
+        self.assertEqual(repeat,state);self.assertEqual(changes,{})
+    def test_known_metadata_update_preserved_without_blocking_changed_content(self):
+        note=self.note(**self.standard_metadata());state,writes,_=self.plan({'200':note},['200']);current={**self.current,**writes}
+        changed=deepcopy(note);changed.update(content='Actual later content',updated_at='2026-10-16 01:02:05',version=1,display_title='Later display title')
+        changed['timestamps']['edited_at']='2026-10-16 01:02:05';changed['tags'][0]['id']='later-tag'
+        state,changes,counts=self.plan({'200':changed},state=state,current=current)
+        self.assertEqual(counts['updated'],1);self.assertEqual(state['newById']['200']['source_metadata'],n.source_metadata(changed));self.assertIn(b'Actual later content',next(iter(changes.values())))
+    def test_structured_source_text_and_incomplete_payload_defer_without_adoption(self):
+        cases=[('chapter_timeline',{'items':[{'text':'Never drop a chapter'}],'source':'source'}),('meeting_todos',{'items':['Never drop task'],'source':'source'}),('reference',{'text':'Never drop quote'}),('content_state',{'content':'partial','ref_content':'full'}),('metadata_state',{'reference':'complete','topics':'partial'}),('timestamps',{'created_at':None})]
+        for key,value in cases:
+            with self.subTest(key=key):
+                note=self.note(**self.standard_metadata());note[key]=value;state,writes,counts=self.plan({'200':note},['200'])
+                self.assertEqual(writes,{});self.assertEqual(counts['conflicted'],1);self.assertNotIn('200',state['newById'])
+    def test_timed_recording_metadata_preserved_with_full_original(self):
+        note=self.note(note_type='recorder_audio',**self.standard_metadata())
+        note['audio']={'original':'Complete original transcript','sentences':[{'end_ms':1000,'start_ms':0,'files':[],'is_me':False,'speaker_id':1,'speaker_name':'Speaker','text':'Exact timed words'}]}
+        note['chapter_timeline']={'items':[{'start_ms':0,'title':'Exact chapter'}],'source':'summary_markdown_rules'}
+        note['timeline']={'moments':[],'resources':[],'schema_version':2,'version':1};note['attachments'][0]['duration']=1000
+        preview,_=self.preview(note);state,writes,counts=self.plan({'200':note},['200'],preview=preview)
+        self.assertEqual(counts['preview_imported'],1);self.assertEqual(state['newById']['200']['source_metadata'],n.source_metadata(note));self.assertEqual(next(iter(writes.values())),preview['200']['bytes'])
+        note['audio']['sentences'][0]['files']=[{'url':'https://example.invalid/asset'}]
+        state,writes,counts=self.plan({'200':note},['200']);self.assertEqual(writes,{});self.assertEqual(state['conflictsById']['200'],'asset_materialization_required')
+    def test_existing_metadata_loss_conflicts_without_advancing_state(self):
+        note=self.note(**self.standard_metadata());state,writes,_=self.plan({'200':note},['200']);current={**self.current,**writes}
+        for field in ('display_title','version','tags','attachments','timestamps'):
+            changed=deepcopy(note);changed.pop(field);changed['updated_at']='2026-10-16 01:02:05';changed['content']='Changed content'
+            after,updates,_=self.plan({'200':changed},state=state,current=current)
+            self.assertEqual(updates,{});self.assertEqual(after['newById']['200'],state['newById']['200']);self.assertEqual(after['conflictsById']['200'],'source_field_missing')
+    def test_cached_metadata_collections_are_validated_before_unchanged_fast_path(self):
+        note=self.note(**self.standard_metadata());state,writes,_=self.plan({'200':note},['200']);current={**self.current,**writes}
+        for field,bad in [('tags','bad'),('topics',[{'name':'valid','id':{}}]),('attachments',[{'type':'audio','url':'https://example.invalid/a','size':False}])]:
+            forged=deepcopy(state);forged['newById']['200']['source_metadata'][field]=bad
+            with self.assertRaises((ValueError,raw.ParityFailure)):self.plan({'200':note},state=forged,current=current,details={})
+    def test_fixed_reason_counts_do_not_publish_unknown_values(self):
+        counts=n.reason_counts({'200':'source_metadata_shape','201':'private payload'});self.assertEqual(counts,{'source_metadata_shape':1,'other':1});self.assertTrue(n.valid_reason_counts(counts,2));self.assertFalse(n.valid_reason_counts({'private payload':1},1))
     def test_one_identity_registry_reserves_legacy_conflicts_pending_and_unknown_mirrors(self):
         self.assertEqual(self.state['reserved']['1'],'legacy');self.assertEqual(self.state['reserved']['3'],'blocked');self.assertEqual(self.state['reserved']['90'],'pending')
         note=self.note('300');current={**self.current,'03 纯文本记录/external.md':n.render(note,[],Path('x'),faithful=True)[0].encode()}

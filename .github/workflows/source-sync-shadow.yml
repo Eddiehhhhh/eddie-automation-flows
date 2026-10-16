@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, notion_readonly, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, canonical_manual, notion_readonly, full]
         default: sample
         required: true
       preview_source_commit:
@@ -20,12 +20,17 @@ on:
         default: 'dab0abf680075e3f073b225872be010c3ae99561'
         required: false
       legacy_expected_parent:
-        description: Exact current private main commit (legacy_manual / canonical_prepare / notion_readonly)
+        description: Exact current private main commit (manual and canonical modes)
         type: string
         default: ''
         required: false
       legacy_state_sha256:
         description: Externally verified previous legacy state SHA-256; empty for bootstrap
+        type: string
+        default: ''
+        required: false
+      canonical_registry_sha256:
+        description: Externally verified canonical registry SHA-256; empty before first import
         type: string
         default: ''
         required: false
@@ -49,7 +54,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ (inputs.mode == 'legacy_manual' || inputs.mode == 'canonical_prepare') && 'eddie-private-vault-writers' || 'getnote-shadow' }}
+  group: ${{ (inputs.mode == 'legacy_manual' || inputs.mode == 'canonical_prepare' || inputs.mode == 'canonical_manual') && 'eddie-private-vault-writers' || 'getnote-shadow' }}
   cancel-in-progress: false
 
 jobs:
@@ -193,6 +198,28 @@ jobs:
           if [[ "$APPLY" == true ]]; then args+=(--apply --approved-payload-sha256 "$APPROVED_PAYLOAD_SHA256"); fi
           timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get bounded manual legacy transaction' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' "${args[@]}"
 
+      - name: Prepare or explicitly apply one canonical Get transaction
+        if: inputs.mode == 'canonical_manual'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          LEGACY_SHA256: ${{ inputs.legacy_state_sha256 }}
+          REGISTRY_SHA256: ${{ inputs.canonical_registry_sha256 }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+          APPLY: ${{ inputs.legacy_apply }}
+        run: |
+          args=(--expected-parent "$EXPECTED_PARENT" --legacy-sha256 "$LEGACY_SHA256" --checkpoint '${{ runner.temp }}/canonical-checkpoint.json')
+          if [ -n "$REGISTRY_SHA256" ]; then args+=(--registry-sha256 "$REGISTRY_SHA256"); fi
+          if [ "$APPLY" = true ]; then args+=(--apply --approved-payload-sha256 "$APPROVED_PAYLOAD_SHA256"); fi
+          timeout --kill-after=60s 55m python scripts/run_private_command.py --label 'Get canonical transaction' --stdout-file '${{ runner.temp }}/canonical-result.json' -- python scripts/get_canonical_manual.py "${args[@]}"
+      - name: Publish safe canonical transaction counts
+        if: always() && inputs.mode == 'canonical_manual'
+        run: |
+          set -o pipefail
+          python scripts/get_canonical_manual.py --publish-report '${{ runner.temp }}/canonical-result.json' --checkpoint '${{ runner.temp }}/canonical-checkpoint.json' | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Prepare ten fixed preview notes without writes
         if: inputs.mode == 'canonical_prepare'
         env:
@@ -232,6 +259,7 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
+          if [ "$MODE" = canonical_manual ]; then exit 0; fi
           if [ "$MODE" = notion_readonly ]; then
             python scripts/get_notion_readonly.py --publish-report '${{ runner.temp }}/notion-readonly-result.json' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0

@@ -185,7 +185,7 @@ class ManualTests(unittest.TestCase):
     def test_workflow_manual_entry_defaults_to_prepare_and_shares_writer_lock(self):
         workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/source-sync-shadow.yml').read_text()
         block=workflow.split('legacy_apply:',1)[1].split('sample_pages:',1)[0]
-        self.assertIn('default: false',block);self.assertIn("(inputs.mode == 'legacy_manual' || inputs.mode == 'canonical_prepare') && 'eddie-private-vault-writers'",workflow)
+        self.assertIn('default: false',block);self.assertIn("(inputs.mode == 'legacy_manual' || inputs.mode == 'canonical_prepare' || inputs.mode == 'canonical_manual') && 'eddie-private-vault-writers'",workflow)
         self.assertIn('args=(--expected-parent "$EXPECTED_PARENT")',workflow);self.assertNotIn('schedule:',workflow)
         self.assertNotIn('actions: write',workflow);self.assertNotIn('contents: write',workflow)
         step=workflow.split('Prepare or explicitly apply one bounded legacy transaction',1)[1].split('- name:',1)[0]
