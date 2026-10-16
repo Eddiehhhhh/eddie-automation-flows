@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, notion_readonly, full]
         default: sample
         required: true
       preview_source_commit:
@@ -20,7 +20,7 @@ on:
         default: 'dab0abf680075e3f073b225872be010c3ae99561'
         required: false
       legacy_expected_parent:
-        description: Exact current private main commit (legacy_manual / canonical_prepare)
+        description: Exact current private main commit (legacy_manual / canonical_prepare / notion_readonly)
         type: string
         default: ''
         required: false
@@ -209,6 +209,20 @@ jobs:
           test -z "$APPROVED_PAYLOAD_SHA256"
           timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get ten-note read-only preparation' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --canonical-preview --expected-parent "$EXPECTED_PARENT" --state-sha256 "$STATE_SHA256"
 
+      - name: Read two pinned Notion pages and plan without writes
+        if: inputs.mode == 'notion_readonly'
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          APPLY: ${{ inputs.legacy_apply }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$APPLY" != true
+          test -z "$APPROVED_PAYLOAD_SHA256"
+          timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion two-page read-only observation' --stdout-file '${{ runner.temp }}/notion-readonly-result.json' -- python scripts/get_notion_readonly.py --expected-parent "$EXPECTED_PARENT"
+
       - name: Publish aggregate evidence only
         if: always()
         env:
@@ -218,6 +232,10 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
+          if [ "$MODE" = notion_readonly ]; then
+            python scripts/get_notion_readonly.py --publish-report '${{ runner.temp }}/notion-readonly-result.json' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$MODE" = legacy_manual ] || [ "$MODE" = canonical_prepare ]; then
             python scripts/get_legacy_manual.py --publish-report "$RESULT" --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
