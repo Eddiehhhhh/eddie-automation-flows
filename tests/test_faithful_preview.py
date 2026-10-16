@@ -355,4 +355,91 @@ class FaithfulPreviewTests(unittest.TestCase):
             remote.request=lambda *a,**k:value
             with self.assertRaisesRegex(r.RetentionFailure,'invalid_source_tree'):remote.source_get_tree('c'*40)
 
+
+class LegacyEightReadOnlyTests(unittest.TestCase):
+    def fixture(self):
+        old={'contract':'get-v7-cloud-mirror-1','pendingById':{str(i):{} for i in range(1,10)}}
+        new={'contract':'get-source-raw-local-2','local_proposal_only':True,'pendingById':{'9':{}},'conflictsById':{}}
+        docs={};details={}
+        for i in range(1,9):
+            ident=str(i);path=f'99 录音卡笔记/{ident}.md'
+            new['conflictsById'][ident]={'filePath':path,'sourceVersion':raw_source_version('2026-10-15 00:00:00'),'reason':'legacy_baseline_missing','sourceContentHash':None}
+            docs[path]=('---\nnote_id: '+json.dumps(ident)+'\nnote_type: recorder_audio\naudio_transcript: ""\n---\nOld hand-edited summary\n').encode()
+            details[ident]={'id':ident,'note_type':'recorder_audio','created_at':'2026-10-14 00:00:00','updated_at':'2026-10-15 00:00:00','audio':{'original':''},'content':'AI summary is not original'}
+        return old,new,docs,details
+    def run_probe(self,old,new,docs,details):
+        from source_sync_mirror_replay import diagnose_legacy_eight
+        calls=[]
+        result=diagnose_legacy_eight(old,new,docs.__getitem__,lambda ident:(calls.append(ident) or deepcopy(details[ident])))
+        self.assertEqual(calls,[str(i) for i in range(1,9)])
+        return result
+    def test_exact_eight_empty_originals_are_not_ready_or_adopted(self):
+        result=self.run_probe(*self.fixture());c=result['counts']
+        self.assertEqual(c['original_missing_or_empty'],8);self.assertEqual(c['render_unavailable'],8)
+        self.assertEqual(c['source_version_same_as_retained'],8);self.assertEqual(result['baseline_adopted'],0)
+        self.assertFalse(result['raw_payload_retained']);self.assertFalse(result['source_content_complete_claimed'])
+    def test_readiness_and_exact_field_coherence_are_separate(self):
+        old,new,docs,details=self.fixture()
+        for ident,detail in details.items():detail['audio']['original']='Full original\r\n'
+        path=new['conflictsById']['1']['filePath'];docs[path]=docs[path].replace(b'audio_transcript: ""',b'audio_transcript: "Full original\\r\\n"')
+        result=self.run_probe(old,new,docs,details);c=result['counts']
+        self.assertEqual(c['original_nonempty'],8);self.assertEqual(c['original_equals_legacy_transcript'],1)
+        self.assertEqual(c['whole_body_equals_original'],0);self.assertEqual(c['whole_body_equals_detail_text_render'],0)
+    def test_substring_or_stripped_body_never_proves_whole_body_equality(self):
+        old,new,docs,details=self.fixture()
+        for ident,detail in details.items():detail['audio']['original']='Old hand-edited summary'
+        self.assertEqual(self.run_probe(old,new,docs,details)['counts']['whole_body_equals_original'],0)
+    def test_raw_version_differences_remain_differences(self):
+        old,new,docs,details=self.fixture();details['1']['updated_at']='2026-10-15T00:00:00+08:00'
+        c=self.run_probe(old,new,docs,details)['counts'];self.assertEqual(c['source_version_changed'],1)
+    def test_cohort_and_identity_fail_before_unselected_detail_reads(self):
+        from source_sync_mirror_replay import diagnose_legacy_eight
+        old,new,docs,details=self.fixture();new['conflictsById'].pop('8')
+        with self.assertRaisesRegex(ValueError,'legacy_probe_cohort'):diagnose_legacy_eight(old,new,docs.__getitem__,lambda _:self.fail('detail must not run'))
+        old,new,docs,details=self.fixture();details['1']['id']='2'
+        with self.assertRaisesRegex(ValueError,'legacy_probe_identity'):self.run_probe(old,new,docs,details)
+    def test_safe_report_requires_final_ref_verification_and_consistent_counts(self):
+        from source_sync_mirror_replay import safe_legacy_eight_report
+        result=self.run_probe(*self.fixture());self.assertEqual(safe_legacy_eight_report(result)['status'],'failed')
+        result['refs_unchanged']=True;result['private_body']='must not leak';result['id']='private-id'
+        public=safe_legacy_eight_report(result);self.assertEqual(public['status'],'legacy_eight_diagnostic_complete');self.assertNotIn('private_body',public);self.assertNotIn('id',public)
+        for key,value in [('raw_payload_retained',True),('baseline_adopted',1),('source_content_complete_claimed',True)]:
+            changed=deepcopy(result);changed[key]=value;self.assertEqual(safe_legacy_eight_report(changed)['status'],'failed')
+        result['counts']['original_nonempty']=1;self.assertEqual(safe_legacy_eight_report(result)['status'],'failed')
+    def test_remote_entry_reads_only_fixed_private_cohort_and_no_writes(self):
+        import io,os
+        from contextlib import redirect_stdout
+        import source_sync_mirror_replay as cli
+        import get_private_preview_retention as retention
+        import sync_getnote_to_raw as sync
+        old,new,docs,details=self.fixture();blobs={};trees={};calls=[]
+        for commit in (cli.LEGACY_SOURCE,cli.LEGACY_OLD_PREVIEW,cli.LEGACY_NEW_PREVIEW):trees[commit]={}
+        def add(commit,path,data):
+            sha=retention.oid(data);blobs[sha]=data;trees[commit][retention.GET+'/'+path]=('100644','blob',sha,len(data))
+        add(cli.LEGACY_OLD_PREVIEW,'03 State/cloud-sync-state.json',json.dumps(old).encode())
+        add(cli.LEGACY_NEW_PREVIEW,'03 State/cloud-sync-state.json',json.dumps(new).encode())
+        for path,data in docs.items():add(cli.LEGACY_SOURCE,path,data);add(cli.LEGACY_NEW_PREVIEW,path,data)
+        class ReadOnlyRemote:
+            def metadata(self):return {'private':True}
+            def ref(self,ref):return {retention.MAIN_REF:'a'*40,retention.BACKUP_REF:cli.LEGACY_SOURCE,retention.PREVIEW_REF:cli.LEGACY_OLD_PREVIEW,retention.FIDELITY_PREVIEW_REF:cli.LEGACY_NEW_PREVIEW}[ref]
+            def check_source_budget(self,commit):return trees[commit]
+            def blob(self,sha,size):assert len(blobs[sha])==size;return blobs[sha]
+        def api(path,params,key,client,**kwargs):
+            self.assertEqual(path,sync.DETAIL_PATH);self.assertEqual(params['image_quality'],'original');self.assertIn('request_policy',kwargs)
+            calls.append(params['id']);return {'data':{'note':details[params['id']]}}
+        output=io.StringIO()
+        with patch.object(retention,'GitHubRemote',return_value=ReadOnlyRemote()),patch.object(retention,'review_source') as review,patch.object(sync,'load_credentials',return_value=('synthetic','synthetic')),patch.object(sync,'api_get',side_effect=api),redirect_stdout(output):
+            self.assertEqual(cli.legacy_eight_main(),0)
+        self.assertEqual(len(calls),8);self.assertEqual(len(set(calls)),8);self.assertEqual(review.call_count,2)
+        report=json.loads(output.getvalue());self.assertEqual(report['status'],'legacy_eight_diagnostic_complete');self.assertNotIn('Old hand-edited',output.getvalue())
+        # A ref race after read fails closed and cannot be called success.
+        remote=ReadOnlyRemote();count=[0];original=remote.ref
+        def race(ref):
+            count[0]+=1
+            return 'b'*40 if count[0]>4 and ref==retention.FIDELITY_PREVIEW_REF else original(ref)
+        remote.ref=race;output=io.StringIO()
+        with patch.object(retention,'GitHubRemote',return_value=remote),patch.object(retention,'review_source'),patch.object(sync,'load_credentials',return_value=('synthetic','synthetic')),patch.object(sync,'api_get',side_effect=api),redirect_stdout(output):self.assertEqual(cli.legacy_eight_main(),1)
+        self.assertEqual(json.loads(output.getvalue())['status'],'failed')
+
+
 if __name__=='__main__':unittest.main()

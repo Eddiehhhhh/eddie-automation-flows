@@ -145,6 +145,140 @@ def private_preview_main(args):
    if i<len(progress):public[which]={k:progress[i][k] for k in COUNTS if k in progress[i]}
   print(json.dumps(public));return 1
 
+# This read-only probe deliberately does not persist source bodies or adopt state.
+# Commit pins identify previously retained private evidence, never public note IDs.
+LEGACY_SOURCE = '4fbc69f2d41bc3c7da81eae8f0c91584f0923190'
+LEGACY_OLD_PREVIEW = 'dab0abf680075e3f073b225872be010c3ae99561'
+LEGACY_NEW_PREVIEW = '013328cc962d9921befb3e25710ba699dd7e46a9'
+LEGACY_COUNTS = ('selected','fresh_details','original_nonempty','original_missing_or_empty',
+ 'legacy_transcript_nonempty','original_equals_legacy_transcript','legacy_transcript_differs',
+ 'whole_body_equals_original','whole_body_equals_detail_text_render','render_unavailable',
+ 'source_version_same_as_retained','source_version_changed','attachments_present')
+
+def legacy_cohort(old,new):
+ import re
+ from get_mirror_incremental_replay import _raw_valid
+ if not isinstance(old,dict) or old.get('contract')!='get-v7-cloud-mirror-1' or not isinstance(old.get('pendingById'),dict):raise ValueError('legacy_probe_input')
+ if not isinstance(new,dict) or new.get('contract')!='get-source-raw-local-2' or new.get('local_proposal_only') is not True or not isinstance(new.get('conflictsById'),dict) or not isinstance(new.get('pendingById'),dict):raise ValueError('legacy_probe_input')
+ prior=set(old['pendingById']);conflicts=new['conflictsById'];selected=sorted(prior & set(conflicts))
+ if len(prior)!=9 or len(selected)!=8 or prior-set(selected)!=set(new['pendingById']):raise ValueError('legacy_probe_cohort')
+ paths=set()
+ for ident in selected:
+  item=conflicts[ident]
+  if not re.fullmatch(r'[0-9]{1,64}',ident) or not isinstance(item,dict) or item.get('reason')!='legacy_baseline_missing' or item.get('sourceContentHash') is not None or not _raw_valid(item.get('sourceVersion')):raise ValueError('legacy_probe_cohort')
+  path=item.get('filePath')
+  if not isinstance(path,str) or not path.endswith('.md') or path in paths or path.startswith('/') or '..' in Path(path).parts or '\\' in path:raise ValueError('legacy_probe_cohort')
+  paths.add(path)
+ return selected
+
+def legacy_document(data):
+ # Parse only simple existing scalar fields. Preserve body bytes exactly; no
+ # strip, newline conversion, YAML timestamp coercion or substring coverage.
+ text=data.decode('utf-8')
+ if not text.startswith('---\n') or '\n---\n' not in text:raise ValueError('legacy_probe_document')
+ header,body=text[4:].split('\n---\n',1);fields={}
+ for line in header.split('\n'):
+  if not line or line[0].isspace() or line.startswith('#'):raise ValueError('legacy_probe_document')
+  key,sep,value=line.partition(':')
+  if not sep or key in fields:raise ValueError('legacy_probe_document')
+  value=value.strip()
+  if key not in ('note_id','note_type','audio_transcript'):continue
+  if value.startswith('"'):
+   try:value=json.loads(value)
+   except ValueError:raise ValueError('legacy_probe_document')
+  elif value.startswith("'"):
+   if not value.endswith("'"):raise ValueError('legacy_probe_document')
+   value=value[1:-1].replace("''", "'")
+  elif value in ('|','>') or value.startswith(('&','*','!','[','{')):raise ValueError('legacy_probe_document')
+  if not isinstance(value,str):raise ValueError('legacy_probe_document')
+  fields[key]=value
+ return fields,body
+
+def diagnose_legacy_eight(old,new,read_mirror,fetch_detail):
+ from get_mirror_incremental_replay import raw_source_version,source_text_fields
+ from get_v7_compat import note_identity
+ from get_mirror_render import validate_note_shape,render
+ selected=legacy_cohort(old,new);counts=dict.fromkeys(LEGACY_COUNTS,0);counts['selected']=len(selected)
+ for ident in selected:
+  entry=new['conflictsById'][ident];data=read_mirror(entry['filePath']);fields,body=legacy_document(data)
+  if fields.get('note_id')!=ident:raise ValueError('legacy_probe_identity')
+  detail=fetch_detail(ident);counts['fresh_details']+=1
+  if not isinstance(detail,dict) or note_identity(detail)!=ident:raise ValueError('legacy_probe_identity')
+  validate_note_shape(detail);source_text_fields(detail)
+  token=raw_source_version(detail.get('updated_at'))
+  counts['source_version_same_as_retained' if token==entry['sourceVersion'] else 'source_version_changed']+=1
+  original=(detail.get('audio') or {}).get('original')
+  if original is None:original=''
+  if not isinstance(original,str):raise ValueError('legacy_probe_detail')
+  has_original=bool(original.strip());counts['original_nonempty' if has_original else 'original_missing_or_empty']+=1
+  prior=fields.get('audio_transcript','')
+  if prior:
+   counts['legacy_transcript_nonempty']+=1
+   counts['original_equals_legacy_transcript' if has_original and original==prior else 'legacy_transcript_differs']+=1
+  if has_original and body==original:counts['whole_body_equals_original']+=1
+  counts['attachments_present']+=bool(detail.get('attachments'))
+  try:
+   rendered,_=render(detail,[],Path(entry['filePath']),faithful=True)
+  except ValueError as error:
+   if str(error)!='transcript_pending':raise
+   counts['render_unavailable']+=1
+  else:
+   _,rendered_body=legacy_document(rendered.encode())
+   if body==rendered_body:counts['whole_body_equals_detail_text_render']+=1
+ return {'mode':'legacy_eight_readonly','status':'legacy_eight_diagnostic_complete','counts':counts,
+  'read_only':True,'raw_payload_retained':False,'baseline_adopted':0,'source_content_complete_claimed':False}
+
+def safe_legacy_eight_report(value):
+ result={'mode':'legacy_eight_readonly','status':'failed','read_only':True,
+  'raw_payload_retained':False,'baseline_adopted':0,'source_content_complete_claimed':False}
+ if not isinstance(value,dict):return result
+ c=value.get('counts')
+ valid=isinstance(c,dict) and set(c)==set(LEGACY_COUNTS) and all(type(c[k]) is int and 0<=c[k]<=8 for k in LEGACY_COUNTS)
+ if valid and c['selected']==c['fresh_details']==8 and c['original_nonempty']+c['original_missing_or_empty']==8 and c['source_version_same_as_retained']+c['source_version_changed']==8 and c['original_equals_legacy_transcript']+c['legacy_transcript_differs']==c['legacy_transcript_nonempty'] and c['whole_body_equals_original']<=c['original_nonempty'] and c['whole_body_equals_detail_text_render']+c['render_unavailable']<=8:
+  if value.get('status')=='legacy_eight_diagnostic_complete' and value.get('read_only') is True and value.get('raw_payload_retained') is False and type(value.get('baseline_adopted')) is int and value.get('baseline_adopted')==0 and value.get('source_content_complete_claimed') is False and value.get('refs_unchanged') is True:
+   result.update(status='legacy_eight_diagnostic_complete',counts=dict(c),refs_unchanged=True)
+ if result['status']=='failed':result['error']='legacy_probe_failed'
+ return result
+
+def legacy_eight_main():
+ import os
+ from get_private_preview_retention import (GitHubRemote,review_source,GET,BACKUP_REF,PREVIEW_REF,FIDELITY_PREVIEW_REF,MAIN_REF,strict_json)
+ from source_sync_inventory import ResponseBudget
+ from source_sync_rate import RequestPolicy
+ import sync_getnote_to_raw as sync
+ try:
+  remote=GitHubRemote(None,os.environ.get('PRIVATE_VAULT_TOKEN'))
+  if remote.metadata().get('private') is not True:raise ValueError('legacy_probe_target')
+  def refs():return {ref:remote.ref(ref) for ref in (MAIN_REF,BACKUP_REF,PREVIEW_REF,FIDELITY_PREVIEW_REF)}
+  before=refs()
+  if before[BACKUP_REF]!=LEGACY_SOURCE or before[PREVIEW_REF]!=LEGACY_OLD_PREVIEW or before[FIDELITY_PREVIEW_REF]!=LEGACY_NEW_PREVIEW:raise ValueError('legacy_probe_refs')
+  review_source(remote,LEGACY_SOURCE)
+  trees={commit:remote.check_source_budget(commit) for commit in (LEGACY_SOURCE,LEGACY_OLD_PREVIEW,LEGACY_NEW_PREVIEW)}
+  def read(commit,path):
+   mode,kind,sha,size=trees[commit][GET+'/'+path]
+   if mode!='100644' or kind!='blob' or size>2*1024*1024:raise ValueError('legacy_probe_budget')
+   return remote.blob(sha,size)
+  old=strict_json(read(LEGACY_OLD_PREVIEW,'03 State/cloud-sync-state.json'));new=strict_json(read(LEGACY_NEW_PREVIEW,'03 State/cloud-sync-state.json'))
+  selected=legacy_cohort(old,new)
+  for ident in selected:
+   path=GET+'/'+new['conflictsById'][ident]['filePath']
+   if trees[LEGACY_SOURCE].get(path)!=trees[LEGACY_NEW_PREVIEW].get(path):raise ValueError('legacy_probe_mirror_changed')
+  key,client=sync.load_credentials();policy=RequestPolicy(seconds=300);budget=ResponseBudget(16*1024*1024)
+  def detail(ident):
+   value=sync.api_get(sync.DETAIL_PATH,{'id':ident,'image_quality':'original'},key,client,
+    max_response_bytes=2*1024*1024,response_budget=budget,request_policy=policy)
+   if not isinstance(value,dict):raise ValueError('legacy_probe_detail')
+   value=value.get('data',value)
+   if not isinstance(value,dict):raise ValueError('legacy_probe_detail')
+   return value.get('note',value)
+  result=diagnose_legacy_eight(old,new,lambda path:read(LEGACY_SOURCE,path),detail)
+  review_source(remote,LEGACY_SOURCE)
+  if refs()!=before:raise ValueError('legacy_probe_refs')
+  result['refs_unchanged']=True
+ except (Exception,SystemExit):result={}
+ public=safe_legacy_eight_report(result);print(json.dumps(public));return 0 if public['status']=='legacy_eight_diagnostic_complete' else 1
+
+
 def main():
  p=argparse.ArgumentParser();p.add_argument('--publish-report',type=Path);p.add_argument('--pending-diagnostic',action='store_true');p.add_argument('--private-preview-vault',type=Path);p.add_argument('--private-preview-output',type=Path);p.add_argument('--expected-source-commit');args=p.parse_args()
  if args.private_preview_vault or args.private_preview_output or args.expected_source_commit:
@@ -154,7 +288,8 @@ def main():
  if args.publish_report:
   try:result=json.loads(args.publish_report.read_text())
   except (OSError,ValueError):result={}
-  print(json.dumps(safe_preview_report(result) if isinstance(result,dict) and result.get('mode')=='private_preview' else safe_report(result)));return 0
+  print(json.dumps(safe_legacy_eight_report(result) if isinstance(result,dict) and result.get('mode')=='legacy_eight_readonly' else (safe_preview_report(result) if isinstance(result,dict) and result.get('mode')=='private_preview' else safe_report(result))));return 0
+ if args.pending_diagnostic:return legacy_eight_main()
  result={};progress=[];stats=[];stores=[];stage='seed';source=None
  try:
   import source_sync_assets as assets
