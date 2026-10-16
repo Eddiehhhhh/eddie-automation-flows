@@ -49,7 +49,7 @@ ERROR_CODES = frozenset(('invalid_commit','invalid_json','outside_get_scope','un
  'existing_preview_conflict','remote_blob_readback_failed','preview_ref_changed','backup_not_verified',
  'preview_retention_failed','conflicting_modes','missing_preview_output','retention_failed',
  'checkout_failed','checkout_destination_exists','invalid_report','source_tree_budget','invalid_source_tree',
- 'missing_preview_commit','retained_preview_missing','retained_plan_missing','retained_readback_failed',
+ 'missing_preview_commit','retained_preview_missing','retained_plan_missing','retained_readback_failed','review_get_tree_changed',
  'retained_tree_mismatch','retained_payload_mismatch','retained_blob_missing'))
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 ROW_KEYS = {'path', 'action', 'old_blob', 'new_blob', 'old_sha256', 'new_sha256', 'old_bytes', 'new_bytes'}
@@ -284,24 +284,30 @@ class GitHubRemote:
             fail('remote_blob_invalid')
         return content
 
-    def check_source_budget(self, source):
-        # Walk only root/Raw tree metadata, then the Get subtree. No non-Get
-        # blob bodies are requested; truncated or oversized responses stop.
-        def entries(revision, recursive=False):
-            value = self.request('/git/trees/' + checked_sha(revision) + ('?recursive=1' if recursive else ''), maximum=16 * 1024 * 1024)
-            if value.get('truncated') is not False or not isinstance(value.get('tree'), list):
-                fail('invalid_source_tree')
-            return value['tree']
+    def tree_entries(self, revision, recursive=False):
+        value = self.request('/git/trees/' + checked_sha(revision) + ('?recursive=1' if recursive else ''), maximum=16 * 1024 * 1024)
+        if value.get('truncated') is not False or not isinstance(value.get('tree'), list):
+            fail('invalid_source_tree')
+        return value['tree']
+
+    def source_get_tree(self, source):
+        # Exact tree identity covers all paths, modes and bytes, without reading
+        # any non-Get body or interpreting timestamps as source equivalence.
         revision = self.commit(source)['tree']
         for wanted in ('Raw', '03 Get'):
-            selected = [entry for entry in entries(revision) if entry.get('path') == wanted]
+            selected = [entry for entry in self.tree_entries(revision) if entry.get('path') == wanted]
             if len(selected) != 1 or selected[0].get('type') != 'tree' or selected[0].get('mode') != '040000':
                 fail('invalid_source_tree')
             revision = checked_sha(selected[0].get('sha'))
+        return revision
+
+    def check_source_budget(self, source):
+        # Walk only root/Raw metadata and Get. Truncated/oversized reads stop.
+        revision = self.source_get_tree(source)
         count = total = 0
         seen = set()
         blobs = {}
-        for entry in entries(revision, True):
+        for entry in self.tree_entries(revision, True):
             path = safe_path(GET + '/' + entry.get('path', ''))
             if path in seen:
                 fail('invalid_source_tree')
@@ -366,19 +372,45 @@ def create_once(remote, ref, commit):
     return 'created_verified'
 
 
+def review_source(remote, source):
+    """Allow a pinned historical review only with its existing exact backup.
+
+    A newer main may differ outside Get. This is never an apply/rebase gate:
+    the preview keeps source as its parent and cannot write main or old refs.
+    """
+    checked_sha(source)
+    main = remote.ref(MAIN_REF)
+    if main is None:
+        fail('remote_main_changed')
+    checked_sha(main)
+    if main != source:
+        if remote.ref(BACKUP_REF) != source:
+            fail('remote_main_changed')
+        if remote.source_get_tree(main) != remote.source_get_tree(source):
+            fail('review_get_tree_changed')
+        if remote.ref(BACKUP_REF) != source:
+            fail('backup_ref_readback_failed')
+    if remote.ref(MAIN_REF) != main:
+        fail('remote_main_changed')
+    return main
+
+
 def prepare_backup(vault, source_commit, *, token=None, remote=None):
     try:
         local, remote = remote_context(vault, token, remote)
-        preflight(local, remote, source_commit)
+        preflight(local, remote, source_commit, allow_main_drift=True)
+        initial_main = review_source(remote, source_commit)
         current = remote.ref(BACKUP_REF)
+        if current is None and (initial_main != source_commit or remote.ref(MAIN_REF) != source_commit):
+            fail('backup_not_verified')
         if current is not None and current != source_commit:
             fail('backup_ref_conflict')
         status = 'existing_verified' if current == source_commit else create_once(remote, BACKUP_REF, source_commit)
         if remote.ref(BACKUP_REF) != source_commit:
             fail('backup_ref_readback_failed')
-        if remote.ref(MAIN_REF) != source_commit:
-            fail('remote_main_changed')
-        return {'status': 'backup_' + status, 'backup_verified': True, 'main_updated': False, 'source_unchanged': True}
+        main = review_source(remote, source_commit)
+        return {'status': 'backup_' + status, 'backup_verified': True, 'main_updated': False,
+                'source_unchanged': True, 'main_advanced': main != source_commit}
     except RetentionFailure:
         raise
     except Exception:
@@ -561,6 +593,8 @@ def retain_private_preview(vault, output, source_commit, *, token=None, remote=N
         # No rebase or ref refresh can replace the caller's pinned baseline.
         preflight(local, remote, source_commit, allow_main_drift=True)
         preview_ref = prepared['preview_ref']
+        if preview_ref == FIDELITY_PREVIEW_REF:
+            review_source(remote, source_commit)
         current = remote.ref(preview_ref)
         if current is None:
             status = create_once(remote, preview_ref, prepared['commit'])
@@ -574,6 +608,8 @@ def retain_private_preview(vault, output, source_commit, *, token=None, remote=N
         if final_main is None:
             fail('remote_main_changed')
         checked_sha(final_main)
+        if preview_ref == FIDELITY_PREVIEW_REF:
+            final_main = review_source(remote, source_commit)
         return {'status': 'preview_' + status, 'preview_retained': True, 'preview_only': True, 'backup_verified': True,
                 'main_advanced': final_main != source_commit,
                 'main_updated': False, 'published': False, 'apply_ready': False, 'source_unchanged': True,
@@ -599,8 +635,7 @@ def checkout_private(vault, source_commit, *, token=None):
         metadata = remote.metadata()
         if metadata.get('full_name') != REPOSITORY or metadata.get('private') is not True:
             fail('repository_not_private_target')
-        if remote.ref(MAIN_REF) != source_commit:
-            fail('remote_main_changed')
+        review_source(remote, source_commit)
         remote.check_source_budget(source_commit)
         destination.mkdir(mode=0o700, parents=True)
         environment = safe_environment(token)
@@ -618,10 +653,9 @@ def checkout_private(vault, source_commit, *, token=None):
         local.run('fetch', '--depth=1', '--filter=blob:none', '--no-tags', 'origin', source_commit)
         local.run('checkout', '--detach', source_commit)
         local.check_source(source_commit)
-        if remote.ref(MAIN_REF) != source_commit:
-            fail('remote_main_changed')
+        main = review_source(remote, source_commit)
         return {'status': 'private_checkout_verified', 'checkout_verified': True,
-                'source_unchanged': True, 'main_updated': False}
+                'source_unchanged': True, 'main_updated': False, 'main_advanced': main != source_commit}
     except RetentionFailure:
         raise
     except Exception:

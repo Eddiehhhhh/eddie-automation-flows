@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from unittest.mock import patch
 import shutil
 import subprocess
 import sys
@@ -268,5 +269,90 @@ class FaithfulPreviewTests(unittest.TestCase):
         legacy={k:v for k,v in plan.items() if k not in ('state_contract','local_proposal_only','conflicts')}
         self.assertEqual(r.preview_ref_for_plan(legacy),r.PREVIEW_REF)
         with self.assertRaises(r.RetentionFailure):r.preview_ref_for_plan({**plan,'preview_ref':'refs/heads/main'})
+
+    def historical_remote(self, change_get=False):
+        import get_private_preview_retention as r
+        from test_get_private_preview_retention import FakeRemote
+        self.git('remote','add','origin',r.REMOTE_URL);source=self.head
+        target=self.root/'changed.md' if change_get else self.vault/'unrelated.txt'
+        target.write_text('new unrelated main' if not change_get else 'changed Get');self.commit();main=self.head
+        self.git('checkout','--detach',source);self.head=source;local=r.LocalGit(self.vault);remote=FakeRemote(local,source)
+        remote.refs.update({r.MAIN_REF:main,r.BACKUP_REF:source,r.PREVIEW_REF:'e'*40})
+        remote.source_get_tree=lambda sha:local.run('rev-parse',sha+':'+r.GET).decode().strip()
+        remote.check_source_budget=lambda sha:{p:(*row,len(local.blob(row[2]))) for p,row in local.tree(sha).items() if p.startswith(r.GET+'/')}
+        return r,local,remote,main
+    def test_historical_prepare_only_reads_existing_exact_backup_and_equal_get(self):
+        r,local,remote,main=self.historical_remote();before=dict(remote.refs)
+        result=r.prepare_backup(self.vault,self.head,remote=remote)
+        self.assertTrue(result['main_advanced']);self.assertEqual(result['status'],'backup_existing_verified')
+        self.assertEqual(remote.refs,before);self.assertEqual(remote.writes,[])
+        remote.refs.pop(r.BACKUP_REF)
+        with self.assertRaisesRegex(r.RetentionFailure,'remote_main_changed'):r.prepare_backup(self.vault,self.head,remote=remote)
+        remote.refs[r.BACKUP_REF]='a'*40
+        with self.assertRaisesRegex(r.RetentionFailure,'remote_main_changed'):r.prepare_backup(self.vault,self.head,remote=remote)
+        self.assertEqual(remote.writes,[])
+    def test_historical_changed_get_is_blocked_before_prepare_or_retain_write(self):
+        r,local,remote,main=self.historical_remote(change_get=True);before=dict(remote.refs)
+        with self.assertRaisesRegex(r.RetentionFailure,'review_get_tree_changed'):r.prepare_backup(self.vault,self.head,remote=remote)
+        self.preview()
+        with self.assertRaisesRegex(r.RetentionFailure,'review_get_tree_changed'):r.retain_private_preview(self.vault,self.work/'p',self.head,remote=remote)
+        self.assertEqual(remote.refs,before);self.assertEqual(remote.writes,[])
+    def test_historical_backup_disappearance_never_recreates_old_ref(self):
+        r,local,remote,main=self.historical_remote();original=remote.ref;reads=[]
+        def disappearing(ref):
+            if ref==r.BACKUP_REF:
+                reads.append(ref)
+                if len(reads)==3:remote.refs.pop(ref,None)
+            return original(ref)
+        remote.ref=disappearing
+        with self.assertRaisesRegex(r.RetentionFailure,'backup_not_verified'):r.prepare_backup(self.vault,self.head,remote=remote)
+        self.assertNotIn(r.BACKUP_REF,remote.refs);self.assertEqual(remote.writes,[])
+    def test_historical_review_ref_races_fail_closed(self):
+        r,local,remote,main=self.historical_remote();original=remote.source_get_tree
+        def tree(sha):
+            result=original(sha);remote.refs[r.MAIN_REF]=self.head;return result
+        remote.source_get_tree=tree
+        with self.assertRaisesRegex(r.RetentionFailure,'remote_main_changed'):r.review_source(remote,self.head)
+        remote.refs[r.MAIN_REF]=main
+        def backup_race(sha):
+            result=original(sha);remote.refs[r.BACKUP_REF]='b'*40;return result
+        remote.source_get_tree=backup_race
+        with self.assertRaisesRegex(r.RetentionFailure,'backup_ref_readback_failed'):r.review_source(remote,self.head)
+        self.assertEqual(remote.writes,[])
+    def test_historical_faithful_retention_keeps_source_parent_and_all_old_refs(self):
+        r,local,remote,main=self.historical_remote();self.preview();before=dict(remote.refs)
+        result=r.retain_private_preview(self.vault,self.work/'p',self.head,remote=remote)
+        self.assertTrue(result['main_advanced']);self.assertFalse(result['apply_ready'])
+        self.assertEqual(remote.commit(remote.refs[r.FIDELITY_PREVIEW_REF])['parents'],[self.head])
+        self.assertEqual({k:remote.refs[k] for k in before},before)
+        r.retain_private_preview(self.vault,self.work/'p',self.head,remote=remote)
+        self.assertEqual(len(remote.writes),1);self.assertEqual(remote.writes[0][0],r.FIDELITY_PREVIEW_REF)
+    def test_historical_checkout_real_local_fetch_and_second_guard(self):
+        r,local,remote,main=self.historical_remote();source=self.head;fixture=self.vault;before=dict(remote.refs)
+        class OfflineGit(r.LocalGit):
+            def run(self,*args,**kwargs):
+                if args and args[0]=='fetch':
+                    return super().run('fetch','--depth=1','--no-tags',str(fixture),source)
+                if args and args[0]=='push':raise AssertionError('Network writes forbidden')
+                return super().run(*args,**kwargs)
+        with patch.object(r,'GitHubRemote',return_value=remote),patch.object(r,'LocalGit',OfflineGit):
+            result=r.checkout_private(self.work/'checkout',source,token='synthetic')
+        checked=r.LocalGit(self.work/'checkout');checked.check_source(source)
+        self.assertTrue(result['main_advanced']);self.assertEqual(remote.refs,before);self.assertEqual(remote.writes,[])
+        self.assertEqual(checked.tree(source),local.tree(source))
+        class RacingGit(OfflineGit):
+            def check_source(self,sha):
+                super().check_source(sha);remote.refs[r.BACKUP_REF]='a'*40
+        with patch.object(r,'GitHubRemote',return_value=remote),patch.object(r,'LocalGit',RacingGit):
+            with self.assertRaisesRegex(r.RetentionFailure,'remote_main_changed'):r.checkout_private(self.work/'race',source,token='synthetic')
+        self.assertEqual(remote.writes,[])
+    def test_remote_get_tree_requires_complete_unique_directory_metadata(self):
+        import get_private_preview_retention as r
+        remote=object.__new__(r.GitHubRemote);remote.commit=lambda sha:{'tree':'a'*40}
+        for value in ({'truncated':True,'tree':[]},{'truncated':False,'tree':[]},
+                      {'truncated':False,'tree':[{'path':'Raw','mode':'100644','type':'blob','sha':'b'*40}]},
+                      {'truncated':False,'tree':[{'path':'Raw','mode':'040000','type':'tree','sha':'b'*40}]*2}):
+            remote.request=lambda *a,**k:value
+            with self.assertRaisesRegex(r.RetentionFailure,'invalid_source_tree'):remote.source_get_tree('c'*40)
 
 if __name__=='__main__':unittest.main()
