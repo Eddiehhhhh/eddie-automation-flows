@@ -29,6 +29,11 @@ on:
         type: string
         default: ''
         required: false
+      legacy_approved_payload_sha256:
+        description: Exact reviewed logical payload SHA-256; required only for apply
+        type: string
+        default: ''
+        required: false
       legacy_apply:
         description: Apply the bounded manual transaction after explicit production authorization
         type: boolean
@@ -178,13 +183,14 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
           EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
           STATE_SHA256: ${{ inputs.legacy_state_sha256 }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
           APPLY: ${{ inputs.legacy_apply }}
         shell: bash
         run: |
           set -euo pipefail
           args=(--expected-parent "$EXPECTED_PARENT")
           if [[ -n "$STATE_SHA256" ]]; then args+=(--state-sha256 "$STATE_SHA256"); fi
-          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          if [[ "$APPLY" == true ]]; then args+=(--apply --approved-payload-sha256 "$APPROVED_PAYLOAD_SHA256"); fi
           timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get bounded manual legacy transaction' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' "${args[@]}"
 
       - name: Publish aggregate evidence only

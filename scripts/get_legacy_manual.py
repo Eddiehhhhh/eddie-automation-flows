@@ -1,8 +1,8 @@
 """Bounded manual legacy Get transactions. Preparation is the default.
 
 This entry is intentionally separate from scheduled/new-note/Notion writers.
-An apply invocation requires caller authorization for the exact parent and the
-bounded cohort. State hashes are externally supplied trust inputs, never learned
+An apply invocation requires an external approved logical-payload hash. Only
+unrelated main changes can be rebased under that unchanged payload binding. State hashes are externally supplied trust inputs, never learned
 from state being validated. No credentials or private text enter public output.
 """
 from copy import deepcopy
@@ -27,7 +27,7 @@ INITIAL_SHA='b55b4d236979ba4a15d3580950713944b0f13ce30c51bad5f11db1a25646a7d1'
 MAX_CHANGED_BYTES=64*c.MIB
 MAX_MANAGED=1152
 PROTECTED={**c.PROTECTED,c.REF:CAPTURE}
-ERRORS={'manual_failed','manual_target','manual_ref_changed','manual_parent_changed','manual_initial_changed','manual_state_anchor','manual_source_payload','manual_budget','manual_plan','manual_scope','manual_readback','manual_readback_ref','manual_readback_transport','manual_uncertain_write','manual_write_unconfirmed','manual_rollback_conflict','manual_checkpoint'}
+ERRORS={'manual_failed','manual_target','manual_ref_changed','manual_parent_changed','manual_initial_changed','manual_state_anchor','manual_source_payload','manual_budget','manual_plan','manual_scope','manual_readback','manual_readback_ref','manual_readback_transport','manual_uncertain_write','manual_write_unconfirmed','manual_rollback_conflict','manual_checkpoint','manual_approval_changed','manual_approval_required'}
 
 class ManualFailure(a.ParityFailure):
     def __init__(self,code,write_state='not_attempted',attempts=0):
@@ -162,6 +162,23 @@ def detail_note(raw):
     return value if isinstance(value,dict) else None
 
 
+def rules_sha256():
+    """Bind the executed Get rules, transport, wrapper and manual workflow."""
+    root=Path(__file__).resolve().parents[1];scripts=root/'scripts'
+    paths=set(scripts.glob('get_*.py'))|set(scripts.glob('source_sync_*.py'))
+    paths|={scripts/'sync_getnote_to_raw.py',scripts/'run_private_command.py',scripts/'probe_getnote_auth.py',scripts/'verify_shadow_repeat.py',root/'.github/workflows/source-sync-shadow.yml'}
+    return a.sha(a.encoded({str(path.relative_to(root)):a.sha(a.bounded_file(path,2*c.MIB)) for path in sorted(paths)}))
+
+
+def approval_payload(reader,plan,current):
+    """Commit-independent permission: all Get bytes/rules/evidence and exact diff."""
+    return {'contract':'get-legacy-approved-payload-1','rules_sha256':rules_sha256(),
+      'before_get_tree':reader.source_get_tree(plan['parent_commit']),
+      'current_sha256':{path:a.sha(data) for path,data in sorted(current.items())},
+      **{key:deepcopy(plan[key]) for key in ('initial_state_sha256','previous_state_sha256','state_sha256',
+        'capture_anchor','bootstrap','changes','managed','conflicts','pending','counts','source_details','source_summary_sha256')}}
+
+
 def transaction_bytes(reader,parent,commit):
     """Distinct new blob payload across both local commits, not just tip diff."""
     existing={row[2] for row in reader.tree(parent).values()};seen=set();total=0;cursor=commit;count=0
@@ -223,6 +240,7 @@ def prepare(reader,evidence,parent,current,source,*,initial_sha=INITIAL_SHA,stat
       'conflicts':len(proposed['conflictsById']),'pending':len(proposed['pending_ids']),'counts':counts,
       'transaction_bytes':transaction_bytes(reader,parent,update['candidate_commit']),'source_details':len(details),'source_summary_sha256':a.sha(a.encoded(summaries)),
       'local_proposal_only':True,'apply_ready':False}
+    plan['approval_payload_sha256']=a.sha(a.encoded(approval_payload(reader,plan,original_current)))
     verify_plan(reader,plan,files)
     return plan,files
 
@@ -272,11 +290,20 @@ def publish(reader,remote,plan,files,expected_plan_sha,readback,*,sleep=time.sle
 
 
 
-def run(token,source,expected_parent,*,state_sha=None,apply=False,work=None,checkpoint=None):
-    remote=Remote(None,token);guard(remote,expected_parent)
+def run(token,source,expected_parent,*,state_sha=None,apply=False,work=None,checkpoint=None,approved_payload_sha256=None):
+    if apply:
+        try:a.checked(approved_payload_sha256,64)
+        except Exception:fail('manual_approval_required')
+    remote=Remote(None,token);parent=guard(remote)
+    if parent!=expected_parent:
+        if not apply or remote.source_get_tree(expected_parent)!=remote.source_get_tree(parent):fail('manual_parent_changed')
+    approved_parent=expected_parent;expected_parent=parent
     with tempfile.TemporaryDirectory(prefix='get-legacy-manual-',dir=work) as folder:
         root=Path(folder);local=r.readback_checkout(root/'objects',CAPTURE,token);remote.local=local
         reader,evidence,current=load_evidence(local,remote,token,root,expected_parent,anchor=ANCHOR)
+        if approved_parent!=expected_parent:
+            try:local.run('merge-base','--is-ancestor',approved_parent,expected_parent)
+            except Exception:fail('manual_parent_changed')
         if a.STATE in current:
             if state_sha is None:fail('manual_state_anchor')
             state=strict_capture_json(current[a.STATE],a.MAX_STATE);a.validate_state(state,state_sha,evidence)
@@ -284,10 +311,11 @@ def run(token,source,expected_parent,*,state_sha=None,apply=False,work=None,chec
         guard(remote,expected_parent)
         plan,files=prepare(reader,evidence,expected_parent,current,source,initial_sha=INITIAL_SHA,state_sha=state_sha)
         guard(remote,expected_parent)
+        if apply and plan['approval_payload_sha256']!=approved_payload_sha256:fail('manual_approval_changed')
         result={'status':'manual_candidate_verified','main_updated':False,'cas_attempts':0,'readback_verified':True,
           'managed':plan['managed'],'conflicts':plan['conflicts'],'pending':plan['pending'],'changed_paths':len(files),
           'notes_updated':sum(p!=r.GET+'/'+a.STATE for p in files),'changed_bytes':sum(map(len,files.values())),'transaction_bytes':plan['transaction_bytes'],
-          'state_sha256':plan['state_sha256'],'plan_sha256':a.sha(a.encoded(plan)),
+          'state_sha256':plan['state_sha256'],'approval_payload_sha256':plan['approval_payload_sha256'],'plan_sha256':a.sha(a.encoded(plan)),
           'parent_commit':plan['parent_commit'],'candidate_commit':plan['candidate_commit'],**plan['counts']}
         if apply:
             def readback(commit,files):
@@ -310,7 +338,7 @@ def public_report(value):
     if value.get('status') not in ('manual_candidate_verified','manual_transaction_verified') or value.get('readback_verified') is not True:return clean
     for key in ('managed','conflicts','pending','changed_paths','notes_updated','changed_bytes','transaction_bytes','cas_attempts','unchanged','source_version_only','source_updated','conflicted','details_used','outside_legacy_cohort','details_unavailable','detail_requests','api_requests','http_attempts','http_retries'):
         if type(value.get(key)) is int and 0<=value[key]<=c.MAX_RAW:clean[key]=value[key]
-    for key,width in (('state_sha256',64),('plan_sha256',64),('parent_commit',40),('candidate_commit',40)):
+    for key,width in (('state_sha256',64),('approval_payload_sha256',64),('plan_sha256',64),('parent_commit',40),('candidate_commit',40)):
         try:clean[key]=a.checked(value.get(key),width)
         except Exception:return {'status':'manual_failed','main_updated':None,'write_state':'unknown'}
     if not 1<=clean.get('managed',0)<=MAX_MANAGED or clean.get('pending')!=9 or clean.get('cas_attempts') not in (0,1):return {'status':'manual_failed','main_updated':None,'write_state':'unknown'}
@@ -326,7 +354,7 @@ def public_report(value):
 def checkpoint_data(plan):
     return {'contract':'get-legacy-write-attempt-1','planned_parent_commit':plan['parent_commit'],
       'planned_candidate_commit':plan['candidate_commit'],'planned_state_sha256':plan['state_sha256'],
-      'planned_plan_sha256':a.sha(a.encoded(plan)),'planned_changed_paths':len(plan['changes'])}
+      'planned_plan_sha256':a.sha(a.encoded(plan)),'planned_payload_sha256':plan['approval_payload_sha256'],'planned_changed_paths':len(plan['changes'])}
 
 
 def write_checkpoint(path,plan):
@@ -347,8 +375,8 @@ def read_report(path,checkpoint=None):
     if checkpoint and clean['status']=='manual_failed':
         try:
             receipt=strict_capture_json(a.bounded_file(Path(checkpoint),4096),4096)
-            if set(receipt)!={'contract','planned_parent_commit','planned_candidate_commit','planned_state_sha256','planned_plan_sha256','planned_changed_paths'} or receipt['contract']!='get-legacy-write-attempt-1':return clean
-            for key,width in (('planned_parent_commit',40),('planned_candidate_commit',40),('planned_state_sha256',64),('planned_plan_sha256',64)):a.checked(receipt[key],width)
+            if set(receipt)!={'contract','planned_parent_commit','planned_candidate_commit','planned_state_sha256','planned_plan_sha256','planned_payload_sha256','planned_changed_paths'} or receipt['contract']!='get-legacy-write-attempt-1':return clean
+            for key,width in (('planned_parent_commit',40),('planned_candidate_commit',40),('planned_state_sha256',64),('planned_plan_sha256',64),('planned_payload_sha256',64)):a.checked(receipt[key],width)
             if type(receipt['planned_changed_paths']) is not int or not 1<=receipt['planned_changed_paths']<=MAX_MANAGED+1:return clean
             clean.update({k:v for k,v in receipt.items() if k!='contract'})
             if clean.get('write_state')=='unknown':clean['write_state']='uncertain'
@@ -357,18 +385,21 @@ def read_report(path,checkpoint=None):
 
 
 def main(argv=None):
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--expected-parent');parser.add_argument('--state-sha256');parser.add_argument('--publish-report');parser.add_argument('--checkpoint');parser.add_argument('--apply',action='store_true');args=parser.parse_args(argv)
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--expected-parent');parser.add_argument('--state-sha256');parser.add_argument('--approved-payload-sha256');parser.add_argument('--publish-report');parser.add_argument('--checkpoint');parser.add_argument('--apply',action='store_true');args=parser.parse_args(argv)
     if args.publish_report:
         print(json.dumps(read_report(args.publish_report,args.checkpoint)));return 0
     try:
         a.checked(args.expected_parent,40)
         if args.apply and not args.checkpoint:fail('manual_checkpoint')
+        if args.apply:
+            try:a.checked(args.approved_payload_sha256,64)
+            except Exception:fail('manual_approval_required')
         if args.state_sha256:a.checked(args.state_sha256,64)
         disabled_writers()
         import sync_getnote_to_raw as sync
         from source_sync_rate import RequestPolicy
         key,client=sync.load_credentials();source=c.Source(key,client,RequestPolicy(seconds=35*60))
-        result=run(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,state_sha=args.state_sha256,apply=args.apply,checkpoint=(lambda plan:write_checkpoint(args.checkpoint,plan)) if args.checkpoint else None)
+        result=run(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,state_sha=args.state_sha256,apply=args.apply,approved_payload_sha256=args.approved_payload_sha256,checkpoint=(lambda plan:write_checkpoint(args.checkpoint,plan)) if args.checkpoint else None)
         result.update(detail_requests=source.details,api_requests=source.api_requests,http_attempts=source.http_attempts,http_retries=max(0,source.http_attempts-source.api_requests))
     except (Exception,SystemExit) as exc:result={'error':str(exc) if str(exc) in ERRORS else 'manual_failed','write_state':getattr(exc,'write_state','not_attempted')}
     clean=public_report(result);print(json.dumps(clean));return 0 if clean['status']!='manual_failed' else 1

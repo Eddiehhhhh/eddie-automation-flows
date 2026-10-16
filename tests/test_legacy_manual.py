@@ -189,7 +189,7 @@ class ManualTests(unittest.TestCase):
         self.assertIn('args=(--expected-parent "$EXPECTED_PARENT")',workflow);self.assertNotIn('schedule:',workflow)
         self.assertNotIn('actions: write',workflow);self.assertNotIn('contents: write',workflow)
         step=workflow.split('Prepare or explicitly apply one bounded legacy transaction',1)[1].split('- name:',1)[0]
-        self.assertIn('if [[ "$APPLY" == true ]]; then args+=(--apply); fi',step)
+        self.assertIn('if [[ "$APPLY" == true ]]; then args+=(--apply --approved-payload-sha256 "$APPROVED_PAYLOAD_SHA256"); fi',step)
         self.assertNotIn('NOTION_',step);self.assertNotIn('GITHUB_TOKEN:',step)
     def test_oversized_candidate_and_conflicting_public_flags_fail_closed(self):
         with patch.object(m,'MAX_CHANGED_BYTES',100),self.assertRaisesRegex(a.ParityFailure,'manual_budget'):self.prepare()
@@ -209,10 +209,24 @@ class ManualTests(unittest.TestCase):
         candidates={i:{'filePath':v['filePath']} for i,v in self.evidence.census['eligible'].items()}
         with patch.object(m,'CAPTURE',self.f.head),patch.object(m,'ANCHOR',self.f.anchor),patch.object(m,'INITIAL_SHA',self.initial),patch.object(m,'Remote',lambda *args:remote),patch.object(m.r,'readback_checkout',lambda *args:local),patch.object(local,'run',side_effect=git),patch.object(m.c,'fetch_blobs',side_effect=blobs),patch.object(m,'fetch_selected',side_effect=blobs),patch.object(m.c,'authorized_cohort',return_value=({},candidates,set(self.evidence.census['pending_ids']),{},{})),patch.object(m,'disabled_writers',lambda:None):
             source=self.source({'1':{'content':'End to end','updated_at':1776968996}})
-            result=m.run('placeholder',source,self.parent,apply=True,work=self.f.base,checkpoint=lambda plan:None)
+            approved=m.run('placeholder',source,self.parent,work=self.f.base)['approval_payload_sha256']
+            changed=self.source({'1':{'content':'Changed after approval','updated_at':1776968997}})
+            with self.assertRaisesRegex(m.ManualFailure,'manual_approval_changed'):
+                m.run('placeholder',changed,self.parent,apply=True,work=self.f.base,checkpoint=lambda plan:None,approved_payload_sha256=approved)
+            self.assertEqual(remote.calls,[])
+            self.f.git('checkout','-q','-B','fresh-unrelated-main',self.parent)
+            (self.f.repo/'unrelated.txt').write_text('Unrelated archive must survive')
+            rebased_parent=self.f.commit('unrelated main advance');remote.head=rebased_parent
+            self.assertEqual(self.reader.source_get_tree(rebased_parent),self.reader.source_get_tree(self.parent))
+            source=self.source({'1':{'content':'End to end','updated_at':1776968996}})
+            result=m.run('placeholder',source,self.parent,apply=True,work=self.f.base,checkpoint=lambda plan:None,approved_payload_sha256=approved)
             self.assertEqual(result['notes_updated'],1);self.assertEqual(result['cas_attempts'],1);self.assertEqual(source.ids,['1']);self.assertEqual(m.public_report(result)['status'],'manual_transaction_verified')
+            self.assertEqual(result['parent_commit'],rebased_parent)
+            self.assertEqual(self.reader.read(remote.head,'unrelated.txt'),b'Unrelated archive must survive')
             head=remote.head;state=result['state_sha256'];source=self.source({'1':{'content':'End to end','updated_at':1776968996}})
-            again=m.run('placeholder',source,head,state_sha=state,apply=True,work=self.f.base,checkpoint=lambda plan:None)
+            approved=m.run('placeholder',source,head,state_sha=state,work=self.f.base)['approval_payload_sha256']
+            source=self.source({'1':{'content':'End to end','updated_at':1776968996}})
+            again=m.run('placeholder',source,head,state_sha=state,apply=True,work=self.f.base,checkpoint=lambda plan:None,approved_payload_sha256=approved)
             self.assertEqual(again['notes_updated'],0);self.assertEqual(again['changed_paths'],0);self.assertEqual(again['candidate_commit'],head)
             self.assertEqual(source.ids,[]);self.assertEqual(len(remote.calls),1);self.assertEqual(m.public_report(again)['status'],'manual_transaction_verified')
     def test_selected_state_blob_larger_than_source_response_cap_roundtrips(self):
@@ -257,3 +271,49 @@ class ManualTests(unittest.TestCase):
             self.prepare(self.source({'1':{'content':'Fresh changed source','updated_at':1776968998}}))
         first,_=self.prepare();again,values=self.prepare(parent=first['candidate_commit'],state_sha=first['state_sha256'])
         self.assertEqual(again['transaction_bytes'],0);self.assertEqual(values,{})
+
+    def test_apply_requires_external_payload_approval_before_source_or_remote(self):
+        source=self.source()
+        with patch.object(m,'Remote') as remote,self.assertRaisesRegex(m.ManualFailure,'manual_approval_required'):
+            m.run('placeholder',source,self.parent,apply=True,checkpoint=lambda plan:None)
+        remote.assert_not_called();self.assertEqual(source.lists,0)
+
+    def test_logical_approval_is_stable_only_for_unrelated_main_changes(self):
+        first,_=self.prepare();self.f.git('checkout','-q','-B','unrelated-main',self.parent)
+        (self.f.repo/'unrelated.txt').write_text('Unrelated source')
+        parent=self.f.commit('unrelated');second,_=self.prepare(parent=parent)
+        self.assertNotEqual(first['candidate_commit'],second['candidate_commit'])
+        self.assertEqual(first['approval_payload_sha256'],second['approval_payload_sha256'])
+        changed,_=self.prepare(self.source({'1':{'content':'Changed source','updated_at':1776968999}}),parent)
+        self.assertNotEqual(first['approval_payload_sha256'],changed['approval_payload_sha256'])
+        with patch.object(m,'rules_sha256',return_value='f'*64):rules,_=self.prepare(parent=parent)
+        self.assertNotEqual(first['approval_payload_sha256'],rules['approval_payload_sha256'])
+
+    def test_approval_binds_every_current_note_and_unknown_region_byte(self):
+        plan,_=self.prepare();payload=m.approval_payload(self.reader,plan,self.current)
+        self.assertEqual(payload['before_get_tree'],self.reader.source_get_tree(self.parent))
+        self.assertEqual(set(payload['current_sha256']),set(self.current))
+        current=dict(self.current);current['1.md']+=b'Extra user text'
+        self.assertNotEqual(a.sha(a.encoded(payload)),a.sha(a.encoded(m.approval_payload(self.reader,plan,current))))
+        self.assertNotIn('parent_commit',payload);self.assertNotIn('candidate_commit',payload)
+
+    def test_rebase_stops_before_source_if_get_tree_changed(self):
+        remote=self.remote();remote.head='f'*40
+        remote.source_get_tree=lambda head: 'a'*40 if head==self.parent else 'b'*40
+        source=self.source()
+        with patch.object(m,'Remote',lambda *args:remote),patch.object(m,'load_evidence') as load,self.assertRaisesRegex(m.ManualFailure,'manual_parent_changed'):
+            m.run('placeholder',source,self.parent,apply=True,approved_payload_sha256='c'*64,checkpoint=lambda plan:None)
+        load.assert_not_called();self.assertEqual(source.lists,0);self.assertEqual(remote.calls,[])
+
+    def test_rule_fingerprint_binds_actual_transport_dependency_bytes(self):
+        import shutil
+        root=Path(__file__).resolve().parents[1];copy=self.f.base/'rule-copy';copy.mkdir()
+        shutil.copytree(root/'scripts',copy/'scripts',ignore=shutil.ignore_patterns('__pycache__'))
+        (copy/'.github/workflows').mkdir(parents=True)
+        shutil.copyfile(root/'.github/workflows/source-sync-shadow.yml',copy/'.github/workflows/source-sync-shadow.yml')
+        with patch.object(m,'__file__',str(copy/'scripts/get_legacy_manual.py')):
+            original=m.rules_sha256()
+            for name in ('probe_getnote_auth.py','verify_shadow_repeat.py'):
+                path=copy/'scripts'/name;before=path.read_bytes();path.write_bytes(before+b'\n# changed dependency\n')
+                self.assertNotEqual(m.rules_sha256(),original);path.write_bytes(before)
+            self.assertEqual(m.rules_sha256(),original)
