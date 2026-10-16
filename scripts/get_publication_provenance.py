@@ -85,12 +85,23 @@ def validate_policy(value, expected_sha256):
     return deepcopy(value)
 
 
+class InspectRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow automatically; expose HTTP status to the exact log gate.
+
+    urllib converts this returned None into HTTPError, which once() consumes as
+    a bounded response. The log gate alone validates one HTTPS CDN destination;
+    it then makes a separate credential-free GET. Other redirects stay failures.
+    """
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 class _PublicGithub:
     """Shared bounded transport; no ambient auth or reusable download URLs."""
     def __init__(self, *, token=None, opener=None, clock=time.monotonic, sleep=time.sleep):
         self._token = token
         self.credentials_used = int(token is not None)
-        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), m.r.NoRedirect())
+        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), InspectRedirect())
         self.clock = clock; self.sleep = sleep; self.elapsed = 0; self.requests = 0; self.bytes = 0
 
     def once(self, url, maximum):

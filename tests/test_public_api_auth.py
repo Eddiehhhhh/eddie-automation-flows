@@ -1,5 +1,8 @@
 """Existing-token injection and redirect boundary; all HTTP responses synthetic."""
 import io
+import email.message
+import urllib.request
+import urllib.response
 import contextlib
 import os
 from pathlib import Path
@@ -27,6 +30,67 @@ class Tests(unittest.TestCase):
 
     def headers(self, request):
         return {k.lower(): v for k, v in request.header_items()}
+
+
+    def stdlib_client(self, responses, *, legacy=False):
+        # Use the real urllib response/error/redirect chain, not an opener that
+        # hands fabricated 302 responses directly to once(). No sockets exist.
+        calls = []
+        class SyntheticHTTPS(urllib.request.HTTPSHandler):
+            def https_open(self, request):
+                calls.append(request)
+                if not responses: raise AssertionError('No additional request')
+                status, fields, raw = responses.pop(0)
+                headers = email.message.Message()
+                for key, value in fields.items(): headers[key] = value
+                response = urllib.response.addinfourl(io.BytesIO(raw), headers,
+                                                     request.full_url, status)
+                response.msg = 'Synthetic'
+                return response
+        original = urllib.request.build_opener
+        def build(*handlers):
+            if legacy:
+                handlers = tuple(p.m.r.NoRedirect() if isinstance(h, p.InspectRedirect) else h for h in handlers)
+            return original(*handlers, SyntheticHTTPS())
+        with patch.object(p.urllib.request, 'build_opener', side_effect=build):
+            client = p.PublicGithub('existing-runtime-token', sleep=lambda _: None)
+        return client, calls
+
+    def test_real_urllib_chain_reproduces_old_precheck_failure(self):
+        client, calls = self.stdlib_client([(302, {'Location': 'https://fixture.blob.core.windows.net/log'}, b'')], legacy=True)
+        with self.assertRaisesRegex(p.ProvenanceFailure, '^provenance_transport$'):
+            client.logs(123)
+        self.assertEqual(len(calls), 1)
+
+    def test_real_urllib_chain_exposes_302_without_automatic_follow(self):
+        client, calls = self.stdlib_client([
+            (302, {'Location': 'https://fixture.blob.core.windows.net/log?signed=ephemeral'}, b''),
+            (200, {}, b'fixed fixture logs')])
+        self.assertEqual(client.logs(123), b'fixed fixture logs')
+        self.assertEqual(client.requests, 2); self.assertEqual(len(calls), 2)
+        self.assertEqual(self.headers(calls[0])['authorization'], 'Bearer existing-runtime-token')
+        self.assertNotIn('authorization', self.headers(calls[1]))
+
+    def test_real_urllib_chain_redirects_outside_log_gate_never_follow(self):
+        for status in (301, 302, 303, 307, 308):
+            for invalid in ('https://evil.invalid/leak', p.API + '/other'):
+                client, calls = self.stdlib_client([(status, {'Location': invalid}, b'')])
+                with self.assertRaises(p.ProvenanceFailure): client.logs(123)
+                self.assertEqual(len(calls), 1)
+        client, calls = self.stdlib_client([(302, {'Location': 'https://fixture.blob.core.windows.net/log'}, b'')])
+        with self.assertRaisesRegex(p.ProvenanceFailure, '^provenance_unavailable$'): client.json('')
+        self.assertEqual(len(calls), 1)
+        client, calls = self.stdlib_client([
+            (302, {'Location': 'https://fixture.blob.core.windows.net/log'}, b''),
+            (302, {'Location': 'https://other.blob.core.windows.net/log'}, b'')])
+        with self.assertRaisesRegex(p.ProvenanceFailure, '^provenance_logs_unavailable$'): client.logs(123)
+        self.assertEqual(len(calls), 2); self.assertNotIn('authorization', self.headers(calls[1]))
+
+    def test_real_urllib_chain_denials_are_terminal(self):
+        for status in (401, 403, 429):
+            client, calls = self.stdlib_client([(status, {}, b'private error body')])
+            with self.assertRaisesRegex(p.ProvenanceFailure, '^provenance_logs_unavailable$'): client.logs(123)
+            self.assertEqual(len(calls), 1)
 
     def test_fixed_public_json_get_has_only_explicit_existing_token(self):
         client, opener = self.client([fixture.Response(200)])
