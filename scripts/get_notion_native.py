@@ -53,6 +53,29 @@ def note_id(page):
     if not re.fullmatch('[0-9]{19}', value): fail('id_property_invalid')
     return value
 
+def page_difference_categories(before, after):
+    """Ignore only top-level request correlation; return fixed, value-free labels.
+
+    Unknown fields remain strictly compared. Never return original keys or values.
+    """
+    categories = set()
+    groups = {
+        'object': 'identity', 'id': 'identity', 'parent': 'parent',
+        'properties': 'properties', 'last_edited_time': 'edit_metadata',
+        'last_edited_by': 'edit_metadata', 'created_time': 'creation_metadata',
+        'created_by': 'creation_metadata', 'archived': 'lifecycle',
+        'in_trash': 'lifecycle', 'is_locked': 'lifecycle',
+        'icon': 'presentation', 'cover': 'presentation',
+        'url': 'location', 'public_url': 'location',
+    }
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return ('malformed_envelope',)
+    for key in (set(before) | set(after)) - {'request_id'}:
+        if key not in before or key not in after or encoded(before[key]) != encoded(after[key]):
+            categories.add(groups.get(key, 'other_page_field'))
+    return tuple(sorted(categories))
+
+
 def collect(request, *, page_pins=None, data_source_pin=DATA_SOURCE_PIN, database_pin=DATABASE_PIN):
     """Return private snapshots plus safe counts. Never treats observation as ownership.
 
@@ -164,7 +187,11 @@ def collect(request, *, page_pins=None, data_source_pin=DATA_SOURCE_PIN, databas
             return ids
         children(ident)
         final = call('GET', '/pages/' + ident)
-        if final != page: fail('page_changed_during_read')
+        differences = page_difference_categories(page, final)
+        if differences:
+            error = Blocked('page_changed_during_read')
+            error.difference_categories = differences
+            raise error from None
         snapshot = {'complete': True, 'native_blocks_available': True, 'page_id': ident, 'parent_data_source': source, 'id_property': nid, 'identity_query_complete': True, 'exact_id_matches': matches, 'last_edited_time': page.get('last_edited_time'), 'properties_raw': deepcopy(props), 'recursive_blocks': rows, 'ownership_adopted': False}
         if not isinstance(snapshot['last_edited_time'], str) or len(encoded(snapshot)) > MAX_BYTES: fail('incomplete_target_read')
         snapshots[nid] = snapshot; totals += len(rows)

@@ -176,3 +176,13 @@ class RuntimeTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+
+class PageDifferenceReportTests(unittest.TestCase):
+    def test_only_fixed_page_difference_categories_are_public(self):
+        import get_notion_readonly as m
+        base={'status':'notion_readonly_failed','stage':'native_read','reason':'page_changed_during_read'}
+        report=m.public_report({**base,'page_difference_categories':['properties','edit_metadata'],'private':'secret'})
+        self.assertEqual(report['page_difference_categories'],['edit_metadata','properties']);self.assertNotIn('private',report)
+        for bad in (['private-page-id'],[{}],'private'):
+            report=m.public_report({**base,'page_difference_categories':bad});self.assertNotIn('private',str(report));self.assertNotIn('page_difference_categories',report)

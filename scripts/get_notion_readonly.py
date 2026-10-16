@@ -24,6 +24,7 @@ from get_mirror_incremental_replay import strict_capture_json, validate_legacy_c
 NOTION_VERSION = '2025-09-03'
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_HTTP_BYTES = 64 * 1024 * 1024
+PAGE_DIFFERENCES={'identity','parent','properties','edit_metadata','creation_metadata','lifecycle','presentation','location','other_page_field','malformed_envelope'}
 STAGES = {'input', 'native_read', 'source_read', 'planner', 'final_readback'}
 REASONS = {'permission_denied', 'missing_credentials', 'invalid_read_route',
     'read_transport_failed', 'response_budget', 'read_api_failed', 'request_budget',
@@ -173,8 +174,10 @@ def run_readonly(remote, request, parent, *, collector=native.collect):
             'ownership_adopted': False, 'receipt_advance': False, 'main_updated': False}
     except Exception as exc:
         reason = str(exc)
+        difference=getattr(exc,'difference_categories',())
+        safe_difference=sorted(set(difference)) if isinstance(difference,(list,tuple)) and all(isinstance(x,str) and x in PAGE_DIFFERENCES for x in difference) else []
         return {'status': 'notion_readonly_failed', 'stage': stage,
-            'reason': reason if reason in REASONS else 'other', 'external_writes': 0,
+            'reason': reason if reason in REASONS else 'other', 'page_difference_categories':safe_difference, 'external_writes': 0,
             'get_requests': 0, 'asset_downloads': 0, 'ownership_adopted': False, 'receipt_advance': False, 'main_updated': False}
 
 
@@ -184,6 +187,8 @@ def public_report(value):
     if value.get('status') == 'notion_readonly_failed':
         if isinstance(value.get('stage'), str) and value['stage'] in STAGES: failed['stage'] = value['stage']
         if isinstance(value.get('reason'), str) and value['reason'] in REASONS: failed['reason'] = value['reason']
+        differences=value.get('page_difference_categories',[])
+        if isinstance(differences,list) and all(isinstance(x,str) and x in PAGE_DIFFERENCES for x in differences):failed['page_difference_categories']=sorted(set(differences))
         return failed
     if value.get('status') != 'notion_readonly_verified': return failed
     if any(value.get(k) is not False for k in ('ownership_adopted', 'receipt_advance', 'main_updated')): return failed

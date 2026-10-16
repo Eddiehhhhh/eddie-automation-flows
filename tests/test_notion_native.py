@@ -92,4 +92,35 @@ class Test(unittest.TestCase):
    if p=='/pages/'+P:x['parent']=None
    return x
   self.blocked(mutate,'wrong_parent')
+ def test_top_level_request_id_is_not_edit(self):
+  f=Fake()
+  def mutate(m,p,b,x):
+   if p=='/pages/'+P:x['request_id']='request-'+str(f.reads)
+   return x
+  f.mutate=mutate
+  self.assertEqual(self.run_collect(f)['report']['status'],'native_read_verified')
+  self.assertEqual(n.page_difference_categories({}, {'request_id':'anything'}), ())
+ def test_real_edit_categories_are_value_free(self):
+  for field,value,category in [('properties',{},'properties'),('last_edited_time','different','edit_metadata'),('cover',{'url':'PRIVATE'},'presentation'),('PRIVATE_FIELD','PRIVATE_VALUE','other_page_field')]:
+   with self.subTest(field=field):
+    f=Fake()
+    def mutate(m,p,b,x):
+     if p=='/pages/'+P:
+      x['request_id']=str(f.reads)
+      if f.reads>1:x[field]=value
+     return x
+    f.mutate=mutate
+    with self.assertRaises(n.Blocked) as e:self.run_collect(f)
+    self.assertEqual(str(e.exception),'page_changed_during_read')
+    self.assertEqual(e.exception.difference_categories,(category,))
+    self.assertNotIn('PRIVATE',str(e.exception.difference_categories))
+ def test_nested_request_id_is_still_compared(self):
+  self.assertEqual(n.page_difference_categories({'properties':{'request_id':'a'}},{'properties':{'request_id':'b'}}),('properties',))
+ def test_missing_other_field_still_compared(self):
+  self.assertEqual(n.page_difference_categories({'cover':None},{}),('presentation',))
+ def test_json_type_changes_are_edits(self):
+  self.assertEqual(n.page_difference_categories({'properties':{'value':1}}, {'properties':{'value':True}}), ('properties',))
+  self.assertEqual(n.page_difference_categories({'extra':1}, {'extra':True}), ('other_page_field',))
+  self.assertEqual(n.page_difference_categories({'extra':1}, {'extra':1.0}), ('other_page_field',))
+  self.assertEqual(n.page_difference_categories({'request_id':1}, {'request_id':True}), ())
 if __name__=='__main__':unittest.main()
