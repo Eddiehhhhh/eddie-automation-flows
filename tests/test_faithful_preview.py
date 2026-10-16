@@ -442,4 +442,81 @@ class LegacyEightReadOnlyTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())['status'],'failed')
 
 
+
+class LegacyLinkReadOnlyTests(unittest.TestCase):
+    def fixture(self):
+        from get_private_preview_retention import oid
+        from source_sync_mirror_replay import LEGACY_SOURCE
+        import hashlib
+        plan={'source_commit':LEGACY_SOURCE,'changes':[]};state={'contract':'get-source-raw-local-2','local_proposal_only':True,'conflictsById':{}}
+        olds={};previews={};details={}
+        for i in range(1,8):
+            ident=str(i);path=f'Raw/03 Get/04 链接同步摘抄/{ident}.md';excerpt='Legacy private quote '+ident
+            old=('---\nnote_id: '+json.dumps(ident)+'\nnote_type: link\nweb_excerpt: '+json.dumps(excerpt)+'\n---\nUser edited full body\n').encode();preview=old.replace(json.dumps(excerpt).encode(),b'""');row={'path':path,'action':'modify'}
+            for data,prefix in ((old,'old'),(preview,'new')):row.update({prefix+'_blob':oid(data),prefix+'_sha256':hashlib.sha256(data).hexdigest(),prefix+'_bytes':len(data)})
+            plan['changes'].append(row);olds[path]=old;previews[path]=preview
+            state['conflictsById'][ident]={'filePath':path.removeprefix('Raw/03 Get/'),'sourceVersion':raw_source_version('2026-10-15 00:00:00'),'reason':'legacy_baseline_missing','sourceContentHash':None}
+            details[ident]={'id':ident,'note_type':'link','created_at':'2026-10-14 00:00:00','updated_at':'2026-10-15 00:00:00','content':'Source current text','web_page':{'excerpt':'New AI summary','content':'Current article'},'ref_content':''}
+        return plan,state,olds,previews,details
+    def run_probe(self,plan,state,olds,previews,details):
+        from source_sync_mirror_replay import diagnose_legacy_links
+        calls=[];result=diagnose_legacy_links(plan,state,olds.__getitem__,previews.__getitem__,lambda ident:(calls.append(ident) or deepcopy(details[ident])))
+        self.assertEqual(calls,[str(i) for i in range(1,8)]);return result
+    def test_seven_omitted_excerpt_fields_remain_loss_conflicts(self):
+        result=self.run_probe(*self.fixture());c=result['counts']
+        self.assertEqual(c['legacy_excerpt_not_found_in_source_text'],7);self.assertEqual(c['current_web_excerpt_nonempty'],7)
+        self.assertEqual(c['legacy_excerpt_full_field_match'],0);self.assertEqual(result['baseline_adopted'],0)
+        self.assertFalse(result['source_content_complete_claimed']);self.assertFalse(result['raw_payload_retained'])
+    def test_full_field_match_and_substring_presence_are_not_conflated(self):
+        plan,state,olds,previews,details=self.fixture()
+        details['1']['web_page']['excerpt']='Legacy private quote 1'
+        details['2']['web_page']['content']='prefix Legacy private quote 2 suffix'
+        details['3']['ref_content']='Legacy private quote 3'
+        c=self.run_probe(plan,state,olds,previews,details)['counts']
+        self.assertEqual(c['legacy_excerpt_full_field_match'],2);self.assertEqual(c['legacy_excerpt_verbatim_in_source_text'],3)
+        self.assertEqual(c['legacy_excerpt_not_found_in_source_text'],4);self.assertEqual(c['legacy_excerpt_matches_web_excerpt'],1);self.assertEqual(c['legacy_excerpt_matches_ref_content'],1)
+    def test_raw_version_not_normalized_and_no_summary_fallback(self):
+        plan,state,olds,previews,details=self.fixture();details['1']['updated_at']='2026-10-15T00:00:00+08:00';details['2'].pop('web_page')
+        c=self.run_probe(plan,state,olds,previews,details)['counts'];self.assertEqual(c['source_version_changed'],1);self.assertEqual(c['current_web_excerpt_nonempty'],6)
+    def test_all_old_blobs_validate_before_any_get_request(self):
+        from source_sync_mirror_replay import diagnose_legacy_links
+        plan,state,olds,previews,details=self.fixture();olds[plan['changes'][-1]['path']]+=b'edit'
+        with self.assertRaisesRegex(ValueError,'legacy_probe_mirror_changed'):diagnose_legacy_links(plan,state,olds.__getitem__,previews.__getitem__,lambda _:self.fail('no details before cohort validation'))
+    def test_cohort_duplication_bad_identity_or_field_shape_fail_closed(self):
+        from source_sync_mirror_replay import legacy_link_rows
+        plan,state,olds,previews,details=self.fixture();plan['changes'][-1]=plan['changes'][0]
+        with self.assertRaisesRegex(ValueError,'legacy_probe_cohort'):legacy_link_rows(plan)
+        plan,state,olds,previews,details=self.fixture();details['1']['id']='2'
+        with self.assertRaisesRegex(ValueError,'legacy_probe_identity'):self.run_probe(plan,state,olds,previews,details)
+    def test_public_report_needs_refs_and_has_no_private_values(self):
+        from source_sync_mirror_replay import safe_legacy_links_report
+        result=self.run_probe(*self.fixture());self.assertEqual(safe_legacy_links_report(result)['status'],'failed')
+        result['refs_unchanged']=True;result['body']='private secret';public=safe_legacy_links_report(result)
+        self.assertEqual(public['status'],'legacy_links_diagnostic_complete');self.assertNotIn('body',public)
+        result['counts']['legacy_excerpt_verbatim_in_source_text']=1;self.assertEqual(safe_legacy_links_report(result)['status'],'failed')
+    def test_main_uses_seven_fixed_private_ids_without_writes(self):
+        import io
+        from contextlib import redirect_stdout
+        import source_sync_mirror_replay as cli
+        import get_private_preview_retention as retention
+        import sync_getnote_to_raw as sync
+        plan,state,olds,previews,details=self.fixture();trees={c:{} for c in (cli.LEGACY_SOURCE,cli.LEGACY_OLD_PREVIEW,cli.LEGACY_NEW_PREVIEW)};blobs={};calls=[]
+        def add(commit,path,data):
+            sha=retention.oid(data);blobs[sha]=data;trees[commit][path]=('100644','blob',sha,len(data))
+        add(cli.LEGACY_OLD_PREVIEW,retention.GET+'/03 State/cloud-preview-plan.json',json.dumps(plan).encode());add(cli.LEGACY_NEW_PREVIEW,retention.GET+'/03 State/cloud-sync-state.json',json.dumps(state).encode())
+        for path,data in olds.items():add(cli.LEGACY_SOURCE,path,data);add(cli.LEGACY_NEW_PREVIEW,path,data);add(cli.LEGACY_OLD_PREVIEW,path,previews[path])
+        class ReadOnlyRemote:
+            def metadata(self):return {'private':True}
+            def ref(self,ref):return {retention.MAIN_REF:'a'*40,retention.BACKUP_REF:cli.LEGACY_SOURCE,retention.PREVIEW_REF:cli.LEGACY_OLD_PREVIEW,retention.FIDELITY_PREVIEW_REF:cli.LEGACY_NEW_PREVIEW}[ref]
+            def check_source_budget(self,commit):return trees[commit]
+            def blob(self,sha,size):assert len(blobs[sha])==size;return blobs[sha]
+        def api(path,params,*args,**kwargs):
+            self.assertEqual(path,sync.DETAIL_PATH);calls.append(params['id']);return {'data':{'note':details[params['id']]}}
+        output=io.StringIO()
+        with patch.object(retention,'GitHubRemote',return_value=ReadOnlyRemote()),patch.object(retention,'review_source') as review,patch.object(sync,'load_credentials',return_value=('synthetic','synthetic')),patch.object(sync,'api_get',side_effect=api),patch.object(sys,'argv',['script','--pending-diagnostic']),redirect_stdout(output):self.assertEqual(cli.main(),0)
+        self.assertEqual(calls,[str(i) for i in range(1,8)]);self.assertEqual(review.call_count,2)
+        report=json.loads(output.getvalue());self.assertEqual(report['status'],'legacy_links_diagnostic_complete');self.assertNotIn('Legacy private quote',output.getvalue())
+        self.assertEqual(cli.safe_legacy_links_report(report),report)
+
+
 if __name__=='__main__':unittest.main()
