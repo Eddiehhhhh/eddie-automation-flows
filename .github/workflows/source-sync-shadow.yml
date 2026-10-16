@@ -298,8 +298,10 @@ jobs:
               print(json.dumps({'public_actions_logs': 'blocked', 'requests': client.requests, 'http_statuses': client.statuses, 'writes': 0}))
               raise SystemExit(1)
           PYPUBLIC
-          timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion transaction read-only preparation' --stdout-file '${{ runner.temp }}/notion-prepare-result.json' -- python scripts/get_notion_runtime.py --expected-parent "$EXPECTED_PARENT"
+          prepare_status=0
+          timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion transaction read-only preparation' --stdout-file '${{ runner.temp }}/notion-prepare-result.json' -- python scripts/get_notion_runtime.py --expected-parent "$EXPECTED_PARENT" || prepare_status=$?
           cat '${{ runner.temp }}/notion-prepare-result.json' | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$prepare_status"
 
       - name: Publish aggregate evidence only
         if: always()
