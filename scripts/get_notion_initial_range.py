@@ -25,11 +25,11 @@ def same(a,b):return p.encoded(a)==p.encoded(b)
 def historical_roots(markdown, ident, *, h4_mapping, readback=False):
     """Strict known enhanced-Markdown grammar; no current-tree inference.
 
-    h4_mapping must explicitly be heading_3. If the actual old writer rendered
-    it differently, the unique native match fails rather than guessing a map.
+    h4_mapping must explicitly be heading_4. Heading levels stay exact; the
+    old h4-to-h3 transform and its proof are rejected, not silently migrated.
     Historical callouts/images/dividers are protected, never proposed as owned.
     """
-    if not isinstance(markdown,str) or len(markdown.encode())>MAX_INPUT or h4_mapping!='heading_3':fail('unsupported_history')
+    if not isinstance(markdown,str) or len(markdown.encode())>MAX_INPUT or h4_mapping!='heading_4':fail('unsupported_history')
     lines=markdown.splitlines();entries=[];plain=[];index=0
     def flush():
         if not plain:return
@@ -95,8 +95,7 @@ def historical_roots(markdown, ident, *, h4_mapping, readback=False):
         elif line.startswith('<'):
             fail('unsupported_history')
         else:
-            if line.startswith('#### '):line='### '+line[5:]
-            elif re.match(r'^#{4,}',line):fail('unsupported_history')
+            if re.match(r'^#{5,}',line):fail('unsupported_history')
             plain.append(line);index+=1
     flush()
     if len(entries)>p.MAX_BLOCKS:fail('unsupported_history')
@@ -120,8 +119,15 @@ def canonical_semantics(blocks):
         for key in ('rich_text','caption'):
             if key in payload:payload[key]=runs(payload[key])
         if 'cells' in payload:payload['cells']=[runs(x) for x in payload['cells']]
-        row['children']=[walk(x) for x in row['children']];return row
-    return [walk(x) for x in blocks]
+        row['children']=canonical_semantics(row['children']);return row
+    result=[walk(x) for x in blocks]
+    # The first item of a numeric list implicitly starts at 1. Later explicit
+    # resets remain present and must exactly match the historical/source list.
+    previous=None
+    for row in result:
+        if row['type']=='numbered_list_item' and previous!='numbered_list_item':row['payload'].setdefault('list_start_index',1)
+        previous=row['type']
+    return result
 
 
 def verify_historical_readback(prepared_entries,readback,ident,h4_mapping):
@@ -141,9 +147,11 @@ def verify_historical_readback(prepared_entries,readback,ident,h4_mapping):
         lines.append(''.join(chunks))
     content='\n'.join(lines)
     entries=historical_roots(content,ident,h4_mapping=h4_mapping,readback=True)
-    expected=canonical_semantics(owned_sequence(prepared_entries));actual=[]
+    expected=canonical_semantics(owned_sequence(prepared_entries));actual=[];pending=[]
     for row in entries:
-        actual.append(canonical_semantics([row['block']])[0] if 'block' in row else None)
+        if 'block' in row:pending.append(row['block'])
+        else:actual.extend(canonical_semantics(pending));pending=[];actual.append(None)
+    actual.extend(canonical_semantics(pending))
     matches=sum(same(actual[i:i+len(expected)],expected) for i in range(len(actual)-len(expected)+1))
     if matches!=1:fail('evidence_invalid')
     return prepared_entries
@@ -253,7 +261,7 @@ def propose(evidence,expected_evidence_sha,source_data,snapshot,data_source_id):
 
 
 PROOF_CONTRACT='get-notion-historical-semantic-proof-1'
-TRANSFORM='get-api-body-without-footer-h4-to-h3-1'
+TRANSFORM='get-api-body-without-footer-native-h4-default-list-2'
 
 
 def reconstructed_roots(source_data,ident,source_path):
@@ -270,8 +278,7 @@ def reconstructed_roots(source_data,ident,source_path):
     if any('![[' in x or '![' in x or '<image' in x or '<img' in x for x in lines):fail('missing_asset')
     mapped=[]
     for line in lines:
-        if line.startswith('#### '):line='### '+line[5:]
-        elif re.match(r'^#{4,}',line):fail('unsupported_history')
+        if re.match(r'^#{5,}',line):fail('unsupported_history')
         mapped.append(line)
     data=('---\nnote_id: '+json.dumps(ident)+'\n---\n'+'\n'.join(mapped)+'\n').encode()
     try:blocks,_,_=p.render_markdown(data,ident,{},source_path,{})
@@ -355,6 +362,7 @@ DIAGNOSTIC_STAGES=frozenset(('complete','envelope','row_identity','row_shape','p
     'payload_keys','payload_shape','rich_text_shape','rich_text_kind','annotations','link',
     'heading_toggle','table_shape','asset_binding','children','snapshot_tree_other'))
 DIFFERENCES=frozenset(('text','annotations','link','table','heading','children','block_type','payload_schema','other_payload'))
+SHAPES=frozenset(('heading_4','paragraph_icon_absent','paragraph_icon_null','paragraph_icon_other','list_start_absent','list_start_null','list_start_one','list_start_nondefault','list_start_invalid','list_format_absent','list_format_null','list_format_numbers','list_format_nondefault','list_format_invalid','embedded_children_absent','embedded_children_empty','embedded_children_nonempty','embedded_children_invalid','unexpected_payload_keys'))
 ALIGNMENTS=frozenset(('not_available','unique_best','tied_best','insufficient_roots','budget'))
 
 def diagnostic_kind(kind):return kind if isinstance(kind,str) and kind in p.KINDS else 'other'
@@ -382,7 +390,8 @@ def payload_stage(kind,payload):
         allowed={'rich_text','color'}
         if kind=='to_do':allowed.add('checked')
         if kind=='code':allowed|={'language','caption'}
-        if kind=='callout':allowed.add('icon')
+        if kind in ('callout','paragraph'):allowed.add('icon')
+        if kind=='numbered_list_item':allowed|={'list_start_index','list_format'}
         if kind.startswith('heading_'):allowed.add('is_toggleable')
         if set(payload)-allowed:return 'payload_keys'
         stage=rich_stage(payload.get('rich_text'))
@@ -401,14 +410,40 @@ def payload_stage(kind,payload):
     if kind in ('table','table_row'):return 'table_shape'
     return 'payload_keys' if payload else 'payload_shape'
 
+def shape_counts(rows):
+    out={}
+    for row in rows:
+        if not isinstance(row,dict):continue
+        kind=row.get('type');payload=row.get('payload')
+        if kind=='heading_4':increment(out,'heading_4')
+        if not isinstance(payload,dict):continue
+        if kind=='paragraph':increment(out,'paragraph_icon_absent' if 'icon' not in payload else 'paragraph_icon_null' if payload['icon'] is None else 'paragraph_icon_other')
+        if kind=='numbered_list_item':
+            v=payload.get('list_start_index')
+            label='absent' if 'list_start_index' not in payload else 'null' if v is None else 'one' if type(v) is int and v==1 else 'nondefault' if type(v) is int else 'invalid'
+            increment(out,'list_start_'+label)
+            v=payload.get('list_format')
+            label='absent' if 'list_format' not in payload else 'null' if v is None else 'numbers' if v=='numbers' else 'nondefault' if v in ('letters','roman') else 'invalid'
+            increment(out,'list_format_'+label)
+        if kind in p.TEXT_KINDS:
+            v=payload.get('children');increment(out,'embedded_children_absent' if 'children' not in payload else 'embedded_children_empty' if v==[] else 'embedded_children_nonempty' if isinstance(v,list) else 'embedded_children_invalid')
+            allowed={'rich_text','color','children'}
+            if kind in ('paragraph','callout'):allowed.add('icon')
+            if isinstance(kind,str) and kind.startswith('heading_'):allowed.add('is_toggleable')
+            if kind=='numbered_list_item':allowed|={'list_start_index','list_format'}
+            if kind=='code':allowed|={'language','caption'}
+            if kind=='to_do':allowed.add('checked')
+            if set(payload)-allowed:increment(out,'unexpected_payload_keys')
+    return out
+
 def snapshot_diagnostic(snapshot):
-    out={'stage':'envelope','native_blocks':0,'native_roots':0,'root_type_counts':{},'all_type_counts':{},'failure_stage_counts':{},'failure_type_counts':{}}
+    out={'stage':'envelope','native_blocks':0,'native_roots':0,'root_type_counts':{},'all_type_counts':{},'failure_stage_counts':{},'failure_type_counts':{},'known_shape_counts':{}}
     if not isinstance(snapshot,dict) or snapshot.get('complete') is not True or snapshot.get('native_blocks_available') is not True:return out
     try:
         if len(p.encoded(snapshot))>p.MAX_TARGET:return out
         page=p.notion_id(snapshot.get('page_id'));rows=snapshot.get('recursive_blocks')
         if not isinstance(rows,list) or len(rows)>p.MAX_BLOCKS or not isinstance(snapshot.get('properties_raw'),dict):return out
-        out['native_blocks']=len(rows);nodes={};first=None
+        out['native_blocks']=len(rows);out['known_shape_counts']=shape_counts(rows);nodes={};first=None
         for row in rows:
             stage='complete';kind=diagnostic_kind(row.get('type')) if isinstance(row,dict) else 'other'
             increment(out['all_type_counts'],kind)
@@ -468,11 +503,15 @@ def diagnose_from_git(proof,expected_proof_sha,source_data,snapshot,data_source_
         nodes,roots,_=raw_tree(snapshot,proof['note_id'],p.notion_id(data_source_id),p.notion_id(proof['page_id']))
         if len(roots)<len(expected):out['alignment']='insufficient_roots';return out
         if len(roots)>256 or len(expected)>256:out['alignment']='budget';return out
-        cache={};comparisons=[0]
+        cache={};comparisons=[0];previous={}
+        for siblings in [roots]+[node['children_ids'] for node in nodes.values()]:
+            prior=None
+            for bid in siblings:previous[bid]=prior;prior=nodes[bid]['type']
         def actual(bid):
             if bid not in cache:
                 node=nodes[bid];stage=payload_stage(node['type'],node['payload'])
-                payload=p.normalize_payload(node['type'],node['payload']) if stage=='complete' else node['payload']
+                payload=p.normalize_payload(node['type'],node['payload']) if stage=='complete' else deepcopy(node['payload'])
+                if stage=='complete' and node['type']=='numbered_list_item' and previous[bid]!='numbered_list_item':payload.setdefault('list_start_index',1)
                 cache[bid]={'type':node['type'],'payload':payload,'children':[actual(x) for x in node['children_ids']],'stage':stage}
             return cache[bid]
         def rich(items):
@@ -515,7 +554,7 @@ def diagnose_from_git(proof,expected_proof_sha,source_data,snapshot,data_source_
                 if not isinstance(lc,list) or not isinstance(rc,list) or len(lc)!=len(rc):diff.add('table')
                 if isinstance(lc,list) and isinstance(rc,list):
                     for a,b in zip(lc,rc):diff|=text_difference(a,b)
-            if any(lp.get(k)!=rp.get(k) for k in ('checked','language','icon')):diff.add('other_payload')
+            if any(lp.get(k)!=rp.get(k) for k in ('checked','language','icon','list_start_index','list_format')):diff.add('other_payload')
             if len(left['children'])!=len(right['children']):diff.add('children')
             for a,b in zip(left['children'],right['children']):diff|=difference(a,b)
             return diff
@@ -550,6 +589,7 @@ def valid_diagnostic(value):
         if set(value['best_difference_min_counts'])!=set(value['best_difference_max_counts']) or any(value['best_difference_min_counts'][k]>value['best_difference_max_counts'][k] for k in value['best_difference_min_counts']):return False
         schema=value['schema']
         if not isinstance(schema,dict) or set(schema)!=set(snapshot_diagnostic(None)) or schema['stage'] not in DIAGNOSTIC_STAGES:return False
+        if not counts(schema['known_shape_counts'],SHAPES):return False
         if not count(schema['native_blocks']) or not count(schema['native_roots']) or schema['native_roots']>schema['native_blocks']:return False
         for key in ('root_type_counts','all_type_counts','failure_type_counts'):
             if not counts(schema[key],DIAGNOSTIC_TYPES):return False

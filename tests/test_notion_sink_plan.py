@@ -201,12 +201,43 @@ class SinkTests(unittest.TestCase):
         self.assets['../assets/image.png']['bytes'] += b'corrupt'
         self.assertEqual(self.record()['reason_codes'], ['missing_asset'])
 
+    def test_native_h4_keeps_exact_level_without_h3_alias(self):
+        self.change_source('#### Native fourth level\n')
+        out=self.record();node=out['operations'][0]['proposed_blocks'][0]
+        self.assertEqual(node['type'],'heading_4');self.assertEqual(out['renderer_version'],n.RENDERER)
+        self.assertNotIn('heading_level_fallback',out['render_warnings'])
+
+    def test_paragraph_only_null_icon_is_default_and_source_is_not_mutated(self):
+        raw={'rich_text':[n.text_run('body')],'icon':None};before=deepcopy(raw)
+        self.assertNotIn('icon',n.normalize_payload('paragraph',raw));self.assertEqual(raw,before)
+        for icon in ({'emoji':'x'},[],False,''):
+            with self.assertRaises(n.Blocked):n.normalize_payload('paragraph',dict(raw,icon=icon))
+        with self.assertRaises(n.Blocked):n.normalize_payload('paragraph',dict(raw,unknown=None))
+
+    def test_numbered_default_format_and_explicit_reset_preserved(self):
+        raw={'rich_text':[n.text_run('item')],'list_start_index':1,'list_format':'numbers'}
+        value=n.normalize_payload('numbered_list_item',raw)
+        self.assertEqual(value['list_start_index'],1);self.assertNotIn('list_format',value)
+        for key,values in [('list_start_index',(None,True,1.0,0,2)),('list_format',(None,'letters','roman','unknown',True))]:
+            for item in values:
+                with self.assertRaises(n.Blocked):n.normalize_payload('numbered_list_item',dict(raw,**{key:item}))
+
+    def test_numeric_source_lists_preserve_explicit_start_and_reset(self):
+        md=self.markdown('1. First\n2. Next\n\n1. Reset\n2. Next\n')
+        blocks,_,_=n.render_markdown(md,self.ident,{},self.path,{})
+        self.assertEqual([b['payload'].get('list_start_index') for b in blocks],[1,None,1,None])
+        with self.assertRaises(n.Blocked):n.render_markdown(self.markdown('2. Nondefault start\n'),self.ident,{},self.path,{})
+
+    def test_prior_renderer_receipt_is_not_implicitly_migrated(self):
+        self.receipt['renderer_version']='get-notion-native-subset-2';self.pin()
+        self.assertEqual(self.record()['reason_codes'],['missing_block_ownership'])
+
     def test_table_heading_fallback_code_task_and_trailing_text_render(self):
         self.change_source('#### Deep heading\n\n| A | B |\n| --- | --- |\n| value | **bold** |\n\n```python\nprint(1)\n```\n\n- [x] Complete\n\nTrailing final paragraph.\n')
         out = self.record(); self.assertEqual(out['decision'], 'preview_diff')
         blocks = out['operations'][0]['proposed_blocks']
-        self.assertEqual([b['type'] for b in blocks], ['paragraph', 'table', 'code', 'to_do', 'paragraph'])
-        self.assertIn('heading_level_fallback', out['render_warnings'])
+        self.assertEqual([b['type'] for b in blocks], ['heading_4', 'table', 'code', 'to_do', 'paragraph'])
+        self.assertNotIn('heading_level_fallback', out['render_warnings'])
         self.assertEqual(blocks[-1]['payload']['rich_text'][0]['text']['content'], 'Trailing final paragraph.')
 
     def test_unsupported_nested_syntax_is_explicit_not_flattened(self):

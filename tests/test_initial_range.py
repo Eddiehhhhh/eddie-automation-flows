@@ -15,7 +15,7 @@ HISTORY='<callout icon="📝" color="gray_bg">\n\tHistorical preview notice\n</c
 def paragraph(text):return p.block('paragraph',{'rich_text':[p.text_run(text)]})
 def evidence(history=HISTORY):
  data=('---\nnote_id: '+json.dumps(N)+'\n---\nSource body\n').encode()
- value={'note_id':N,'page_id':P,'source':{'commit':'a'*40,'path':'Raw/03 Get/notes/sample.md','blob':p.git_blob(data),'sha256':p.digest(data)},'prepared_markdown':history,'readback':{'id':P,'text':'<page>\n<content>\n'+history+'\n</content>\n</page>'},'h4_mapping':'heading_3'}
+ value={'note_id':N,'page_id':P,'source':{'commit':'a'*40,'path':'Raw/03 Get/notes/sample.md','blob':p.git_blob(data),'sha256':p.digest(data)},'prepared_markdown':history,'readback':{'id':P,'text':'<page>\n<content>\n'+history+'\n</content>\n</page>'},'h4_mapping':'heading_4'}
  return value,data
 
 def snapshot(blocks):
@@ -30,7 +30,7 @@ def snapshot(blocks):
 
 class Tests(unittest.TestCase):
  def fixture(self,history=HISTORY):
-  ev,data=evidence(history);entries=m.historical_roots(history,N,h4_mapping='heading_3')
+  ev,data=evidence(history);entries=m.historical_roots(history,N,h4_mapping='heading_4')
   blocks=[paragraph('Original metadata'),p.block('divider',{})]
   for entry in entries:
    if entry.get('kind')=='image':blocks.append({'type':'image','payload':{'type':'file','file':{'url':'https://private.invalid/temporary','expiry_time':'later'},'caption':[]},'children':[]})
@@ -38,9 +38,9 @@ class Tests(unittest.TestCase):
   blocks.append(paragraph('Human extra'))
   return ev,data,snapshot(blocks),entries
  def test_explicit_h4_table_and_callout_parser(self):
-  entries=m.historical_roots(HISTORY,N,h4_mapping='heading_3')
+  entries=m.historical_roots(HISTORY,N,h4_mapping='heading_4')
   self.assertEqual(entries[0]['role'],'protected');self.assertEqual(entries[0]['block']['type'],'callout')
-  self.assertEqual(entries[1]['block']['type'],'heading_3');self.assertTrue(entries[1]['block']['payload']['rich_text'][0]['annotations']['bold'])
+  self.assertEqual(entries[1]['block']['type'],'heading_4');self.assertTrue(entries[1]['block']['payload']['rich_text'][0]['annotations']['bold'])
   table=next(x['block'] for x in entries if x['block']['type']=='table')
   self.assertEqual(table['payload'],{'table_width':2,'has_column_header':True,'has_row_header':False});self.assertEqual(len(table['children']),2)
   self.assertEqual(table['children'][1]['payload']['cells'][1][0]['text']['content'],'First\nSecond')
@@ -73,7 +73,7 @@ class Tests(unittest.TestCase):
   ev['h4_mapping']='guess';self.assertEqual(m.propose(ev,p.digest(ev),data,target,DS)['reason'],'unsupported_history')
  def test_unknown_xml_attributes_entities_and_table_shape_block(self):
   for value in ('<callout icon="x" color="red_bg">\n\tx\n</callout>', '<table evil="true"><tr><td>x</td></tr></table>', '<!DOCTYPE table><table fit-page-width="true" header-row="true"><tr><td>x</td></tr></table>', HISTORY.replace('<td>Value</td>',''),'<image src="https://example.invalid/x">Caption</image>'):
-   with self.assertRaises(m.Blocked):m.historical_roots(value,N,h4_mapping='heading_3')
+   with self.assertRaises(m.Blocked):m.historical_roots(value,N,h4_mapping='heading_4')
  def test_divider_within_historical_owned_range_is_not_silently_owned(self):
   ev,data,target,_=self.fixture('Before\n\n---\n\nAfter')
   self.assertEqual(m.propose(ev,p.digest(ev),data,target,DS)['reason'],'noncontiguous_history')
@@ -96,10 +96,10 @@ class Tests(unittest.TestCase):
    ev['source']['commit']=git('rev-parse','HEAD').decode().strip();self.assertEqual(git('rev-parse','HEAD:'+ev['source']['path']).decode().strip(),ev['source']['blob'])
    raw=git('show',ev['source']['commit']+':'+ev['source']['path']);self.assertEqual(m.propose(ev,p.digest(ev),raw,target,DS)['decision'],'candidate')
  def test_html_void_br_in_cells_is_exact_newline_but_escaped_br_blocks(self):
-  entries=m.historical_roots(HISTORY.replace('<br/>','<br>'),N,h4_mapping='heading_3')
+  entries=m.historical_roots(HISTORY.replace('<br/>','<br>'),N,h4_mapping='heading_4')
   table=next(x['block'] for x in entries if x['block']['type']=='table');self.assertEqual(table['children'][1]['payload']['cells'][1][0]['text']['content'],'First\nSecond')
   for old in ('First\\<br>Second','`<br>`'):
-   with self.assertRaises(m.Blocked):m.historical_roots(HISTORY.replace('First<br/>Second',old),N,h4_mapping='heading_3')
+   with self.assertRaises(m.Blocked):m.historical_roots(HISTORY.replace('First<br/>Second',old),N,h4_mapping='heading_4')
  def hash_fixture(self):
   history='<callout icon="📝" color="gray_bg">\n\tHistorical preview notice\n</callout>\n\n#### **Nested title**\n\nBody'
   ev,_,target,_=self.fixture(history)
@@ -152,13 +152,24 @@ class Tests(unittest.TestCase):
   with self.assertRaises(m.Blocked):m.reconstruct_proof(template,p.digest(template),note_id='9'*19,page_id=P,source_path=proof['source']['path'])
   bad=deepcopy(template);bad['proof_sha256']='f'*64
   with self.assertRaises(m.Blocked):m.reconstruct_proof(bad,p.digest(bad),note_id=N,page_id=P,source_path=proof['source']['path'])
+ def test_old_h4_mapping_and_transform_are_rejected(self):
+  ev,data,target,proof=self.hash_fixture();ev['h4_mapping']='heading_3'
+  self.assertEqual(m.propose(ev,p.digest(ev),data,target,DS)['reason'],'unsupported_history')
+  proof['transform']='get-api-body-without-footer-h4-to-h3-1'
+  self.assertEqual(m.propose_from_git(proof,p.digest(proof),data,target,DS)['reason'],'evidence_invalid')
+ def test_list_default_first_is_equivalent_but_middle_reset_is_not(self):
+  a=[p.block('numbered_list_item',{'rich_text':[p.text_run('First')]}),p.block('numbered_list_item',{'rich_text':[p.text_run('Second')]})]
+  b=deepcopy(a);b[0]['payload']['list_start_index']=1
+  self.assertEqual(m.canonical_semantics(a),m.canonical_semantics(b))
+  b[1]['payload']['list_start_index']=1
+  self.assertNotEqual(m.canonical_semantics(a),m.canonical_semantics(b))
 class DiagnosticTests(unittest.TestCase):
  fixture=Tests.fixture
  hash_fixture=Tests.hash_fixture
  def test_diagnostic_exact_alignment_is_read_only_and_bounded(self):
   ev,data,target,proof=self.hash_fixture();before=deepcopy(target);decision=m.propose_from_git(proof,p.digest(proof),data,target,DS)
   out=m.diagnose_from_git(proof,p.digest(proof),data,target,DS);self.assertTrue(m.valid_diagnostic(out));self.assertEqual(out['alignment'],'unique_best');self.assertEqual(out['best_exact_roots'],2);self.assertEqual(out['best_mismatched_roots'],0);self.assertEqual(target,before);self.assertEqual(m.propose_from_git(proof,p.digest(proof),data,target,DS),decision)
-  self.assertEqual(out['schema']['stage'],'complete');self.assertEqual(out['expected_root_type_counts'],{'heading_3':1,'paragraph':1})
+  self.assertEqual(out['schema']['stage'],'complete');self.assertEqual(out['expected_root_type_counts'],{'heading_4':1,'paragraph':1})
  def test_diagnostic_fixed_text_annotation_link_and_heading_categories(self):
   for category in ('text','annotations','link','heading'):
    ev,data,target,proof=self.hash_fixture();row=target['recursive_blocks'][4]
@@ -194,4 +205,14 @@ class DiagnosticTests(unittest.TestCase):
   ev,data,target,proof=self.hash_fixture();out=m.diagnose_from_git(proof,'f'*64,data,target,DS);self.assertEqual(out['expected_roots'],0);self.assertEqual(out['alignment'],'not_available')
   for change in ({'alignment':'PRIVATE'},{'expected_roots':True},{'best_difference_max_counts':{'PRIVATE':1}},{'extra':'PRIVATE'}):self.assertFalse(m.valid_diagnostic(dict(out,**change)))
   for target in (None,[],{'complete':True,'native_blocks_available':True,'recursive_blocks':[]}):self.assertTrue(m.valid_diagnostic(m.blank_diagnostic(target)))
+ def test_known_shape_categories_do_not_expose_unknown_keys_or_values(self):
+  ev,data,target,proof=self.hash_fixture()
+  rows=target['recursive_blocks'];rows[4]['payload']['icon']=None
+  rows.append({'type':'numbered_list_item','payload':{'rich_text':[], 'list_start_index':None,'list_format':'numbers','PRIVATE':'SECRET'}})
+  counts=m.shape_counts(rows)
+  self.assertEqual(counts['heading_4'],1);self.assertEqual(counts['paragraph_icon_null'],1)
+  self.assertEqual(counts['list_start_null'],1);self.assertEqual(counts['list_format_numbers'],1);self.assertEqual(counts['unexpected_payload_keys'],1)
+  self.assertNotIn('PRIVATE',json.dumps(counts));self.assertNotIn('SECRET',json.dumps(counts))
+  good=m.blank_diagnostic(None);good['schema']['known_shape_counts']={'PRIVATE':1}
+  self.assertFalse(m.valid_diagnostic(good))
 if __name__=='__main__':unittest.main()

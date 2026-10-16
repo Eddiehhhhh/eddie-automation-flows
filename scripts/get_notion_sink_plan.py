@@ -11,7 +11,7 @@ import re
 from pathlib import PurePosixPath
 
 CONTRACT = 'get-notion-read-only-plan-1'
-RENDERER = 'get-notion-native-subset-2'
+RENDERER = 'get-notion-native-subset-3'
 REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
 DATA_SOURCE_SHA256 = '00b4d82e612d3fa5dd16cec55f456a83190365f676c9fb163ff7d7989e8cb989'
 COHORT_SHA256 = '21f08b0c2d76f96c13a9e1b28bab48b6b9508e60927e864aa0332ce49d8d9f1e'
@@ -19,7 +19,7 @@ MAX_NOTE = 1024 * 1024
 MAX_TARGET = 16 * 1024 * 1024
 MAX_ASSET = 16 * 1024 * 1024
 MAX_BLOCKS = 10000
-KINDS = frozenset(('paragraph', 'heading_1', 'heading_2', 'heading_3',
+KINDS = frozenset(('paragraph', 'heading_1', 'heading_2', 'heading_3', 'heading_4',
     'bulleted_list_item', 'numbered_list_item', 'to_do', 'quote', 'code',
     'divider', 'image', 'table', 'table_row', 'callout'))
 TEXT_KINDS = KINDS - {'divider', 'image', 'table', 'table_row'}
@@ -171,10 +171,22 @@ def normalize_payload(kind, payload):
     if kind in TEXT_KINDS:
         allowed |= {'checked'} if kind == 'to_do' else set()
         allowed |= {'language', 'caption'} if kind == 'code' else set()
-        allowed |= {'icon'} if kind == 'callout' else set()
+        allowed |= {'icon'} if kind in ('callout','paragraph') else set()
+        allowed |= {'list_start_index','list_format'} if kind == 'numbered_list_item' else set()
         allowed |= {'is_toggleable'} if kind.startswith('heading_') else set()
         if set(value) - allowed:
             stop('incomplete_target_read')
+        if kind=='paragraph' and 'icon' in value:
+            if value['icon'] is not None: stop('incomplete_target_read')
+            value.pop('icon')
+        if kind=='numbered_list_item':
+            # Only the default numeric format/start is supported. A reset at 1
+            # remains explicit: it is not interchangeable with a continuation.
+            if 'list_format' in value:
+                if value['list_format']!='numbers': stop('incomplete_target_read')
+                value.pop('list_format')
+            if 'list_start_index' in value and (type(value['list_start_index']) is not int or value['list_start_index']!=1):
+                stop('incomplete_target_read')
         value['rich_text'] = normalize_rich(value.get('rich_text'))
         value.setdefault('color', 'default')
         if not isinstance(value['color'], str):
@@ -300,7 +312,7 @@ def render_markdown(data, ident, assets, source_path, content_tree):
         heading = re.fullmatch(r'(#{1,6}) (.*)', line)
         if heading:
             level = len(heading[1]); rt = rich_text(heading[2])
-            if level <= 3:
+            if level <= 4:
                 output.append(block('heading_' + str(level), {'rich_text': rt}))
             else:
                 # Explicit visible level marker avoids silently equating H4/H5.
@@ -334,6 +346,11 @@ def render_markdown(data, ident, assets, source_path, content_tree):
                 index += 1; continue
             task = re.fullmatch(r'\[([ xX])\] (.*)', value)
             payload = {'rich_text': rich_text(task[2] if task else value)}
+            if kind=='numbered_list_item' and not task:
+                first=index==0 or re.fullmatch(r'[0-9]+\. .*',lines[index-1]) is None
+                if first:
+                    if int(listing[3])!=1: stop('unsupported_source_format')
+                    payload['list_start_index']=1
             if task: kind = 'to_do'; payload['checked'] = task[1].lower() == 'x'
             output.append(block(kind, payload)); index += 1; continue
         if line.startswith('> '):
