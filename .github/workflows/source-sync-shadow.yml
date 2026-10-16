@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, full]
         default: sample
         required: true
       preview_source_commit:
@@ -147,6 +147,11 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get bounded private legacy capture' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_capture.py
+      - name: Verify retained legacy observations without source reads or writes
+        if: inputs.mode == 'legacy_verify'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=30s 15m python scripts/run_private_command.py --label 'Get retained legacy verification only' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_capture.py --verify-only
       - name: Remove ephemeral private checkout and preview
         if: always() && (inputs.mode == 'private_preview' || inputs.mode == 'verify_retained')
         run: rm -rf -- "$GITHUB_WORKSPACE/private-vault" '${{ runner.temp }}/get-private-preview'
@@ -159,7 +164,7 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
-          if [ "$MODE" = legacy_capture ]; then
+          if [ "$MODE" = legacy_capture ] || [ "$MODE" = legacy_verify ]; then
             python scripts/get_legacy_capture.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi

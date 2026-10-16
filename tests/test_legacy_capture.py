@@ -186,6 +186,61 @@ class GitCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(ParityFailure,'capture_scope_changed'):self.publish()
         self.assertEqual(self.remote.writes,[])
 
+class PostCasReadbackTests(unittest.TestCase):
+    def test_exact_previous_ref_is_read_only_retried_then_verified(self):
+        remote=type('Remote',(),{})();remote.metrics={}
+        answers=iter(['a'*40,'a'*40,'b'*40]);remote.ref=lambda _:next(answers)
+        with patch.object(c,'guard') as guard,patch.object(c.time,'sleep') as sleep:
+            c.verify_published_ref(remote,'a'*40,'b'*40)
+        self.assertEqual(remote.metrics,{'readback_ref_attempts':3,'readback_stale_ref_observations':2})
+        self.assertEqual([call.args[0] for call in sleep.call_args_list],[1,2]);self.assertEqual(guard.call_count,2)
+    def test_stale_previous_head_is_bounded_and_foreign_head_stops_immediately(self):
+        for actual,code,count in [('a'*40,'capture_readback_ref_stale',6),('c'*40,'capture_readback_ref_changed',1)]:
+            remote=type('Remote',(),{'ref':lambda _,name:actual})()
+            with patch.object(c,'guard'),patch.object(c.time,'sleep') as sleep,self.assertRaisesRegex(ParityFailure,code):
+                c.verify_published_ref(remote,'a'*40,'b'*40)
+            self.assertEqual(remote.metrics['readback_ref_attempts'],count)
+            self.assertEqual(sum(call.args[0] for call in sleep.call_args_list),31 if count==6 else 0)
+    def test_missing_existing_head_and_transport_have_distinct_safe_errors(self):
+        remote=type('Remote',(),{'ref':lambda _,name:None})()
+        with self.assertRaisesRegex(ParityFailure,'capture_readback_ref_changed'):c.verify_published_ref(remote,'a'*40,'b'*40)
+        def fail(*_):raise RuntimeError('Private remote error')
+        remote.ref=fail
+        with self.assertRaisesRegex(ParityFailure,'capture_readback_ref_transport'):c.verify_published_ref(remote,'a'*40,'b'*40)
+        remote.commit=fail
+        with self.assertRaisesRegex(ParityFailure,'capture_readback_commit_transport'):c.readback_commit(remote,'b'*40)
+    def test_post_push_old_ref_does_not_repeat_cas_or_payload_read(self):
+        fixture=GitCaptureTests();fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        remote=fixture.remote;actual_ref=remote.ref;old_reads=[2]
+        def ref(name):
+            if name==c.REF and remote.writes and old_reads[0]:old_reads[0]-=1;return None
+            return actual_ref(name)
+        remote.ref=ref
+        with patch.object(c.time,'sleep'),patch.object(fixture,'readback',wraps=fixture.readback) as readback:
+            commit=fixture.publish()
+        self.assertEqual(len(remote.writes),1);self.assertEqual(readback.call_count,1);self.assertEqual(remote.current,commit)
+        self.assertEqual(remote.metrics['readback_stale_ref_observations'],2)
+    def test_parent_and_payload_mismatches_stop_after_one_write(self):
+        fixture=GitCaptureTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.remote.commit=lambda _: {'parents':['f'*40],'tree':'e'*40}
+        with self.assertRaisesRegex(ParityFailure,'capture_readback_parent'):fixture.publish()
+        self.assertEqual(len(fixture.remote.writes),1)
+    def test_blob_size_hash_pack_and_capability_failures_are_distinct(self):
+        import source_sync_pack_seed as pack
+        data=b'exact';blob=c.retention.oid(data);meta={c.LEDGER:('100644','blob',blob,len(data))}
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'blob';path.write_bytes(data)
+            for replacement,code in ((b'shorter','capture_readback_blob_size'),(b'other','capture_readback_blob_hash')):
+                path.write_bytes(replacement)
+                with patch.object(pack,'capabilities',return_value=2),patch.object(c.retention,'fetch_readback_blobs',return_value=({blob:path},10)),self.assertRaisesRegex(ParityFailure,code):c.fetch_blobs(None,meta,'synthetic',Path(folder)/'out')
+            for target,code in (('capabilities','capture_readback_pack_capabilities'),('pack','capture_readback_pack')):
+                with patch.object(pack,'capabilities',side_effect=RuntimeError('private') if target=='capabilities' else None,return_value=2),patch.object(c.retention,'fetch_readback_blobs',side_effect=RuntimeError('private')),self.assertRaisesRegex(ParityFailure,code):c.fetch_blobs(None,meta,'synthetic',Path(folder)/'out')
+    def test_safe_public_readback_diagnostics_and_counts(self):
+        for error in ('capture_readback_ref_stale','capture_readback_ref_changed','capture_readback_parent','capture_readback_tree','capture_readback_blob_size','capture_readback_blob_hash','capture_readback_payload','capture_readback_pack'):
+            clean=c.public_report({'error':error,'readback_ref_attempts':6,'readback_stale_ref_observations':5,'private':'secret'})
+            self.assertEqual(clean['error'],error);self.assertEqual(clean['readback_ref_attempts'],6);self.assertNotIn('private',clean)
+
 class TransportTests(unittest.TestCase):
     def test_capture_incomplete_read_retries_and_charges_partial_bytes(self):
         import http.client
@@ -301,6 +356,10 @@ class RunIntegrationTests(unittest.TestCase):
                 self.assertEqual(source.list_calls,1);self.assertEqual(len(set(source.detail_calls)),1923);self.assertFalse(set(str(i) for i in range(1,9))&set(source.detail_calls))
                 before=deepcopy(remote.writes);second=c.run('synthetic',source,root)
                 self.assertEqual(second['captured'],1923);self.assertEqual(second['fresh_details'],0);self.assertEqual(source.list_calls,1);self.assertEqual(len(source.detail_calls),1923);self.assertEqual(remote.writes,before)
+                from types import SimpleNamespace
+                verified=c.run('synthetic',SimpleNamespace(capture_metrics={}),root,verify_only=True)
+                self.assertEqual(verified['status'],'retained_capture_verified');self.assertEqual(verified['fresh_details'],0);self.assertEqual(remote.writes,before)
+                self.assertEqual(c.public_report(verified)['status'],'retained_capture_verified')
             self.assertEqual(local.tree(main),{p:v for p,v in local.tree(remote.current).items() if not p.startswith(c.PREFIX)})
             self.assertEqual(git('rev-parse','HEAD').decode().strip(),main)
 
@@ -452,3 +511,74 @@ class FreshResumeGitCaptureTests(unittest.TestCase):
         for data,oid in ((b'changed','a'*40),(b'x'*(c.MIB+1),c.retention.oid(b'x'*(c.MIB+1)))):
             with self.assertRaisesRegex(ParityFailure,'capture_invalid_ledger'):c.retain_verified_ledger_blob(local,data,oid)
         local.run.assert_not_called()
+
+class ReconciliationAggregateTests(unittest.TestCase):
+    def fixture(self,*,note_changes=None,summary=None,body=None,extra_fields=None,duplicate_header=False):
+        note={'id':'1','note_type':'plain_text','title':'Exact','content':'Current source','created_at':1776968995,'updated_at':1776968995.0}
+        note.update(note_changes or {})
+        fields={'note_id':'1','note_type':note['note_type'],'created_at':'Original date bytes','updated_at':'Old date bytes','unknown':{'preserve':True},**(extra_fields or {})}
+        summary=note['content'] if summary is None else summary
+        body=c.REVIEW_DUPLICATE_BODY if body is None else body+'\n\n'
+        text='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in fields.items())+'\n---\n\n# Exact\n\n## 🧠 摘要\n'+summary+'\n\n## 📝 正文\n'+body+'## 🔗 来源\nSource metadata\n\n## 📎 附件\nNo attachments\n'
+        if duplicate_header:text+='## 🧠 摘要\nAmbiguous duplicate\n'
+        old={'1':text.encode()};paths={'1':{'filePath':'1.md','gitBlob':c.retention.oid(old['1']),'sha256':c.digest(old['1'])}}
+        census,h=freeze_legacy_census([note],True,paths,[],'a'*40,'b'*40,'2026-10-16T07:00:00Z')
+        record=make_legacy_observation(census,h,'1',capture_json_bytes({'data':{'note':note}}),old['1'],'2026-10-16T07:10:00Z')
+        records={'1':{'observation':record,'proposal':c.proposal(record,census,old['1'])}}
+        return census,records,old
+    def test_exact_whole_legacy_section_coherence_preserves_metadata(self):
+        args=self.fixture();before=deepcopy(args);v=c.reconciliation_counts(*args)
+        self.assertEqual(v['review_legacy_content_section_exact'],1);self.assertEqual(v['review_known_source_text_all_accounted'],1)
+        self.assertEqual(v['review_whole_body_different'],1);self.assertEqual(v['review_known_legacy_text_regions_extra'],0)
+        self.assertEqual(v['review_frontmatter_bytes_preserved'],1);self.assertEqual(args,before)
+    def test_substring_and_whitespace_are_not_whole_section_equality(self):
+        for summary in ('Extra Current source','Current source extra',' Current source','Current source '):
+            v=c.reconciliation_counts(*self.fixture(summary=summary))
+            self.assertEqual(v['review_legacy_content_section_exact'],0);self.assertEqual(v['review_known_source_text_partial'],1);self.assertEqual(v['review_known_legacy_text_regions_extra'],1)
+    def test_duplicate_headers_are_ambiguous(self):
+        v=c.reconciliation_counts(*self.fixture(duplicate_header=True))
+        self.assertEqual(v['review_legacy_section_ambiguous'],1);self.assertEqual(v['review_known_source_text_partial'],1)
+    def test_full_source_field_coverage_keeps_extra_excerpt_and_references_separate(self):
+        args=self.fixture(note_changes={'web_page':{'content':'Unrepresented complete article'},'attachments':[{'url':'https://example.invalid/asset'}]},extra_fields={'web_excerpt':'Original excerpt retained','attachments':['old-reference']})
+        v=c.reconciliation_counts(*args)
+        self.assertEqual(v['review_legacy_content_section_exact'],1);self.assertEqual(v['review_known_source_text_partial'],1)
+        self.assertEqual(v['review_known_legacy_text_regions_extra'],1);self.assertEqual(v['review_asset_reference_review_required'],1)
+    def test_audio_original_and_summary_are_separately_whole_matched(self):
+        v=c.reconciliation_counts(*self.fixture(note_changes={'note_type':'recorder_audio','audio':{'original':'Exact original','play_url':'https://example.invalid/audio'}},body='Exact original'))
+        self.assertEqual(v['review_known_source_text_all_accounted'],1);self.assertEqual(v['review_known_legacy_text_regions_extra'],0);self.assertEqual(v['review_asset_reference_review_required'],1)
+    def test_empty_and_unsupported_source_fields_are_not_coherence_success(self):
+        empty=c.reconciliation_counts(*self.fixture(note_changes={'content':''}))
+        self.assertEqual(empty['review_known_source_text_empty'],1)
+        unsupported=c.reconciliation_counts(*self.fixture(note_changes={'audio':{'original':{'text':'Unsupported'}}}))
+        self.assertEqual(unsupported['review_known_source_text_partial'],1)
+    def test_unsupported_parent_shapes_never_count_as_source_text_accounted(self):
+        for change in ({'audio':'unsupported'},{'web_page':['unmapped article']},{'audio':[]}):
+            v=c.reconciliation_counts(*self.fixture(note_changes=change))
+            self.assertEqual(v['review_known_source_text_all_accounted'],0);self.assertEqual(v['review_known_source_text_partial'],1)
+    def test_legacy_only_references_are_read_from_preserved_header(self):
+        for fields in ({'audio_url':'https://example.invalid/old'},{'web_url':'https://example.invalid/old'},{'attachments':['old-file.png']}):
+            v=c.reconciliation_counts(*self.fixture(extra_fields=fields))
+            self.assertEqual(v['review_asset_reference_review_required'],1)
+    def test_other_legacy_regions_never_claimed_classified_or_safe_to_drop(self):
+        args=self.fixture();v=c.reconciliation_counts(*args)
+        self.assertEqual(v['review_known_legacy_text_regions_extra'],0)
+        self.assertEqual(v['review_other_legacy_regions_unclassified'],1)
+        self.assertFalse(c.public_report({})['legacy_regions_complete_claimed'])
+    def test_public_aggregate_counts_are_complete_bounded_and_never_adoption(self):
+        counts=c.reconciliation_counts(*self.fixture())
+        base={'status':'capture_complete_for_review','eligible':1,'captured':1,'remaining':0,'source_missing':0,'capture_batches':1,'raw_bytes':0,'retained_bytes':0,'refs_verified':True,'readback_verified':True,**counts,'private_payload':'must disappear','mirror_adopted':1,'apply_ready':True}
+        clean=c.public_report(base);self.assertEqual(clean['status'],'capture_complete_for_review');self.assertNotIn('private_payload',clean);self.assertEqual(clean['mirror_adopted'],0);self.assertFalse(clean['apply_ready'])
+        self.assertEqual(c.public_report(clean),clean)
+        for change in ({'review_whole_body_exact':1},{'review_frontmatter_bytes_preserved':0},{'review_known_source_text_partial':True},{'review_known_legacy_text_regions_extra':-1}):
+            bad=c.public_report({**base,**change});self.assertEqual(bad['status'],'failed');self.assertEqual(bad['error'],'capture_invalid_report')
+        bad=dict(base);bad.pop(c.REVIEW_KEYS[0]);self.assertEqual(c.public_report(bad)['status'],'failed')
+
+class VerifyOnlyCliTests(unittest.TestCase):
+    def test_verification_cli_never_loads_source_credentials_and_filters_result(self):
+        import sync_getnote_to_raw as sync
+        result={'status':'retained_capture_verified','verification_only':True,'eligible':2,'captured':1,'remaining':1,'source_missing':0,'capture_batches':1,'raw_bytes':100,'retained_bytes':200,'refs_verified':True,'readback_verified':True}
+        with patch.object(sync,'load_credentials',side_effect=AssertionError('Source credentials forbidden')),patch.object(c,'Source',side_effect=AssertionError('Get transport forbidden')),patch.object(c,'run',return_value=result) as run,patch('builtins.print') as output:
+            self.assertEqual(c.main(['--verify-only']),0)
+        self.assertTrue(run.call_args.kwargs['verify_only']);self.assertFalse(hasattr(run.call_args.args[1],'detail_raw'))
+        clean=json.loads(output.call_args.args[0]);self.assertEqual(clean['status'],'retained_capture_verified');self.assertTrue(clean['verification_only'])
+        self.assertEqual(c.public_report(clean),clean)

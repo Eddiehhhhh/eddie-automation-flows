@@ -14,8 +14,9 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 
-from get_mirror_incremental_replay import (capture_json_bytes,strict_capture_json,freeze_legacy_census,
+from get_mirror_incremental_replay import (capture_json_bytes,strict_capture_json,freeze_legacy_census,SOURCE_TEXT_FIELDS,
     validate_legacy_census,make_legacy_observation,verify_legacy_observation,observation_detail,ParityFailure)
 import get_private_preview_retention as retention
 from source_sync_mirror_replay import (LEGACY_SOURCE,LEGACY_OLD_PREVIEW,LEGACY_NEW_PREVIEW,legacy_document)
@@ -35,7 +36,7 @@ PROTECTED={retention.BACKUP_REF:LEGACY_SOURCE,retention.PREVIEW_REF:LEGACY_OLD_P
 ERRORS={'capture_target','capture_refs_changed','capture_scope_changed','capture_census_changed','capture_invalid_census','capture_receipt_changed','capture_invalid_receipt','capture_invalid_detail','capture_detail_identity','capture_mirror_changed','capture_mirror_identity','capture_source_changed','capture_commit_cap','capture_raw_budget','capture_total_budget','capture_batch_budget','capture_invalid_ledger','capture_uncertain_write','capture_ref_conflict','capture_readback','capture_invalid_json','capture_response_budget','capture_api_error','capture_unselected_identity','capture_source_missing','capture_census_budget','capture_cohort','capture_mirror','capture_source_identity','incomplete_list','capture_failed','capture_source_failed','capture_ledger_budget','capture_existing_ref','capture_unsupported'}
 
 ERRORS |= set(retention.ERROR_CODES)
-ERRORS |= {'capture_git_tree_read','capture_git_index','capture_git_blob','capture_git_tree_write','capture_git_commit'}
+ERRORS |= {'capture_git_tree_read','capture_git_index','capture_git_blob','capture_git_tree_write','capture_git_commit','capture_invalid_report','capture_readback_ref_stale','capture_readback_ref_changed','capture_readback_ref_transport','capture_readback_commit_transport','capture_readback_parent','capture_readback_tree','capture_readback_blob_size','capture_readback_blob_hash','capture_readback_payload','capture_readback_pack_capabilities','capture_readback_pack','capture_readback_blob_read'}
 
 def fail(code):raise ParityFailure(code if code in ERRORS else 'capture_failed')
 def digest(value):return hashlib.sha256(value).hexdigest()
@@ -44,18 +45,100 @@ def record_path(ident):
     if not isinstance(ident,str) or not re.fullmatch('[0-9]{1,64}',ident):fail('capture_cohort')
     return PREFIX+'observations/'+ident+'.json'
 
+REVIEW_KEYS=('review_whole_body_exact','review_whole_body_different','review_render_unavailable',
+      'review_legacy_content_section_exact','review_legacy_section_ambiguous',
+      'review_known_source_text_all_accounted','review_known_source_text_partial','review_known_source_text_empty',
+      'review_known_legacy_text_regions_extra','review_asset_reference_review_required','review_frontmatter_bytes_preserved','review_other_legacy_regions_unclassified')
+REVIEW_MARKERS=('## 🧠 摘要\n','## 📝 正文\n','## 🔗 来源\n','## 📎 附件\n')
+REVIEW_DUPLICATE_BODY='（正文与摘要一致，已省略重复内容）\n\n'
+
+def reconciliation_counts(census,records,old):
+    """Whole known-field matches only; other legacy regions stay unclassified."""
+    counts={key:0 for key in REVIEW_KEYS}
+    for ident,value in records.items():
+        record=value['observation'];proposal=value['proposal'];fields,body=legacy_document(old[ident])
+        note={**census['summaries'][ident],**observation_detail(record)}
+        counts['review_whole_body_exact' if proposal['body_exact'] else ('review_whole_body_different' if proposal['byte_diff'] else 'review_render_unavailable')]+=1
+        # Capture never writes old notes. Proposals additionally preserve the
+        # complete original frontmatter prefix rather than reserializing it.
+        diff=proposal['byte_diff']
+        if diff is None or (diff['start']==len(old[ident])-len(body.encode()) and diff['old_length']==len(body.encode())):
+            counts['review_frontmatter_bytes_preserved']+=1
+        sections=None
+        if all(body.count(marker)==1 for marker in REVIEW_MARKERS):
+            positions=[body.index(marker) for marker in REVIEW_MARKERS]
+            if positions==sorted(positions):
+                sections=[body[positions[n]+len(REVIEW_MARKERS[n]):positions[n+1]] for n in range(3)]
+        if sections is None:counts['review_legacy_section_ambiguous']+=1
+        content=note.get('content');summary=sections[0] if sections else None;main=sections[1] if sections else None
+        # Known exact separators, never substring/strip/fuzzy coverage.
+        content_exact=isinstance(content,str) and bool(content) and (summary==content+'\n\n' or main==content+'\n\n')
+        if content_exact:counts['review_legacy_content_section_exact']+=1
+        def exact_section(text):return isinstance(text,str) and bool(text) and sections is not None and any(section==text+'\n\n' for section in sections[:2])
+        present={};unsupported=(record['disposition']=='source_shape_unsupported' or any(note.get(key) is not None and not isinstance(note[key],dict) for key in ('audio','web_page')))
+        for path in SOURCE_TEXT_FIELDS:
+            text=note
+            for component in path.split('.'):
+                text=text.get(component) if isinstance(text,dict) else None
+            if text is not None and not isinstance(text,str):unsupported=True
+            if isinstance(text,str) and text:present[path]=text
+        mapped={}
+        for path,text in present.items():
+            if path=='content':mapped[path]=content_exact or proposal['body_exact']
+            elif path in ('audio.original','audio.transcript','audio_transcript'):mapped[path]=fields.get('audio_transcript')==text or exact_section(text) or (path=='audio.original' and proposal['body_exact'])
+            elif path in ('ref_content','web_page.excerpt'):mapped[path]=fields.get('web_excerpt')==text or exact_section(text) or proposal['body_exact']
+            elif path=='web_page.content':mapped[path]=exact_section(text) or proposal['body_exact']
+        if not present and not unsupported:counts['review_known_source_text_empty']+=1
+        elif not unsupported and all(mapped.values()):counts['review_known_source_text_all_accounted']+=1
+        else:counts['review_known_source_text_partial']+=1
+        # Extra old text is kept. Its lack of an entire current-field match
+        # cannot be classified as deletion, user edit, or disposable duplicate.
+        extras=False
+        for field,paths in (('audio_transcript',('audio.original','audio.transcript','audio_transcript')),('web_excerpt',('ref_content','web_page.excerpt','web_page.content'))):
+            text=fields.get(field)
+            if isinstance(text,str) and text and text not in [present.get(path) for path in paths]:extras=True
+        if sections:
+            for section in sections[:2]:
+                if section and section!=REVIEW_DUPLICATE_BODY and section not in [text+'\n\n' for text in present.values()]:extras=True
+        elif body and not proposal['body_exact']:extras=True
+        if extras:counts['review_known_legacy_text_regions_extra']+=1
+        other_regions=[body[:positions[0]],sections[2],body[positions[3]+len(REVIEW_MARKERS[3]):]] if sections else ([body] if not proposal['body_exact'] else [])
+        if any(region.strip() for region in other_regions):counts['review_other_legacy_regions_unclassified']+=1
+        # Source descriptors and every old reference remain untouched. This is
+        # explicit unresolved asset review, not a no-assets completeness claim.
+        audio=note.get('audio') or {};web=note.get('web_page') or {}
+        header=old[ident].decode('utf-8')[4:].split('\n---\n',1)[0]
+        old_references=False
+        for line in header.split('\n'):
+            key,_,raw=line.partition(':')
+            if key in ('attachments','audio_url','web_url') and raw.strip() not in ('','""',"''",'[]','null','~'):old_references=True
+        if note.get('attachments') or note.get('audio_url') or old_references or (isinstance(audio,dict) and audio.get('play_url')) or (isinstance(web,dict) and web.get('url')) or '](' in body:
+            counts['review_asset_reference_review_required']+=1
+    return dict(counts)
+
+
 def public_report(value):
-    result={'mode':'legacy_capture','status':'failed','main_updated':False,'mirror_adopted':0,'apply_ready':False,'source_content_complete_claimed':False}
+    result={'mode':'legacy_capture','status':'failed','main_updated':False,'mirror_adopted':0,'apply_ready':False,'source_content_complete_claimed':False,'legacy_regions_complete_claimed':False}
     if not isinstance(value,dict):return result
-    for key in ('eligible','captured','remaining','source_missing','source_version_changed','source_transcript_unavailable','capture_batches','raw_bytes','retained_bytes','fresh_details','detail_requests','http_attempts','http_retries','api_requests','cas_attempts','cas_retries'):
+    for key in ('eligible','captured','remaining','source_missing','source_version_changed','source_transcript_unavailable','capture_batches','raw_bytes','retained_bytes','fresh_details','detail_requests','http_attempts','http_retries','api_requests','cas_attempts','cas_retries','readback_ref_attempts','readback_stale_ref_observations'):
         if type(value.get(key)) is int and 0<=value[key]<=MAX_TOTAL:result[key]=value[key]
     if isinstance(value.get('error'),str) and value.get('error') in ERRORS:result['error']=value['error']
     if value.get('rate_limit_reason') in ('qps_global','qps_bucket','quota_day','quota_month','not_member','unknown'):result['rate_limit_reason']=value['rate_limit_reason']
     valid=all(k in result for k in ('eligible','captured','remaining','source_missing','capture_batches','raw_bytes','retained_bytes'))
     if valid and 0<=result['eligible']<=1923 and result['captured']+result['remaining']+result['source_missing']==result['eligible'] and result['capture_batches']<=MAX_BATCHES and result['raw_bytes']<=MAX_RAW and result['retained_bytes']<=MAX_TOTAL and value.get('refs_verified') is True and value.get('readback_verified') is True:
-        if value.get('status')=='capture_complete_for_review' and result['remaining']==0 and 'error' not in result:result['status']='capture_complete_for_review'
+        if value.get('verification_only') is True and value.get('status')=='retained_capture_verified' and 'error' not in result:
+            result['status']='retained_capture_verified';result['verification_only']=True
+        elif value.get('status')=='capture_complete_for_review' and result['remaining']==0 and 'error' not in result:result['status']='capture_complete_for_review'
         elif value.get('status')=='capture_partial':result['status']='capture_partial'
         result['refs_verified']=True;result['readback_verified']=True
+    if any(key in value for key in REVIEW_KEYS):
+        valid_review=all(type(value.get(key)) is int and 0<=value[key]<=result.get('captured',-1) for key in REVIEW_KEYS)
+        if valid_review:
+            valid_review=(sum(value[k] for k in ('review_whole_body_exact','review_whole_body_different','review_render_unavailable'))==result['captured']
+                and sum(value[k] for k in ('review_known_source_text_all_accounted','review_known_source_text_partial','review_known_source_text_empty'))==result['captured']
+                and value['review_frontmatter_bytes_preserved']==result['captured'])
+        if valid_review:result.update({key:value[key] for key in REVIEW_KEYS})
+        else:result.update(status='failed',error='capture_invalid_report')
     return result
 
 class Source:
@@ -158,12 +241,16 @@ def fetch_blobs(remote,metadata,token,directory):
     import source_sync_pack_seed as pack
     requested={sha:size for mode,kind,sha,size in metadata.values()}
     if any(mode!='100644' or kind!='blob' or size>(16*MIB if path==CENSUS else (5*MIB if path.startswith(PREFIX+'observations/') else MAX_RESPONSE)) for path,(mode,kind,sha,size) in metadata.items()) or sum(requested.values())>MAX_TOTAL:fail('capture_mirror')
-    protocol=pack.capabilities(token)
-    paths,used=retention.fetch_readback_blobs(token,requested,directory,pack.MAX_PACK,protocol)
+    try:protocol=pack.capabilities(token)
+    except Exception:fail('capture_readback_pack_capabilities')
+    try:paths,used=retention.fetch_readback_blobs(token,requested,directory,pack.MAX_PACK,protocol)
+    except Exception:fail('capture_readback_pack')
     result={}
     for path,(_,_,sha,size) in metadata.items():
-        data=retention.file_bytes(paths[sha],16*MIB if path==CENSUS else 5*MIB)
-        if len(data)!=size or retention.oid(data)!=sha:fail('capture_readback')
+        try:data=retention.file_bytes(paths[sha],16*MIB if path==CENSUS else 5*MIB)
+        except Exception:fail('capture_readback_blob_read')
+        if len(data)!=size:fail('capture_readback_blob_size')
+        if retention.oid(data)!=sha:fail('capture_readback_blob_hash')
         result[path]=data
     return result
 
@@ -245,6 +332,29 @@ def make_commit(local,parent,files):
     if changed!=set(files):fail('capture_scope_changed')
     return commit
 
+def verify_published_ref(remote,previous,commit):
+    """Read-only convergence for the exact old head after one confirmed push.
+
+    Never retry a write here. A different third head stops immediately. The
+    previous ref may be served briefly after CAS; sleep at most 31 seconds while
+    keeping all protected/source guards and exact commit checks in force.
+    """
+    if not hasattr(remote,'metrics'):remote.metrics={}
+    for attempt in range(6):
+        remote.metrics['readback_ref_attempts']=remote.metrics.get('readback_ref_attempts',0)+1
+        try:actual=remote.ref(REF)
+        except Exception:fail('capture_readback_ref_transport')
+        if actual==commit:return
+        if actual!=previous:fail('capture_readback_ref_changed')
+        remote.metrics['readback_stale_ref_observations']=remote.metrics.get('readback_stale_ref_observations',0)+1
+        if attempt==5:fail('capture_readback_ref_stale')
+        guard(remote)
+        time.sleep(2**attempt)
+
+def readback_commit(remote,commit):
+    try:return remote.commit(commit)
+    except Exception:fail('capture_readback_commit_transport')
+
 def publish_batch(local,remote,census,expected,files,token,readback):
     guard(remote,census)
     if remote.ref(REF)!=expected:fail('capture_ref_conflict')
@@ -266,11 +376,12 @@ def publish_batch(local,remote,census,expected,files,token,readback):
             if actual==commit:break
             if actual!=expected or attempt==2:fail('capture_uncertain_write')
             guard(remote,census)
-    if remote.ref(REF)!=commit or remote.commit(commit).get('parents')!=[parent]:fail('capture_readback')
+    verify_published_ref(remote,expected,commit)
+    if readback_commit(remote,commit).get('parents')!=[parent]:fail('capture_readback_parent')
     observed=readback(commit,files)
-    if observed!=files:fail('capture_readback')
+    if observed!=files:fail('capture_readback_payload')
     guard(remote,census)
-    if remote.ref(REF)!=commit:fail('capture_ref_conflict')
+    verify_published_ref(remote,expected,commit)
     return commit
 
 def capture_batches(census,ledger,records,source,old,commit,*,clock=now,stop=None):
@@ -388,16 +499,17 @@ def retain_verified_ledger_blob(local,data,expected_oid):
     blob=local.run('hash-object','-w','--stdin',data=data).decode().strip()
     if blob!=expected_oid or local.blob(blob)!=data:fail('capture_readback')
 
-def run(token,source,work):
+def run(token,source,work,*,verify_only=False):
     remote=Remote(None,token);source.capture_metrics={};remote.metrics=source.capture_metrics
     main,get_tree=guard(remote);head=remote.ref(REF)
+    if verify_only and head is None:fail('capture_existing_ref')
     with tempfile.TemporaryDirectory(prefix='get-legacy-capture-',dir=work) as folder:
         root=Path(folder)
         # Object-only, bounded Get payload fetches; never checkout media/assets.
         local=retention.readback_checkout(root/'objects',head or main,token);remote.local=local
         serial=[0]
         def readback(commit,files):
-            if remote.commit(commit)['tree']!=local.run('rev-parse',commit+'^{tree}').decode().strip():fail('capture_readback')
+            if readback_commit(remote,commit)['tree']!=local.run('rev-parse',commit+'^{tree}').decode().strip():fail('capture_readback_tree')
             serial[0]+=1
             metadata={p:('100644','blob',retention.oid(data),len(data)) for p,data in files.items()}
             return fetch_blobs(remote,metadata,token,root/('readback-'+str(serial[0])))
@@ -472,14 +584,18 @@ def run(token,source,work):
         def commit(files):
             nonlocal head
             head=publish_batch(local,remote,census,head,files,token,readback)
-        _,result=capture_batches(census,ledger,records,source,old,commit)
+        if verify_only:
+            result={'status':'retained_capture_verified','verification_only':True,'eligible':len(census['eligible']),'captured':len(records),'remaining':len(remaining),'source_missing':len(census['source_missing_ids']),'capture_batches':ledger['capture_batches'],'raw_bytes':ledger['raw_bytes'],'retained_bytes':ledger['retained_bytes'],'fresh_details':0,'detail_requests':0,'api_requests':0,'http_attempts':0,'http_retries':0,'refs_verified':True,'readback_verified':True}
+            result.update({key:sum(v['observation']['disposition']==key for v in records.values()) for key in ('source_version_changed','source_transcript_unavailable')})
+        else:_,result=capture_batches(census,ledger,records,source,old,commit)
+        result.update(reconciliation_counts(census,records,old))
         guard(remote,census)
         if remote.ref(REF)!=head:fail('capture_ref_conflict')
-        result.update(cas_attempts=remote.metrics.get('cas_attempts',0),cas_retries=remote.metrics.get('cas_retries',0))
+        result.update({key:remote.metrics.get(key,0) for key in ('cas_attempts','cas_retries','readback_ref_attempts','readback_stale_ref_observations')})
         return result
 
 def main(argv=None):
-    parser=argparse.ArgumentParser();parser.add_argument('--publish-report');args=parser.parse_args(argv)
+    parser=argparse.ArgumentParser();parser.add_argument('--publish-report');parser.add_argument('--verify-only',action='store_true');args=parser.parse_args(argv)
     if args.publish_report:
         try:value=json.loads(Path(args.publish_report).read_text())
         except Exception:value={}
@@ -487,14 +603,18 @@ def main(argv=None):
     try:
         import sync_getnote_to_raw as sync
         from source_sync_rate import RequestPolicy
-        key,client=sync.load_credentials();token=os.environ.get('PRIVATE_VAULT_TOKEN')
-        source=Source(key,client,RequestPolicy(seconds=105*60))
-        result=run(token,source,None)
+        token=os.environ.get('PRIVATE_VAULT_TOKEN')
+        if args.verify_only:
+            from types import SimpleNamespace
+            source=SimpleNamespace(details=0,api_requests=0,http_attempts=0,capture_metrics={})
+        else:
+            key,client=sync.load_credentials();source=Source(key,client,RequestPolicy(seconds=105*60))
+        result=run(token,source,None,verify_only=args.verify_only)
     except (Exception,SystemExit) as exc:
         result={'error':str(exc) if str(exc) in ERRORS else 'capture_failed'}
         if type(exc).__name__=='RateLimitFailure':result['rate_limit_reason']=getattr(exc,'reason','unknown')
         if 'source' in locals():
             result.update(detail_requests=source.details,api_requests=source.api_requests,http_attempts=source.http_attempts,http_retries=max(0,source.http_attempts-source.api_requests),**source.capture_metrics)
-    clean=public_report(result);print(json.dumps(clean));return 0 if clean['status']=='capture_complete_for_review' else (2 if clean['status']=='capture_partial' else 1)
+    clean=public_report(result);print(json.dumps(clean));return 0 if clean['status'] in ('capture_complete_for_review','retained_capture_verified') else (2 if clean['status']=='capture_partial' else 1)
 
 if __name__=='__main__':raise SystemExit(main())

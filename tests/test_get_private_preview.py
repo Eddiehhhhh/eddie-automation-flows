@@ -94,7 +94,7 @@ class PreviewWorkflowTests(unittest.TestCase):
  def test_retention_explicit_scope_and_partial_preserved(self):
   p=Path(__file__).resolve().parents[1]/'.github/workflows/source-sync-shadow.yml'
   text=p.read_text()
-  self.assertIn('private_preview, verify_retained, legacy_capture, full]',text)
+  self.assertIn('private_preview, verify_retained, legacy_capture, legacy_verify, full]',text)
   self.assertIn('get_private_preview_retention.py checkout',text)
   self.assertIn('--publish-report "$RETENTION_RESULT"',text)
   self.assertNotIn('upload-artifact',text)
@@ -114,3 +114,13 @@ class PreviewWorkflowTests(unittest.TestCase):
   self.assertIn('--preview-commit "$RETAINED_PREVIEW"',step)
   for forbidden in ('GETNOTE_API_KEY','GETNOTE_CLIENT_ID',' prepare ',' retain ','source_sync_mirror_replay.py'):
    self.assertNotIn(forbidden,step)
+
+class LegacyVerifyWorkflowTests(unittest.TestCase):
+ def test_legacy_verify_is_secret_minimal_and_read_only(self):
+  text=(Path(__file__).resolve().parents[1]/'.github/workflows/source-sync-shadow.yml').read_text()
+  step=text.split('      - name: Verify retained legacy observations without source reads or writes')[1].split('      - name:')[0]
+  self.assertIn("inputs.mode == 'legacy_verify'",step)
+  self.assertIn('get_legacy_capture.py --verify-only',step)
+  self.assertIn('PRIVATE_VAULT_TOKEN',step)
+  self.assertNotIn('GETNOTE_API_KEY',step);self.assertNotIn('GETNOTE_CLIENT_ID',step)
+  self.assertNotIn('schedule:',text);self.assertNotIn('upload-artifact',text)
