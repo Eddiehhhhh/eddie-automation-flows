@@ -26,6 +26,21 @@ class Tests(unittest.TestCase):
  def test_valid_immutable_normalized(self):
   old=deepcopy(self.snapshot);result=self.runbind();self.assertEqual(old,self.snapshot);self.assertEqual(result['asset_downloads'],1);self.assertEqual(result['binding']['block_id'],B);self.assertTrue(result['binding']['readback_verified'])
   payload=result['snapshot']['recursive_blocks'][0]['payload'];self.assertEqual(set(payload),{'kind','block_id','sha256','byte_count','mime','caption'});self.assertNotIn('url',str(result));self.assertEqual(len(self.calls),4)
+ def test_authenticated_prod_host_exact_no_credentials_or_redirects(self):
+  url='https://prod-files-secure.s3.us-west-2.amazonaws.com/example/a?sig=PRIVATE'
+  self.snapshot['recursive_blocks'][0]['payload']['file']['url']=url
+  self.block['image']['file']['url']=url
+  class Response(io.BytesIO):status=200
+  class Open:
+   calls=[]
+   def open(s,req,timeout):s.calls.append(req);return Response(DATA)
+  op=Open();get=m.AssetGet(opener=op);out=self.runbind(asset_get=get)
+  self.assertTrue(out['binding']['readback_verified']);self.assertEqual(get.downloads,1)
+  self.assertEqual(op.calls[0].full_url,url);self.assertIsNone(op.calls[0].get_header('Authorization'));self.assertIsNone(op.calls[0].get_header('Cookie'))
+  self.assertEqual(m.HOSTS,frozenset(('s3.us-west-2.amazonaws.com','prod-files-secure.s3.us-west-2.amazonaws.com')))
+  for bad in ('https://prod-files-secure.s3.us-west-2.amazonaws.com.evil.invalid/a','https://extra.prod-files-secure.s3.us-west-2.amazonaws.com/a','http://prod-files-secure.s3.us-west-2.amazonaws.com/a','https://prod-files-secure.s3.us-west-2.amazonaws.com:444/a','https://u:p@prod-files-secure.s3.us-west-2.amazonaws.com/a','https://prod-files-secure.s3.us-west-2.amazonaws.com/a#fragment'):
+   with self.assertRaisesRegex(m.Blocked,'asset_host_unsupported'):m.checked_url(bad)
+  self.assertEqual(get.downloads,1);self.assertNotIn('PRIVATE',str(out))
  def test_url_rotation_same_bytes_only(self):
   def change(v,i):
    if v['object']=='block':v['image']['file']={'url':URL+str(i),'expiry_time':str(i)}

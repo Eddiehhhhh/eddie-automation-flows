@@ -169,6 +169,12 @@ class NativePipelineTests(unittest.TestCase):
   import get_notion_runtime as runtime
   self.assertEqual(runtime.safe_result(out)['asset_downloads'],1)
 
- def test_unverified_exact_host_is_reported_but_never_fetched(self):
+ def test_lookalike_host_is_reported_but_never_fetched(self):
+  self.image['payload']['file']['url']='https://prod-files-secure.s3.us-west-2.amazonaws.com.evil.invalid/PRIVATE?token=PRIVATE'
+  before=len(self.downloads);out=self.run_it();self.assertEqual(out['actions'],{'blocked':1});self.assertEqual(out['image_binding']['host'],'other');self.assertEqual(out['image_binding']['failures'],{'asset_host_unsupported':1});self.assertEqual(len(self.downloads),before);self.assertNotIn('PRIVATE',str(out))
+
+ def test_authenticated_prod_host_prepare_preserves_image(self):
   self.image['payload']['file']['url']='https://prod-files-secure.s3.us-west-2.amazonaws.com/PRIVATE?token=PRIVATE'
-  before=len(self.downloads);out=self.run_it();self.assertEqual(out['actions'],{'blocked':1});self.assertEqual(out['image_binding']['host'],'exact_prod_files_secure');self.assertEqual(out['image_binding']['failures'],{'asset_host_unsupported':1});self.assertEqual(len(self.downloads),before);self.assertNotIn('PRIVATE',str(out))
+  old=deepcopy(self.image);state=self.f.store.read();before=len(self.downloads)
+  out=self.run_it();self.assertEqual(out['actions'],{'noop':1},out);self.assertEqual(out['image_binding'],{'verified':1,'failures':{},'host':'exact_prod_files_secure'})
+  self.assertEqual(len(self.downloads),before+1);self.assertEqual(self.image,old);self.assertEqual(self.f.store.read(),state);self.assertFalse(self.transport.attempted);self.assertNotIn('PRIVATE',str(out))
