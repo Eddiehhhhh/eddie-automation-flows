@@ -264,6 +264,101 @@ class SinkTests(unittest.TestCase):
         self.snapshot['properties_raw']['笔记 ID']['rich_text'] = [n.text_run('2234567890123456789')]
         self.assertEqual(self.record()['reason_codes'], ['unmapped_id'])
 
+    def test_attribute_free_breaks_preserve_newlines_in_table_and_bold(self):
+        self.change_source('| A | B |\n| --- | --- |\n| First<br>Second | **Third<br />Fourth** |\n')
+        out = self.record(); self.assertEqual(out['decision'], 'preview_diff')
+        cells = out['operations'][0]['proposed_blocks'][0]['children'][1]['payload']['cells']
+        self.assertEqual(cells[0][0]['text']['content'], 'First\nSecond')
+        self.assertEqual(cells[1][0]['text']['content'], 'Third\nFourth')
+        self.assertTrue(cells[1][0]['annotations']['bold'])
+        for variant in ('<BR>', '<br/>', '<br />'):
+            self.assertEqual(n.rich_text('one' + variant + 'two')[0]['text']['content'], 'one\ntwo')
+
+    def test_escaped_html_break_is_not_mistaken_for_newline(self):
+        for value in (r'Show \<br> literally', r'**Show \<br> literally**', r'*Show \<br /> literally*'):
+            with self.assertRaisesRegex(n.Blocked, '^unsupported_source_format$'):
+                n.rich_text(value)
+        self.assertEqual(n.rich_text(r'`Show \<br> literally`')[0]['text']['content'], r'Show \<br> literally')
+
+    def test_other_html_and_break_attributes_remain_unsupported(self):
+        for text in ('one<br class="x">two', 'one<br onclick="x">two', '<img src="x">', 'one</br>two', '<b>bold</b>'):
+            with self.assertRaisesRegex(n.Blocked, '^unsupported_source_format$'):
+                n.rich_text(text)
+
+    def test_literal_comparison_and_intraword_underscores_remain_exact(self):
+        url = 'https://example.invalid/watch?v=abc_123&source_id=first_value'
+        value = 'More (>5) and snake_case. ' + url
+        runs = n.rich_text(value)
+        self.assertEqual(''.join(x['text']['content'] for x in runs), value)
+        self.assertTrue(all(x['text']['link'] is None for x in runs))
+        self.assertEqual(n.rich_text('**More (>5)**')[0]['text']['content'], 'More (>5)')
+        for ambiguous in ('_italic_', 'foo__bar', 'text_trailing_', '~~strike~~'):
+            with self.assertRaises(n.Blocked): n.rich_text(ambiguous)
+
+    def bind_wiki_image(self):
+        ref = '../_assets/images/picture.jpeg'; image = b'exact fixture image'
+        path = 'Raw/03 Get/_assets/images/picture.jpeg'; oid = n.git_blob(image)
+        self.assets[ref] = {'bytes': image, 'path': path, 'git_blob': oid,
+            'sha256': n.digest(image), 'notion_file_id': 'f' * 32, 'readback_verified': True}
+        self.batch['content_tree'][path] = oid
+        return ref
+
+    def test_wiki_image_in_list_requires_asset_before_any_ownership(self):
+        self.change_source('- Picture: ![[../_assets/images/picture.jpeg]]\n')
+        record = self.record()
+        self.assertEqual(record['reason_codes'], ['missing_asset'])
+        self.assertEqual(record['pending_assets'], ['unresolved_committed_asset'])
+        self.assertEqual(record['operations'], [])
+        self.assertFalse(record['receipt_advance'])
+
+    def test_bound_wiki_image_preserves_list_label_and_child_identity(self):
+        ref = self.bind_wiki_image()
+        self.change_source('- Picture: ![[' + ref + ']]\n')
+        record = self.record(); self.assertEqual(record['decision'], 'preview_diff')
+        root = record['operations'][0]['proposed_blocks'][0]
+        self.assertEqual(root['type'], 'bulleted_list_item')
+        self.assertEqual(root['payload']['rich_text'][0]['text']['content'], 'Picture: ')
+        self.assertEqual(root['children'][0]['type'], 'image')
+        self.assertEqual(root['children'][0]['payload']['file_identity'], 'f' * 32)
+        self.assertNotIn('url', root['children'][0]['payload'])
+        self.assertFalse(record['operations'][0]['executable'])
+        self.assets[ref]['bytes'] += b'changed'
+        self.assertEqual(self.record()['reason_codes'], ['missing_asset'])
+
+    def test_standalone_wiki_image_uses_same_verified_binding(self):
+        ref = self.bind_wiki_image(); self.change_source('![[' + ref + ']]\n')
+        record = self.record(); self.assertEqual(record['decision'], 'preview_diff')
+        self.assertEqual(record['operations'][0]['proposed_blocks'][0]['type'], 'image')
+        self.policy['ownership_sha256'] = {}
+        self.assertEqual(self.record()['reason_codes'], ['missing_block_ownership'])
+
+    def test_wiki_alias_size_fragment_other_files_or_suffix_not_guessed(self):
+        self.bind_wiki_image()
+        for ref in ('../_assets/images/picture.jpeg|100', '../_assets/images/picture.jpeg#section', '../_assets/recording.mp3'):
+            self.change_source('- Picture: ![[' + ref + ']]\n')
+            self.assertEqual(self.record()['reason_codes'], ['unsupported_source_format'])
+        self.change_source('- Picture: ![[../_assets/images/picture.jpeg]] trailing\n')
+        self.assertEqual(self.record()['reason_codes'], ['unsupported_source_format'])
+        self.change_source('- Picture: ![[https://example.invalid/picture.jpeg]]\n')
+        self.assertEqual(self.record()['reason_codes'], ['missing_asset'])
+
+    def test_compact_and_nested_blockquotes_are_not_flattened(self):
+        for body in ('>compact quote\n', '- >nested quote\n'):
+            self.change_source(body)
+            self.assertEqual(self.record()['reason_codes'], ['unsupported_source_format'])
+
+    def test_frontmatter_is_not_rendered_and_footer_text_is_not_discarded(self):
+        self.change_source('Text (>5).\n\n---\nsource: api\nupdated: 2026-01-01T00:00:00Z\ncanonicalId: api:fixture\n')
+        record = self.record(); blocks = record['operations'][0]['proposed_blocks']
+        self.assertEqual([x['type'] for x in blocks], ['paragraph', 'divider', 'paragraph'])
+        text = ''.join(x['text']['content'] for x in blocks[-1]['payload']['rich_text'])
+        self.assertEqual(text, 'source: api\nupdated: 2026-01-01T00:00:00Z\ncanonicalId: api:fixture')
+        self.assertNotIn('Original raw date', json.dumps(blocks))
+
+    def test_renderer_version_change_does_not_adopt_prior_receipts(self):
+        self.receipt['renderer_version'] = 'get-notion-native-subset-1'; self.pin()
+        self.assertEqual(self.record()['reason_codes'], ['missing_block_ownership'])
+
     def test_unsupported_inline_markup_never_becomes_plain_semantic_noop(self):
         for body in ('_italic_', '~~strike~~', 'Text <b>bold</b>', '**nested _italic_**', '[<b>label</b>](https://example.invalid)'):
             self.change_source(body + '\n')

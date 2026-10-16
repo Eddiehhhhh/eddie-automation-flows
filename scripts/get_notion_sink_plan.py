@@ -11,7 +11,7 @@ import re
 from pathlib import PurePosixPath
 
 CONTRACT = 'get-notion-read-only-plan-1'
-RENDERER = 'get-notion-native-subset-1'
+RENDERER = 'get-notion-native-subset-2'
 REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
 DATA_SOURCE_SHA256 = '00b4d82e612d3fa5dd16cec55f456a83190365f676c9fb163ff7d7989e8cb989'
 COHORT_SHA256 = '21f08b0c2d76f96c13a9e1b28bab48b6b9508e60927e864aa0332ce49d8d9f1e'
@@ -93,13 +93,20 @@ def rich_text(value):
     if not isinstance(value, str):
         stop('unsupported_source_format')
     out = []
-    def plain_supported(text):
-        if re.search(r'[_~<>]', text): stop('unsupported_source_format')
+    def plain_text(text):
+        # Only an attribute-free HTML line break is supported. Intraword
+        # underscores (including URL query names) and literal > are plain text.
+        if re.search(r'\\<[bB][rR] ?/?>', text):
+            stop('unsupported_source_format')
+        text = re.sub(r'<[bB][rR] ?/?>', '\n', text)
+        if re.search(r'(?<!\w)_|_(?!\w)|__|[~<]', text):
+            stop('unsupported_source_format')
+        return text
     token = re.compile(r'(\\[\\`*\[\]()]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\))')
     cursor = 0
     for match in token.finditer(value):
         plain = value[cursor:match.start()]
-        plain_supported(plain)
+        plain = plain_text(plain)
         if any(x in plain for x in ('*', '`', '[', ']')):
             stop('unsupported_source_format')
         if plain:
@@ -110,20 +117,17 @@ def rich_text(value):
         elif part.startswith('`'):
             out.append(text_run(part[1:-1], code=True))
         elif part.startswith('**'):
-            plain_supported(part[2:-2])
-            out.append(text_run(part[2:-2], bold=True))
+            out.append(text_run(plain_text(part[2:-2]), bold=True))
         elif part.startswith('*'):
-            plain_supported(part[1:-1])
-            out.append(text_run(part[1:-1], italic=True))
+            out.append(text_run(plain_text(part[1:-1]), italic=True))
         else:
             label, url = part[1:].split('](', 1)
-            plain_supported(label)
-            run = text_run(label)
+            run = text_run(plain_text(label))
             run['text']['link'] = {'url': url[:-1]}
             out.append(run)
         cursor = match.end()
     tail = value[cursor:]
-    plain_supported(tail)
+    tail = plain_text(tail)
     if any(x in tail for x in ('*', '`', '[', ']')):
         stop('unsupported_source_format')
     if tail:
@@ -239,8 +243,44 @@ def render_markdown(data, ident, assets, source_path, content_tree):
     """Native preview subset. Unsupported input is blocked, never flattened."""
     lines = source_body(data, ident).splitlines()
     output = []; warnings = []; used = {}; index = 0
+    def bound_image(reference, caption=''):
+        entry = assets.get(reference)
+        if not isinstance(entry, dict) or entry.get('readback_verified') is not True or not isinstance(entry.get('bytes'), bytes):
+            stop('missing_asset')
+        if reference.startswith('/') or ':' in reference or '\\' in reference or '%' in reference:
+            stop('missing_asset')
+        parts = list(PurePosixPath(source_path).parent.parts)
+        for part in reference.split('/'):
+            if part == '..':
+                if len(parts) <= 2: stop('missing_asset')
+                parts.pop()
+            elif part in ('', '.'):
+                stop('missing_asset')
+            else:
+                parts.append(part)
+        path = safe_path(entry.get('path')); value = entry['bytes']
+        if len(value) > MAX_ASSET: stop('missing_asset')
+        blob_id = git_blob(value)
+        if '/'.join(parts) != path or entry.get('git_blob') != blob_id or content_tree.get(path) != blob_id or entry.get('sha256') != digest(value):
+            stop('missing_asset')
+        file_id = notion_id(entry.get('notion_file_id'))
+        used[reference] = {'path': path, 'git_blob': blob_id, 'sha256': digest(value), 'notion_file_id': file_id}
+        return block('image', {'file_identity': file_id, 'sha256': digest(value), 'caption': rich_text(caption)})
+
+    def wiki_image(value):
+        # No aliases, dimensions, fragments or guessed attachment types.
+        match = re.fullmatch(r'([^!]*?)!\[\[([^\[\]\n|#]+)\]\]', value)
+        if not match:
+            return None
+        label, reference = match.groups()
+        if not re.search(r'\.(?:png|jpe?g|gif|webp)$', reference, re.I):
+            stop('unsupported_source_format')
+        return label, bound_image(reference)
+
     while index < len(lines):
         line = lines[index]
+        if line.startswith('>') and not line.startswith('> '):
+            stop('unsupported_source_format')
         if not line.strip():
             index += 1; continue
         if line.startswith('```'):
@@ -252,28 +292,11 @@ def render_markdown(data, ident, assets, source_path, content_tree):
             output.append(block('code', {'rich_text': [text_run('\n'.join(code))], 'language': language, 'caption': []})); index += 1; continue
         image = re.fullmatch(r'!\[([^\]]*)\]\(([^\s()]+)\)', line)
         if image:
-            caption, reference = image.groups(); entry = assets.get(reference)
-            if not isinstance(entry, dict) or entry.get('readback_verified') is not True or not isinstance(entry.get('bytes'), bytes):
-                stop('missing_asset')
-            if reference.startswith('/') or ':' in reference or '\\' in reference or '%' in reference:
-                stop('missing_asset')
-            parts = list(PurePosixPath(source_path).parent.parts)
-            for part in reference.split('/'):
-                if part == '..':
-                    if len(parts) <= 2: stop('missing_asset')
-                    parts.pop()
-                elif part in ('', '.'):
-                    stop('missing_asset')
-                else:
-                    parts.append(part)
-            path = safe_path(entry.get('path')); value = entry['bytes']
-            if len(value) > MAX_ASSET: stop('missing_asset')
-            blob_id = git_blob(value)
-            if '/'.join(parts) != path or entry.get('git_blob') != blob_id or content_tree.get(path) != blob_id or entry.get('sha256') != digest(value):
-                stop('missing_asset')
-            file_id = notion_id(entry.get('notion_file_id'))
-            used[reference] = {'path': path, 'git_blob': blob_id, 'sha256': digest(value), 'notion_file_id': file_id}
-            output.append(block('image', {'file_identity': file_id, 'sha256': digest(value), 'caption': rich_text(caption)})); index += 1; continue
+            output.append(bound_image(image[2], image[1])); index += 1; continue
+        if line.startswith('![['):
+            embedded = wiki_image(line)
+            if embedded is None or embedded[0]: stop('unsupported_source_format')
+            output.append(embedded[1]); index += 1; continue
         heading = re.fullmatch(r'(#{1,6}) (.*)', line)
         if heading:
             level = len(heading[1]); rt = rich_text(heading[2])
@@ -303,6 +326,12 @@ def render_markdown(data, ident, assets, source_path, content_tree):
             if listing[1]:
                 stop('unsupported_source_format')
             kind = 'bulleted_list_item' if listing[2] else 'numbered_list_item'; value = listing[4]
+            if value.startswith('>'): stop('unsupported_source_format')
+            embedded = wiki_image(value)
+            if embedded is not None:
+                label, image_block = embedded
+                output.append(block(kind, {'rich_text': rich_text(label)}, [image_block]))
+                index += 1; continue
             task = re.fullmatch(r'\[([ xX])\] (.*)', value)
             payload = {'rich_text': rich_text(task[2] if task else value)}
             if task: kind = 'to_do'; payload['checked'] = task[1].lower() == 'x'

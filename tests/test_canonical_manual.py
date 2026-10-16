@@ -20,6 +20,58 @@ class CanonicalManualTests(unittest.TestCase):
         return g.prepare(self.reader,self.evidence,parent,n.git_inventory(self.reader,parent),source or self.f.source(),legacy_sha=sha or self.sha,registry_sha=registry,preview=self.f.preview if first else None)
     def report(self,plan,files):
         return {'status':'canonical_candidate_verified','main_updated':False,'cas_attempts':0,'readback_verified':True,'changed_paths':len(files),'notes_changed':sum(p not in (r.GET+'/'+a.STATE,r.GET+'/'+n.STATE) for p in files),'changed_bytes':sum(map(len,files.values())),'transaction_bytes':plan['transaction_bytes'],**{k:plan[k] for k in ('parent_commit','candidate_commit','state_sha256','registry_sha256','approval_payload_sha256')},'plan_sha256':a.sha(a.encoded(plan)),'conflict_reason_counts':plan['conflict_reason_counts'],**plan['counts']}
+    def test_probe_only_details_fixed_cohort_and_no_readiness_claim(self):
+        source=self.f.source();report=g.probe_details(self.f.preview,source)
+        self.assertEqual(source.ids,['200','201']);self.assertEqual(source.lists,0)
+        self.assertEqual(report['stages'],{'accepted':2});self.assertFalse(report['source_readiness_claimed']);self.assertFalse(report['raw_retained'])
+        self.assertEqual(g.probe_report(report),report)
+        self.assertNotIn('secret',json.dumps(g.probe_report({**report,'secret':'secret'})))
+        for key,value in [('stages',{'private title':2}),('backlinks',[]),('list_requests',1),('cas_attempts',1),('raw_retained',True)]:
+            self.assertEqual(g.probe_report({**report,key:value})['status'],'canonical_probe_failed')
+    def test_probe_reason_categories_do_not_emit_unknown_keys_or_private_values(self):
+        notes=deepcopy(self.f.notes);notes['200']['private secret field']='private secret value'
+        out=g.probe_details(self.f.preview,self.f.source(notes));self.assertEqual(out['stages'],{'top_fields':1,'accepted':1});self.assertNotIn('private secret',json.dumps(out))
+        cases=[('note_url','https://biji.com/note/200','backlink'),('audio',{'original':'Full','private key':'secret'},'audio_fields'),('web_page',{'private key':'secret'},'web_fields'),('tags',[{'name':'Tag','private key':1}],'tags'),('attachments',[{'type':'audio','url':'https://example.invalid/a','private key':1}],'attachment_fields')]
+        for field,value,stage in cases:
+            notes=deepcopy(self.f.notes);notes['200'][field]=value;out=g.probe_details(self.f.preview,self.f.source(notes));self.assertEqual(out['stages'].get(stage),1);self.assertNotIn('private key',json.dumps(out))
+    def test_probe_identity_and_apply_fail_before_any_write_or_source(self):
+        source=self.f.source()
+        with patch.object(m,'Remote',side_effect=AssertionError('remote forbidden')):
+            for kwargs in ({'apply':True},{'approved_payload_sha256':'a'*64}):
+                with self.assertRaisesRegex(m.ManualFailure,'manual_scope'):g.run_probe('placeholder',source,self.parent,**kwargs)
+        import sync_getnote_to_raw as sync
+        with patch.object(sync,'load_credentials',side_effect=AssertionError('credentials forbidden')),patch('builtins.print'):
+            self.assertEqual(g.main(['--probe-fixed-source','--apply','--expected-parent',self.parent]),1)
+        notes=deepcopy(self.f.notes);notes['200']['note_id']='999'
+        with self.assertRaisesRegex(m.ManualFailure,'manual_scope'):g.probe_details(self.f.preview,self.f.source(notes))
+        self.assertEqual(source.ids,[])
+    def test_probe_real_git_fixed_preview_blobs_without_legacy_capture_or_inventory(self):
+        self.f.f.git('checkout','-q','--detach',self.parent)
+        statepath=r.GET+'/'+n.PREVIEW_STATE;p=self.f.f.repo/statepath;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(self.f.preview_bytes)
+        for saved in self.f.preview.values():
+            path=self.f.f.repo/r.GET/saved['entry']['filePath'];path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(saved['bytes'])
+        preview_commit=self.f.f.commit('Synthetic fixed preview');reader=a.OfflineGit(self.f.f.repo);local=reader.local;store={oid:local.blob(oid) for mode,kind,oid in reader.tree(preview_commit).values() if kind=='blob'}
+        parent=self.parent;seen=[]
+        class Remote:
+            def __init__(self):self.local=local
+            def metadata(self):return {'full_name':r.REPOSITORY,'private':True}
+            def ref(self,ref):return parent if ref==r.MAIN_REF else m.PROTECTED[ref]
+            def check_source_budget(self,commit):
+                assert commit==preview_commit
+                return {p:(*row,len(store[row[2]])) for p,row in reader.tree(commit).items() if p.startswith(r.GET+'/')}
+            def cas_main(self,*args):raise AssertionError('no writes')
+        def fetch(remote,metadata,token,directory):seen.extend(metadata);return {p:store[row[2]] for p,row in metadata.items()}
+        source=self.f.source();refs=self.f.f.git('show-ref');index=self.f.f.git('ls-files','--stage')
+        with patch.object(n,'PREVIEW',preview_commit),patch.object(n,'PREVIEW_STATE_SHA',a.sha(self.f.preview_bytes)),patch.object(m,'Remote',return_value=Remote()),patch.object(r,'readback_checkout',return_value=local),patch.object(m,'fetch_selected',side_effect=fetch),patch.object(m,'load_evidence',side_effect=AssertionError('no full capture fetch')):
+            report=g.run_probe('placeholder',source,parent)
+        self.assertEqual(report['stages'],{'accepted':2});self.assertEqual(len(seen),3);self.assertEqual(source.lists,0);self.assertEqual(refs,self.f.f.git('show-ref'));self.assertEqual(index,self.f.f.git('ls-files','--stage'))
+    def test_fresh_preview_creation_preserves_old_preview_and_existing_main(self):
+        notes=deepcopy(self.f.notes);notes['200'].update(title='Fresh title',updated_at='2026-10-17 01:02:04',content='New exact source')
+        prior=deepcopy(self.f.preview);plan,files=self.prepare(source=self.f.source(notes));self.assertEqual(plan['counts']['new_created'],1);self.assertEqual(plan['counts']['new_preview_imported'],1);self.assertEqual(prior,self.f.preview)
+        before=self.reader.tree(self.parent);after=self.reader.tree(plan['candidate_commit'])
+        for path,row in before.items():self.assertEqual(after[path],row)
+        source=self.f.source(notes);repeat,writes=self.prepare(plan['candidate_commit'],registry=plan['registry_sha256'],source=source,first=False);self.assertEqual(writes,{});self.assertEqual(source.ids,[])
+
     def test_metadata_only_update_reports_state_change_without_note_change(self):
         first,_=self.prepare();notes=deepcopy(self.f.notes);notes['200']['version']=1
         plan,files=self.prepare(first['candidate_commit'],registry=first['registry_sha256'],source=self.f.source(notes),first=False)

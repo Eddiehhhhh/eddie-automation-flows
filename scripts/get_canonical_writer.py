@@ -327,7 +327,7 @@ def record(note,summary,path,data,anchor=None):
       'preview_anchor':deepcopy(anchor),'source_metadata':source_metadata(note)}
 
 
-def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None):
+def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None,allow_fresh_preview=False):
     """Return actual candidate bytes and state; no side effects or source calls."""
     state=validate_registry(registry,registry_sha,evidence,legacy_state,legacy_sha,current)
     items=legacy.source_snapshot(summaries,terminal);preview=preview or {};selected=list(selected_new)
@@ -368,10 +368,18 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
             elif ident in preview:
                 saved=preview[ident];entry=saved['entry'];path=path_ok(entry['filePath'])
                 if path in occupied:fail('destination_collision')
-                if token!=entry['sourceVersion'] or raw._source_content_hash(note)!=entry['sourceContentHash'] or raw._source_content_hash(summary)!=entry['sourceSummaryHash']:fail('preview_source_changed')
                 data=render_exact(note,path)
-                if data!=saved['bytes']:fail('preview_render_changed')
-                anchor=saved['anchor'];outcome='preview_imported'
+                exact=(token==entry['sourceVersion'] and raw._source_content_hash(note)==entry['sourceContentHash'] and raw._source_content_hash(summary)==entry['sourceSummaryHash'] and data==saved['bytes'])
+                if exact:outcome='preview_imported'
+                else:
+                    if not allow_fresh_preview:fail('preview_source_changed')
+                    # The preview is an immutable selection/audit anchor, not an
+                    # existing main owner. A fresh absent identity can be created
+                    # from its fully validated current source without rewriting it.
+                    path=new_path(note,ident)
+                    if path in occupied:fail('destination_collision')
+                    data=render_exact(note,path);outcome='created'
+                anchor=saved['anchor']
             else:
                 category=CATEGORIES.get(note.get('note_type'))
                 if not category:fail('source_shape_unsupported')
@@ -496,7 +504,7 @@ def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,deta
     next_sha=legacy.sha(legacy.encoded(next_legacy))
     registry=deepcopy(registry);registry['legacy_state_sha256']=next_sha
     producer_registry_sha=legacy.sha(legacy.encoded(registry))
-    next_registry,new_changes,new_counts=propose_new(evidence,next_legacy,next_sha,registry,producer_registry_sha,current,summaries,terminal,{i:v for i,v in details.items() if i not in legacy_needed},selected_new=selected_new,preview=preview,baseline_errors=baseline_errors)
+    next_registry,new_changes,new_counts=propose_new(evidence,next_legacy,next_sha,registry,producer_registry_sha,current,summaries,terminal,{i:v for i,v in details.items() if i not in legacy_needed},selected_new=selected_new,preview=preview,baseline_errors=baseline_errors,allow_fresh_preview=True)
     if set(legacy_changes)&set(new_changes):fail('canonical_owner_overlap')
     plan=git_candidate(repo,parent,next_legacy,next_registry,{**legacy_changes,**new_changes},current)
     return plan,{'legacy':next_legacy,'registry':next_registry},{'legacy_'+k:v for k,v in old_counts.items()}|{'new_'+k:v for k,v in new_counts.items()}

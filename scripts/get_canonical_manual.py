@@ -97,6 +97,101 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     verify_plan(reader,plan,files)
     return plan,files
 
+PROBE_STAGES={'accepted','top_fields','backlink','audio_fields','web_fields','tags','topics','attachment_fields','other_source_conflict','detail_unavailable'}
+PROBE_BACKLINKS={'absent','exact','same_identity_alternate','different_identity','non_note_url','invalid_type'}
+
+def probe_stage(note):
+    """Fixed categories only. Never emit source keys, IDs, URLs or text."""
+    if not isinstance(note,dict):return 'detail_unavailable'
+    if set(note)-n.KNOWN-n.EXTENSIONS:return 'top_fields'
+    ident=n.note_identity(note);url=note.get('note_url')
+    if url not in (None,'','https://www.biji.com/note/'+ident):return 'backlink'
+    for name,allowed,stage in [('audio',{'original','transcript','play_url','duration','sentences'},'audio_fields'),('web_page',{'url','content','excerpt'},'web_fields')]:
+        if isinstance(note.get(name),dict) and set(note[name])-allowed:return stage
+    for field in ('tags','topics'):
+        try:n.validate_collections({field:note.get(field)})
+        except Exception:return field
+    try:n.validate_collections({'attachments':note.get('attachments')})
+    except Exception:return 'attachment_fields'
+    return 'other_source_conflict'
+
+def backlink_class(note):
+    import re
+    value=note.get('note_url');ident=n.note_identity(note)
+    if value in (None,''):return 'absent'
+    if not isinstance(value,str):return 'invalid_type'
+    if value=='https://www.biji.com/note/'+ident:return 'exact'
+    match=re.fullmatch(r'https://(?:www\.)?biji\.com/note/([0-9]{1,64})/?',value)
+    if match:return 'same_identity_alternate' if match[1]==ident else 'different_identity'
+    return 'non_note_url'
+
+def probe_details(preview,source):
+    if len(preview)!=m.CANONICAL_COUNT:m.fail('manual_scope')
+    stages={};backlinks={};types={};reasons={};exact=0;reads=0
+    for ident in sorted(preview):
+        n.identity(ident);reads+=1
+        try:note=m.detail_note(source.detail_raw(ident))
+        except RuntimeError as exc:
+            if str(exc)!='GetNote HTTP 404':raise
+            note=None
+        if isinstance(note,dict) and n.note_identity(note)!=ident:m.fail('manual_scope')
+        if note is not None:
+            kind=note.get('note_type');kind=kind if isinstance(kind,str) and kind in n.CATEGORIES else 'unsupported'
+            types[kind]=types.get(kind,0)+1
+            code=backlink_class(note);backlinks[code]=backlinks.get(code,0)+1
+        try:
+            parsed=n.source_note(note,note);data=n.render_exact(parsed,preview[ident]['entry']['filePath']);stage='accepted'
+            exact+=data==preview[ident]['bytes']
+        except (a.ParityFailure,ValueError,TypeError,AttributeError) as exc:
+            stage=probe_stage(note);reason=str(exc) if str(exc) in n.CONFLICT_REASONS else 'other';reasons[reason]=reasons.get(reason,0)+1
+        stages[stage]=stages.get(stage,0)+1
+    return {'status':'canonical_probe_verified','selected':len(preview),'detail_requests':reads,'stages':stages,'backlinks':backlinks,'note_types':types,'reason_counts':reasons,'detail_render_equals_preview':exact,'list_requests':0,'get_writes':0,'cas_attempts':0,'main_updated':False,'asset_downloads':0,'raw_retained':False,'source_readiness_claimed':False}
+
+def run_probe(token,source,expected_parent,*,apply=False,approved_payload_sha256=None,work=None):
+    if apply or approved_payload_sha256:m.fail('manual_scope')
+    a.checked(expected_parent,40);remote=m.Remote(None,token);m.guard(remote,expected_parent)
+    with tempfile.TemporaryDirectory(prefix='get-fixed-source-probe-',dir=work) as folder:
+        root=Path(folder);local=r.readback_checkout(root/'objects',n.PREVIEW,token);remote.local=local;reader=a.OfflineGit(local.vault)
+        metadata=remote.check_source_budget(n.PREVIEW);statepath=r.GET+'/'+n.PREVIEW_STATE
+        if statepath not in metadata:m.fail('manual_state_anchor')
+        row=metadata[statepath]
+        if row[:2]!=('100644','blob') or type(row[3]) is not int or not 0<=row[3]<=2*c.MIB or reader.tree(n.PREVIEW).get(statepath)!=row[:3]:m.fail('manual_budget')
+        values=m.fetch_selected(remote,{statepath:row},token,root/'state');data=values[statepath]
+        if a.sha(data)!=n.PREVIEW_STATE_SHA:m.fail('manual_state_anchor')
+        m.import_blob(local,data,row[2]);state=strict_capture_json(data,2*c.MIB);rows=state.get('notesByCanonicalId')
+        if not isinstance(rows,dict) or len(rows)!=m.CANONICAL_COUNT:m.fail('manual_scope')
+        selected={}
+        for record in rows.values():
+            if not isinstance(record,dict):m.fail('manual_scope')
+            path=r.GET+'/'+n.path_ok(record.get('filePath'));entry=metadata.get(path)
+            if path in selected or entry is None or entry[:2]!=('100644','blob') or type(entry[3]) is not int or not 0<=entry[3]<=a.owned.MAX_NOTE or reader.tree(n.PREVIEW).get(path)!=entry[:3]:m.fail('manual_budget')
+            selected[path]=entry
+        for path,data in m.fetch_selected(remote,selected,token,root/'notes').items():m.import_blob(local,data,selected[path][2])
+        preview=n.preview_records(reader,n.PREVIEW,n.PREVIEW_STATE_SHA);m.guard(remote,expected_parent)
+        result=probe_details(preview,source);m.guard(remote,expected_parent)
+        return result
+
+def probe_report(value):
+    bad={'status':'canonical_probe_failed','main_updated':False,'cas_attempts':0,'source_readiness_claimed':False}
+    if not isinstance(value,dict) or value.get('status')!='canonical_probe_verified':return bad
+    if value.get('selected')!=m.CANONICAL_COUNT or value.get('detail_requests')!=m.CANONICAL_COUNT:return bad
+    allowed={'stages':PROBE_STAGES,'backlinks':PROBE_BACKLINKS,'note_types':set(n.CATEGORIES)|{'unsupported'},'reason_counts':n.CONFLICT_REASONS}
+    result={}
+    for key,keys in allowed.items():
+        item=value.get(key)
+        if not isinstance(item,dict) or set(item)-keys or any(type(v) is not int or not 0<=v<=m.CANONICAL_COUNT for v in item.values()) or sum(item.values())>m.CANONICAL_COUNT:return bad
+        result[key]=dict(item)
+    if sum(result['stages'].values())!=m.CANONICAL_COUNT:return bad
+    if type(value.get('detail_render_equals_preview')) is not int or not 0<=value['detail_render_equals_preview']<=m.CANONICAL_COUNT:return bad
+    for key in ('list_requests','get_writes','cas_attempts','asset_downloads'):
+        if type(value.get(key)) is not int or value[key]!=0:return bad
+    if any(value.get(key) is not False for key in ('main_updated','raw_retained','source_readiness_claimed')):return bad
+    for key in ('api_requests','http_attempts','http_retries'):
+        if key in value:
+            if type(value[key]) is not int or not 0<=value[key]<=100:return bad
+            result[key]=value[key]
+    return {**result,**{key:value[key] for key in ('status','selected','detail_requests','detail_render_equals_preview','list_requests','get_writes','cas_attempts','main_updated','asset_downloads','raw_retained','source_readiness_claimed')}}
+
 def new_baselines(reader,registry,parent,remote):
     total=0
     for ident,row in registry['newById'].items():
@@ -155,6 +250,7 @@ COUNTS=('changed_paths','notes_changed','changed_bytes','transaction_bytes','leg
 HASHES=(('parent_commit',40),('candidate_commit',40),('state_sha256',64),('registry_sha256',64),('approval_payload_sha256',64),('plan_sha256',64))
 
 def public_report(value):
+    if isinstance(value,dict) and value.get('status')=='canonical_probe_verified':return probe_report(value)
     bad={'status':'canonical_failed','main_updated':None,'write_state':'unknown'}
     if not isinstance(value,dict):return bad
     if value.get('status') not in ('canonical_candidate_verified','canonical_transaction_verified'):
@@ -194,10 +290,12 @@ def read_report(path,checkpoint=None):
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('expected-parent','legacy-sha256','registry-sha256','approved-payload-sha256','checkpoint','publish-report'):parser.add_argument('--'+key)
-    parser.add_argument('--apply',action='store_true');args=parser.parse_args(argv)
+    parser.add_argument('--apply',action='store_true');parser.add_argument('--probe-fixed-source',action='store_true');args=parser.parse_args(argv)
     if args.publish_report:print(json.dumps(read_report(args.publish_report,args.checkpoint)));return 0
     try:
-        a.checked(args.expected_parent,40);a.checked(args.legacy_sha256,64)
+        if args.probe_fixed_source and (args.apply or args.approved_payload_sha256):m.fail('manual_scope')
+        a.checked(args.expected_parent,40)
+        if not args.probe_fixed_source:a.checked(args.legacy_sha256,64)
         if args.registry_sha256:a.checked(args.registry_sha256,64)
         if args.apply:
             if not args.checkpoint:m.fail('manual_checkpoint')
@@ -207,9 +305,9 @@ def main(argv=None):
         import sync_getnote_to_raw as sync
         from source_sync_rate import RequestPolicy
         key,client=sync.load_credentials();source=c.Source(key,client,RequestPolicy(seconds=35*60))
-        result=run(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,legacy_sha=args.legacy_sha256,registry_sha=args.registry_sha256,apply=args.apply,approved_payload_sha256=args.approved_payload_sha256,checkpoint=(lambda plan:m.write_checkpoint(args.checkpoint,plan)) if args.checkpoint else None)
+        result=run_probe(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent) if args.probe_fixed_source else run(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,legacy_sha=args.legacy_sha256,registry_sha=args.registry_sha256,apply=args.apply,approved_payload_sha256=args.approved_payload_sha256,checkpoint=(lambda plan:m.write_checkpoint(args.checkpoint,plan)) if args.checkpoint else None)
         result.update(detail_requests=source.details,api_requests=source.api_requests,http_attempts=source.http_attempts,http_retries=max(0,source.http_attempts-source.api_requests))
     except Exception as exc:result={'error':str(exc) if str(exc) in m.ERRORS else 'manual_failed','write_state':getattr(exc,'write_state','not_attempted')}
-    clean=public_report(result);print(json.dumps(clean));return 1 if clean['status']=='canonical_failed' else 0
+    clean=public_report(result);print(json.dumps(clean));return 1 if clean['status'] in ('canonical_failed','canonical_probe_failed') else 0
 
 if __name__=='__main__':raise SystemExit(main())

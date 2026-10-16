@@ -26,6 +26,8 @@ from get_v7_compat import note_identity
 
 CONTRACT='get-legacy-transaction-proposal-1'
 STATE='03 State/legacy-reconciliation-state.json'
+OVERLAY_CONTRACT='get-legacy-mutable-metadata-1'
+MUTABLE_METADATA=('version','display_title','timestamps.edited_at','timestamps.record_updated_at')
 MAX_STATE=8*1024*1024
 MAX_TREE=300*1024*1024
 IMMUTABLE=('contract','origin','local_proposal_only','blocked_from_apply','mirror_adopted',
@@ -179,7 +181,9 @@ def validate_state(payload,expected_sha,evidence):
     if any(conflicts.get(i)!=reason for i,reason in evidence.conflicts.items()):fail('adapter_state_schema')
     paths=set()
     for ident,row in rows.items():
-        if not isinstance(row,dict) or set(row)!={'ownership','baseline_blob','summary_sha256'}:fail('adapter_state_schema')
+        if not isinstance(row,dict) or set(row) not in ({'ownership','baseline_blob','summary_sha256'},{'ownership','baseline_blob','summary_sha256','source_overlay'}):fail('adapter_state_schema')
+        if 'source_overlay' in row and row['source_overlay'] is None:fail('adapter_state_schema')
+        validate_overlay(row.get('source_overlay'),evidence.source[ident])
         checked(row['baseline_blob'],40);checked(row['summary_sha256'],64);state=row['ownership'];original=evidence.initial[ident]
         if not isinstance(state,dict) or any(state.get(k)!=original[k] for k in IMMUTABLE):fail('adapter_ownership_changed')
         if state['filePath'] in paths:fail('adapter_state_schema')
@@ -187,6 +191,81 @@ def validate_state(payload,expected_sha,evidence):
         if owned.ownership_shape_hash(state.get('owned_spans'))!=original['ownership_shape_sha256']:fail('adapter_ownership_changed')
     if len(encoded(payload))>MAX_STATE:fail('adapter_state_budget')
     return deepcopy(payload)
+
+
+def metadata_values(note):
+    values={}
+    for path in MUTABLE_METADATA:
+        parts=path.split('.');parent=note
+        for key in parts[:-1]:
+            if not isinstance(parent,dict) or key not in parent:parent=None;break
+            parent=parent[key]
+        if isinstance(parent,dict) and parts[-1] in parent:values[path]=deepcopy(parent[parts[-1]])
+    return values
+
+
+def validate_metadata_values(values):
+    for path,value in values.items():
+        if path=='version':
+            if type(value) is not int or value<0:fail('source_metadata_changed')
+        elif path=='display_title':
+            if not isinstance(value,str):fail('source_metadata_changed')
+        else:
+            try:raw_source_version(value)
+            except ParityFailure:fail('source_metadata_changed')
+
+
+def set_metadata_values(note,values):
+    note=deepcopy(note)
+    for path,value in values.items():
+        parts=path.split('.');parent=note
+        for key in parts[:-1]:
+            if not isinstance(parent,dict) or not isinstance(parent.get(key),dict):fail('source_metadata_changed')
+            parent=parent[key]
+        if parts[-1] not in parent:fail('source_metadata_changed')
+        parent[parts[-1]]=deepcopy(value)
+    return note
+
+
+def validate_overlay(overlay,original):
+    if overlay is None:return
+    if not isinstance(overlay,dict) or set(overlay)!={'contract','fields','actual_source_sha256'} or overlay['contract']!=OVERLAY_CONTRACT or not isinstance(overlay['fields'],dict):fail('adapter_state_schema')
+    checked(overlay['actual_source_sha256'],64)
+    initial=metadata_values(original);values=overlay['fields']
+    if set(values)!=set(initial) or encoded(values)==encoded(initial):fail('adapter_state_schema')
+    try:
+        validate_metadata_values(initial);validate_metadata_values(values)
+        if any(initial[key] not in (None,'') and values[key] in (None,'') for key in initial):fail('source_metadata_changed')
+    except ParityFailure:fail('adapter_state_schema')
+
+
+def actual_source(row,core,original):
+    overlay=row.get('source_overlay');validate_overlay(overlay,original)
+    if overlay is None:return core
+    actual=set_metadata_values(core,overlay['fields'])
+    if sha(encoded(actual))!=overlay['actual_source_sha256']:fail('adapter_state_source_hash')
+    return actual
+
+
+def normalize_source(note,previous,original):
+    """Only four explicitly mutable metadata values may evolve.
+
+    The span state remains bound to capture metadata; an independent outer
+    receipt binds the full actual source. No timestamp conversion or source
+    text normalization occurs. All other metadata still passes the exact hash.
+    """
+    initial=metadata_values(original);old=metadata_values(previous);new=metadata_values(note)
+    if set(new)!=set(initial) or set(old)!=set(initial):fail('source_metadata_changed')
+    if encoded(new)!=encoded(initial) or encoded(old)!=encoded(initial):
+        validate_metadata_values(initial);validate_metadata_values(old);validate_metadata_values(new)
+        if any(old[key] not in (None,'') and new[key] in (None,'') for key in old):fail('source_metadata_changed')
+    return set_metadata_values(note,initial)
+
+
+def source_overlay(note,original):
+    values=metadata_values(note)
+    if encoded(values)==encoded(metadata_values(original)):return None
+    return {'contract':OVERLAY_CONTRACT,'fields':values,'actual_source_sha256':sha(encoded(note))}
 
 
 def reconstructed_source(evidence,ident,ownership,baseline):
@@ -235,11 +314,14 @@ def propose_updates(evidence,state,state_sha,current,repo,prior_commit,summaries
         ownership=row['ownership'];path=ownership['filePath'];summary=items.get(ident)
         try:
             baseline=repo.baseline(prior_commit,path,row['baseline_blob'],ownership['mirror_sha256'])
-            previous=reconstructed_source(evidence,ident,ownership,baseline)
+            core=reconstructed_source(evidence,ident,ownership,baseline)
+            previous=actual_source(row,core,evidence.source[ident])
             if path not in current:fail('legacy_missing')
             if summary is None:fail('source_missing')
-            try:owned.regions(current[path])
+            try:_,_,current_header=owned.regions(current[path])
             except (ValueError,UnicodeError):fail('legacy_structure_ambiguous')
+            owned.text_values(previous)
+            if owned.has_unresolved_references(previous,current[path],current_header):fail('legacy_references_unresolved')
             note=previous
             if ident in needed:
                 detail=details[ident];counts['details_used']+=1
@@ -250,11 +332,18 @@ def propose_updates(evidence,state,state_sha,current,repo,prior_commit,summaries
                 except ParityFailure:fail('source_version_mismatch')
                 if detail_version!=raw_source_version(summary.get('updated_at')):fail('source_version_mismatch')
                 note={**summary,**detail}
-            result=owned.propose_update(ownership,baseline,current[path],note,state_sha256=sha(encoded(ownership)))
-            counts[result['classification']]+=1
+            owned.text_values(note)
+            if owned.has_unresolved_references(note,current[path],current_header):fail('legacy_references_unresolved')
+            normalized=normalize_source(note,previous,evidence.source[ident])
+            result=owned.propose_update(ownership,baseline,current[path],normalized,state_sha256=sha(encoded(ownership)))
+            classification=result['classification']
+            if classification=='unchanged' and encoded(note)!=encoded(previous):classification='source_version_only'
+            counts[classification]+=1
             if result['bytes']!=current[path]:changed[path]=result['bytes']
             rows[ident]={'ownership':result['proposed_state'],'baseline_blob':retention.oid(result['bytes']),
                          'summary_sha256':sha(encoded(summary))}
+            overlay=source_overlay(note,evidence.source[ident])
+            if overlay is not None:rows[ident]['source_overlay']=overlay
         except ParityFailure as exc:
             if str(exc) not in CONFLICTS:raise
             conflicts[ident]=str(exc);counts['conflicted']+=1

@@ -18,7 +18,7 @@ class CanonicalTests(unittest.TestCase):
         return {'note_id':ident,'note_type':'plain_text','title':'Fresh note','content':'Complete fresh text\r\nwith spacing','created_at':'2026-10-16 01:02:03','updated_at':'2026-10-16 01:02:04','note_url':'https://www.biji.com/note/'+ident,**changes}
     def plan(self,notes,selected=(),state=None,current=None,details=None,preview=None):
         state=state or self.state;current=current or self.current
-        return n.propose_new(self.f.evidence,self.legacy,self.legacy_sha,state,a.sha(a.encoded(state)),current,self.f.summaries+list(notes.values()),True,notes if details is None else details,selected_new=selected,preview=preview)
+        return n.propose_new(self.f.evidence,self.legacy,self.legacy_sha,state,a.sha(a.encoded(state)),current,self.f.summaries+list(notes.values()),True,notes if details is None else details,selected_new=selected,preview=preview,allow_fresh_preview=True)
     def preview(self,note,path=None):
         ident=note['note_id'];path=path or n.CATEGORIES[note['note_type']]+'/preview.md';data=n.render(note,[],Path(path),faithful=True)[0].encode()
         state=raw.empty_faithful_state();state['notesByCanonicalId']['api:'+ident]={'sourceVersion':raw.raw_source_version(note['updated_at']),'filePath':path,'mirrorSha256':a.sha(data),'sourceContentHash':raw._source_content_hash(note),'sourceSummaryHash':raw._source_content_hash(note),'sourceUnknownHash':raw._source_unknown_hash(note),'sourceTextFields':raw.source_text_fields(note),'origin':'faithful-created','history':[]}
@@ -95,9 +95,10 @@ class CanonicalTests(unittest.TestCase):
         note=self.note(note_type='recorder_audio',audio={'original':'Full original transcript','play_url':'https://example.invalid/audio.mp3'},attachments=[{'type':'audio','url':'https://example.invalid/audio.mp3'}]);preview,_=self.preview(note)
         state,changes,counts=self.plan({'200':note},['200'],preview=preview)
         self.assertEqual(counts['preview_imported'],1);self.assertEqual(next(iter(changes.values())),preview['200']['bytes']);self.assertEqual(state['newById']['200']['preview_anchor'],preview['200']['anchor'])
-    def test_stale_preview_or_missing_detail_never_advances_success(self):
+    def test_changed_preview_creates_fresh_absent_note_and_missing_detail_conflicts(self):
         note=self.note();preview,_=self.preview(note);note['content']='Changed after preview'
-        state,changes,counts=self.plan({'200':note},['200'],preview=preview);self.assertEqual(changes,{});self.assertNotIn('200',state['newById']);self.assertEqual(state['conflictsById']['200'],'preview_source_changed')
+        state,changes,counts=self.plan({'200':note},['200'],preview=preview);self.assertEqual(counts['created'],1);self.assertIn(b'Changed after preview',next(iter(changes.values())));self.assertNotEqual(next(iter(changes.values())),preview['200']['bytes']);self.assertEqual(state['newById']['200']['preview_anchor'],preview['200']['anchor'])
+        repeat,writes,again=self.plan({'200':note},state=state,current={**self.current,**changes},details={});self.assertEqual(writes,{});self.assertEqual(state,repeat)
         state,changes,counts=self.plan({'200':self.note()},['200'],preview=preview,details={});self.assertEqual(changes,{});self.assertEqual(counts['detail_required'],1)
     def test_reserved_identity_cannot_gain_second_writer(self):
         state,changes,counts=self.plan({},['1','3','90']);self.assertEqual(changes,{});self.assertEqual(counts['conflicted'],3);self.assertEqual(set(state['newById']),set())

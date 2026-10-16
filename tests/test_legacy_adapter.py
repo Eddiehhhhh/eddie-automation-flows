@@ -22,6 +22,7 @@ class LegacyAdapterTests(unittest.TestCase):
         self.notes={};self.old={};paths={}
         for i in range(1,6):
             ident=str(i);note={'id':ident,'note_type':'plain_text','title':'Title','content':'Exact source '+ident+'\r\nline','created_at':1776968995,'updated_at':1776968995.0,'note_url':'https://www.biji.com/note/'+ident,'unknown':{'keep':True}}
+            note.update(deepcopy(getattr(self,'extensions',{})))
             if i==3:note['attachments']=[{'url':'https://example.invalid/asset'}]
             if i==5:note['ref_content']='Unmapped separate text'
             text='---\nnote_id: "'+ident+'"\nnote_type: "plain_text"\ncreated_at: "Old date bytes"\nupdated_at: "Old updated bytes"\nunknown_local: {"keep":true}\n---\nUser prefix\n## 🧠 摘要\n'+note['content']+'\n\n## 📝 正文\n（正文与摘要一致，已省略重复内容）\n\n## 🔗 来源\nUser source text\n\n## 📎 附件\nUser tail\n'
@@ -259,5 +260,108 @@ class LegacyAdapterTests(unittest.TestCase):
         output=io.StringIO()
         with patch.object(sys,'argv',args),contextlib.redirect_stdout(output):status=a.main()
         self.assertEqual(status,0);report=json.loads(output.getvalue());self.assertEqual(report['managed_proposals'],2);self.assertEqual(report['conflicts'],3);self.assertEqual(report['pending'],9);self.assertEqual(report['changed_paths'],1);self.assertNotIn('Exact source',output.getvalue());self.assertNotIn('1.md',output.getvalue())
+
+
+class LegacyMetadataTests(LegacyAdapterTests):
+    def setUp(self):
+        self.extensions={'version':1,'display_title':'Title','timestamps':{'created_at':1776968995,'edited_at':1776968995.0,'record_updated_at':'2026-10-16T07:00:00Z'}}
+        super().setUp()
+    def updated_metadata(self,**extra):
+        return {'version':2,'display_title':'Fresh display','timestamps':{'created_at':1776968995,'edited_at':1776968996.0,'record_updated_at':'2026-10-16T08:00:00Z'},**extra}
+    def test_mutable_metadata_and_body_preserve_dates_and_repeat(self):
+        state,root,prior,_=self.adopt();change=self.updated_metadata(content='Fresh source',updated_at=1776968996)
+        new,changes,counts=self.update(state,root,prior,{'1':change})
+        self.assertEqual(counts['source_updated'],1);self.assertEqual(counts['conflicted'],0)
+        self.assertEqual(new['legacyById']['1']['ownership']['metadata_sha256'],state['legacyById']['1']['ownership']['metadata_sha256'])
+        full={**self.notes['1'],**change};overlay=new['legacyById']['1']['source_overlay'];self.assertEqual(overlay['actual_source_sha256'],a.sha(a.encoded(full)))
+        self.assertNotEqual(overlay['actual_source_sha256'],new['legacyById']['1']['ownership']['source_sha256'])
+        for token in (b'Old date bytes',b'Old updated bytes',b'unknown_local',b'User prefix',b'User source text',b'User tail'):self.assertIn(token,changes['1.md'])
+        current,_=a.load_current(root);plan=a.git_candidate(self.reader,prior,new,changes,current,operation='update')
+        next_commit=plan['candidate_commit'];current['1.md']=changes['1.md'];current[a.STATE]=a.encoded(new)
+        summaries=deepcopy(self.summaries)
+        for summary in summaries:
+            if a.note_identity(summary)=='1':summary.update(change)
+        fresh=a.OfflineGit(self.repo)
+        again,diff,counts=a.propose_updates(self.evidence,new,a.sha(a.encoded(new)),current,fresh,next_commit,summaries,True,{})
+        self.assertEqual(a.encoded(again),a.encoded(new));self.assertEqual(diff,{});self.assertEqual(counts['details_used'],0)
+    def test_metadata_only_preserves_whole_markdown(self):
+        state,root,prior,_=self.adopt();new,changes,counts=self.update(state,root,prior,{'1':self.updated_metadata()})
+        self.assertEqual(changes,{});self.assertEqual(counts['source_version_only'],1);self.assertEqual(counts['source_updated'],0)
+        self.assertEqual(new['legacyById']['1']['baseline_blob'],state['legacyById']['1']['baseline_blob'])
+    def test_unified_manual_metadata_update_single_cas_and_noop(self):
+        import test_canonical_manual as manual
+        import get_canonical_manual as g
+        fixture=manual.CanonicalManualTests(methodName='test_first_preview_import_one_candidate_and_repeat_noop')
+        with patch.object(LegacyAdapterTests,'extensions',self.extensions,create=True):fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        first,_=fixture.prepare();change=self.updated_metadata(content='Fresh manual source',updated_at=1776968996)
+        summaries=deepcopy(fixture.f.f.summaries)+list(fixture.f.notes.values())
+        for summary in summaries:
+            if a.note_identity(summary)=='1':summary.update(change)
+        source=fixture.f.source(summaries=summaries);original=source.detail_raw
+        source.detail_raw=lambda ident:a.encoded({'data':{'note':{**fixture.f.f.notes['1'],**change}}}) if ident=='1' else original(ident)
+        plan,files=fixture.prepare(first['candidate_commit'],registry=first['registry_sha256'],source=source,first=False)
+        self.assertEqual(plan['counts']['legacy_source_updated'],1);self.assertEqual(plan['counts']['legacy_conflicted'],0)
+        self.assertEqual(g.public_report(fixture.report(plan,files))['status'],'canonical_candidate_verified')
+        class Remote:
+            def __init__(self):self.head=first['candidate_commit'];self.calls=[]
+            def metadata(self):return {'full_name':g.r.REPOSITORY,'private':True}
+            def ref(self,ref):return self.head if ref==g.r.MAIN_REF else g.m.PROTECTED[ref]
+            def source_get_tree(self,commit):return fixture.reader.source_get_tree(commit)
+            def cas_main(self,old,new):assert self.head==old;self.calls.append((old,new));self.head=new
+            def commit(self,commit):return {'tree':fixture.reader.local.run('rev-parse',commit+'^{tree}').decode().strip(),'parents':fixture.reader.local.run('rev-list','--parents','-n','1',commit).decode().split()[1:]}
+        remote=Remote()
+        result=g.m.publish(fixture.reader,remote,plan,files,a.sha(a.encoded(plan)),lambda commit,values:dict(values),verifier=g.verify_plan,sleep=lambda _:None,writers_guard=lambda:None,checkpoint=lambda _:None)
+        self.assertEqual(len(remote.calls),1);self.assertTrue(result['main_updated'])
+        repeat,writes=fixture.prepare(plan['candidate_commit'],sha=plan['state_sha256'],registry=plan['registry_sha256'],source=fixture.f.source(summaries=summaries),first=False)
+        self.assertEqual(writes,{});self.assertEqual(repeat['counts']['source_details'],0)
+
+    def test_actual_mutable_metadata_references_remain_conflicts(self):
+        state,root,prior,_=self.adopt()
+        for title in ('https://example.invalid/new-reference','<IMG SRC="asset">','[label](asset)'):
+            new,changes,counts=self.update(state,root,prior,{'1':self.updated_metadata(display_title=title,content='Fresh source')})
+            self.assertEqual(counts['conflicted'],1);self.assertEqual(changes,{})
+            self.assertEqual(new['conflictsById']['1'],'legacy_references_unresolved');self.assertEqual(new['legacyById']['1'],state['legacyById']['1'])
+        bad=a.deepcopy(state);note=a.deepcopy(self.notes['1']);note['display_title']='https://example.invalid/cached-reference'
+        bad['legacyById']['1']['source_overlay']=a.source_overlay(note,self.evidence.source['1'])
+        current,_=a.load_current(root);current[a.STATE]=a.encoded(bad)
+        # A rehashed/committed malformed overlay is still subject to the exact
+        # actual-source reference gate before any cached fast path can advance.
+        plan=a.git_candidate(self.reader,prior,bad,{},a.load_current(root)[0],operation='update')
+        new,changes,counts=a.propose_updates(self.evidence,bad,a.sha(a.encoded(bad)),current,self.reader,plan['candidate_commit'],self.summaries,True,{})
+        self.assertEqual(new['legacyById']['1'],bad['legacyById']['1']);self.assertEqual(new['conflictsById']['1'],'legacy_references_unresolved');self.assertEqual(changes,{})
+
+    def test_actual_bad_shape_isolates_peer_before_reference_scan(self):
+        state,root,prior,_=self.adopt()
+        for field in ('audio','web_page'):
+            new,changes,counts=self.update(state,root,prior,{'1':self.updated_metadata(**{field:'unsupported'},content='Source A'),'2':self.updated_metadata(content='Source B')})
+            self.assertEqual(new['conflictsById']['1'],'source_shape_unsupported');self.assertEqual(new['legacyById']['1'],state['legacyById']['1']);self.assertEqual(set(changes),{'2.md'});self.assertEqual(counts['source_updated'],1)
+
+    def test_overlay_schema_and_actual_hash_checked_on_cached_record(self):
+        state,root,prior,_=self.adopt();new,changes,_=self.update(state,root,prior,{'1':self.updated_metadata()})
+        for mutation in ('extra','type','hash','null'):
+            bad=deepcopy(new);overlay=bad['legacyById']['1']['source_overlay']
+            if mutation=='null':bad['legacyById']['1']['source_overlay']=None
+            elif mutation=='extra':overlay['fields']['unknown']='x'
+            elif mutation=='type':overlay['fields']['version']=True
+            else:overlay['actual_source_sha256']='f'*64
+            with self.assertRaises(ParityFailure):
+                a.validate_state(bad,a.sha(a.encoded(bad)),self.evidence)
+                row=bad['legacyById']['1'];core=a.reconstructed_source(self.evidence,'1',row['ownership'],self.old['1']);a.actual_source(row,core,self.evidence.source['1'])
+    def test_creation_unknown_missing_empty_type_changes_conflict(self):
+        state,root,prior,_=self.adopt()
+        variants=[self.updated_metadata(timestamps={'created_at':1776968995.0,'edited_at':1776968996.0,'record_updated_at':'later'}),
+                  self.updated_metadata(title='Changed title'),self.updated_metadata(display_title=''),self.updated_metadata(version=True),self.updated_metadata(new_unknown='unmapped')]
+        for change in variants:
+            new,changes,counts=self.update(state,root,prior,{'1':change})
+            self.assertEqual(counts['conflicted'],1);self.assertEqual(changes,{});self.assertEqual(new['legacyById']['1'],state['legacyById']['1'])
+        detail=deepcopy(self.notes['1']);detail.pop('version');summary=deepcopy(detail);summary['updated_at']=1776968996;detail['updated_at']=1776968996
+        summaries=[summary if x['id']=='1' else x for x in self.summaries];current,_=a.load_current(root)
+        new,changes,counts=a.propose_updates(self.evidence,state,a.sha(a.encoded(state)),current,self.reader,prior,summaries,True,{'1':detail})
+        self.assertEqual(new['conflictsById']['1'],'source_metadata_changed');self.assertEqual(changes,{})
+    def test_conflicting_peer_never_advances_overlay(self):
+        state,root,prior,_=self.adopt();p=root/'1.md';p.write_bytes(p.read_bytes().replace(self.notes['1']['content'].encode(),b'User owned edit'))
+        new,changes,counts=self.update(state,root,prior,{'1':self.updated_metadata(content='Source A'),'2':self.updated_metadata(content='Source B')})
+        self.assertEqual(new['legacyById']['1'],state['legacyById']['1']);self.assertEqual(set(changes),{'2.md'});self.assertEqual(counts['conflicted'],1)
 
 if __name__=='__main__':unittest.main()
