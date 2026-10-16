@@ -186,3 +186,35 @@ class PageDifferenceReportTests(unittest.TestCase):
         self.assertEqual(report['page_difference_categories'],['edit_metadata','properties']);self.assertNotIn('private',report)
         for bad in (['private-page-id'],[{}],'private'):
             report=m.public_report({**base,'page_difference_categories':bad});self.assertNotIn('private',str(report));self.assertNotIn('page_difference_categories',report)
+
+class HistoricalRangeIntegrationTests(unittest.TestCase):
+    def fixture(self):
+        import test_initial_range as history
+        from types import SimpleNamespace
+        case=history.Tests();ev,data,snapshot,proof=case.hash_fixture()
+        template=history.m.public_proof_template(proof,p.digest(proof))
+        row={'path':proof['source']['path'],'md_blob':proof['source']['blob'],'data_source_id':history.DS}
+        calls=[]
+        def budget(commit):
+            calls.append(commit)
+            if commit!=proof['source']['commit']:raise AssertionError('wrong history')
+            return {row['path']:('100644','blob',row['md_blob'],len(data))}
+        return history,template,{history.N:row},{row['md_blob']:data},{history.N:snapshot},SimpleNamespace(check_source_budget=budget),calls
+    def test_exact_historical_proof_full_native_match_and_no_private_output(self):
+        h,template,mapping,blobs,snapshots,remote,calls=self.fixture()
+        out=r.historical_ranges(remote,mapping,blobs,snapshots,template,p.digest(template))
+        self.assertEqual(out['proofs'],1);self.assertEqual(out['candidates'],1);self.assertEqual(out['managed_blocks'],2);self.assertEqual(out['protected_blocks'],4)
+        self.assertEqual(calls,[template['source_commit']])
+        for secret in (h.N,h.P,'Nested title','Historical preview notice','Raw/03 Get'):self.assertNotIn(secret,json.dumps(out))
+    def test_old_membership_and_current_blob_must_both_match(self):
+        h,template,mapping,blobs,snapshots,remote,calls=self.fixture();remote.check_source_budget=lambda _:{}
+        with self.assertRaisesRegex(r.ReadFailure,'source_anchor'):r.historical_ranges(remote,mapping,blobs,snapshots,template,p.digest(template))
+        h,template,mapping,blobs,snapshots,remote,calls=self.fixture();mapping[h.N]['md_blob']='f'*40
+        with self.assertRaisesRegex(r.ReadFailure,'source_anchor'):r.historical_ranges(remote,mapping,blobs,snapshots,template,p.digest(template))
+    def test_human_change_is_blocked_not_owned(self):
+        h,template,mapping,blobs,snapshots,remote,calls=self.fixture();snapshots[h.N]['recursive_blocks'][-2]['payload']['rich_text']=[p.text_run('Human edit')]
+        out=r.historical_ranges(remote,mapping,blobs,snapshots,template,p.digest(template));self.assertEqual(out['blocked'],1);self.assertEqual(out['reason_counts'],{'no_unique_range':1});self.assertEqual(out['managed_blocks'],0)
+    def test_new_aggregate_filter_rejects_forged_counts_and_keys(self):
+        valid={'proofs':1,'candidates':1,'blocked':0,'unproven_notes':1,'managed_blocks':39,'protected_blocks':8,'reason_counts':{}}
+        self.assertTrue(r.valid_historical(valid))
+        for change in ({'proofs':True},{'candidates':2},{'reason_counts':{'PRIVATE':1}},{'extra':'PRIVATE'},{'managed_blocks':-1}):self.assertFalse(r.valid_historical(dict(valid,**change)))

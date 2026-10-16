@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 
 import get_notion_native as native
+import get_notion_initial_range as historical
 import get_notion_sink_plan as planner
 import get_legacy_capture as capture
 import get_private_preview_retention as git
@@ -25,7 +26,7 @@ NOTION_VERSION = '2025-09-03'
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_HTTP_BYTES = 64 * 1024 * 1024
 PAGE_DIFFERENCES={'identity','parent','properties','edit_metadata','creation_metadata','lifecycle','presentation','location','other_page_field','malformed_envelope'}
-STAGES = {'input', 'native_read', 'source_read', 'planner', 'final_readback'}
+STAGES = {'input', 'native_read', 'source_read', 'planner', 'historical_range', 'final_readback'}
 REASONS = {'permission_denied', 'missing_credentials', 'invalid_read_route',
     'read_transport_failed', 'response_budget', 'read_api_failed', 'request_budget',
     'source_changed', 'source_anchor', 'source_missing', 'planner_failed', 'other',
@@ -39,6 +40,10 @@ PLAN_REASONS = {'uncommitted_source', 'dry_run_source', 'incomplete_source', 'id
     'unmapped_id', 'missing_target', 'duplicate_id', 'wrong_parent', 'incomplete_target_read',
     'missing_block_ownership', 'human_edit_conflict', 'missing_asset', 'privacy_hold',
     'format_not_accepted', 'writer_gate_unknown', 'authorization_missing', 'unsupported_source_format'}
+
+
+HISTORICAL_TEMPLATE = {'candidate_roots': 39, 'candidate_semantic_sha256': 'd7d83cdff9e6309f9fc04ea12ee52ee0f56c00e83af8b20dea04e77da0fd4f38', 'contract': 'get-notion-historical-semantic-proof-1', 'historical_evidence_sha256': '04349ab0a059fcd8e052e9cdae108a146d0d987697ec5f6c97886b39622a46a4', 'historical_readback_sha256': '81fd20fec7e0d15815079cdf4a5214f500823df1b31ba286b8d411388cd58659', 'note_id_sha256': '8754337352a6e2c3958dd5858fd8f8a1e7c87f6a5352439ad37330aecbdfc333', 'page_id_sha256': '92bbf878381321f99f36c6a89828c579f26d196df36292c7364c82f57294320c', 'prepared_markdown_sha256': '65c7e9a8d98639235d69530f5462ea9d2ee25407dae127af40d4f8bf20e2e1fa', 'proof_sha256': 'be9d8de5772cc48c236aabd2bc3edf5efd8b1d3469b63f229cb9478ed88cd0ad', 'source_blob': '445b1d2ae89689c76a6b0d5c7d7581cb57f29f82', 'source_commit': 'cbcea1d0de84e106825146f39e1db726e06ace49', 'source_path_sha256': '2556434993b07afe192608729cb60ebbc60e4139b622311134b8deb7ce17f7e3', 'source_sha256': '1af47de12fdf54ee69ca0f7628c68440e79b33fe7143fc453c578852b1fc38f5', 'transform': 'get-api-body-without-footer-h4-to-h3-1', 'validation': 'prepared-readback-logical-1'}
+HISTORICAL_TEMPLATE_SHA = "7475ef5f1042c17ce62d83b031aa46edc6901300b263f24c68101543dbb6857e"
 
 
 class ReadFailure(ValueError):
@@ -147,6 +152,37 @@ def read_committed_sources(remote, parent, snapshots):
     return batch, mapping, blobs
 
 
+def historical_ranges(remote,mapping,blobs,snapshots,template=HISTORICAL_TEMPLATE,expected_template_sha=HISTORICAL_TEMPLATE_SHA):
+    """One independently reviewed historical proof; observations grant no ownership."""
+    out={'proofs':0,'candidates':0,'blocked':0,'unproven_notes':len(mapping),'managed_blocks':0,'protected_blocks':0,'reason_counts':{}}
+    if planner.digest(template)!=expected_template_sha:fail('source_anchor')
+    for ident,row in mapping.items():
+        if planner.digest(ident)!=template['note_id_sha256']:continue
+        snapshot=snapshots[ident]
+        proof=historical.reconstruct_proof(template,expected_template_sha,note_id=ident,page_id=snapshot['page_id'],source_path=row['path'])
+        # Check both current source (already read/hash-bound) and the exact old
+        # Git path/blob membership. No old content or assets are downloaded.
+        prior=remote.check_source_budget(proof['source']['commit']).get(row['path'])
+        if prior is None or prior[:3]!=('100644','blob',proof['source']['blob']) or row['md_blob']!=proof['source']['blob']:fail('source_anchor')
+        result=historical.propose_from_git(proof,template['proof_sha256'],blobs[row['md_blob']],snapshot,row['data_source_id'])
+        safe=historical.public_summary(result);out['proofs']+=1;out['unproven_notes']-=1
+        if safe['decision']=='candidate':out['candidates']+=1
+        else:
+            out['blocked']+=1;reason=safe['reason'];out['reason_counts'][reason]=out['reason_counts'].get(reason,0)+1
+        out['managed_blocks']+=safe['managed_blocks'];out['protected_blocks']+=safe['protected_blocks']
+    return out
+
+
+def valid_historical(value):
+    keys={'proofs','candidates','blocked','unproven_notes','managed_blocks','protected_blocks','reason_counts'}
+    if not isinstance(value,dict) or set(value)!=keys:return False
+    for key in keys-{'reason_counts'}:
+        cap=2*planner.MAX_BLOCKS if key in ('managed_blocks','protected_blocks') else 2
+        if type(value[key]) is not int or not 0<=value[key]<=cap:return False
+    reasons=value['reason_counts']
+    return isinstance(reasons,dict) and not set(reasons)-historical.REASONS and all(type(n) is int and 0<=n<=2 for n in reasons.values()) and sum(reasons.values())==value['blocked'] and value['candidates']+value['blocked']==value['proofs'] and value['proofs']+value['unproven_notes']==2
+
+
 def run_readonly(remote, request, parent, *, collector=native.collect):
     stage = 'input'
     try:
@@ -166,11 +202,12 @@ def run_readonly(remote, request, parent, *, collector=native.collect):
         if len(plan.get('records', [])) != 2 or plan.get('source_mode') != 'initial_two_preview': fail('planner_failed')
         reasons = Counter(reason for row in plan['records'] for reason in row['reason_codes'])
         if set(reasons) - PLAN_REASONS: fail('planner_failed')
+        stage = 'historical_range'; ranges=historical_ranges(remote,mapping,blobs,snapshots)
         stage = 'final_readback'; source_guard(remote, parent)
         return {'status': 'notion_readonly_verified', 'native_pages': len(snapshots),
             'native_blocks': observation['report']['blocks'], 'native_requests': observation['report']['requests'],
             'source_notes_read': len(mapping), 'source_commit': parent, 'planner': planner.public_summary(plan),
-            'reason_counts': dict(reasons), 'external_writes': 0, 'get_requests': 0, 'asset_downloads': 0,
+            'reason_counts': dict(reasons), 'historical_range':ranges, 'external_writes': 0, 'get_requests': 0, 'asset_downloads': 0,
             'ownership_adopted': False, 'receipt_advance': False, 'main_updated': False}
     except Exception as exc:
         reason = str(exc)
@@ -203,7 +240,8 @@ def public_report(value):
     if summary.get('decision') not in ('blocked', 'noop_verified', 'preview_diff'): return failed
     if any(type(summary.get(k)) is not int or not 0 <= summary[k] <= 2 for k in ('noop_verified', 'preview_diff', 'blocked')) or sum(summary[k] for k in ('noop_verified', 'preview_diff', 'blocked')) != 2: return failed
     if not isinstance(reasons, dict) or set(reasons) - PLAN_REASONS or any(type(v) is not int or not 0 <= v <= 2 for v in reasons.values()): return failed
-    return {k: value[k] for k in ('status', 'native_pages', 'native_blocks', 'native_requests', 'source_notes_read', 'source_commit', 'planner', 'reason_counts', 'external_writes', 'get_requests', 'asset_downloads', 'ownership_adopted', 'receipt_advance', 'main_updated')}
+    if not valid_historical(value.get('historical_range')):return failed
+    return {k: value[k] for k in ('historical_range','status', 'native_pages', 'native_blocks', 'native_requests', 'source_notes_read', 'source_commit', 'planner', 'reason_counts', 'external_writes', 'get_requests', 'asset_downloads', 'ownership_adopted', 'receipt_advance', 'main_updated')}
 
 
 def main(argv=None):
