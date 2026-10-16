@@ -28,6 +28,7 @@ REMOTE_URL = 'https://github.com/' + REPOSITORY + '.git'
 GET = 'Raw/03 Get'
 BACKUP_REF = 'refs/heads/backup/get-cloud-cutover-20261015'
 PREVIEW_REF = 'refs/heads/preview/get-cloud-cutover-20261015'
+FIDELITY_PREVIEW_REF = 'refs/heads/preview/get-fidelity-20261016'
 MAIN_REF = 'refs/heads/main'
 PLAN_PATH = GET + '/03 State/cloud-preview-plan.json'
 MAX_PLAN_BYTES = 16 * 1024 * 1024
@@ -255,7 +256,7 @@ class GitHubRemote:
         return self.request('')
 
     def ref(self, name):
-        if name not in (MAIN_REF, BACKUP_REF, PREVIEW_REF):
+        if name not in (MAIN_REF, BACKUP_REF, PREVIEW_REF, FIDELITY_PREVIEW_REF):
             fail('ref_not_allowed')
         value = self.request('/git/ref/' + name.removeprefix('refs/'), missing=True)
         if value is None:
@@ -321,7 +322,7 @@ class GitHubRemote:
         return blobs
 
     def create_only(self, name, commit):
-        if name not in (BACKUP_REF, PREVIEW_REF):
+        if name not in (BACKUP_REF, PREVIEW_REF, FIDELITY_PREVIEW_REF):
             fail('ref_not_allowed')
         checked_sha(commit)
         # An empty expected value means the branch must not exist at the server.
@@ -451,7 +452,7 @@ def build_preview(local, output, source):
     candidate = regular_root(output / 'candidate')
     plan_bytes = file_bytes(output / 'plan.json', MAX_PLAN_BYTES)
     plan = strict_json(plan_bytes)
-    if not isinstance(plan, dict) or set(plan) != PLAN_KEYS or (type(plan.get('version')) is not int or plan['version'] != 1) or plan.get('scope') != 'get-private-preview':
+    if not isinstance(plan, dict) or not valid_plan_keys(plan) or (type(plan.get('version')) is not int or plan['version'] != 1) or plan.get('scope') != 'get-private-preview':
         fail('invalid_plan')
     if plan.get('source_commit') != source or plan.get('published') is not False or plan.get('apply_ready') is not False:
         fail('invalid_plan')
@@ -536,7 +537,7 @@ def build_preview(local, output, source):
     local.check_source(source)
     if files(candidate) != after or file_bytes(output / 'plan.json', MAX_PLAN_BYTES) != plan_bytes:
         fail('candidate_changed')
-    return {'commit': commit, 'tree': tree, 'payload': payload, 'pending': plan['pending'], 'changed_paths': len(rows)}
+    return {'commit': commit, 'tree': tree, 'payload': payload, 'pending': plan['pending'], 'changed_paths': len(rows), 'preview_ref': preview_ref_for_plan(plan)}
 
 
 def verify_preview(remote, commit, source, prepared):
@@ -546,7 +547,7 @@ def verify_preview(remote, commit, source, prepared):
     for data in prepared['payload'].values():
         if remote.blob(oid(data), len(data)) != data:
             fail('remote_blob_readback_failed')
-    if remote.ref(PREVIEW_REF) != commit:
+    if remote.ref(prepared['preview_ref']) != commit:
         fail('preview_ref_changed')
 
 
@@ -559,9 +560,10 @@ def retain_private_preview(vault, output, source_commit, *, token=None, remote=N
         prepared = build_preview(local, output, source_commit)
         # No rebase or ref refresh can replace the caller's pinned baseline.
         preflight(local, remote, source_commit, allow_main_drift=True)
-        current = remote.ref(PREVIEW_REF)
+        preview_ref = prepared['preview_ref']
+        current = remote.ref(preview_ref)
         if current is None:
-            status = create_once(remote, PREVIEW_REF, prepared['commit'])
+            status = create_once(remote, preview_ref, prepared['commit'])
             current = prepared['commit']
         else:
             status = 'existing_verified'
@@ -690,7 +692,7 @@ def fetch_readback_blobs(token, entries, directory, remaining, protocol):
 
 
 def validate_retained_plan(plan, source, before, after, before_metadata, after_metadata):
-    if not isinstance(plan, dict) or set(plan) != PLAN_KEYS:
+    if not isinstance(plan, dict) or not valid_plan_keys(plan):
         fail('invalid_plan')
     if (type(plan.get('version')) is not int or plan['version'] != 1
             or plan.get('scope') != 'get-private-preview' or plan.get('source_commit') != source
@@ -759,7 +761,13 @@ def verify_retained(vault, source_commit, preview_commit, *, token=None, remote=
             fail('repository_not_private_target')
         if remote.ref(BACKUP_REF) != source_commit:
             fail('backup_not_verified')
-        if remote.ref(PREVIEW_REF) != preview_commit:
+        # Only the two fixed review destinations are eligible. Select by the
+        # caller's explicit commit; no arbitrary ref and no ref mutation.
+        if remote.ref(PREVIEW_REF) == preview_commit:
+            preview_ref = PREVIEW_REF
+        elif remote.ref(FIDELITY_PREVIEW_REF) == preview_commit:
+            preview_ref = FIDELITY_PREVIEW_REF
+        else:
             fail('preview_ref_changed')
         preview_info, source_info = remote.commit(preview_commit), remote.commit(source_commit)
         if preview_info.get('parents') != [source_commit]:
@@ -798,6 +806,7 @@ def verify_retained(vault, source_commit, preview_commit, *, token=None, remote=
         if len(plan_bytes) > MAX_PLAN_BYTES or len(plan_bytes) != after_metadata[PLAN_PATH][3] or oid(plan_bytes) != plan_blob:
             fail('retained_payload_mismatch')
         plan = strict_json(plan_bytes)
+        if preview_ref_for_plan(plan) != preview_ref:fail('invalid_plan')
         # The retention helper wrote this canonical representation. Reject
         # alternate serialization or trailing extra content in a retained plan.
         if canonical(plan) != plan_bytes:
@@ -835,7 +844,7 @@ def verify_retained(vault, source_commit, preview_commit, *, token=None, remote=
         # plan_verified flag and byte count account for the additional plan file.
         stage = 'refs'
         local.check_source(preview_commit)
-        if remote.ref(PREVIEW_REF) != preview_commit:
+        if remote.ref(preview_ref) != preview_commit:
             fail('preview_ref_changed')
         if remote.ref(BACKUP_REF) != source_commit:
             fail('backup_ref_readback_failed')
@@ -964,6 +973,23 @@ def main(argv=None):
     except Exception:
         print(json.dumps(public_report({'status': 'retention_failed', 'error': 'retention_failed'})))
         return 0 if args.publish_report is not None else 1
+
+
+
+
+
+def valid_plan_keys(plan):
+    if not isinstance(plan,dict):return False
+    if set(plan)==PLAN_KEYS:return True
+    return (set(plan)==PLAN_KEYS|{'state_contract','local_proposal_only','conflicts'}
+            and plan['state_contract']=='get-source-raw-local-2'
+            and plan['local_proposal_only'] is True
+            and type(plan['conflicts']) is int and type(plan.get('pending')) is int
+            and 0<=plan['conflicts']<=plan['pending']<=2500)
+
+def preview_ref_for_plan(plan):
+    if not valid_plan_keys(plan):fail('invalid_plan')
+    return FIDELITY_PREVIEW_REF if plan.get('local_proposal_only') is True else PREVIEW_REF
 
 
 if __name__ == '__main__':

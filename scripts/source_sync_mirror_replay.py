@@ -8,7 +8,7 @@ import time
 
 from get_mirror_incremental_replay import replay,read_mirrors,validate_manifest,diagnose_pending,DIFF_KEYS
 from get_mirror_source import MirrorSource
-from get_mirror_render import CompatibleWriter
+from get_mirror_render import CompatibleWriter,FaithfulWriter
 
 ASSET_ERROR_CODES = {
     'asset exceeds byte limit': 'byte_limit',
@@ -35,7 +35,7 @@ ASSET_ERROR_CODES = {
     'empty asset body': 'empty_body',
 }
 
-COUNTS=DIFF_KEYS+('pending_signing_refreshed','diagnostic_probed','diagnostic_rechecks','pending','list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
+COUNTS=DIFF_KEYS+('legacy_conflicts','source_updated','source_update_conflicts','source_missing','pending_signing_refreshed','diagnostic_probed','diagnostic_rechecks','pending','list_time_epoch','list_time_aware','list_time_naive','list_time_missing','list_time_type','list_time_invalid','enumerated','cached_skipped','fresh_details','adopted_after_detail','new_or_changed','written_or_changed',
         'pages','api_response_bytes','downloaded_assets','downloaded_bytes','asset_transfer_bytes')
 FLAGS=('diagnostic_truncated','diagnostic_only','pending_set_stable','data_bytes_paths_mtimes_unchanged','second_data_unchanged','state_lastSyncedAt_changed',
        'source_content_complete_claimed','renderer_exercised')
@@ -45,7 +45,7 @@ ERRORS=('pending_changed_between_passes','invalid_detail_time','list_version_mis
  'duplicate_manifest_path','manifest_missing_file','manifest_identity_conflict','manifest_version_conflict',
  'conflicting_identity_fields','malformed_frontmatter','unsupported_frontmatter_scalar','duplicate_frontmatter_field',
  'transcript_pending','unsupported_note_type','destination_collision','invalid_attachment','path_escape','readback',
- 'note_limit','detail_limit','invalid_identity','invalid_detail','list_required','symlink')
+ 'invalid_source_text','invalid_raw_version','untrusted_legacy_state','legacy_reconciliation_required','note_limit','detail_limit','invalid_identity','invalid_detail','list_required','symlink')
 
 def safe_report(value):
  value=value if isinstance(value,dict) else {}
@@ -84,6 +84,19 @@ def safe_preview_report(value):
  if not isinstance(value,dict):return result
  mapped=dict(value);mapped['status']={'private_preview_partial':'mirror_replay_partial','private_preview_ready_for_review':'mirror_replay_ok'}.get(value.get('status'),'failed')
  clean=safe_report(mapped)
+ if value.get('local_proposal_only') is True:
+  clean['status']='failed'
+  result['local_proposal_only']=True
+  conflicts=value.get('conflicts')
+  if type(conflicts) is int and 0<=conflicts<=2500:result['conflicts']=conflicts
+  def valid_fidelity(counts):
+   required=('enumerated','cached_skipped','fresh_details','legacy_conflicts','source_updated','source_update_conflicts','written_or_changed','pending','source_missing')
+   return all(type(counts.get(k)) is int and 0<=counts[k]<=2500 for k in required) and counts['enumerated']>0 and counts['cached_skipped']+counts['fresh_details']+counts['legacy_conflicts']==counts['enumerated'] and counts['source_update_conflicts']+counts['written_or_changed']+counts['pending']==counts['fresh_details'] and counts['source_update_conflicts']<=counts['source_updated']
+  a=clean.get('first',{});b=clean.get('second',{})
+  if valid_fidelity(a) and valid_fidelity(b) and a['enumerated']==b['enumerated'] and b['written_or_changed']==0 and value.get('second_data_unchanged') is True and value.get('pending_set_stable') is True and 'error' not in clean and 'conflicts' in result:
+   partial=bool(conflicts or a['pending'] or a['source_missing'])
+   expected='private_preview_partial' if partial else 'private_preview_ready_for_review'
+   if value.get('status')==expected:clean['status']='mirror_replay_partial' if partial else 'mirror_replay_ok'
  for key in ('first','second','error','rate_limit_reason','http_status','asset_error_code',*FLAGS):
   if key in clean:result[key]=clean[key]
  if value.get('error') in ('invalid_preview_source','invalid_preview_output','preview_head_changed','dirty_preview_source','untracked_preview_source','preview_deleted_path','preview_ignored_path','preview_source_changed','invalid_cloud_state','cloud_mirror_changed','conflicting_modes'):result['error']=value['error']
@@ -113,9 +126,9 @@ def private_preview_main(args):
     if time.monotonic()>=policy.deadline:raise RateLimitFailure(budget=True)
     return assets.fetch_asset(url,max_bytes=max_bytes,transfer_budget=transfer)
    store=assets.AssetStore(root,fetch=fetch,max_run=200*1024*1024,max_assets=256);stores.append(store)
-   return CompatibleWriter(root,store)
+   return FaithfulWriter(root,store)
   with pack.deadline(110*60):
-   result,counts=prepare_private_preview(args.private_preview_vault,args.private_preview_output,args.expected_source_commit,source.enumerate,source.detail,factory,progress)
+   result,counts=prepare_private_preview(args.private_preview_vault,args.private_preview_output,args.expected_source_commit,source.enumerate,source.detail,factory,progress,faithful=True)
   public={**result,'mode':'private_preview','status':'private_preview_partial' if counts['pending'] else 'private_preview_ready_for_review',**counts,'source_content_complete_claimed':False,'pending_binary_verified':False}
   public['first']={k:result['first'][k] for k in COUNTS if k in result['first']}
   public['second']={k:result['second'][k] for k in COUNTS if k in result['second']}

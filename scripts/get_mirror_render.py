@@ -66,55 +66,61 @@ def transcript_pending(note):
  if audio is not None and not isinstance(audio,dict):raise ValueError('invalid_attachment')
  return not text((audio or {}).get('original'))
 
-def render(note,assets,path):
+def render(note,assets,path,*,faithful=False):
  ident=api_id(note.get('note_id') or note.get('id'));kind=note.get('note_type')
  audio=note.get('audio') or {};audio=audio if isinstance(audio,dict) else {}
- original=text(audio.get('original'));content=text(note.get('content'))
+ source_text=lambda value: value if isinstance(value,str) else ''
+ original=source_text(audio.get('original')) if faithful else text(audio.get('original'));content=source_text(note.get('content')) if faithful else text(note.get('content'))
  if kind in RECORDINGS and not original:raise ValueError('transcript_pending')
  attachments=note.get('attachments') or []
  links=[a.get('url') for a in attachments if isinstance(a,dict) and a.get('type')=='link' and a.get('url')]
  web=note.get('web_page') or {};web=web if isinstance(web,dict) else {}
  weburl=web.get('url') or (links[0] if links else '')
  fields={'source_system':'getnote','note_id':ident,'title':title_for(note),'note_type':kind,
-  'source':note.get('source') or '', 'created_at':render_time(note.get('created_at')), 'updated_at':render_time(note.get('updated_at'),canonical_naive=True),
+  'source':note.get('source') or '', 'created_at':note.get('created_at','') if faithful else render_time(note.get('created_at')), 'updated_at':note.get('updated_at','') if faithful else render_time(note.get('updated_at'),canonical_naive=True),
   'tags':names(note.get('tags')),'topics':names(note.get('topics')),'is_child_note':bool(note.get('is_child_note')),
   'parent_id':str(note.get('parent_id') or ''),'children_ids':[str(v) for v in note.get('children_ids') or []],
   'share_id':str(note.get('share_id') or ''),'web_url':weburl,'web_domain':urlsplit(weburl).netloc,
   'web_excerpt':web.get('excerpt') or note.get('ref_content') or '',
   'audio_url':audio.get('play_url') or note.get('audio_url') or '',
   'audio_duration':audio.get('duration') or note.get('audio_duration') or 0,
-  'audio_transcript':audio.get('transcript') or note.get('audio_transcript') or '',
+  'audio_transcript':audio.get('transcript') or note.get('audio_transcript') or (original if kind in RECORDINGS | {'audio', 'local_audio'} else ''),
   'attachments':[a.get('url') or '' for a in attachments]}
  lines=['---']+[k+': '+scalar(v) for k,v in fields.items()]+['---','']
  if original and original!=content:
   if content:lines+=['## AI 总结','',content,'']
   lines+=['## 原文','',original,'']
  else:lines+=[original or content or '（空）','']
+ if faithful:
+  for label,value in [('引用原文',note.get('ref_content')),('网页原文',web.get('content')),('网页 AI 摘要',web.get('excerpt'))]:
+   if isinstance(value,str) and value:
+    lines += ['## '+label,'',value,'']
  # Keep remote image URLs exactly as supplied in content. Do not transform resize
  # URLs or replace remote image policy with an all-history original download.
  for asset in assets:
   if asset.get('status')=='downloaded':
    relative=os.path.relpath(asset['path'],path.parent)
    lines.append(('!' if asset['kind']=='image' else '')+'['+asset['kind']+']('+quote(relative)+')')
- return '\n'.join(lines).rstrip()+'\n',fields
+ return ('\n'.join(lines)+'\n' if faithful else '\n'.join(lines).rstrip()+'\n'),fields
 
 class CompatibleWriter:
  def __init__(self,root,asset_store):self.root=Path(root);self.store=asset_store;self.rows={}
+ _render=staticmethod(render)
  def write(self,summary,detail,old_path):
   note={**summary,**detail}
   validate_note_shape(note)
   attachments=note.get('attachments') or []
   note['attachments']=[{**a,'original_url':a['url']} for a in attachments]
   # Validate pending before any binary write/download.
-  render(note,[],Path(old_path or 'placeholder.md'))
+  self._render(note,[],Path(old_path or 'placeholder.md'))
   path=destination(self.root,note,old_path)
   assets=self.store.materialize(note)
-  content,fields=render(note,assets,path)
+  content,fields=self._render(note,assets,path)
   target=self.root/path
   if not target.resolve().is_relative_to(self.root.resolve()):raise ValueError('path_escape')
   target.parent.mkdir(parents=True,exist_ok=True)
   target.write_text(content,encoding='utf-8')
-  if target.read_text(encoding='utf-8')!=content:raise ValueError('readback')
+  if target.read_bytes()!=content.encode('utf-8'):raise ValueError('readback')
   ident=fields['note_id'];self.rows[ident]={'title':fields['title'],'note_id':ident,'note_type':fields['note_type'],
    'created_at':fields['created_at'],'updated_at':fields['updated_at'],'path':path.as_posix(),'category':path.parts[0]}
   return path.as_posix()
@@ -125,10 +131,11 @@ class CompatibleWriter:
   if not self.rows:return
   path=self.root/'03 State'/'manifest.json'
   old=json.loads(path.read_text()) if path.exists() else {'notes':[]}
-  rows=[row for row in old['notes'] if api_id(row.get('note_id')) not in self.rows]+list(self.rows.values())
+  prior_rows={api_id(row.get('note_id')):row for row in old['notes']}
+  rows=[row for row in old['notes'] if api_id(row.get('note_id')) not in self.rows]+[{**prior_rows.get(ident,{}),**row} for ident,row in self.rows.items()]
   rows.sort(key=lambda n:(str(n.get('updated_at') or n.get('created_at') or ''),n['path']),reverse=True)
   generated=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='seconds')
-  result={'source_system':'getnote','generated_at':generated,'count':len(rows),'counts_by_category':{},'counts_by_note_type':{},'notes':rows}
+  result={**old,'source_system':'getnote','generated_at':generated,'count':len(rows),'counts_by_category':{},'counts_by_note_type':{},'notes':rows}
   for row in rows:
    for field,target in [('category','counts_by_category'),('note_type','counts_by_note_type')]:
     key=row.get(field) or '';result[target][key]=result[target].get(key,0)+1
@@ -187,3 +194,57 @@ def render_index(notes: list[dict[str, Any]], generated_at: str) -> str:
         ]
 
     return "\n".join(lines) + "\n"
+
+
+class FaithfulWriter(CompatibleWriter):
+ """New-note writer only. Existing content requires explicit reconciliation.
+
+ The raw-state runner never calls this writer with an old path. Guard here too
+ so a future caller cannot accidentally restore the destructive legacy route.
+ """
+ _render=staticmethod(lambda note,assets,path:render(note,assets,path,faithful=True))
+ def write(self,summary,detail,old_path):
+  if old_path is not None:raise ValueError('legacy_reconciliation_required')
+  return super().write(summary,detail,None)
+
+ def write_update(self,summary,detail,entry):
+  """Update only this contract's hash-bound generated notes; retain old bytes."""
+  if entry.get('origin')!='faithful-created':raise ValueError('legacy_reconciliation_required')
+  path=Path(entry['filePath']);target=self.root/path
+  if target.is_symlink() or not target.resolve().is_relative_to(self.root.resolve()):raise ValueError('path_escape')
+  old=target.read_bytes();digest=hashlib.sha256(old).hexdigest()
+  if digest!=entry['mirrorSha256']:raise ValueError('cloud_mirror_changed')
+  try:
+   head=old.decode('utf-8').split('\n---\n',1)[0]
+   if not head.startswith('---\n'):raise ValueError()
+   prior={}
+   for line in head.split('\n')[1:]:
+    key,sep,value=line.partition(': ')
+    if not sep or key in prior:raise ValueError()
+    prior[key]=json.loads(value)
+  except (UnicodeError,ValueError):raise ValueError('managed_header_changed')
+  note={**summary,**detail};validate_note_shape(note)
+  note['attachments']=[{**a,'original_url':a['url']} for a in note.get('attachments') or []]
+  _,fields=self._render(note,[],path)
+  if fields['note_id']!=prior.get('note_id') or scalar(fields.get('created_at'))!=scalar(prior.get('created_at')):raise ValueError('source_field_missing')
+  empty=(None,'',[],{},0,False)
+  # Without explicit deletion semantics, missing populated fields are a conflict.
+  # They never remain silently stale in a supposedly updated current note.
+  if any(value not in empty and fields.get(key) in empty for key,value in prior.items() if key!='updated_at'):raise ValueError('source_field_missing')
+  if set(prior)-set(fields):raise ValueError('source_field_missing')
+  history=list(entry.get('history',[]));archive=Path('03 State/history')/fields['note_id']/(digest+'.md.txt')
+  record={'filePath':archive.as_posix(),'sha256':digest,'sourceVersion':entry['sourceVersion']}
+  if not any(item['filePath']==record['filePath'] for item in history):
+   if len(history)>=100:raise ValueError('source_history_limit')
+   history.append(record)
+  archived=self.root/archive
+  if archived.exists() and archived.read_bytes()!=old:raise ValueError('readback')
+  assets=self.store.materialize(note);content,fields=self._render(note,assets,path)
+  archived.parent.mkdir(parents=True,exist_ok=True)
+  if not archived.exists():archived.write_bytes(old)
+  if archived.read_bytes()!=old:raise ValueError('readback')
+  target.write_bytes(content.encode('utf-8'))
+  if target.read_bytes()!=content.encode('utf-8'):raise ValueError('readback')
+  ident=fields['note_id'];self.rows[ident]={'title':fields['title'],'note_id':ident,'note_type':fields['note_type'],
+   'created_at':fields['created_at'],'updated_at':fields['updated_at'],'path':path.as_posix(),'category':path.parts[0]}
+  return path.as_posix(),history

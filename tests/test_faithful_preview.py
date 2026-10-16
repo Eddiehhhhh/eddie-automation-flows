@@ -1,0 +1,272 @@
+"""No live requests. Fidelity path tests use exact source tokens and local Git."""
+from copy import deepcopy
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+from get_mirror_incremental_replay import (prepare_private_preview,snapshot,ParityFailure,
+    raw_source_version,load_faithful_state,read_faithful_state,empty_faithful_state)
+from get_mirror_render import FaithfulWriter,render
+from source_sync_assets import AssetStore
+
+class FaithfulPreviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.work=Path(self.temp.name);self.vault=self.work/'vault';self.root=self.vault/'Raw/03 Get'
+        (self.root/'03 State').mkdir(parents=True)
+        (self.root/'03 State/manifest.json').write_text('{"notes":[],"unknown_metadata":{"keep":true}}')
+        self.git('init','-q');self.git('config','user.name','Fixture');self.git('config','user.email','fixture@example.invalid');self.commit()
+        self.note={'id':'123','note_type':'plain_text','title':'Readable','content':'Exact body  \n\n',
+                   'created_at':'2026-04-23 18:29:55','updated_at':'2026-04-23 18:29:55'}
+        self.calls=[]
+    def git(self,*args):return subprocess.check_output(['git','-C',str(self.vault),*args],text=True,stderr=subprocess.DEVNULL)
+    def commit(self):self.git('add','.');self.git('commit','-qm','fixture');self.head=self.git('rev-parse','HEAD').strip()
+    def factory(self,root):
+        def forbidden(*args,**kwargs):raise AssertionError('Unexpected binary transfer')
+        return FaithfulWriter(root,AssetStore(root,fetch=forbidden))
+    def preview(self,name='p',detail=None,listing=None):
+        def fetch(ident):self.calls.append(ident);return deepcopy(self.note)
+        return prepare_private_preview(self.vault,self.work/name,self.head,listing or (lambda:([deepcopy(self.note)],True)),detail or fetch,self.factory,faithful=True)
+    def state(self,name='p'):return json.loads((self.work/name/'candidate/03 State/cloud-sync-state.json').read_text())
+    def adopt(self,name='p'):
+        shutil.copytree(self.work/name/'candidate',self.root,dirs_exist_ok=True);self.commit();self.calls=[]
+    def legacy(self):
+        path=self.root/'old.md'
+        data=b'---\nnote_id: "123"\ncreated_at: "2020-01-01T00:00:00Z"\nupdated_at: "2026-04-23T10:29:55Z"\naudio_transcript: "old original"\nweb_excerpt: "old quote"\nunknown: {keep: [1, 2]}\n---\nHand edited body\n\n'
+        path.write_bytes(data)
+        (self.root/'03 State/manifest.json').write_text(json.dumps({'notes':[{'note_id':'123','path':'old.md','updated_at':'2026-04-23T10:29:55Z'}]}))
+        self.commit();return path,data
+    def test_raw_tokens_do_not_normalize_or_guess_timezone(self):
+        values=['2026-04-23 18:29:55','2026-04-23T18:29:55','2026-04-23T18:29:55+08:00','2026-04-23T10:29:55Z',1776968995,1776968995.0]
+        tokens=[raw_source_version(v) for v in values]
+        self.assertEqual(len({json.dumps(v,sort_keys=True) for v in tokens}),len(values))
+        for value in (None,True,'bad',' 2026-04-23 18:29:55',float('nan'),0,{}):
+            with self.assertRaises(ParityFailure):raw_source_version(value)
+    def test_new_note_exact_source_dates_and_body_then_independent_zero_detail(self):
+        before=snapshot(self.root);result,counts=self.preview()
+        self.assertEqual(snapshot(self.root),before);self.assertEqual(self.calls,['123'])
+        state=self.state();entry=state['notesByCanonicalId']['api:123']
+        text=(self.work/'p/candidate'/entry['filePath']).read_text()
+        self.assertIn('created_at: "2026-04-23 18:29:55"',text);self.assertIn('updated_at: "2026-04-23 18:29:55"',text)
+        self.assertNotIn('+08:00',text);self.assertIn(self.note['content'],text)
+        self.assertTrue(state['local_proposal_only']);self.assertNotIn('updatedAt',entry)
+        self.assertEqual(json.loads((self.work/'p/candidate/03 State/manifest.json').read_text())['unknown_metadata'],{'keep':True})
+        self.adopt();result,counts=self.preview('p2');self.assertEqual(self.calls,[]);self.assertEqual(counts['changed_paths'],0)
+    def test_all_legacy_fields_body_dates_preserved_without_detail_or_watermark(self):
+        path,data=self.legacy();before=snapshot(self.root)
+        def forbidden(_):raise AssertionError('No raw baseline; do not bulk-fetch')
+        result,counts=self.preview(detail=forbidden)
+        self.assertEqual(snapshot(self.root),before);self.assertEqual((self.work/'p/candidate/old.md').read_bytes(),data)
+        state=self.state();self.assertEqual(state['notesByCanonicalId'],{})
+        self.assertEqual(state['conflictsById']['123']['reason'],'legacy_baseline_missing')
+        self.assertEqual(counts['pending'],1);self.assertEqual(result['first']['legacy_conflicts'],1)
+    def test_corrupt_old_preview_watermarks_are_rejected_not_adopted(self):
+        self.legacy();(self.root/'03 State/cloud-sync-state.json').write_text('{"version":1,"contract":"get-v7-cloud-mirror-1"}');self.commit()
+        before=snapshot(self.root)
+        with self.assertRaisesRegex(ParityFailure,'untrusted_legacy_state'):self.preview()
+        self.assertEqual(snapshot(self.root),before);self.assertFalse((self.work/'p').exists());self.assertEqual(self.calls,[])
+    def test_managed_source_update_has_current_body_and_one_prior_history(self):
+        self.preview();self.adopt();old=self.state();entry=old['notesByCanonicalId']['api:123'];data=(self.root/entry['filePath']).read_bytes()
+        self.note.update(updated_at='2026-04-24 18:29:55',content='new source version')
+        result,counts=self.preview('changed');self.assertEqual(self.calls,['123'])
+        next_state=self.state('changed');current=next_state['notesByCanonicalId']['api:123']
+        self.assertEqual(next_state['conflictsById'],{});self.assertEqual(len(current['history']),1)
+        root=self.work/'changed/candidate';self.assertEqual((root/current['history'][0]['filePath']).read_bytes(),data)
+        body=(root/entry['filePath']).read_text();self.assertIn('new source version',body);self.assertNotIn('Exact body',body)
+        self.assertIn('updated_at: "2026-04-24 18:29:55"',body)
+        self.assertEqual(result['first']['source_updated'],1);self.assertEqual(counts['pending'],0)
+        self.adopt('changed');result,counts=self.preview('repeat');self.assertEqual(counts['changed_paths'],0);self.assertEqual(self.calls,[])
+        self.assertEqual(len(self.state('repeat')['notesByCanonicalId']['api:123']['history']),1)
+    def test_metadata_version_update_is_exact_raw_and_preserves_prior_full_md(self):
+        self.preview();self.adopt();old=self.state();entry=old['notesByCanonicalId']['api:123'];before=(self.root/entry['filePath']).read_bytes()
+        self.note['updated_at']='2026-04-24 18:29:55';result,counts=self.preview('metadata')
+        next_entry=self.state('metadata')['notesByCanonicalId']['api:123'];root=self.work/'metadata/candidate'
+        self.assertNotEqual(entry['sourceVersion'],next_entry['sourceVersion'])
+        self.assertEqual(before,(root/next_entry['history'][0]['filePath']).read_bytes())
+        self.assertEqual(counts['pending'],0);self.assertEqual(self.calls,['123'])
+    def test_unknown_source_field_change_is_conflict(self):
+        self.note['unknown']={'original':'value'};self.preview();self.adopt();self.note['unknown']['original']='changed';self.note['updated_at']='2026-04-24 18:29:55'
+        self.preview('unknown');self.assertEqual(self.state('unknown')['conflictsById']['123']['reason'],'source_unknown_changed')
+    def test_user_edit_rejected_without_overwrite(self):
+        self.preview();self.adopt();entry=self.state()['notesByCanonicalId']['api:123'];path=self.root/entry['filePath'];path.write_text(path.read_text()+'manual edit\n');self.commit();before=snapshot(self.root)
+        with self.assertRaisesRegex(ParityFailure,'cloud_mirror_changed'):self.preview('edit')
+        self.assertEqual(snapshot(self.root),before);self.assertEqual(self.calls,[])
+    def test_pending_becomes_ready_next_run_but_not_inside_one_run(self):
+        self.note.update(note_type='recorder_audio',audio={'original':''});self.preview();self.adopt();self.note['audio']['original']='Actual transcript.'
+        _,counts=self.preview('ready');self.assertEqual(counts['pending'],0);self.assertEqual(self.calls,['123'])
+        entry=self.state('ready')['notesByCanonicalId']['api:123'];body=(self.work/'ready/candidate'/entry['filePath']).read_text();self.assertIn('audio_transcript: "Actual transcript."',body)
+    def test_in_run_pending_completion_cleans_entire_candidate(self):
+        self.note.update(note_type='recorder_audio',audio={'original':''});calls=[]
+        def fetch(_):
+            calls.append(1);value=deepcopy(self.note)
+            if len(calls)>1:value['audio']['original']='Became ready'
+            return value
+        before=snapshot(self.root)
+        with self.assertRaisesRegex(ParityFailure,'pending_changed_between_passes'):self.preview(detail=fetch)
+        self.assertEqual(snapshot(self.root),before);self.assertFalse((self.work/'p').exists())
+    def test_unstable_list_rolls_back_new_note_and_state(self):
+        calls=[]
+        def listing():
+            calls.append(1);note=deepcopy(self.note)
+            if len(calls)>1:note['updated_at']='2026-04-24 18:29:55'
+            return [note],True
+        before=snapshot(self.root)
+        with self.assertRaises(ParityFailure):self.preview(listing=listing)
+        self.assertEqual(snapshot(self.root),before);self.assertFalse((self.work/'p').exists())
+    def test_naive_detail_and_aware_list_are_not_implicitly_equal(self):
+        summary=deepcopy(self.note);summary['updated_at']='2026-04-23T18:29:55+08:00'
+        with self.assertRaisesRegex(ParityFailure,'source_changed_during_pass'):self.preview(listing=lambda:([summary],True))
+    def test_writer_refuses_any_existing_note_before_materialization(self):
+        path,data=self.legacy();writer=self.factory(self.root)
+        with self.assertRaisesRegex(ValueError,'legacy_reconciliation_required'):writer.write(self.note,self.note,'old.md')
+        self.assertEqual(path.read_bytes(),data)
+    def test_source_sections_and_original_transcript_are_distinct(self):
+        note={**self.note,'note_type':'audio','audio':{'original':'Exact transcript  \n'},'ref_content':'Source quotation','web_page':{'content':'Entire web page','excerpt':'AI web summary'}}
+        body,fields=render(note,[],Path('x.md'),faithful=True)
+        for value in (note['content'],note['audio']['original'],note['ref_content'],note['web_page']['content'],note['web_page']['excerpt']):self.assertIn(value,body)
+        self.assertEqual(fields['audio_transcript'],note['audio']['original'])
+        self.assertEqual(render(self.note,[],Path('x.md'),faithful=True)[1]['audio_transcript'],'')
+    def test_private_report_stays_partial_and_excludes_raw_private_data(self):
+        from source_sync_mirror_replay import safe_preview_report
+        self.legacy();result,counts=self.preview()
+        value={**result,**counts,'status':'private_preview_partial','secret':'private title'}
+        clean=safe_preview_report(value);self.assertEqual(clean['status'],'private_preview_partial')
+        self.assertEqual(clean,safe_preview_report(clean));self.assertFalse(clean['apply_ready']);self.assertTrue(clean['local_proposal_only'])
+        self.assertNotIn('private title',json.dumps(clean));self.assertEqual(clean['conflicts'],1)
+    def test_new_only_report_ready_for_review_never_apply(self):
+        from source_sync_mirror_replay import safe_preview_report
+        result,counts=self.preview();value={**result,**counts,'status':'private_preview_ready_for_review'}
+        clean=safe_preview_report(value);self.assertEqual(clean['status'],'private_preview_ready_for_review');self.assertFalse(clean['apply_ready'])
+    def test_duplicate_ids_and_incomplete_list_do_not_touch_source(self):
+        for listing in (lambda:([self.note,self.note],True),lambda:([self.note],False)):
+            before=snapshot(self.root)
+            with self.assertRaises(ParityFailure):self.preview(listing=listing)
+            self.assertEqual(snapshot(self.root),before)
+    def test_strict_state_duplicate_keys_null_symlink_and_oversize(self):
+        target=self.root/'03 State/cloud-sync-state.json'
+        for value in ('null','{"a":1,"a":2}','{"a":NaN}',' '*(2*1024*1024+1)):
+            target.write_text(value)
+            with self.assertRaises(ParityFailure):read_faithful_state(self.root,target)
+        target.unlink();target.symlink_to(self.root/'03 State/manifest.json')
+        with self.assertRaises(ParityFailure):read_faithful_state(self.root,target)
+
+    def test_source_field_disappearance_conflicts_without_stale_current_or_state_advance(self):
+        self.note['web_page']={'url':'https://example.test/page','excerpt':'Prior summary','content':'Full page'}
+        self.preview();self.adopt();old=self.state();entry=old['notesByCanonicalId']['api:123'];before=(self.root/entry['filePath']).read_bytes()
+        self.note.update(updated_at='2026-04-24 18:29:55',content='Changed body');self.note.pop('web_page')
+        result,counts=self.preview('missing');next_state=self.state('missing')
+        self.assertEqual(next_state['notesByCanonicalId'],old['notesByCanonicalId']);self.assertEqual(next_state['conflictsById']['123']['reason'],'source_text_missing')
+        self.assertEqual((self.work/'missing/candidate'/entry['filePath']).read_bytes(),before);self.assertEqual(counts['pending'],1)
+    def test_current_audio_field_and_body_update_together_with_prior_history(self):
+        self.note.update(note_type='audio',audio={'original':'Old transcript'});self.preview();self.adopt()
+        self.note['audio']['original']='New transcript';self.note['updated_at']='2026-04-24 18:29:55'
+        self.preview('audio');entry=self.state('audio')['notesByCanonicalId']['api:123'];body=(self.work/'audio/candidate'/entry['filePath']).read_text()
+        self.assertIn('audio_transcript: "New transcript"',body);self.assertNotIn('Old transcript',body);self.assertEqual(len(entry['history']),1)
+    def test_original_created_date_change_conflicts(self):
+        self.preview();self.adopt();self.note['created_at']='2020-01-01 00:00:00';self.note['updated_at']='2026-04-24 18:29:55'
+        self.preview('date');self.assertEqual(self.state('date')['conflictsById']['123']['reason'],'source_field_missing')
+    def test_summary_fallback_change_is_hashed_and_reconciled(self):
+        def detail(_):return {k:v for k,v in self.note.items() if k!='content'}
+        self.preview(detail=detail);self.adopt();self.note['content']='New summary-only body';self.note['updated_at']='2026-04-24 18:29:55'
+        self.preview('fallback',detail=detail);entry=self.state('fallback')['notesByCanonicalId']['api:123']
+        self.assertIn('New summary-only body',(self.work/'fallback/candidate'/entry['filePath']).read_text())
+    def test_summary_change_same_token_within_run_fails(self):
+        calls=[]
+        def listing():
+            calls.append(1);value=deepcopy(self.note)
+            if len(calls)>1:value['content']='Changed during pass'
+            return [value],True
+        def detail(_):return {k:v for k,v in self.note.items() if k!='content'}
+        with self.assertRaises(ParityFailure):self.preview(detail=detail,listing=listing)
+        self.assertFalse((self.work/'p').exists())
+    def test_exact_crlf_content_survives_byte_readback(self):
+        self.note['content']='First line\r\nSecond line\r\n';self.preview();entry=self.state()['notesByCanonicalId']['api:123']
+        self.assertIn(self.note['content'].encode(),(self.work/'p/candidate'/entry['filePath']).read_bytes())
+        self.adopt();self.note['content']='New first\r\nNew second\r\n';self.note['updated_at']='2026-04-24 18:29:55';self.preview('crlf')
+        self.assertIn(self.note['content'].encode(),(self.work/'crlf/candidate'/entry['filePath']).read_bytes())
+    def test_contradictory_faithful_report_never_falls_back_to_legacy_success(self):
+        from source_sync_mirror_replay import safe_preview_report
+        result,counts=self.preview();value={**result,**counts,'status':'private_preview_ready_for_review'}
+        for change in ({'conflicts':1},{'conflicts':True},{'local_proposal_only':True,'pending_set_stable':False}):
+            self.assertEqual(safe_preview_report({**value,**change})['status'],'failed')
+    def test_faithful_retention_plan_build_is_compatible_without_remote_write(self):
+        import get_private_preview_retention as r
+        self.legacy();self.preview();self.git('remote','add','origin',r.REMOTE_URL);before=self.git('show-ref')
+        prepared=r.build_preview(r.LocalGit(self.vault),self.work/'p',self.head)
+        self.assertEqual(self.git('show-ref'),before);self.assertTrue(prepared['commit'])
+        plan=json.loads((self.work/'p/plan.json').read_text());self.assertTrue(r.valid_plan_keys(plan))
+        for changes in ({'state_contract':'unknown'},{'conflicts':True},{'conflicts':2},{'local_proposal_only':False},{'extra':'not allowed'}):
+            self.assertFalse(r.valid_plan_keys({**plan,**changes}))
+    def test_history_bytes_are_bound_before_next_source_update(self):
+        self.preview();self.adopt();self.note.update(content='second',updated_at='2026-04-24 18:29:55');self.preview('second');self.adopt('second')
+        entry=self.state('second')['notesByCanonicalId']['api:123'];(self.root/entry['history'][0]['filePath']).write_bytes(b'corrupt history');self.commit()
+        with self.assertRaisesRegex(ParityFailure,'cloud_mirror_changed'):self.preview('bad_history')
+
+    def test_omitted_body_or_original_source_text_never_becomes_success(self):
+        self.note.update(content='Original body',ref_content='Original quotation',audio_transcript='Original explicit transcript',
+                         audio={'original':'Original audio','transcript':'Explicit audio'},web_page={'content':'Entire original web page','excerpt':'Original web summary'})
+        self.preview();self.adopt();prior=self.state();entry=prior['notesByCanonicalId']['api:123'];before=(self.root/entry['filePath']).read_bytes()
+        original=deepcopy(self.note)
+        for i,path in enumerate(('content','ref_content','audio_transcript','audio.original','audio.transcript','web_page.content','web_page.excerpt')):
+            self.note=deepcopy(original);self.note['updated_at']='2026-04-24 18:29:55';parts=path.split('.');target=self.note
+            for part in parts[:-1]:target=target[part]
+            target.pop(parts[-1]);name='missing-'+str(i)
+            self.preview(name);state=self.state(name)
+            self.assertEqual(state['notesByCanonicalId'],prior['notesByCanonicalId']);self.assertEqual(state['conflictsById']['123']['reason'],'source_text_missing')
+            self.assertEqual((self.work/name/'candidate'/entry['filePath']).read_bytes(),before)
+    def test_empty_body_is_unresolved_without_explicit_delete_semantics(self):
+        self.preview();self.adopt();self.note.update(content='',updated_at='2026-04-24 18:29:55')
+        self.preview('empty');self.assertEqual(self.state('empty')['conflictsById']['123']['reason'],'source_text_missing')
+    def test_invalid_source_text_type_cannot_be_certified(self):
+        self.note['content']={'unexpected':'object'}
+        with self.assertRaisesRegex(ParityFailure,'invalid_source_text'):self.preview()
+        self.assertFalse((self.work/'p').exists())
+
+    def test_created_time_numeric_type_is_exact_not_python_equal(self):
+        self.note['created_at']=1776968995;self.preview();self.adopt()
+        self.note['created_at']=1776968995.0;self.note['updated_at']='2026-04-24 18:29:55'
+        self.preview('typed');self.assertEqual(self.state('typed')['conflictsById']['123']['reason'],'source_field_missing')
+    def test_new_note_requires_actual_created_time(self):
+        self.note.pop('created_at')
+        with self.assertRaisesRegex(ParityFailure,'invalid_raw_version'):self.preview()
+        self.assertFalse((self.work/'p').exists())
+
+    def test_manifest_unknown_row_metadata_survives_managed_update(self):
+        self.preview();self.adopt();path=self.root/'03 State/manifest.json';manifest=json.loads(path.read_text());manifest['notes'][0]['unknown_row_metadata']={'keep':[1,2]};path.write_text(json.dumps(manifest));self.commit()
+        self.note.update(content='new body',updated_at='2026-04-24 18:29:55');self.preview('row_metadata')
+        result=json.loads((self.work/'row_metadata/candidate/03 State/manifest.json').read_text())
+        self.assertEqual(result['notes'][0]['unknown_row_metadata'],{'keep':[1,2]})
+
+    def test_named_fidelity_ref_create_only_preserves_old_preview_and_backup(self):
+        import get_private_preview_retention as r
+        from test_get_private_preview_retention import FakeRemote
+        self.preview();self.git('remote','add','origin',r.REMOTE_URL);local=r.LocalGit(self.vault);remote=FakeRemote(local,self.head)
+        remote.refs[r.BACKUP_REF]=self.head;remote.refs[r.PREVIEW_REF]='e'*40
+        before=dict(remote.refs);result=r.retain_private_preview(self.vault,self.work/'p',self.head,remote=remote)
+        self.assertTrue(result['preview_retained']);self.assertEqual(len(remote.writes),1)
+        self.assertEqual(remote.writes[0][0],'refs/heads/preview/get-fidelity-20261016')
+        self.assertEqual(remote.refs[r.PREVIEW_REF],before[r.PREVIEW_REF]);self.assertEqual(remote.refs[r.BACKUP_REF],before[r.BACKUP_REF]);self.assertEqual(remote.refs[r.MAIN_REF],before[r.MAIN_REF])
+        r.retain_private_preview(self.vault,self.work/'p',self.head,remote=remote);self.assertEqual(len(remote.writes),1)
+    def test_existing_different_fidelity_ref_and_mismatched_backup_never_overwritten(self):
+        import get_private_preview_retention as r
+        from test_get_private_preview_retention import FakeRemote
+        self.preview();self.git('remote','add','origin',r.REMOTE_URL);local=r.LocalGit(self.vault);remote=FakeRemote(local,self.head)
+        remote.refs.update({r.BACKUP_REF:self.head,r.PREVIEW_REF:'e'*40,r.FIDELITY_PREVIEW_REF:self.head});before=dict(remote.refs)
+        with self.assertRaises(r.RetentionFailure):r.retain_private_preview(self.vault,self.work/'p',self.head,remote=remote)
+        self.assertEqual(remote.refs,before);self.assertEqual(remote.writes,[])
+        remote.refs.pop(r.FIDELITY_PREVIEW_REF);remote.refs[r.BACKUP_REF]='b'*40;before=dict(remote.refs)
+        with self.assertRaisesRegex(r.RetentionFailure,'backup_not_verified'):r.retain_private_preview(self.vault,self.work/'p',self.head,remote=remote)
+        self.assertEqual(remote.refs,before);self.assertEqual(remote.writes,[])
+    def test_legacy_and_fidelity_plan_targets_are_fixed_and_distinct(self):
+        import get_private_preview_retention as r
+        self.preview();plan=json.loads((self.work/'p/plan.json').read_text())
+        self.assertEqual(r.preview_ref_for_plan(plan),r.FIDELITY_PREVIEW_REF)
+        legacy={k:v for k,v in plan.items() if k not in ('state_contract','local_proposal_only','conflicts')}
+        self.assertEqual(r.preview_ref_for_plan(legacy),r.PREVIEW_REF)
+        with self.assertRaises(r.RetentionFailure):r.preview_ref_for_plan({**plan,'preview_ref':'refs/heads/main'})
+
+if __name__=='__main__':unittest.main()
