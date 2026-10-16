@@ -180,7 +180,20 @@ class LegacyAdapterTests(unittest.TestCase):
         (root/a.STATE).write_bytes(a.encoded(state));(self.repo/a.retention.GET/a.STATE).write_bytes(a.encoded(state));prior=self.commit('bad local fixture');self.reader=a.OfflineGit(self.repo)
         with self.assertRaises(ParityFailure):self.update(state,root,prior)
     def test_missing_baseline_blob_defers_only_record_and_does_not_mask_corruption(self):
-        state,root,prior,_=self.adopt();blob=state['legacyById']['1']['baseline_blob'];obj=self.repo/'.git/objects'/blob[:2]/blob[2:];original=obj.read_bytes();obj.unlink()
+        state,root,prior,_=self.adopt();blob=state['legacyById']['1']['baseline_blob']
+        # Object storage layout is not a correctness contract. Exercise packed
+        # objects explicitly, then hydrate the isolated fixture as loose objects
+        # before deliberately deleting/corrupting exactly one baseline object.
+        self.assertEqual(self.git('cat-file','-t',blob).strip(),b'blob')
+        self.git('repack','-a','-d')
+        packs=list((self.repo/'.git/objects/pack').glob('*.pack'))
+        self.assertTrue(packs)
+        packed=[p.read_bytes() for p in packs]
+        for path in (self.repo/'.git/objects/pack').iterdir():path.unlink()
+        for data in packed:self.git('unpack-objects','-r',data=data)
+        obj=self.repo/'.git/objects'/blob[:2]/blob[2:]
+        self.assertEqual(self.git('cat-file','-t',blob).strip(),b'blob')
+        original=obj.read_bytes();obj.unlink()
         new,changes,counts=self.update(state,root,prior,{'2':{'content':'Still updates'}})
         self.assertEqual(new['conflictsById']['1'],'baseline_missing');self.assertEqual(new['legacyById']['1'],state['legacyById']['1']);self.assertEqual(set(changes),{'2.md'})
         obj.write_bytes(b'Corrupt object')
