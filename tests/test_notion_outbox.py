@@ -1,5 +1,6 @@
 from copy import deepcopy
 from pathlib import Path
+from git_object_fixture import assert_missing, disable_auto_maintenance, remove_objects
 import json,sys,subprocess,tempfile,unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import get_notion_outbox as o
@@ -20,6 +21,7 @@ class Tests(unittest.TestCase):
  def setUp(self):
   self.t=tempfile.TemporaryDirectory();self.addCleanup(self.t.cleanup);self.root=Path(self.t.name)
   self.git('init','-q','-b','main');self.git('config','user.name','Synthetic');self.git('config','user.email','synthetic@example.invalid')
+  disable_auto_maintenance(self.root)
   self.write('Raw/03 Get/03 State/legacy.json',b'{}');self.origin={'commit':self.commit(),'receipt_sha256':None,'sequence':0};self.last=self.origin;self.rows=[];self.store=Store()
  def git(self,*args):return subprocess.run(['git','-C',str(self.root),*args],check=True,capture_output=True).stdout
  def write(self,path,data):p=self.root/path;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
@@ -130,8 +132,8 @@ class Tests(unittest.TestCase):
  def test_missing_inherited_asset_blob_is_never_fetched(self):
   self.write('Raw/03 Get/assets/a.jpg',b'opaque asset');asset_commit=self.commit();self.origin={'commit':asset_commit,'receipt_sha256':None,'sequence':0};self.last=self.origin
   blob=self.git('rev-parse','HEAD:Raw/03 Get/assets/a.jpg').decode().strip();self.publication({N(1):'one'})
-  object_path=self.root/'.git/objects'/blob[:2]/blob[2:];object_path.unlink()
-  self.ingest();pub=self.pub();self.assertEqual(pub.read(N(1)),md(N(1),'one'));self.assertFalse(object_path.exists());self.assertEqual(pub.descriptor['content_tree']['Raw/03 Get/assets/a.jpg'],blob)
+  object_path,_=remove_objects(self.root,blob)[blob]
+  self.ingest();pub=self.pub();self.assertEqual(pub.read(N(1)),md(N(1),'one'));self.assertFalse(object_path.exists());self.assertEqual(pub.descriptor['content_tree']['Raw/03 Get/assets/a.jpg'],blob);assert_missing(self.root,blob)
  def test_peer_source_commit_stays_original_after_new_id_coalesces(self):
   first=self.publication({N(1):'one',N(2):'two'});self.ingest();second=self.publication({N(1):'new'});self.ingest([second]);self.blocked_batch()
   pub=self.pub();self.assertEqual(pub.descriptor['commit'],first['commit']);self.assertEqual(set(pub.descriptor['records']),{N(2)});self.assertIn(N(2),pub.descriptor['changed_content_ids'])

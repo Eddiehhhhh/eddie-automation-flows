@@ -1,6 +1,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from git_object_fixture import assert_missing, remove_objects
 import sys
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -259,22 +260,10 @@ class CanonicalTests(unittest.TestCase):
         note=self.note(title='Title',content='title: "Title"\nOther source text');state,changes,counts=self.plan({'200':note},['200']);self.assertEqual(counts['created'],1);self.assertIn(note['content'].encode(),next(iter(changes.values())))
     def test_object_only_candidate_does_not_require_inherited_asset_bytes(self):
         parent=self.adopted();path=a.retention.GET+'/assets/inherited.bin';blob=self.f.reader.tree(parent)[path][2]
-        # Git may store inherited objects in packs. Construct that layout,
-        # then unpack this isolated fixture before removing only the asset.
-        self.assertEqual(self.f.git('cat-file','-t',blob).strip(),b'blob')
-        self.f.git('repack','-a','-d')
-        packs=list((self.f.repo/'.git/objects/pack').glob('*.pack'))
-        self.assertTrue(packs)
-        packed=[p.read_bytes() for p in packs]
-        for p in (self.f.repo/'.git/objects/pack').iterdir():p.unlink()
-        for data in packed:self.f.git('unpack-objects','-r',data=data)
-        obj=self.f.repo/'.git/objects'/blob[:2]/blob[2:]
-        self.assertEqual(self.f.git('cat-file','-t',blob).strip(),b'blob')
-        self.assertTrue(obj.exists());obj.unlink()
-        self.assertEqual(self.f.git('cat-file','--batch-check',data=(blob+'\n').encode()).decode().strip(),blob+' missing')
+        obj,_=remove_objects(self.f.repo,blob)[blob]
         refs=self.f.git('show-ref');plan,states,counts=self.transaction(parent,{'200':self.note()},['200'])
         self.assertEqual(counts['new_created'],1);self.assertEqual(self.f.reader.tree(plan['candidate_commit'])[path],self.f.reader.tree(parent)[path]);self.assertFalse(obj.exists());self.assertEqual(self.f.git('show-ref'),refs)
-        retry,_,_=self.transaction(plan['candidate_commit'],{'200':self.note()},registry_sha=plan['registry_sha256'],details={});self.assertEqual(retry['changes'],[]);self.assertFalse(obj.exists())
+        retry,_,_=self.transaction(plan['candidate_commit'],{'200':self.note()},registry_sha=plan['registry_sha256'],details={});self.assertEqual(retry['changes'],[]);self.assertFalse(obj.exists());assert_missing(self.f.repo,blob)
     def test_coerced_boolean_child_or_metadata_shapes_are_conflicts(self):
         for change in ({'is_child_note':'false'},{'children_ids':[{'text':'Child source data'}]},{'parent_id':{'x':'Y'}},{'audio':{'play_url':['Wrong shape']}},{'audio_duration':True}):
             state,changes,counts=self.plan({'200':self.note(**change)},['200']);self.assertEqual(changes,{});self.assertEqual(counts['conflicted'],1)

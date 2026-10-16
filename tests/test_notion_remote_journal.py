@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+from git_object_fixture import disable_auto_maintenance
 import subprocess
 import sys
 import tempfile
@@ -36,11 +37,13 @@ class Fixture:
         if seed is None:
             seed = self.base / 'seed'; seed.mkdir()
             run(seed, 'init', '-q', '-b', 'main')
+            disable_auto_maintenance(seed)
             (seed / 'keep.txt').write_bytes(b'Synthetic independent content\n')
             (seed / 'asset.bin').write_bytes(bytes(range(256)) * 2048)
             run(seed, 'add', '.'); run(seed, 'commit', '-qm', 'Initial fixture')
         self.bare = self.base / 'remote.git'
         run(self.base, 'clone', '-q', '--bare', str(seed), str(self.bare))
+        disable_auto_maintenance(self.bare)
         run(self.bare, 'config', 'uploadpack.allowFilter', 'true')
         self.initial = self.head()
         run(self.bare, 'update-ref', 'refs/tags/protected', self.initial)
@@ -54,6 +57,7 @@ class Fixture:
         root = self.base / name
         run(self.base, 'clone', '-q', '--no-checkout', '--filter=blob:none',
             self.bare.as_uri(), str(root))
+        disable_auto_maintenance(root)
         run(root, 'read-tree', 'HEAD')
         return root
 

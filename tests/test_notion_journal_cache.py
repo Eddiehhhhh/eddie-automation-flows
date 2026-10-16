@@ -1,5 +1,6 @@
 """Verified immutable-object cache; real local filtered Git, no live services."""
 from pathlib import Path
+from git_object_fixture import remove_objects
 import sys
 import tempfile
 import unittest
@@ -37,11 +38,10 @@ class CacheTests(unittest.TestCase):
             with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
                 f=Fixture(directory);store=f.store();store.compare_and_set(o.digest(o.initial_state()),state())
                 loader=rt.ExactJournalLoader(f.root,f);head=f.head();loader(head)
-                blob=store.anchor['state_blob'];path=f.root/'.git/objects'/blob[:2]/blob[2:]
-                self.assertTrue(path.is_file())
-                if corruption=='missing':path.unlink()
-                else:
-                    data=b'{}';path.unlink();path.write_bytes(zlib.compress(b'blob '+str(len(data)).encode()+b'\0'+data))
+                blob=store.anchor['state_blob'];path,_=remove_objects(f.root,blob)[blob]
+                if corruption=='corrupt':
+                    data=b'{}';path.write_bytes(zlib.compress(b'blob '+str(len(data)).encode()+b'\0'+data))
+                    self.assertEqual(git_fixture.run(f.root,'cat-file','blob',blob),data)
                 start=len(f.fetch_args);reads=len(f.blob_reads)
                 with self.assertRaises(rt.CheckpointFailure):loader(head)
                 self.assertEqual(len(f.fetch_args),start)

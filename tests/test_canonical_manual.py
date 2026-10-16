@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from git_object_fixture import assert_missing, remove_objects
 import sys
 import unittest
 from unittest.mock import patch
@@ -175,7 +176,7 @@ class CanonicalManualTests(unittest.TestCase):
 
     def test_real_object_only_runtime_prepare_apply_and_noop(self):
         reader=self.reader;local=reader.local;store={oid:local.blob(oid) for mode,kind,oid in reader.tree(self.parent).values() if kind=='blob'}
-        asset=reader.tree(self.parent)[r.GET+'/assets/inherited.bin'][2];(self.f.f.repo/'.git/objects'/asset[:2]/asset[2:]).unlink();refs=self.f.f.git('show-ref')
+        asset=reader.tree(self.parent)[r.GET+'/assets/inherited.bin'][2];object_path,_=remove_objects(self.f.f.repo,asset)[asset];refs=self.f.f.git('show-ref')
         initial_parent=self.parent
         class Remote:
             def __init__(self):self.local=local;self.head=initial_parent;self.calls=[]
@@ -195,7 +196,7 @@ class CanonicalManualTests(unittest.TestCase):
             assert g.public_report(result)['status']=='canonical_transaction_verified';assert len(remote.calls)==1
             repeat=g.run('placeholder',self.f.source(),remote.head,legacy_sha=result['state_sha256'],registry_sha=result['registry_sha256'])
             assert repeat['changed_paths']==0 and repeat['source_details']==0
-        assert refs==self.f.f.git('show-ref');assert not (self.f.f.repo/'.git/objects'/asset[:2]/asset[2:]).exists()
+        assert refs==self.f.f.git('show-ref');assert not object_path.exists();assert_missing(self.f.f.repo,asset)
 
     def test_cli_rejects_missing_apply_permission_before_credentials(self):
         import sync_getnote_to_raw as sync

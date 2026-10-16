@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+from git_object_fixture import assert_missing, remove_objects
 import sys
 import unittest
 from unittest.mock import patch
@@ -250,9 +251,9 @@ class RecurringEntryTests(unittest.TestCase):
 
     def test_inherited_missing_asset_is_preserved_without_materialization(self):
         path = r.GET + '/assets/inherited.bin'; blob = self.reader.tree(self.parent)[path][2]
-        obj = self.f.f.repo / '.git/objects' / blob[:2] / blob[2:]
-        obj.unlink(); plan, _ = self.prepare()
-        self.assertFalse(obj.exists())
+        obj, _ = remove_objects(self.f.f.repo, blob)[blob]
+        plan, _ = self.prepare()
+        self.assertFalse(obj.exists()); assert_missing(self.f.f.repo, blob)
         self.assertEqual(self.reader.tree(plan['candidate_commit'])[path], ('100644', 'blob', blob))
 
     def test_receipt_only_snapshot_is_rejected(self):

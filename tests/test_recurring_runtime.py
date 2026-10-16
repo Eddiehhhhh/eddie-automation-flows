@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from git_object_fixture import assert_missing, disable_auto_maintenance, remove_objects
 import sys
 import unittest
 from unittest.mock import patch
@@ -100,14 +101,15 @@ class RuntimeTests(unittest.TestCase):
 
     def test_prepare_real_partial_objects_no_cas_no_public_anchor_lookup(self):
         asset = self.reader.tree(self.parent)[r.GET + '/assets/inherited.bin'][2]
-        object_path = self.f.f.f.repo / '.git/objects' / asset[:2] / asset[2:]
-        object_path.unlink(); refs = self.f.f.f.git('show-ref')
+        object_path, _ = remove_objects(self.f.f.f.repo, asset)[asset]
+        refs = self.f.f.f.git('show-ref')
         self.patches(); api = api_fixture.FakeAPI(); source = self.f.f.source()
         result = self.call(source=source, api=api)
         self.assertEqual(result['status'], 'recurring_candidate_verified'); self.assertEqual(self.remote.calls, [])
         self.assertEqual(api.called, []); self.assertEqual(source.ids, ['200', '201'])
         self.assertEqual(result['opaque_fields'], 0); self.assertFalse(result['complete_source_rendering_claimed'])
-        self.assertFalse(object_path.exists()); self.assertFalse(any('/assets/' in path for path in self.fetches))
+        self.assertFalse(object_path.exists()); assert_missing(self.f.f.f.repo, asset)
+        self.assertFalse(any('/assets/' in path for path in self.fetches))
         self.assertEqual(refs, self.f.f.f.git('show-ref'))
         self.assertTrue(any('--depth=1026' in row and '--filter=blob:none' in row for row in self.commit_fetches))
 
@@ -130,6 +132,7 @@ class RuntimeTests(unittest.TestCase):
         subprocess.run(['git', '-c', 'protocol.file.allow=always', 'clone', '--quiet',
                         '--filter=blob:none', '--no-checkout', source_repo.as_uri(), str(clone)],
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        disable_auto_maintenance(clone)
         self.reader = a.OfflineGit(clone); self.local = self.reader.local
         self.remote.tree_entries = source_reader.tree_entries
         asset = self.reader.tree(self.parent)[r.GET + '/assets/inherited.bin'][2]
@@ -238,8 +241,8 @@ class RuntimeTests(unittest.TestCase):
         first, files, api = self.previous()
         for path, data in files.items():
             oid = r.oid(data); self.store[oid] = data
-            object_path = self.f.f.f.repo / '.git/objects' / oid[:2] / oid[2:]
-            if object_path.exists(): object_path.unlink()
+        # Normalize once before removing any member of this cohort.
+        remove_objects(self.f.f.f.repo, *(r.oid(data) for data in files.values()))
         self.patches(); result = self.call(api=api)
         self.assertEqual(result['changed_paths'], 0)
         self.assertIn(entry.FULL_RECEIPT, self.fetches)

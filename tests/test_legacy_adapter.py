@@ -1,5 +1,6 @@
 from copy import deepcopy
 from pathlib import Path
+from git_object_fixture import assert_missing, disable_auto_maintenance, remove_objects
 import contextlib
 import io
 import json
@@ -19,6 +20,7 @@ class LegacyAdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.base=Path(self.temp.name)
         self.repo=self.base/'repo';self.repo.mkdir();self.git('init','-q');self.git('config','user.name','Local Test');self.git('config','user.email','test@example.invalid')
+        disable_auto_maintenance(self.repo)
         self.notes={};self.old={};paths={}
         for i in range(1,6):
             ident=str(i);note={'id':ident,'note_type':'plain_text','title':'Title','content':'Exact source '+ident+'\r\nline','created_at':1776968995,'updated_at':1776968995.0,'note_url':'https://www.biji.com/note/'+ident,'unknown':{'keep':True}}
@@ -181,24 +183,14 @@ class LegacyAdapterTests(unittest.TestCase):
         with self.assertRaises(ParityFailure):self.update(state,root,prior)
     def test_missing_baseline_blob_defers_only_record_and_does_not_mask_corruption(self):
         state,root,prior,_=self.adopt();blob=state['legacyById']['1']['baseline_blob']
-        # Object storage layout is not a correctness contract. Exercise packed
-        # objects explicitly, then hydrate the isolated fixture as loose objects
-        # before deliberately deleting/corrupting exactly one baseline object.
-        self.assertEqual(self.git('cat-file','-t',blob).strip(),b'blob')
-        self.git('repack','-a','-d')
-        packs=list((self.repo/'.git/objects/pack').glob('*.pack'))
-        self.assertTrue(packs)
-        packed=[p.read_bytes() for p in packs]
-        for path in (self.repo/'.git/objects/pack').iterdir():path.unlink()
-        for data in packed:self.git('unpack-objects','-r',data=data)
-        obj=self.repo/'.git/objects'/blob[:2]/blob[2:]
-        self.assertEqual(self.git('cat-file','-t',blob).strip(),b'blob')
-        original=obj.read_bytes();obj.unlink()
+        obj,original=remove_objects(self.repo,blob)[blob]
         new,changes,counts=self.update(state,root,prior,{'2':{'content':'Still updates'}})
         self.assertEqual(new['conflictsById']['1'],'baseline_missing');self.assertEqual(new['legacyById']['1'],state['legacyById']['1']);self.assertEqual(set(changes),{'2.md'})
         obj.write_bytes(b'Corrupt object')
+        with self.assertRaises(subprocess.CalledProcessError):self.git('cat-file','-p',blob)
         with self.assertRaisesRegex(ParityFailure,'adapter_baseline_readback'):self.update(state,root,prior)
         obj.write_bytes(original)
+        self.assertEqual(self.git('cat-file','blob',blob),self.old['1'])
     def test_foreign_output_created_at_publication_is_never_overwritten(self):
         current,snap=a.load_current(self.root);state=a.initial_state(self.evidence,current);output=self.base/'foreign'
         def race(_):output.mkdir()
@@ -218,10 +210,10 @@ class LegacyAdapterTests(unittest.TestCase):
         with patch.object(a,'MAX_TREE',1),patch.object(a,'bounded_file',side_effect=AssertionError('must not read')):
             with self.assertRaisesRegex(ParityFailure,'adapter_tree_budget'):a.tree_snapshot(self.root)
     def test_capture_evidence_preserves_missing_inherited_asset_without_fetch(self):
-        path=a.retention.GET+'/assets/inherited.bin';blob=self.git('rev-parse',self.source+':'+path).decode().strip();object_path=self.repo/'.git/objects'/blob[:2]/blob[2:];object_path.unlink()
+        path=a.retention.GET+'/assets/inherited.bin';blob=self.git('rev-parse',self.source+':'+path).decode().strip();object_path,_=remove_objects(self.repo,blob)[blob]
         reader=a.OfflineGit(self.repo);evidence=a.CaptureEvidence(reader,self.anchor)
         current=a.git_current(reader,self.source,evidence);state=a.initial_state(evidence,current);plan=a.git_candidate(reader,self.source,state,{},current,operation='adoption')
-        self.assertEqual(len(state['legacyById']),2);self.assertEqual(reader.tree(plan['candidate_commit'])[path],('100644','blob',blob));self.assertFalse(object_path.exists())
+        self.assertEqual(len(state['legacyById']),2);self.assertEqual(reader.tree(plan['candidate_commit'])[path],('100644','blob',blob));self.assertFalse(object_path.exists());assert_missing(self.repo,blob)
     def test_stale_unchanged_current_note_cannot_adopt_against_another_parent(self):
         current=a.git_current(self.reader,self.source,self.evidence);state=a.initial_state(self.evidence,current)
         path=self.repo/a.retention.GET/'1.md';path.write_bytes(path.read_bytes()+b'New user edit');parent=self.commit('later main fixture');reader=a.OfflineGit(self.repo)
@@ -233,12 +225,12 @@ class LegacyAdapterTests(unittest.TestCase):
     def test_object_only_adoption_preserves_missing_assets_and_all_refs(self):
         asset=self.repo/a.retention.GET/'assets/binary.bin';asset.parent.mkdir(exist_ok=True);asset.write_bytes(b'Inherited asset bytes')
         parent=self.commit('asset fixture');blob=self.git('rev-parse',parent+':'+a.retention.GET+'/assets/binary.bin').decode().strip()
-        (self.repo/'.git/objects'/blob[:2]/blob[2:]).unlink()
+        object_path,_=remove_objects(self.repo,blob)[blob]
         reader=a.OfflineGit(self.repo);current=a.git_current(reader,parent,self.evidence);state=a.initial_state(self.evidence,current)
         before_refs=self.git('show-ref');before_index=(self.repo/'.git/index').read_bytes()
         first=a.git_candidate(reader,parent,state,{},current,operation='adoption');again=a.git_candidate(reader,parent,state,{},current,operation='adoption')
         self.assertEqual(first,again);self.assertEqual([r['path'] for r in first['changes']],[a.STATE]);self.assertEqual(self.git('show-ref'),before_refs);self.assertEqual((self.repo/'.git/index').read_bytes(),before_index)
-        self.assertFalse((self.repo/'.git/objects'/blob[:2]/blob[2:]).exists())
+        self.assertFalse(object_path.exists());assert_missing(self.repo,blob)
         expected=reader.tree(parent).copy();expected[a.retention.GET+'/'+a.STATE]=('100644','blob',a.retention.oid(a.encoded(state)))
         self.assertEqual(reader.tree(first['candidate_commit']),expected)
     def test_object_only_update_and_noop_use_pinned_candidate_without_refs(self):
