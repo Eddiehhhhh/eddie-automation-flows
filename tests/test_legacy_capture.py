@@ -399,3 +399,56 @@ class PartialCloneCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(ParityFailure,'^capture_git_tree_write$'):
                 c.make_commit(fixture.local,fixture.head,fixture.files)
         self.assertEqual(c.public_report({'error':'capture_git_tree_write'})['error'],'capture_git_tree_write')
+
+class FreshResumeGitCaptureTests(unittest.TestCase):
+    def test_each_batch_and_final_ledger_resume_in_fresh_object_only_clone(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);src=root/'source';src.mkdir();bare=root/'remote.git'
+            def git(where,*args,**kwargs):return subprocess.check_output(['git','-C',str(where),*args],stderr=subprocess.DEVNULL,**kwargs)
+            git(src,'init','-q');git(src,'config','user.name','Fixture');git(src,'config','user.email','fixture@example.invalid')
+            (src/'Raw/03 Get').mkdir(parents=True);(src/'Raw/03 Get/old.md').write_text('Original old note')
+            (src/'non-Get.txt').write_text('Outside capture');git(src,'add','.');git(src,'commit','-qm','base')
+            base=git(src,'rev-parse','HEAD').decode().strip();old_blob=git(src,'rev-parse','HEAD:Raw/03 Get/old.md').decode().strip()
+            subprocess.check_call(['git','clone','-q','--bare',str(src),str(bare)],stderr=subprocess.DEVNULL)
+            git(bare,'config','uploadpack.allowFilter','true');git(bare,'config','uploadpack.allowAnySHA1InWant','true');original_refs=git(bare,'show-ref')
+            with patch.object(c.retention,'REMOTE_URL',bare.as_uri()):
+                first_local=c.retention.readback_checkout(root/'first',base,'synthetic-fixture-token')
+                first_files={c.CENSUS:capture_json_bytes({'census':'immutable'}),c.LEDGER:capture_json_bytes({'records':list(range(50)),'finalized':False})}
+                first_files.update({c.record_path(str(i)):capture_json_bytes({'fixture_record':i,'content':'retained body '+str(i)}) for i in range(1,51)})
+                first=c.make_commit(first_local,base,first_files);c.Remote(first_local,'synthetic-fixture-token').cas(None,first)
+                prior_ledger=first_files[c.LEDGER];prior_observation_blob=c.retention.oid(first_files[c.record_path('1')])
+                for step in ('second','final'):
+                    parent=first if step=='second' else second
+                    local=c.retention.readback_checkout(root/step,parent,'synthetic-fixture-token')
+                    self.assertNotEqual(local.command('cat-file','-e',c.retention.oid(prior_ledger)).returncode,0)
+                    self.assertNotEqual(local.command('cat-file','-e',prior_observation_blob).returncode,0)
+                    ledger=capture_json_bytes({'records':list(range(100)),'finalized':step=='final'})
+                    files={c.LEDGER:ledger}
+                    if step=='second':files.update({c.record_path(str(i)):capture_json_bytes({'fixture_record':i,'content':'retained body '+str(i)}) for i in range(51,101)})
+                    candidate=c.make_commit(local,parent,files);remote=c.Remote(local,'synthetic-fixture-token')
+                    # Actual former production failure: a fresh resume has no
+                    # prior mutable ledger blob for pack-objects' delta base.
+                    with self.assertRaisesRegex(c.retention.RetentionFailure,'git_operation_failed'):remote.cas(parent,candidate)
+                    self.assertEqual(git(bare,'rev-parse',c.REF).decode().strip(),parent)
+                    verified=git(bare,'show',parent+':'+c.LEDGER)
+                    self.assertEqual(verified,prior_ledger)
+                    c.retain_verified_ledger_blob(local,verified,c.retention.oid(verified))
+                    remote.cas(parent,candidate)
+                    self.assertEqual(git(bare,'rev-parse',c.REF).decode().strip(),candidate)
+                    self.assertEqual(git(bare,'show',candidate+':'+c.LEDGER),ledger)
+                    self.assertNotEqual(local.command('cat-file','-e',old_blob).returncode,0)
+                    self.assertNotEqual(local.command('cat-file','-e',prior_observation_blob).returncode,0)
+                    if step=='second':second=candidate
+                    else:final=candidate
+                    prior_ledger=ledger
+                for path,data in first_files.items():
+                    if path!=c.LEDGER:self.assertEqual(git(bare,'show',final+':'+path),data)
+                self.assertEqual(git(bare,'show-ref').replace((final+' '+c.REF+'\n').encode(),b''),original_refs)
+                self.assertEqual(git(bare,'show',final+':Raw/03 Get/old.md'),b'Original old note')
+                self.assertEqual(git(bare,'show',final+':non-Get.txt'),b'Outside capture')
+    def test_ledger_import_rejects_changed_or_over_budget_bytes_before_git(self):
+        from unittest.mock import Mock
+        local=Mock()
+        for data,oid in ((b'changed','a'*40),(b'x'*(c.MIB+1),c.retention.oid(b'x'*(c.MIB+1)))):
+            with self.assertRaisesRegex(ParityFailure,'capture_invalid_ledger'):c.retain_verified_ledger_blob(local,data,oid)
+        local.run.assert_not_called()

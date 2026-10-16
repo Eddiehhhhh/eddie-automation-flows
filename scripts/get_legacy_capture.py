@@ -378,6 +378,16 @@ def verify_scope_history(local,head,census,ledger,remote):
         previous=current
     if total!=ledger['retained_bytes'] or total>MAX_TOTAL:fail('capture_invalid_ledger')
 
+def retain_verified_ledger_blob(local,data,expected_oid):
+    """Keep the already-verified mutable-path base for Git delta packing.
+
+    Immutable census/receipts and old notes stay absent from the object store.
+    This imports only bytes already fetched and hash-validated for resume.
+    """
+    if len(data)>MIB or retention.oid(data)!=expected_oid:fail('capture_invalid_ledger')
+    blob=local.run('hash-object','-w','--stdin',data=data).decode().strip()
+    if blob!=expected_oid or local.blob(blob)!=data:fail('capture_readback')
+
 def run(token,source,work):
     remote=Remote(None,token);source.capture_metrics={};remote.metrics=source.capture_metrics
     main,get_tree=guard(remote);head=remote.ref(REF)
@@ -402,6 +412,7 @@ def run(token,source,work):
             if capture_json_bytes(census)!=census_bytes:fail('capture_invalid_census')
             ledger_bytes=remote.blob(metadata[LEDGER][2],metadata[LEDGER][3]);ledger=strict_capture_json(ledger_bytes,MIB)
             if capture_json_bytes(ledger)!=ledger_bytes:fail('capture_invalid_ledger')
+            retain_verified_ledger_blob(local,ledger_bytes,metadata[LEDGER][2])
             local.run('fetch','--depth=42','--filter=blob:none','--no-tags','--no-recurse-submodules','--no-write-fetch-head','origin',head)
             local.run('fetch','--depth=1','--filter=blob:none','--no-tags','--no-recurse-submodules','--no-write-fetch-head','origin',census['source_commit'])
             wanted={p:v for p,v in metadata.items() if p not in (CENSUS,LEDGER)}
