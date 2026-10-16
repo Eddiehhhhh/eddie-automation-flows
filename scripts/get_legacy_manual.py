@@ -326,9 +326,177 @@ def run(token,source,expected_parent,*,state_sha=None,apply=False,work=None,chec
         return result
 
 
+# This mode is preparation-only. No canonical plan is accepted by publish().
+CANONICAL_COUNT=10
+CANONICAL_CONTRACT='get-canonical-preview-proposal-1'
+
+
+def load_canonical_inputs(reader,remote,token,root,parent):
+    """Read all current Markdown identities and the fixed preview; no assets."""
+    import get_canonical_writer as n
+    local=remote.local
+    local.run('fetch','--depth=1','--filter=blob:none','--no-tags','--no-recurse-submodules','--no-write-fetch-head','origin',n.PREVIEW)
+    snapshots={parent:remote.check_source_budget(parent),n.PREVIEW:remote.check_source_budget(n.PREVIEW)}
+    for commit,metadata in snapshots.items():
+        if commit==parent:
+            selected={p:row for p,row in metadata.items() if n.is_markdown(p) or p in (r.GET+'/'+a.STATE,r.GET+'/'+n.STATE)}
+        else:
+            statepath=r.GET+'/'+n.PREVIEW_STATE
+            if statepath not in metadata:fail('manual_state_anchor')
+            selected={statepath:metadata[statepath]}
+        missing={}
+        for path,row in selected.items():
+            rel=path[len(r.GET)+1:]
+            cap=n.MAX_STATE if rel in (a.STATE,n.STATE,n.PREVIEW_STATE) else a.owned.MAX_NOTE
+            if row[:2]!=('100644','blob') or type(row[3]) is not int or not 0<=row[3]<=cap:fail('manual_budget')
+            if reader.tree(commit).get(path)!=row[:3]:fail('manual_readback')
+            probe=reader.local.command('cat-file','--batch-check=%(objectname) %(objecttype) %(objectsize)',data=(row[2]+'\n').encode())
+            if probe.returncode or probe.stderr:fail('manual_readback')
+            if probe.stdout==(row[2]+' missing\n').encode():missing[path]=row
+            elif probe.stdout!=(row[2]+' blob '+str(row[3])+'\n').encode():fail('manual_readback')
+        values=fetch_selected(remote,missing,token,root/('current-canonical' if commit==parent else 'preview-state'))
+        for path,data in values.items():import_blob(local,data,selected[path][2])
+    current=n.git_inventory(reader,parent)
+    # Anchor and schema gate before reading any preview path from untrusted data.
+    state_bytes=reader.read(n.PREVIEW,r.GET+'/'+n.PREVIEW_STATE,2*c.MIB)
+    if a.sha(state_bytes)!=n.PREVIEW_STATE_SHA:fail('manual_state_anchor')
+    state=strict_capture_json(state_bytes,2*c.MIB);rows=state.get('notesByCanonicalId')
+    if not isinstance(rows,dict) or len(rows)!=CANONICAL_COUNT:fail('manual_scope')
+    selected={}
+    for row in rows.values():
+        if not isinstance(row,dict):fail('manual_scope')
+        path=r.GET+'/'+n.path_ok(row.get('filePath'));metadata=snapshots[n.PREVIEW]
+        if path in selected or path not in metadata:fail('manual_scope')
+        value=metadata[path]
+        if value[:2]!=('100644','blob') or type(value[3]) is not int or not 0<=value[3]<=a.owned.MAX_NOTE or reader.tree(n.PREVIEW).get(path)!=value[:3]:fail('manual_budget')
+        selected[path]=value
+    values=fetch_selected(remote,selected,token,root/'preview-notes')
+    for path,data in values.items():import_blob(local,data,selected[path][2])
+    preview=n.preview_records(reader,n.PREVIEW,n.PREVIEW_STATE_SHA)
+    if len(preview)!=CANONICAL_COUNT:fail('manual_scope')
+    return current,preview
+
+
+def canonical_reference_receipt(note,data):
+    """Exact named URL fields only; never claim binary availability/readability."""
+    import get_canonical_writer as n
+    fields=n.json_header(data);audio=note.get('audio') or {};web=note.get('web_page') or {}
+    attachments=note.get('attachments') or []
+    links=[entry['url'] for entry in attachments if entry['type']=='link']
+    expected={'attachments':[entry['url'] for entry in attachments],
+      'audio_url':audio.get('play_url') or note.get('audio_url') or '',
+      'web_url':web.get('url') or (links[0] if links else '')}
+    if any(fields.get(key)!=value for key,value in expected.items()):fail('manual_readback')
+    return {'contract':'get-canonical-reference-evidence-1','named_fields':expected,
+      'attachment_types':[entry['type'] for entry in attachments],
+      'reference_count':len(attachments)+bool(expected['audio_url'])+bool(expected['web_url']),
+      'bytes_sha256':a.sha(data),'binary_downloads':0,'reference_content_verified':False}
+
+
+def prepare_canonical_preview(reader,evidence,parent,current,preview,source,*,state_sha,apply=False):
+    """Only the ten absent preview identities. Every existing file is frozen."""
+    if apply:fail('manual_scope')
+    import get_canonical_writer as n
+    if n.STATE in current or a.STATE not in current or len(preview)!=CANONICAL_COUNT:fail('manual_state_anchor')
+    legacy=a.validate_state(strict_capture_json(current[a.STATE],a.MAX_STATE),state_sha,evidence)
+    if a.encoded(legacy)!=current[a.STATE] or reader.read(parent,r.GET+'/'+a.STATE,a.MAX_STATE)!=current[a.STATE]:fail('manual_state_anchor')
+    registry=n.initial_registry(evidence,legacy,state_sha,current)
+    # Bind and validate the full inventory against the exact parent before Get.
+    before=reader.tree(parent);prefix=r.GET+'/'
+    evaluated={p[len(prefix):] for p in before if p.startswith(prefix) and (n.is_markdown(p) or p[len(prefix):] in (a.STATE,n.STATE))}
+    if set(current)!=evaluated or any(before.get(prefix+p)!=('100644','blob',r.oid(data)) for p,data in current.items()):fail('manual_parent_changed')
+    selected=sorted(preview)
+    if len(set(selected))!=CANONICAL_COUNT or set(selected)&set(registry['reserved']):fail('manual_scope')
+    if any(prefix+n.path_ok(saved['entry']['filePath']) in before for saved in preview.values()):fail('manual_scope')
+    summaries,terminal=source.enumerate();items=a.source_snapshot(summaries,terminal)
+    details={};receipts={};unavailable=0
+    for ident in selected:
+        if ident not in items:continue
+        try:
+            raw=source.detail_raw(ident);details[ident]=detail_note(raw)
+            receipts[ident]={'wire_sha256':a.sha(raw),'wire_bytes':len(raw),'detail_sha256':a.sha(a.encoded(details[ident]))}
+        except RuntimeError as exc:
+            if str(exc)!='GetNote HTTP 404':raise
+            unavailable+=1;details[ident]=None;receipts[ident]={'unavailable':True}
+    proposed,changes,counts=n.propose_new(evidence,legacy,state_sha,registry,a.sha(a.encoded(registry)),current,summaries,terminal,details,selected_new=selected,preview=preview)
+    if counts['created'] or counts['updated'] or counts['unchanged'] or counts['preview_imported']+counts['conflicted']!=CANONICAL_COUNT:fail('manual_plan')
+    from get_mirror_render import RECORDINGS
+    references={};audio_notes=0;empty_text_notes=0
+    for ident,row in proposed['newById'].items():
+        data=changes[row['filePath']];note=n.source_note(items[ident],details[ident])
+        references[ident]=canonical_reference_receipt(note,data)
+        audio_notes+=note.get('note_type') in (RECORDINGS|{'audio'})
+        empty_text_notes+=note.get('note_type')=='plain_text' and not n.text_fields(note)
+    plan=n.git_candidate(reader,parent,legacy,proposed,changes,current)
+    after=reader.tree(plan['candidate_commit'])
+    allowed={prefix+n.STATE}|{prefix+saved['entry']['filePath'] for saved in preview.values()}
+    changed={p for p in set(before)|set(after) if before.get(p)!=after.get(p)}
+    if not changed<=allowed or any(after.get(p)!=row for p,row in before.items()) or set(after)-set(before)!=changed:fail('manual_scope')
+    files={p:reader.read(plan['candidate_commit'],p,n.MAX_STATE if p==prefix+n.STATE else a.owned.MAX_NOTE) for p in changed}
+    if len(files)!=len(changes)+1 or sum(map(len,files.values()))>MAX_CHANGED_BYTES:fail('manual_budget')
+    legacy_deferred=sum(ident not in items or raw_source_version(items[ident].get('updated_at'))!=row['ownership']['source_version'] or a.sha(a.encoded(items[ident]))!=row['summary_sha256'] for ident,row in legacy['legacyById'].items())
+    reasons=list(proposed['conflictsById'].values())
+    evidence_payload={'contract':CANONICAL_CONTRACT,'rules_sha256':rules_sha256(),'capture_anchor':evidence.anchor,
+      'preview_commit':n.PREVIEW,'preview_state_sha256':n.PREVIEW_STATE_SHA,'legacy_state_sha256':state_sha,
+      'before_get_tree':reader.source_get_tree(parent),'selected':selected,'source_summary_sha256':a.sha(a.encoded(summaries)),
+      'detail_receipts':receipts,'reference_receipts':references,'registry_sha256':plan['registry_sha256'],'changes':plan['changes']}
+    result={'status':'canonical_preview_candidate_verified','main_updated':False,'cas_attempts':0,'apply_ready':False,
+      'current_preserved':True,'readback_verified':True,'selected':CANONICAL_COUNT,'notes_proposed':len(changes),
+      'conflicted':counts['conflicted'],'changed_paths':len(files),'changed_bytes':sum(map(len,files.values())),
+      'source_details':len(details),'details_unavailable':unavailable,'legacy_managed':len(legacy['legacyById']),
+      'legacy_conflicts':len(legacy['conflictsById']),'legacy_pending':len(legacy['pending_ids']),'legacy_deferred':legacy_deferred,
+      'imported_audio_notes':audio_notes,'imported_empty_plain_text_notes':empty_text_notes,
+      'reference_notes':sum(bool(x['reference_count']) for x in references.values()),
+      'reference_entries':sum(x['reference_count'] for x in references.values()),'asset_downloads':0,
+      'source_changed':sum(x in ('preview_source_changed','preview_render_changed') for x in reasons),
+      'source_unavailable':sum(x in ('source_missing','detail_identity','source_transcript_pending') for x in reasons),
+      'other_conflicts':sum(x not in ('preview_source_changed','preview_render_changed','source_missing','detail_identity','source_transcript_pending') for x in reasons),
+      'parent_commit':parent,'candidate_commit':plan['candidate_commit'],'candidate_tree':plan['candidate_tree'],
+      'legacy_state_sha256':state_sha,'registry_sha256':plan['registry_sha256'],'plan_sha256':a.sha(a.encoded(plan)),
+      'proposal_sha256':a.sha(a.encoded(evidence_payload)),'detail_receipts_sha256':a.sha(a.encoded(receipts)),
+      'reference_receipts_sha256':a.sha(a.encoded(references))}
+    return result
+
+
+def run_canonical_preview(token,source,expected_parent,*,state_sha,apply=False,work=None):
+    if apply:fail('manual_scope')
+    a.checked(expected_parent,40);a.checked(state_sha,64)
+    remote=Remote(None,token);guard(remote,expected_parent)
+    with tempfile.TemporaryDirectory(prefix='get-canonical-prepare-',dir=work) as folder:
+        root=Path(folder);local=r.readback_checkout(root/'objects',CAPTURE,token);remote.local=local
+        reader,evidence,_=load_evidence(local,remote,token,root,expected_parent,anchor=ANCHOR)
+        current,preview=load_canonical_inputs(reader,remote,token,root,expected_parent)
+        guard(remote,expected_parent)
+        result=prepare_canonical_preview(reader,evidence,expected_parent,current,preview,source,state_sha=state_sha)
+        guard(remote,expected_parent);result['refs_verified']=True
+        return result
+
+
+def public_canonical_report(value):
+    clean={'status':'manual_failed','main_updated':None,'write_state':'unknown'}
+    if any(value.get(k) is not expected for k,expected in [('main_updated',False),('apply_ready',False),('current_preserved',True),('readback_verified',True),('refs_verified',True)]):return clean
+    if value.get('cas_attempts')!=0 or type(value.get('cas_attempts')) is not int or value.get('asset_downloads')!=0 or type(value.get('asset_downloads')) is not int:return clean
+    counts=('selected','notes_proposed','conflicted','changed_paths','changed_bytes','source_details','details_unavailable','legacy_managed','legacy_conflicts','legacy_pending','legacy_deferred','imported_audio_notes','imported_empty_plain_text_notes','reference_notes','reference_entries','source_changed','source_unavailable','other_conflicts')
+    if any(type(value.get(key)) is not int or not 0<=value[key]<=MAX_CHANGED_BYTES for key in counts):return clean
+    if value['selected']!=CANONICAL_COUNT or value['notes_proposed']+value['conflicted']!=CANONICAL_COUNT or value['changed_paths']!=value['notes_proposed']+1:return clean
+    if value['source_changed']+value['source_unavailable']+value['other_conflicts']!=value['conflicted']:return clean
+    if not 0<=value['details_unavailable']<=value['source_details']<=CANONICAL_COUNT:return clean
+    if not 1<=value['legacy_managed']<=MAX_MANAGED or value['legacy_pending']!=9 or value['legacy_deferred']>value['legacy_managed']:return clean
+    if value['imported_audio_notes']+value['imported_empty_plain_text_notes']>value['notes_proposed'] or value['reference_notes']>value['notes_proposed']:return clean
+    out={key:value[key] for key in counts}
+    for key,width in [('parent_commit',40),('candidate_commit',40),('candidate_tree',40),('legacy_state_sha256',64),('registry_sha256',64),('plan_sha256',64),('proposal_sha256',64),('detail_receipts_sha256',64),('reference_receipts_sha256',64)]:
+        try:out[key]=a.checked(value.get(key),width)
+        except Exception:return clean
+    for key in ('detail_requests','api_requests','http_attempts','http_retries'):
+        if type(value.get(key)) is int and 0<=value[key]<=c.MAX_RAW:out[key]=value[key]
+    out.update(status='canonical_preview_candidate_verified',main_updated=False,cas_attempts=0,apply_ready=False,current_preserved=True,readback_verified=True,refs_verified=True,asset_downloads=0,reference_content_verified=False)
+    return out
+
+
 def public_report(value):
     clean={'status':'manual_failed','main_updated':None,'write_state':'unknown'}
     if not isinstance(value,dict):return clean
+    if value.get('status')=='canonical_preview_candidate_verified':return public_canonical_report(value)
     if isinstance(value.get('error'),str) and value['error'] in ERRORS:
         clean['error']=value['error']
         write_state=value.get('write_state','unknown')
@@ -385,11 +553,12 @@ def read_report(path,checkpoint=None):
 
 
 def main(argv=None):
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--expected-parent');parser.add_argument('--state-sha256');parser.add_argument('--approved-payload-sha256');parser.add_argument('--publish-report');parser.add_argument('--checkpoint');parser.add_argument('--apply',action='store_true');args=parser.parse_args(argv)
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--expected-parent');parser.add_argument('--state-sha256');parser.add_argument('--approved-payload-sha256');parser.add_argument('--publish-report');parser.add_argument('--checkpoint');parser.add_argument('--apply',action='store_true');parser.add_argument('--canonical-preview',action='store_true');args=parser.parse_args(argv)
     if args.publish_report:
         print(json.dumps(read_report(args.publish_report,args.checkpoint)));return 0
     try:
         a.checked(args.expected_parent,40)
+        if args.canonical_preview and (args.apply or args.approved_payload_sha256 or not args.state_sha256):fail('manual_scope')
         if args.apply and not args.checkpoint:fail('manual_checkpoint')
         if args.apply:
             try:a.checked(args.approved_payload_sha256,64)
@@ -399,7 +568,10 @@ def main(argv=None):
         import sync_getnote_to_raw as sync
         from source_sync_rate import RequestPolicy
         key,client=sync.load_credentials();source=c.Source(key,client,RequestPolicy(seconds=35*60))
-        result=run(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,state_sha=args.state_sha256,apply=args.apply,approved_payload_sha256=args.approved_payload_sha256,checkpoint=(lambda plan:write_checkpoint(args.checkpoint,plan)) if args.checkpoint else None)
+        if args.canonical_preview:
+            result=run_canonical_preview(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,state_sha=args.state_sha256)
+        else:
+            result=run(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,state_sha=args.state_sha256,apply=args.apply,approved_payload_sha256=args.approved_payload_sha256,checkpoint=(lambda plan:write_checkpoint(args.checkpoint,plan)) if args.checkpoint else None)
         result.update(detail_requests=source.details,api_requests=source.api_requests,http_attempts=source.http_attempts,http_retries=max(0,source.http_attempts-source.api_requests))
     except (Exception,SystemExit) as exc:result={'error':str(exc) if str(exc) in ERRORS else 'manual_failed','write_state':getattr(exc,'write_state','not_attempted')}
     clean=public_report(result);print(json.dumps(clean));return 0 if clean['status']!='manual_failed' else 1

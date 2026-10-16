@@ -185,7 +185,7 @@ class ManualTests(unittest.TestCase):
     def test_workflow_manual_entry_defaults_to_prepare_and_shares_writer_lock(self):
         workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/source-sync-shadow.yml').read_text()
         block=workflow.split('legacy_apply:',1)[1].split('sample_pages:',1)[0]
-        self.assertIn('default: false',block);self.assertIn("inputs.mode == 'legacy_manual' && 'eddie-private-vault-writers'",workflow)
+        self.assertIn('default: false',block);self.assertIn("(inputs.mode == 'legacy_manual' || inputs.mode == 'canonical_prepare') && 'eddie-private-vault-writers'",workflow)
         self.assertIn('args=(--expected-parent "$EXPECTED_PARENT")',workflow);self.assertNotIn('schedule:',workflow)
         self.assertNotIn('actions: write',workflow);self.assertNotIn('contents: write',workflow)
         step=workflow.split('Prepare or explicitly apply one bounded legacy transaction',1)[1].split('- name:',1)[0]
@@ -317,3 +317,143 @@ class ManualTests(unittest.TestCase):
                 path=copy/'scripts'/name;before=path.read_bytes();path.write_bytes(before+b'\n# changed dependency\n')
                 self.assertNotEqual(m.rules_sha256(),original);path.write_bytes(before)
             self.assertEqual(m.rules_sha256(),original)
+
+class CanonicalPrepareTests(unittest.TestCase):
+    def setUp(self):
+        import get_canonical_writer as n
+        import get_mirror_incremental_replay as raw
+        self.n=n;self.raw=raw
+        self.f=fixture.LegacyAdapterTests(methodName='test_capture_history_and_exact_first_adoption_state_only');self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.legacy,_,self.parent,_=self.f.adopt();self.reader=self.f.reader;self.evidence=self.f.evidence;self.sha=a.sha(a.encoded(self.legacy))
+        self.notes={'200':{'note_id':'200','note_type':'recorder_audio','title':'Recording','content':'Readable summary','audio':{'original':'Full original\r\ntranscript','play_url':'https://example.invalid/audio'},'attachments':[{'type':'audio','url':'https://example.invalid/audio'}],'created_at':'2026-10-16 01:02:03','updated_at':'2026-10-16 01:02:04'},
+          '201':{'note_id':'201','note_type':'plain_text','title':'Empty note','content':'','created_at':1776968995,'updated_at':1776968995}}
+        state=raw.empty_faithful_state();self.preview={}
+        for ident,note in self.notes.items():
+            path=n.CATEGORIES[note['note_type']]+'/'+ident+'.md';data=n.render_exact(note,path)
+            row={'sourceVersion':raw.raw_source_version(note['updated_at']),'filePath':path,'mirrorSha256':a.sha(data),'sourceContentHash':raw._source_content_hash(note),'sourceSummaryHash':raw._source_content_hash(note),'sourceUnknownHash':raw._source_unknown_hash(note),'sourceTextFields':raw.source_text_fields(note),'origin':'faithful-created','history':[]}
+            state['notesByCanonicalId']['api:'+ident]=row
+            self.preview[ident]={'entry':row,'bytes':data,'anchor':{'commit':'a'*40,'state_sha256':'b'*64,'blob':a.retention.oid(data)}}
+        self.preview_bytes=a.encoded(state);self.current=n.git_inventory(self.reader,self.parent)
+        self.count_patch=patch.object(m,'CANONICAL_COUNT',2);self.count_patch.start();self.addCleanup(self.count_patch.stop)
+    def source(self,notes=None,summaries=None):
+        notes=deepcopy(self.notes if notes is None else notes)
+        summaries=deepcopy(self.f.summaries+list(notes.values()) if summaries is None else summaries)
+        class Source:
+            def __init__(s):s.ids=[];s.lists=0
+            def enumerate(s):s.lists+=1;return summaries,True
+            def detail_raw(s,ident):s.ids.append(ident);return a.encoded({'success':True,'data':{'note':notes[ident]}})
+        return Source()
+    def prepare(self,source=None,current=None,preview=None,parent=None,**kwargs):
+        return m.prepare_canonical_preview(self.reader,self.evidence,parent or self.parent,self.current if current is None else current,self.preview if preview is None else preview,source or self.source(),state_sha=self.sha,**kwargs)
+    def test_fixed_preview_only_exact_candidate_preserves_every_existing_path(self):
+        refs=self.f.git('show-ref');index=self.f.git('ls-files','--stage');source=self.source();out=self.prepare(source)
+        self.assertEqual(source.ids,['200','201']);self.assertEqual(source.lists,1)
+        self.assertEqual((out['notes_proposed'],out['changed_paths'],out['imported_audio_notes'],out['imported_empty_plain_text_notes']),(2,3,1,1))
+        self.assertEqual((out['reference_notes'],out['reference_entries'],out['asset_downloads']),(1,2,0))
+        before=self.reader.tree(self.parent);after=self.reader.tree(out['candidate_commit'])
+        for path,row in before.items():self.assertEqual(after[path],row)
+        self.assertEqual(self.reader.read(out['candidate_commit'],a.retention.GET+'/'+a.STATE),self.current[a.STATE])
+        for value in self.preview.values():self.assertEqual(self.reader.read(out['candidate_commit'],a.retention.GET+'/'+value['entry']['filePath']),value['bytes'])
+        self.assertEqual(self.f.git('show-ref'),refs);self.assertEqual(self.f.git('ls-files','--stage'),index)
+        again=self.prepare();self.assertEqual(again,out)
+    def test_flash_recording_is_counted_as_audio_after_exact_import(self):
+        note=self.notes['200'];note['note_type']='recorder_flash_audio';saved=self.preview['200']
+        data=self.n.render_exact(note,saved['entry']['filePath']);saved['bytes']=data;saved['anchor']['blob']=a.retention.oid(data)
+        saved['entry'].update(mirrorSha256=a.sha(data),sourceContentHash=self.raw._source_content_hash(note),sourceSummaryHash=self.raw._source_content_hash(note),sourceUnknownHash=self.raw._source_unknown_hash(note))
+        out=self.prepare();self.assertEqual(out['notes_proposed'],2);self.assertEqual(out['imported_audio_notes'],1)
+        self.assertEqual(out['imported_empty_plain_text_notes'],1);self.assertEqual(out['reference_notes'],1)
+    def test_changed_legacy_summaries_defer_without_details_or_state_mutation(self):
+        summaries=deepcopy(self.f.summaries)+list(self.notes.values());summaries[0]['updated_at']=1776968999
+        source=self.source(summaries=summaries);out=self.prepare(source)
+        self.assertEqual(out['legacy_deferred'],1);self.assertEqual(source.ids,['200','201'])
+        self.assertEqual(self.reader.read(out['candidate_commit'],a.retention.GET+'/'+a.STATE),self.current[a.STATE])
+    def test_changed_preview_source_is_individual_conflict_and_never_overwritten(self):
+        notes=deepcopy(self.notes);notes['200']['content']='New source after preview';out=self.prepare(self.source(notes))
+        self.assertEqual((out['notes_proposed'],out['conflicted'],out['source_changed']),(1,1,1))
+        self.assertNotIn(a.retention.GET+'/'+self.preview['200']['entry']['filePath'],self.reader.tree(out['candidate_commit']))
+    def test_missing_selected_source_is_pending_without_fetching_missing_or_legacy(self):
+        source=self.source({'201':self.notes['201']});out=self.prepare(source)
+        self.assertEqual(source.ids,['201']);self.assertEqual((out['notes_proposed'],out['source_unavailable']),(1,1))
+    def test_404_and_unknown_envelope_are_isolated_but_auth_failure_stops(self):
+        for mode in ('404','unknown'):
+            source=self.source();original=source.detail_raw
+            def detail(ident):
+                if ident=='200':
+                    source.ids.append(ident)
+                    if mode=='404':raise RuntimeError('GetNote HTTP 404')
+                    return a.encoded({'data':{'note':self.notes[ident],'unknown':'Private source'}})
+                return original(ident)
+            source.detail_raw=detail;out=self.prepare(source)
+            self.assertEqual(out['notes_proposed'],1);self.assertEqual(out['source_unavailable'],1)
+        source=self.source();source.detail_raw=lambda i:(_ for _ in ()).throw(RuntimeError('GetNote HTTP 401'))
+        with self.assertRaisesRegex(RuntimeError,'401'):self.prepare(source)
+    def test_binary_asset_needs_materialization_and_other_record_still_prepares(self):
+        notes=deepcopy(self.notes);notes['200']['attachments']=[{'type':'image','url':'https://example.invalid/image'}]
+        out=self.prepare(self.source(notes));self.assertEqual((out['notes_proposed'],out['other_conflicts']),(1,1));self.assertEqual(out['asset_downloads'],0)
+    def test_apply_rejected_at_cli_runner_and_builder_before_source_or_remote(self):
+        source=self.source()
+        with self.assertRaisesRegex(m.ManualFailure,'manual_scope'):self.prepare(source,apply=True)
+        with patch.object(m,'Remote',side_effect=AssertionError('must not touch remote')):
+            with self.assertRaisesRegex(m.ManualFailure,'manual_scope'):m.run_canonical_preview('token',source,self.parent,state_sha=self.sha,apply=True)
+        import sync_getnote_to_raw as sync
+        with patch.object(sync,'load_credentials',side_effect=AssertionError('must not load credentials')),patch('builtins.print') as output:
+            self.assertEqual(m.main(['--canonical-preview','--apply','--expected-parent',self.parent,'--state-sha256',self.sha]),1)
+            self.assertEqual(json.loads(output.call_args[0][0])['error'],'manual_scope')
+        self.assertEqual(source.ids,[]);self.assertEqual(source.lists,0)
+    def test_current_duplicate_uppercase_md_and_foreign_parent_stop_before_source(self):
+        self.f.git('checkout','-q','--detach',self.parent)
+        path=self.f.repo/a.retention.GET/'duplicate.MD';path.write_bytes(self.current['1.md']);parent=self.f.commit('duplicate current');reader=a.OfflineGit(self.f.repo)
+        with self.assertRaisesRegex(a.ParityFailure,'canonical_duplicate_identity'):self.n.git_inventory(reader,parent)
+        source=self.source()
+        with self.assertRaisesRegex(m.ManualFailure,'manual_parent_changed'):self.prepare(source,parent=parent)
+        self.assertEqual(source.lists,0)
+    def test_wrong_state_existing_registry_or_wrong_cohort_stops_before_source(self):
+        source=self.source();current={**self.current,self.n.STATE:b'{}'}
+        with self.assertRaisesRegex(m.ManualFailure,'manual_state_anchor'):self.prepare(source,current=current)
+        with self.assertRaisesRegex(m.ManualFailure,'manual_state_anchor'):self.prepare(source,preview={'200':self.preview['200']})
+        sha=self.sha;self.sha='f'*64
+        with self.assertRaisesRegex(a.ParityFailure,'adapter_state_hash'):self.prepare(source)
+        self.sha=sha;self.assertEqual(source.lists,0)
+    def test_named_reference_evidence_exact_fields_and_no_network_claim(self):
+        note=self.notes['200'];data=self.preview['200']['bytes'];receipt=m.canonical_reference_receipt(note,data)
+        self.assertEqual(receipt['attachment_types'],['audio']);self.assertFalse(receipt['reference_content_verified'])
+        bad=data.replace(b'attachments: ["https://example.invalid/audio"]',b'attachments: []')
+        with self.assertRaisesRegex(m.ManualFailure,'manual_readback'):m.canonical_reference_receipt(note,bad)
+    def test_public_report_strips_private_fields_and_rejects_contradictory_counts(self):
+        out=self.prepare();out['refs_verified']=True;out['private_payload']='Secret';out['detail_requests']=2
+        clean=m.public_report(out);self.assertEqual(clean['status'],'canonical_preview_candidate_verified');self.assertNotIn('Secret',json.dumps(clean));self.assertEqual(m.public_report(clean),clean)
+        for key,value in [('main_updated',True),('cas_attempts',1),('apply_ready',True),('asset_downloads',1),('changed_paths',99),('selected',99),('legacy_pending',8),('source_details',3),('reference_notes',3)]:
+            self.assertEqual(m.public_report({**out,key:value})['status'],'manual_failed')
+    def test_workflow_prepare_entry_has_no_write_argument_and_shares_lock(self):
+        workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/source-sync-shadow.yml').read_text()
+        step=workflow.split('Prepare ten fixed preview notes without writes',1)[1].split('- name:',1)[0]
+        self.assertIn('test "$APPLY" != true',step);self.assertIn('test -z "$APPROVED_PAYLOAD_SHA256"',step)
+        self.assertIn('--canonical-preview',step);self.assertNotIn('--apply',step);self.assertNotIn('upload-artifact',workflow);self.assertNotIn('schedule:',workflow)
+    def test_run_real_git_loading_fixed_preview_and_no_ref_write(self):
+        self.f.git('checkout','-q','--detach',self.parent)
+        for value in self.preview.values():
+            path=self.f.repo/a.retention.GET/value['entry']['filePath'];path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value['bytes'])
+        path=self.f.repo/a.retention.GET/self.n.PREVIEW_STATE;path.write_bytes(self.preview_bytes)
+        preview_commit=self.f.commit('fixed preview');self.f.git('checkout','-q','--detach',self.parent)
+        self.reader=a.OfflineGit(self.f.repo);local=self.reader.local;real_run=local.run;refs=self.f.git('show-ref');requested=[]
+        class Remote:
+            def __init__(s,*args):s.local=local
+            def metadata(s):return {'full_name':a.retention.REPOSITORY,'private':True}
+            def ref(s,ref):return self.parent if ref==a.retention.MAIN_REF else m.PROTECTED[ref]
+            def check_source_budget(s,commit):return {p:(*row,int(real_run('cat-file','-s',row[2]))) for p,row in self.reader.tree(commit).items() if p.startswith(a.retention.GET+'/')}
+            def source_get_tree(s,commit):return self.reader.source_get_tree(commit)
+            def tree_entries(s,*args,**kwargs):return self.reader.tree_entries(*args,**kwargs)
+            def cas_main(s,*args):raise AssertionError('forbidden main write')
+            def cas(s,*args):raise AssertionError('forbidden ref write')
+        def blobs(remote,metadata,token,directory):
+            requested.extend(metadata)
+            return {p:local.blob(row[2]) for p,row in metadata.items()}
+        def git(*args,**kwargs):
+            if args[0]=='fetch':return b''
+            return real_run(*args,**kwargs)
+        candidates={i:{'filePath':v['filePath']} for i,v in self.evidence.census['eligible'].items()}
+        with patch.object(m,'Remote',Remote),patch.object(m,'CAPTURE',self.f.head),patch.object(m,'ANCHOR',self.f.anchor),patch.object(self.n,'PREVIEW',preview_commit),patch.object(self.n,'PREVIEW_STATE_SHA',a.sha(self.preview_bytes)),patch.object(m.r,'readback_checkout',return_value=local),patch.object(local,'run',side_effect=git),patch.object(m.c,'fetch_blobs',side_effect=blobs),patch.object(m,'fetch_selected',side_effect=blobs),patch.object(m.c,'authorized_cohort',return_value=({},candidates,set(self.evidence.census['pending_ids']),{},{})):
+            source=self.source();out=m.run_canonical_preview('placeholder',source,self.parent,state_sha=self.sha,work=self.f.base)
+            self.assertTrue(out['refs_verified']);self.assertEqual(out['notes_proposed'],2);self.assertEqual(source.ids,['200','201'])
+            self.assertEqual(m.public_report(out)['status'],'canonical_preview_candidate_verified')
+        self.assertEqual(self.f.git('show-ref'),refs);self.assertFalse(any('/assets/' in x for x in requested))

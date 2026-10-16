@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, full]
         default: sample
         required: true
       preview_source_commit:
@@ -20,7 +20,7 @@ on:
         default: 'dab0abf680075e3f073b225872be010c3ae99561'
         required: false
       legacy_expected_parent:
-        description: Exact current private main commit (legacy_manual only)
+        description: Exact current private main commit (legacy_manual / canonical_prepare)
         type: string
         default: ''
         required: false
@@ -49,7 +49,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ inputs.mode == 'legacy_manual' && 'eddie-private-vault-writers' || 'getnote-shadow' }}
+  group: ${{ (inputs.mode == 'legacy_manual' || inputs.mode == 'canonical_prepare') && 'eddie-private-vault-writers' || 'getnote-shadow' }}
   cancel-in-progress: false
 
 jobs:
@@ -193,6 +193,22 @@ jobs:
           if [[ "$APPLY" == true ]]; then args+=(--apply --approved-payload-sha256 "$APPROVED_PAYLOAD_SHA256"); fi
           timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get bounded manual legacy transaction' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' "${args[@]}"
 
+      - name: Prepare ten fixed preview notes without writes
+        if: inputs.mode == 'canonical_prepare'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          STATE_SHA256: ${{ inputs.legacy_state_sha256 }}
+          APPLY: ${{ inputs.legacy_apply }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$APPLY" != true
+          test -z "$APPROVED_PAYLOAD_SHA256"
+          timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get ten-note read-only preparation' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --canonical-preview --expected-parent "$EXPECTED_PARENT" --state-sha256 "$STATE_SHA256"
+
       - name: Publish aggregate evidence only
         if: always()
         env:
@@ -202,7 +218,7 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
-          if [ "$MODE" = legacy_manual ]; then
+          if [ "$MODE" = legacy_manual ] || [ "$MODE" = canonical_prepare ]; then
             python scripts/get_legacy_manual.py --publish-report "$RESULT" --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi

@@ -94,7 +94,7 @@ class PreviewWorkflowTests(unittest.TestCase):
  def test_retention_explicit_scope_and_partial_preserved(self):
   p=Path(__file__).resolve().parents[1]/'.github/workflows/source-sync-shadow.yml'
   text=p.read_text()
-  self.assertIn('private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, full]',text)
+  self.assertIn('private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, full]',text)
   self.assertIn('get_private_preview_retention.py checkout',text)
   self.assertIn('--publish-report "$RETENTION_RESULT"',text)
   self.assertNotIn('upload-artifact',text)
