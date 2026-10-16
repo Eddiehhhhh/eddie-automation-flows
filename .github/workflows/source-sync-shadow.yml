@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, full]
         default: sample
         required: true
       preview_source_commit:
@@ -19,6 +19,21 @@ on:
         type: string
         default: 'dab0abf680075e3f073b225872be010c3ae99561'
         required: false
+      legacy_expected_parent:
+        description: Exact current private main commit (legacy_manual only)
+        type: string
+        default: ''
+        required: false
+      legacy_state_sha256:
+        description: Externally verified previous legacy state SHA-256; empty for bootstrap
+        type: string
+        default: ''
+        required: false
+      legacy_apply:
+        description: Apply the bounded manual transaction after explicit production authorization
+        type: boolean
+        default: false
+        required: false
       sample_pages:
         description: List pages to inspect for one ordinary note and one recording
         type: choice
@@ -29,7 +44,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: getnote-shadow
+  group: ${{ inputs.mode == 'legacy_manual' && 'eddie-private-vault-writers' || 'getnote-shadow' }}
   cancel-in-progress: false
 
 jobs:
@@ -155,6 +170,23 @@ jobs:
       - name: Remove ephemeral private checkout and preview
         if: always() && (inputs.mode == 'private_preview' || inputs.mode == 'verify_retained')
         run: rm -rf -- "$GITHUB_WORKSPACE/private-vault" '${{ runner.temp }}/get-private-preview'
+      - name: Prepare or explicitly apply one bounded legacy transaction
+        if: inputs.mode == 'legacy_manual'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          STATE_SHA256: ${{ inputs.legacy_state_sha256 }}
+          APPLY: ${{ inputs.legacy_apply }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--expected-parent "$EXPECTED_PARENT")
+          if [[ -n "$STATE_SHA256" ]]; then args+=(--state-sha256 "$STATE_SHA256"); fi
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get bounded manual legacy transaction' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' "${args[@]}"
+
       - name: Publish aggregate evidence only
         if: always()
         env:
@@ -164,6 +196,10 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
+          if [ "$MODE" = legacy_manual ]; then
+            python scripts/get_legacy_manual.py --publish-report "$RESULT" --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$MODE" = legacy_capture ] || [ "$MODE" = legacy_verify ]; then
             python scripts/get_legacy_capture.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
