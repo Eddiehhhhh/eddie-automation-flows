@@ -6,6 +6,7 @@ unrelated main changes can be rebased under that unchanged payload binding. Stat
 from state being validated. No credentials or private text enter public output.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 import argparse
 import base64
 import json
@@ -330,6 +331,17 @@ def run(token,source,expected_parent,*,state_sha=None,apply=False,work=None,chec
 CANONICAL_COUNT=10
 CANONICAL_CONTRACT='get-canonical-preview-proposal-1'
 
+CANONICAL_STAGES={'initial_guard','capture_load','inventory_preview_load','inventory','source_list','source_detail','candidate','final_guard'}
+CANONICAL_REASONS={'canonical_identity','canonical_duplicate_identity','canonical_budget','canonical_alias','canonical_path','canonical_preview_anchor','canonical_preview_schema','canonical_preview_blob','canonical_baseline_identity','canonical_baseline_version','canonical_generated_header','adapter_missing_blob','adapter_blob_budget','adapter_blob_readback','adapter_state_hash','adapter_state_schema','git_operation_failed','capture_readback','source_tree_budget','incomplete_list','capture_cohort','capture_api_error','other'}
+
+@contextmanager
+def canonical_stage(name):
+    try:yield
+    except Exception as exc:
+        if not getattr(exc,'canonical_stage',None):exc.canonical_stage=name
+        raise
+
+
 
 def load_canonical_inputs(reader,remote,token,root,parent):
     """Read all current Markdown identities and the fixed preview; no assets."""
@@ -356,7 +368,7 @@ def load_canonical_inputs(reader,remote,token,root,parent):
             elif probe.stdout!=(row[2]+' blob '+str(row[3])+'\n').encode():fail('manual_readback')
         values=fetch_selected(remote,missing,token,root/('current-canonical' if commit==parent else 'preview-state'))
         for path,data in values.items():import_blob(local,data,selected[path][2])
-    current=n.git_inventory(reader,parent)
+    with canonical_stage('inventory'):current=n.git_inventory(reader,parent)
     # Anchor and schema gate before reading any preview path from untrusted data.
     state_bytes=reader.read(n.PREVIEW,r.GET+'/'+n.PREVIEW_STATE,2*c.MIB)
     if a.sha(state_bytes)!=n.PREVIEW_STATE_SHA:fail('manual_state_anchor')
@@ -408,12 +420,14 @@ def prepare_canonical_preview(reader,evidence,parent,current,preview,source,*,st
     selected=sorted(preview)
     if len(set(selected))!=CANONICAL_COUNT or set(selected)&set(registry['reserved']):fail('manual_scope')
     if any(prefix+n.path_ok(saved['entry']['filePath']) in before for saved in preview.values()):fail('manual_scope')
-    summaries,terminal=source.enumerate();items=a.source_snapshot(summaries,terminal)
+    with canonical_stage('source_list'):
+        summaries,terminal=source.enumerate();items=a.source_snapshot(summaries,terminal)
     details={};receipts={};unavailable=0
     for ident in selected:
         if ident not in items:continue
         try:
-            raw=source.detail_raw(ident);details[ident]=detail_note(raw)
+            with canonical_stage('source_detail'):
+                raw=source.detail_raw(ident);details[ident]=detail_note(raw)
             receipts[ident]={'wire_sha256':a.sha(raw),'wire_bytes':len(raw),'detail_sha256':a.sha(a.encoded(details[ident]))}
         except RuntimeError as exc:
             if str(exc)!='GetNote HTTP 404':raise
@@ -461,14 +475,18 @@ def prepare_canonical_preview(reader,evidence,parent,current,preview,source,*,st
 def run_canonical_preview(token,source,expected_parent,*,state_sha,apply=False,work=None):
     if apply:fail('manual_scope')
     a.checked(expected_parent,40);a.checked(state_sha,64)
-    remote=Remote(None,token);guard(remote,expected_parent)
+    remote=Remote(None,token)
+    with canonical_stage('initial_guard'):guard(remote,expected_parent)
     with tempfile.TemporaryDirectory(prefix='get-canonical-prepare-',dir=work) as folder:
-        root=Path(folder);local=r.readback_checkout(root/'objects',CAPTURE,token);remote.local=local
-        reader,evidence,_=load_evidence(local,remote,token,root,expected_parent,anchor=ANCHOR)
-        current,preview=load_canonical_inputs(reader,remote,token,root,expected_parent)
-        guard(remote,expected_parent)
-        result=prepare_canonical_preview(reader,evidence,expected_parent,current,preview,source,state_sha=state_sha)
-        guard(remote,expected_parent);result['refs_verified']=True
+        root=Path(folder)
+        with canonical_stage('capture_load'):
+            local=r.readback_checkout(root/'objects',CAPTURE,token);remote.local=local
+            reader,evidence,_=load_evidence(local,remote,token,root,expected_parent,anchor=ANCHOR)
+        with canonical_stage('inventory_preview_load'):current,preview=load_canonical_inputs(reader,remote,token,root,expected_parent)
+        with canonical_stage('initial_guard'):guard(remote,expected_parent)
+        with canonical_stage('candidate'):result=prepare_canonical_preview(reader,evidence,expected_parent,current,preview,source,state_sha=state_sha)
+        with canonical_stage('final_guard'):guard(remote,expected_parent)
+        result['refs_verified']=True
         return result
 
 
@@ -499,6 +517,10 @@ def public_report(value):
     if value.get('status')=='canonical_preview_candidate_verified':return public_canonical_report(value)
     if isinstance(value.get('error'),str) and value['error'] in ERRORS:
         clean['error']=value['error']
+        if isinstance(value.get('error_stage'),str) and value['error_stage'] in CANONICAL_STAGES:clean['error_stage']=value['error_stage']
+        if isinstance(value.get('error_reason'),str) and value['error_reason'] in CANONICAL_REASONS:clean['error_reason']=value['error_reason']
+        for key in ('detail_requests','api_requests','http_attempts','http_retries'):
+            if type(value.get(key)) is int and 0<=value[key]<=c.MAX_RAW:clean[key]=value[key]
         write_state=value.get('write_state','unknown')
         if write_state in ('not_attempted','unchanged','uncertain','confirmed'):
             clean['write_state']=write_state;clean['main_updated']=True if write_state=='confirmed' else (None if write_state=='uncertain' else False)
@@ -573,7 +595,11 @@ def main(argv=None):
         else:
             result=run(os.environ.get('PRIVATE_VAULT_TOKEN'),source,args.expected_parent,state_sha=args.state_sha256,apply=args.apply,approved_payload_sha256=args.approved_payload_sha256,checkpoint=(lambda plan:write_checkpoint(args.checkpoint,plan)) if args.checkpoint else None)
         result.update(detail_requests=source.details,api_requests=source.api_requests,http_attempts=source.http_attempts,http_retries=max(0,source.http_attempts-source.api_requests))
-    except (Exception,SystemExit) as exc:result={'error':str(exc) if str(exc) in ERRORS else 'manual_failed','write_state':getattr(exc,'write_state','not_attempted')}
+    except (Exception,SystemExit) as exc:
+        result={'error':str(exc) if str(exc) in ERRORS else 'manual_failed','write_state':getattr(exc,'write_state','not_attempted')}
+        if args.canonical_preview:
+            result.update(error_stage=getattr(exc,'canonical_stage',None),error_reason=str(exc) if str(exc) in CANONICAL_REASONS else 'other')
+            if 'source' in locals():result.update(detail_requests=source.details,api_requests=source.api_requests,http_attempts=source.http_attempts,http_retries=max(0,source.http_attempts-source.api_requests))
     clean=public_report(result);print(json.dumps(clean));return 0 if clean['status']!='manual_failed' else 1
 
 if __name__=='__main__':raise SystemExit(main())

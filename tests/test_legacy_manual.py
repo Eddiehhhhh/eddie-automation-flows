@@ -457,3 +457,27 @@ class CanonicalPrepareTests(unittest.TestCase):
             self.assertTrue(out['refs_verified']);self.assertEqual(out['notes_proposed'],2);self.assertEqual(source.ids,['200','201'])
             self.assertEqual(m.public_report(out)['status'],'canonical_preview_candidate_verified')
         self.assertEqual(self.f.git('show-ref'),refs);self.assertFalse(any('/assets/' in x for x in requested))
+
+    def test_failure_stages_preserve_inner_source_stage_and_never_private_reason(self):
+        try:
+            with m.canonical_stage('candidate'):
+                with m.canonical_stage('source_detail'):raise RuntimeError('Private response body')
+        except RuntimeError as exc:
+            self.assertEqual(exc.canonical_stage,'source_detail')
+            value={'error':'manual_failed','write_state':'not_attempted','error_stage':exc.canonical_stage,'error_reason':str(exc),'detail_requests':1,'api_requests':99,'http_attempts':100,'http_retries':1}
+        clean=m.public_report(value);self.assertEqual(clean['error_stage'],'source_detail');self.assertNotIn('Private',json.dumps(clean));self.assertNotIn('error_reason',clean);self.assertEqual(clean['http_retries'],1)
+        for invalid in ({},[],True,'private path'):
+            clean=m.public_report({**value,'error_stage':invalid,'error_reason':invalid,'http_attempts':invalid});self.assertNotIn('error_stage',clean);self.assertNotIn('error_reason',clean);self.assertNotIn('http_attempts',clean)
+    def test_cli_failure_has_safe_exact_inventory_stage_and_zero_request_counts(self):
+        import sync_getnote_to_raw as sync
+        from types import SimpleNamespace
+        source=SimpleNamespace(details=0,api_requests=0,http_attempts=0)
+        def broken(*args,**kwargs):
+            with m.canonical_stage('inventory'):raise a.ParityFailure('canonical_identity')
+        with patch.object(m,'disabled_writers'),patch.object(sync,'load_credentials',return_value=('key','client')),patch.object(m.c,'Source',return_value=source),patch.object(m,'run_canonical_preview',side_effect=broken),patch('builtins.print') as output:
+            self.assertEqual(m.main(['--canonical-preview','--expected-parent',self.parent,'--state-sha256',self.sha]),1)
+        report=json.loads(output.call_args[0][0]);self.assertEqual(report['error_stage'],'inventory');self.assertEqual(report['error_reason'],'canonical_identity');self.assertEqual(report['http_attempts'],0);self.assertFalse(report['main_updated'])
+    def test_auth_detail_failure_preserves_source_detail_stage(self):
+        source=self.source();source.detail_raw=lambda i:(_ for _ in ()).throw(RuntimeError('GetNote HTTP 401'))
+        with self.assertRaisesRegex(RuntimeError,'401') as raised:self.prepare(source)
+        self.assertEqual(raised.exception.canonical_stage,'source_detail')

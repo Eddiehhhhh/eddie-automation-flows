@@ -217,3 +217,28 @@ class CanonicalTests(unittest.TestCase):
         with patch.object(n,'MAX_RECORDS',len(self.state['reserved'])):
             state,changes,counts=self.plan({'200':self.note()},['200']);self.assertEqual(changes,{});self.assertEqual(counts['conflicted'],1);self.assertEqual(state['conflictsById']['200'],'canonical_budget')
             n.validate_registry(state,a.sha(a.encoded(state)),self.f.evidence,self.legacy,self.legacy_sha,self.current)
+
+    def test_opaque_existing_id_is_reserved_verbatim_never_numeric_selected_or_owned(self):
+        ident='aBcD'*8;current={**self.current,'opaque.MD':('---\nnote_id: "'+ident+'"\n---\nOpaque historical text').encode()}
+        state=n.initial_registry(self.f.evidence,self.legacy,self.legacy_sha,current)
+        self.assertEqual(state['reserved'][ident],'existing_unmanaged');self.assertNotIn(ident.lower(),state['reserved'])
+        n.validate_registry(state,a.sha(a.encoded(state)),self.f.evidence,self.legacy,self.legacy_sha,current)
+        with self.assertRaisesRegex(raw.ParityFailure,'canonical_identity'):self.plan({},[ident],state=state,current=current)
+        bad=deepcopy(state);bad['reserved'].pop(ident);bad['newById'][ident]={}
+        with self.assertRaisesRegex(raw.ParityFailure,'canonical_identity'):n.validate_registry(bad,a.sha(a.encoded(bad)),self.f.evidence,self.legacy,self.legacy_sha,current)
+        duplicate={**current,'duplicate.md':current['opaque.MD']}
+        with self.assertRaisesRegex(raw.ParityFailure,'canonical_duplicate_identity'):n.inventory(duplicate)
+    def test_full_historical_opaque_inventory_has_separate_bounded_capacity(self):
+        current={str(i)+'.md':('---\nnote_id: "'+str(i)+'"\n---\n').encode() for i in range(1942)}
+        current.update({'opaque'+str(i)+'.md':('---\nnote_id: "'+format(0xa0000000000000000000000000000000+i,'032x')+'"\n---\n').encode() for i in range(970)})
+        self.assertEqual(len(n.inventory(current)),2912)
+        self.assertFalse(n.owner_budget(str(i) for i in range(n.MAX_RECORDS+1)))
+        self.assertFalse(n.owner_budget(format(0xa0000000000000000000000000000000+i,'032x') for i in range(n.MAX_EXISTING_OWNERS+1)))
+        with self.assertRaisesRegex(raw.ParityFailure,'canonical_identity'):n.inventory({'bad.md':b'---\nnote_id: "opaque-invalid"\n---\n'})
+    def test_git_candidate_preserves_opaque_existing_owner_bytes_and_state_on_repeat(self):
+        parent=self.adopted();ident='ABCd'*8;path=self.f.repo/a.retention.GET/'opaque.MD';data=('---\nnote_id: "'+ident+'"\n---\nExact historical text').encode();path.write_bytes(data)
+        parent=self.f.commit('opaque existing owner');self.f.reader=a.OfflineGit(self.f.repo)
+        plan,states,counts=self.transaction(parent,{'200':self.note()},['200'])
+        self.assertEqual(counts['new_created'],1);self.assertEqual(states['registry']['reserved'][ident],'existing_unmanaged')
+        self.assertEqual(self.f.reader.read(plan['candidate_commit'],a.retention.GET+'/opaque.MD'),data)
+        again,_,_=self.transaction(plan['candidate_commit'],{'200':self.note()},registry_sha=plan['registry_sha256'],details={});self.assertEqual(again['changes'],[])

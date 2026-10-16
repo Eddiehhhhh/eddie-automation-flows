@@ -18,6 +18,7 @@ from source_sync_mirror_replay import legacy_document
 CONTRACT='get-canonical-local-registry-1'
 STATE='03 State/canonical-registry.json'
 MAX_RECORDS=2500
+MAX_EXISTING_OWNERS=5000
 MAX_NEW=50
 MAX_STATE=8*1024*1024
 PREVIEW='013328cc962d9921befb3e25710ba699dd7e46a9'
@@ -43,6 +44,17 @@ def path_ok(path):
 
 def is_markdown(path):return Path(path).suffix.lower() in ('.md','.markdown')
 
+def api_identity(value):return isinstance(value,str) and re.fullmatch('[0-9]{1,64}',value) is not None
+
+def inventory_identity(value):
+    # Preserve historical 32-hex Get IDs verbatim, never reinterpret them as API IDs.
+    if api_identity(value) or isinstance(value,str) and re.fullmatch('[0-9a-fA-F]{32}',value):return value
+    fail('canonical_identity')
+
+def owner_budget(identities):
+    values=set(identities)
+    return len(values)<=MAX_EXISTING_OWNERS and sum(api_identity(i) for i in values)<=MAX_RECORDS
+
 
 def inventory(current):
     """All current Get Markdown bytes must come from one externally pinned tree."""
@@ -54,10 +66,10 @@ def inventory(current):
         if not data.startswith((b'---',b'\xef\xbb\xbf---')):continue
         fields,_=legacy_document(data);ident=fields.get('note_id')
         if not ident:continue
-        identity(ident)
+        inventory_identity(ident)
         if ident in result:fail('canonical_duplicate_identity')
         result[ident]=path
-    if len(result)>MAX_RECORDS:fail('canonical_budget')
+    if not owner_budget(result):fail('canonical_budget')
     return result
 
 
@@ -101,7 +113,7 @@ def validate_registry(state,expected_sha,evidence,legacy_state,legacy_sha,curren
     for ident,reason in conflicts.items():
         identity(ident)
         if not isinstance(reason,str) or not re.fullmatch('[a-z_]{1,64}',reason):fail('canonical_state_schema')
-    if len(set(reserved)|set(new))>MAX_RECORDS or len(legacy.encoded(state))>MAX_STATE:fail('canonical_budget')
+    if not owner_budget(set(reserved)|set(new)) or len(legacy.encoded(state))>MAX_STATE:fail('canonical_budget')
     return deepcopy(state)
 
 
@@ -254,7 +266,7 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
                 if token==old['source_version'] and raw._source_content_hash(summary)==old['summary_sha256']:
                     counts['unchanged']+=1;continue
             elif ident in present:fail('identity_reserved')
-            if not old and len(state['reserved'])+len(state['newById'])>=MAX_RECORDS:fail('canonical_budget')
+            if not old and not owner_budget(set(state['reserved'])|set(state['newById'])|{ident}):fail('canonical_budget')
             if ident not in details:counts['detail_required']+=1;fail('detail_required')
             note=source_note(summary,details[ident])
             if old:
