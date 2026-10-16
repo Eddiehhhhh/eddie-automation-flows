@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, canonical_manual, canonical_probe, notion_readonly, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, canonical_manual, canonical_probe, notion_readonly, notion_prepare, full]
         default: sample
         required: true
       preview_source_commit:
@@ -268,6 +268,39 @@ jobs:
           PYGUARD
           timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion two-page read-only observation' --stdout-file '${{ runner.temp }}/notion-readonly-result.json' -- python scripts/get_notion_readonly.py --expected-parent "$EXPECTED_PARENT"
 
+      - name: Prepare the bounded Notion transaction without writes
+        if: inputs.mode == 'notion_prepare'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          APPLY: ${{ inputs.legacy_apply }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$APPLY" != true
+          test -z "$APPROVED_PAYLOAD_SHA256"
+          PYTHONPATH=scripts python - <<'PYPUBLIC'
+          import hashlib, json, os
+          from get_publication_provenance import PublicGithub
+          class CheckedPublic(PublicGithub):
+              def once(self, url, maximum):
+                  status, headers, raw = super().once(url, maximum)
+                  self.statuses.append(status if type(status) is int and 100 <= status <= 599 else 0)
+                  return status, headers, raw
+          client = CheckedPublic(os.environ.get('GITHUB_TOKEN'))
+          client.statuses = []
+          try:
+              raw = client.logs(117176342381)
+              print(json.dumps({'public_actions_logs': 'verified', 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(), 'requests': client.requests, 'http_statuses': client.statuses, 'writes': 0}))
+          except Exception:
+              print(json.dumps({'public_actions_logs': 'blocked', 'requests': client.requests, 'http_statuses': client.statuses, 'writes': 0}))
+              raise SystemExit(1)
+          PYPUBLIC
+          timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion transaction read-only preparation' --stdout-file '${{ runner.temp }}/notion-prepare-result.json' -- python scripts/get_notion_runtime.py --expected-parent "$EXPECTED_PARENT"
+          cat '${{ runner.temp }}/notion-prepare-result.json' | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Publish aggregate evidence only
         if: always()
         env:
@@ -277,7 +310,7 @@ jobs:
           RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
         run: |
           set -o pipefail
-          if [ "$MODE" = canonical_manual ] || [ "$MODE" = canonical_probe ]; then exit 0; fi
+          if [ "$MODE" = canonical_manual ] || [ "$MODE" = canonical_probe ] || [ "$MODE" = notion_prepare ]; then exit 0; fi
           if [ "$MODE" = notion_readonly ]; then
             python scripts/get_notion_readonly.py --publish-report '${{ runner.temp }}/notion-readonly-result.json' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0

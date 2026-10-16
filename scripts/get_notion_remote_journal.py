@@ -1,0 +1,309 @@
+"""Injected private Git journal backend; no HTTP, credentials, CLI or deployment.
+
+The caller supplies externally trusted commit/blob/state anchors, an exact-OID
+object loader, source/writer guards and a durable confirmation callback. The
+callback must return True before the executor may perform its next Notion write.
+Only the fixed journal path is changed; one CAS at most per call. Uncertain
+outcomes are read back, never retried. A poisoned instance cannot be reused.
+"""
+from copy import deepcopy
+from pathlib import Path
+import re
+import tempfile
+import threading
+import time
+
+import get_notion_executor as engine
+import get_notion_outbox as codec
+import get_private_preview_retention as retention
+
+REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
+REF = 'refs/heads/main'
+STATE_PATH = '.sync/get-notion/state.json'
+MAX_STATE = 32 * 1024 * 1024
+MAX_COMMITS = 400
+MAX_BATCH_BYTES = 192 * 1024 * 1024
+MAX_HISTORY = 256
+RECEIPT_CONTRACT = 'get-notion-remote-journal-receipt-1'
+
+
+class JournalFailure(engine.Blocked):
+    """Fixed public reason, plus private bounded recovery metadata only."""
+    def __init__(self, reason='journal_failed', *, stage='read', unknown=False,
+                 recovery=None):
+        super().__init__(reason)
+        self.stage = stage
+        self.outcome = 'unknown' if unknown else 'not_attempted'
+        self.recovery = deepcopy(recovery)
+
+    def public_report(self):
+        return {'status': self.outcome, 'stage': self.stage}
+
+
+def checked(value, width):
+    if not isinstance(value, str) or not re.fullmatch('[a-f0-9]{%d}' % width, value):
+        raise JournalFailure('state_invalid', stage='anchor')
+    return value
+
+
+class RemoteJournal:
+    """Implements read() and compare_and_set(expected_sha, state).
+
+    remote: metadata(), ref(REF), commit(oid), blob(oid, size),
+            cas_main(expected_parent, candidate_commit).
+    load_commit(oid): hydrate only exact commit/tree/journal objects in root;
+                     never advance refs/index or materialize inherited assets.
+    guard(head): independently revalidate caller's source/protected/writer gates.
+    confirm(receipt): durably retain verified provenance; only literal True
+                      permits success. This is not an authorization mechanism.
+
+    anchor keys are commit, state_blob (None only for proven absence), and
+    state_sha256. They must come from trusted approval/success provenance, not
+    from hashing the state currently under inspection. A fresh process needs a
+    new externally verified anchor after earlier journal writes.
+    """
+    def __init__(self, root, remote, *, anchor, load_commit, guard, confirm,
+                 max_commits=MAX_COMMITS, max_batch_bytes=MAX_BATCH_BYTES,
+                 poll_attempts=6, sleep=time.sleep):
+        self.poisoned = False
+        self.lock = threading.Lock()
+        self.recovery = None
+        self.stage = 'anchor'
+        if (not isinstance(anchor, dict)
+                or set(anchor) != {'commit', 'state_blob', 'state_sha256'}):
+            raise JournalFailure('state_invalid', stage='anchor')
+        checked(anchor['commit'], 40); checked(anchor['state_sha256'], 64)
+        if anchor['state_blob'] is not None: checked(anchor['state_blob'], 40)
+        for value, limit in ((max_commits, MAX_COMMITS),
+                             (max_batch_bytes, MAX_BATCH_BYTES), (poll_attempts, 6)):
+            if type(value) is not int or not 1 <= value <= limit:
+                raise JournalFailure('request_budget', stage='budget')
+        if not all(callable(f) for f in (load_commit, guard, confirm, sleep)):
+            raise JournalFailure('state_invalid', stage='anchor')
+        self.anchor = deepcopy(anchor)
+        self.remote = remote
+        self.load_commit = load_commit
+        self.guard = guard
+        self.confirm = confirm
+        self.sleep = sleep
+        self.max_commits = max_commits
+        self.max_batch_bytes = max_batch_bytes
+        self.poll_attempts = poll_attempts
+        self.commits_attempted = 0
+        self.new_blob_bytes = 0
+        self.charged_blobs = {anchor['state_blob']} if anchor['state_blob'] else set()
+        # Separate offline LocalGit: never alter a caller's credentialed transport.
+        try:
+            self.local = retention.LocalGit(root)
+        except Exception:
+            raise JournalFailure('state_invalid', stage='anchor') from None
+        env = self.local.env
+        count = int(env['GIT_CONFIG_COUNT'])
+        env.update(GIT_NO_LAZY_FETCH='1', GIT_CONFIG_COUNT=str(count + 1))
+        env['GIT_CONFIG_KEY_' + str(count)] = 'protocol.allow'
+        env['GIT_CONFIG_VALUE_' + str(count)] = 'never'
+        if self.local.run('rev-parse', '--show-object-format').strip() != b'sha1':
+            raise JournalFailure('state_invalid', stage='anchor')
+
+    def _ready(self):
+        if self.poisoned:
+            raise JournalFailure(stage='locked', unknown=True, recovery=self.recovery)
+
+    def _head(self, expected=None):
+        self.stage = 'guard'
+        meta = self.remote.metadata()
+        if meta.get('full_name') != REPOSITORY or meta.get('private') is not True:
+            raise JournalFailure(stage='guard')
+        head = checked(self.remote.ref(REF), 40)
+        if expected is not None and head != expected:
+            raise JournalFailure('state_changed', stage='guard')
+        if self.guard(head) is not True:
+            raise JournalFailure(stage='guard')
+        return head
+
+    def _commit(self, head):
+        self.stage = 'load'
+        self.load_commit(head)
+        if self.local.run('cat-file', '-t', head).strip() != b'commit':
+            raise JournalFailure('state_invalid', stage='load')
+        tree = checked(self.local.run('rev-parse', head + '^{tree}').decode().strip(), 40)
+        parents = self.local.run('rev-list', '--parents', '-n', '1', head).decode().split()
+        if not parents or parents[0] != head:
+            raise JournalFailure('state_invalid', stage='load')
+        remote = self.remote.commit(head)
+        if remote.get('tree') != tree or remote.get('parents') != parents[1:]:
+            raise JournalFailure('state_invalid', stage='readback')
+        return tree, parents[1:], self.local.tree(head)
+
+    def _state(self, tree):
+        row = tree.get(STATE_PATH)
+        if row is None:
+            value = codec.initial_state()
+            return value, codec.digest(value), None, codec.encoded(value)
+        if row[:2] != ('100644', 'blob'):
+            raise JournalFailure('state_invalid', stage='readback')
+        size = self.local.run('cat-file', '-s', checked(row[2], 40)).decode().strip()
+        if not size.isdigit() or int(size) > MAX_STATE:
+            raise JournalFailure('request_budget', stage='readback')
+        data = self.local.blob(row[2])
+        if (len(data) != int(size) or len(data) > MAX_STATE
+                or retention.oid(data) != row[2]
+                or self.remote.blob(row[2], len(data)) != data):
+            raise JournalFailure('state_invalid', stage='readback')
+        value = retention.strict_json(data)
+        codec.check_state(value)
+        if codec.encoded(value) != data:
+            raise JournalFailure('state_invalid', stage='readback')
+        return value, codec.digest(data), row[2], data
+
+    def _current(self):
+        head = self._head()
+        _, _, anchored_tree = self._commit(self.anchor['commit'])
+        _, digest, blob, _ = self._state(anchored_tree)
+        if (digest != self.anchor['state_sha256'] or blob != self.anchor['state_blob']):
+            raise JournalFailure('state_changed', stage='anchor')
+        tree_oid, _, tree = self._commit(head)
+        self.local.run('merge-base', '--is-ancestor', self.anchor['commit'], head)
+        history = self.local.run('rev-list', '--max-count=' + str(MAX_HISTORY + 1),
+                                 self.anchor['commit'] + '..' + head).splitlines()
+        if len(history) > MAX_HISTORY:
+            raise JournalFailure('request_budget', stage='history')
+        # Detect changed-then-restored journals too; do not trust tip equality.
+        touched = self.local.run('rev-list', '--full-history', '--max-count=1',
+                                 self.anchor['commit'] + '..' + head, '--', STATE_PATH)
+        if touched.strip():
+            raise JournalFailure('state_changed', stage='history')
+        value, digest, blob, data = self._state(tree)
+        if digest != self.anchor['state_sha256'] or blob != self.anchor['state_blob']:
+            raise JournalFailure('state_changed', stage='readback')
+        self._head(head)
+        return head, tree_oid, tree, value, digest, blob, data
+
+    def read(self):
+        if not self.lock.acquire(blocking=False):
+            raise JournalFailure('journal_busy', stage='locked')
+        try:
+            return self._read()
+        finally:
+            self.lock.release()
+
+    def _read(self):
+        self._ready()
+        try:
+            _, _, _, value, digest, _, _ = self._current()
+            return deepcopy(value), digest
+        except JournalFailure:
+            raise
+        except Exception:
+            raise JournalFailure(stage=self.stage) from None
+
+    def _build(self, parent, before, data):
+        self.stage = 'prepare'
+        blob = retention.oid(data)
+        with tempfile.TemporaryDirectory(prefix='get-notion-journal-index-') as directory:
+            env = dict(self.local.env, GIT_INDEX_FILE=str(Path(directory) / 'index'))
+            self.local.run('read-tree', parent, env=env)
+            if self.local.run('hash-object', '-w', '--stdin', data=data, env=env).decode().strip() != blob:
+                raise JournalFailure(stage='prepare')
+            self.local.run('update-index', '--add', '--cacheinfo',
+                           '100644,' + blob + ',' + STATE_PATH, env=env)
+            tree_oid = checked(self.local.run('write-tree', '--missing-ok', env=env).decode().strip(), 40)
+            wanted = dict(before, **{STATE_PATH: ('100644', 'blob', blob)})
+            if self.local.tree(tree_oid) != wanted or self.local.blob(blob) != data:
+                raise JournalFailure(stage='prepare')
+            env.update(GIT_AUTHOR_NAME='Get journal', GIT_AUTHOR_EMAIL='get-journal@users.noreply.github.com',
+                       GIT_COMMITTER_NAME='Get journal', GIT_COMMITTER_EMAIL='get-journal@users.noreply.github.com')
+            commit = checked(self.local.run('commit-tree', tree_oid, '-p', parent,
+                '-m', 'Persist private Notion transaction journal', env=env).decode().strip(), 40)
+        if self.local.run('rev-list', '--parents', '-n', '1', commit).decode().split() != [commit, parent]:
+            raise JournalFailure(stage='prepare')
+        return commit, tree_oid, blob, wanted
+
+    def _verify(self, commit, parent, tree_oid, wanted, data):
+        self.stage = 'readback'
+        actual_tree, parents, tree = self._commit(commit)
+        if actual_tree != tree_oid or parents != [parent] or tree != wanted:
+            raise JournalFailure(stage='readback')
+        value, digest, blob, actual = self._state(tree)
+        if actual != data or digest != codec.digest(data) or blob != retention.oid(data):
+            raise JournalFailure(stage='readback')
+        self._head(commit)
+        return {'contract': RECEIPT_CONTRACT, 'repository': REPOSITORY, 'ref': REF,
+                'path': STATE_PATH, 'parent_commit': parent, 'commit': commit,
+                'tree': tree_oid, 'state_blob': blob, 'state_sha256': digest,
+                'state_bytes': len(data), 'cas_attempts': 1, 'readback_verified': True}
+
+    def _confirm(self, receipt):
+        self.stage = 'confirm'
+        self.confirm_entered = True
+        self.recovery = deepcopy(receipt)
+        if self.confirm(deepcopy(receipt)) is not True:
+            raise JournalFailure(stage='confirm', unknown=True, recovery=receipt)
+        self._head(receipt['commit'])
+        self.anchor = {key: receipt[key] for key in ('commit', 'state_blob', 'state_sha256')}
+        return receipt['state_sha256']
+
+    def compare_and_set(self, expected_sha, value):
+        if not self.lock.acquire(blocking=False):
+            raise JournalFailure('journal_busy', stage='locked')
+        try:
+            return self._compare_and_set(expected_sha, value)
+        finally:
+            self.lock.release()
+
+    def _compare_and_set(self, expected_sha, value):
+        self._ready()
+        self.recovery = None
+        self.confirm_entered = False
+        attempted = False
+        try:
+            checked(expected_sha, 64)
+            data = codec.encoded(value)
+            if len(data) > MAX_STATE:
+                raise JournalFailure('request_budget', stage='budget')
+            codec.check_state(value)
+            parent, old_tree, before, _, digest, old_blob, old_data = self._current()
+            if expected_sha != digest:
+                raise JournalFailure('state_changed', stage='anchor')
+            blob = retention.oid(data)
+            if data == old_data and old_blob is not None:
+                return self._confirm({'contract': RECEIPT_CONTRACT, 'repository': REPOSITORY,
+                    'ref': REF, 'path': STATE_PATH, 'parent_commit': None, 'commit': parent,
+                    'tree': old_tree, 'state_blob': old_blob, 'state_sha256': digest,
+                    'state_bytes': len(data), 'cas_attempts': 0, 'readback_verified': True})
+            added_bytes = 0 if blob in self.charged_blobs else len(data)
+            if (self.commits_attempted >= self.max_commits
+                    or self.new_blob_bytes + added_bytes > self.max_batch_bytes):
+                raise JournalFailure('request_budget', stage='budget')
+            commit, tree_oid, blob, wanted = self._build(parent, before, data)
+            self._head(parent)
+            self.stage = 'cas'
+            self.commits_attempted += 1
+            self.new_blob_bytes += added_bytes
+            self.charged_blobs.add(blob)
+            attempted = True
+            try:
+                self.remote.cas_main(parent, commit)
+            except Exception:
+                pass  # Ambiguous response: exact readback, NEVER a second CAS.
+            self.stage = 'poll'
+            for attempt in range(self.poll_attempts):
+                observed = self._head()
+                if observed == commit: break
+                if observed != parent or attempt == self.poll_attempts - 1:
+                    raise JournalFailure(stage='poll', unknown=True)
+                self.sleep(2 ** attempt)
+            receipt = self._verify(commit, parent, tree_oid, wanted, data)
+            return self._confirm(receipt)
+        except Exception as exc:
+            # Callback/readback failures may follow a committed journal. Preserve
+            # only verified candidate metadata; block all subsequent API eligibility.
+            unknown = attempted or self.confirm_entered
+            if unknown:
+                self.poisoned = True
+                raise JournalFailure(stage=self.stage, unknown=True,
+                                     recovery=self.recovery) from None
+            if isinstance(exc, JournalFailure): raise
+            reason = str(exc) if isinstance(exc, engine.Blocked) and str(exc) in (
+                'state_invalid', 'state_changed', 'request_budget') else ('request_budget' if isinstance(exc, codec.Blocked) and str(exc) == 'outbox_budget' else 'journal_failed')
+            raise JournalFailure(reason, stage=self.stage) from None
