@@ -21,6 +21,7 @@ MAX_RECORDS=2500
 MAX_EXISTING_OWNERS=5000
 MAX_NEW=50
 MAX_STATE=8*1024*1024
+MAX_OPAQUE=2*1024*1024
 PREVIEW='013328cc962d9921befb3e25710ba699dd7e46a9'
 PREVIEW_STATE='03 State/cloud-sync-state.json'
 PREVIEW_STATE_SHA='d05c1aa4773421d0d73a60a6d1cf430158440422a31d89c006accc524e600645'
@@ -163,7 +164,7 @@ def source_note(summary,detail):
     note={**summary,**detail};validate_note_shape(note);raw.source_text_fields(note)
     validate_metadata(note)
     if set(text_fields(summary))-set(text_fields(note)):fail('source_text_missing')
-    if set(note)-KNOWN-EXTENSIONS:fail('source_unknown_fields')
+    opaque_top_level(note)  # Strict JSON, bounded; never interpreted or fetched.
     validate_extensions(note)
     if note.get('note_url') not in (None,'','https://www.biji.com/note/'+note_identity(note)):fail('source_unknown_fields')
     for name,allowed in [('audio',{'original','transcript','play_url','duration','sentences'}),('web_page',{'url','content','excerpt'})]:
@@ -191,12 +192,29 @@ def validate_collections(note):
         value=item.get('duration')
         if value is not None and (type(value) not in (int,float) or not __import__('math').isfinite(value) or value<0):fail('source_shape_unsupported')
 
+def validate_opaque(value):
+    if not isinstance(value,dict) or set(value)&(KNOWN|EXTENSIONS):fail('source_metadata_shape')
+    try:
+        payload=legacy.encoded(value)
+        raw.strict_capture_json(payload,MAX_OPAQUE)
+    except (raw.ParityFailure,ValueError,TypeError,RecursionError):fail('source_metadata_shape')
+    return value
+
+def opaque_top_level(note):
+    return validate_opaque({k:v for k,v in note.items() if k not in KNOWN|EXTENSIONS})
+
+def opaque_counts(registry):
+    values=[row['source_metadata'].get('opaque_top_level',{}) for row in registry['newById'].values()]
+    return {'opaque_records':sum(bool(v) for v in values),'opaque_fields':sum(len(v) for v in values)}
+
 def source_metadata(note):
     # Exact secondary metadata remains in the same private registry. Timed
     # sentence/chapter text is retained here, not claimed as rendered in MD.
     # This replaces one current metadata value, never appends snapshots.
     result=deepcopy({k:v for k,v in note.items() if k in EXTENSIONS|{'tags','topics','attachments'}})
     if isinstance(note.get('audio'),dict) and 'sentences' in note['audio']:result['audio']={'sentences':deepcopy(note['audio']['sentences'])}
+    opaque=opaque_top_level(note)
+    if opaque:result['opaque_top_level']=deepcopy(opaque)
     return result
 
 def metadata_missing(before,after):
@@ -213,8 +231,9 @@ def immutable_unknown_hash(note):
     return raw._source_unknown_hash(value)
 
 def validate_extensions(note,*,metadata_only=False):
-    if metadata_only and set(note)-EXTENSIONS-{'tags','topics','attachments','audio'}:fail('canonical_state_schema')
+    if metadata_only and set(note)-EXTENSIONS-{'tags','topics','attachments','audio','opaque_top_level'}:fail('canonical_state_schema')
     if metadata_only:
+        if 'opaque_top_level' in note:validate_opaque(note['opaque_top_level'])
         validate_note_shape(note);validate_collections(note)
         if 'audio' in note and (not isinstance(note['audio'],dict) or set(note['audio'])!={'sentences'}):fail('canonical_state_schema')
     sentences=(note.get('audio') or {}).get('sentences')
@@ -308,6 +327,8 @@ def render_exact(note,path):
         lines=head.split('\n')
         if lines.count(old)!=1:fail('canonical_generated_header')
         head='\n'.join(new if line==old else line for line in lines)
+    # Generated disclosure is separate from source text and never enters its hash.
+    if opaque_top_level(note):body+='\n\n> 同步提示：源扩展字段已原样保存在私有同步记录中，尚未转换为本文格式。\n'
     return (head+sep+body).encode()
 
 

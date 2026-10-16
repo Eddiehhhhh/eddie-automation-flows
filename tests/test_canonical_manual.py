@@ -30,7 +30,7 @@ class CanonicalManualTests(unittest.TestCase):
             self.assertEqual(g.probe_report({**report,key:value})['status'],'canonical_probe_failed')
     def test_probe_reason_categories_do_not_emit_unknown_keys_or_private_values(self):
         notes=deepcopy(self.f.notes);notes['200']['private secret field']='private secret value'
-        out=g.probe_details(self.f.preview,self.f.source(notes));self.assertEqual(out['stages'],{'top_fields':1,'accepted':1});self.assertNotIn('private secret',json.dumps(out))
+        out=g.probe_details(self.f.preview,self.f.source(notes));self.assertEqual(out['stages'],{'accepted':2});self.assertNotIn('private secret',json.dumps(out))
         cases=[('note_url','https://biji.com/note/200','backlink'),('audio',{'original':'Full','private key':'secret'},'audio_fields'),('web_page',{'private key':'secret'},'web_fields'),('tags',[{'name':'Tag','private key':1}],'tags'),('attachments',[{'type':'audio','url':'https://example.invalid/a','private key':1}],'attachment_fields')]
         for field,value,stage in cases:
             notes=deepcopy(self.f.notes);notes['200'][field]=value;out=g.probe_details(self.f.preview,self.f.source(notes));self.assertEqual(out['stages'].get(stage),1);self.assertNotIn('private key',json.dumps(out))
@@ -72,6 +72,13 @@ class CanonicalManualTests(unittest.TestCase):
         for path,row in before.items():self.assertEqual(after[path],row)
         source=self.f.source(notes);repeat,writes=self.prepare(plan['candidate_commit'],registry=plan['registry_sha256'],source=source,first=False);self.assertEqual(writes,{});self.assertEqual(source.ids,[])
 
+    def test_opaque_report_private_values_not_rendered(self):
+        notes=deepcopy(self.f.notes);ident=next(iter(self.f.preview));notes[ident]['opaque_secret']={'private_value':'https://example.invalid/no-fetch'}
+        plan,files=self.prepare(source=self.f.source(notes));report=g.public_report(self.report(plan,files))
+        self.assertEqual(report['status'],'canonical_candidate_verified')
+        self.assertEqual(report['opaque_records'],1);self.assertEqual(report['opaque_fields'],1)
+        self.assertIs(report['opaque_source_fields_rendered'],False);self.assertIs(report['complete_source_rendering_claimed'],False)
+        self.assertNotIn('opaque_secret',json.dumps(report));self.assertNotIn('private_value',json.dumps(report))
     def test_metadata_only_update_reports_state_change_without_note_change(self):
         first,_=self.prepare();notes=deepcopy(self.f.notes);notes['200']['version']=1
         plan,files=self.prepare(first['candidate_commit'],registry=first['registry_sha256'],source=self.f.source(notes),first=False)
@@ -149,7 +156,7 @@ class CanonicalManualTests(unittest.TestCase):
 
     def test_unselected_failed_new_records_are_retained_until_success(self):
         first,_=self.prepare();notes=deepcopy(self.f.notes)
-        notes['300']={**notes['201'],'note_id':'300','content':'Failed source','unknown':'Unrepresented field'}
+        notes['300']={**notes['201'],'note_id':'300','content':'Failed source','web_page':{'unknown':'Unrepresented field'}}
         notes['301']={**notes['201'],'note_id':'301','content':'Valid source'}
         with patch.object(g,'MAX_NEW',1):
             second,files=self.prepare(first['candidate_commit'],registry=first['registry_sha256'],source=self.f.source(notes),first=False)

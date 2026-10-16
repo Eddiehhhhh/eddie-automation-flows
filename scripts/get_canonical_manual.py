@@ -91,6 +91,7 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     all_owned={r.GET+'/'+row['ownership']['filePath'] for row in legacy['legacyById'].values()}|{r.GET+'/'+row['filePath'] for row in next_registry['newById'].values()}|{r.GET+'/'+a.STATE,r.GET+'/'+n.STATE}
     if not set(files)<=all_owned or any(p not in after for p in files):m.fail('manual_scope')
     counts.update(legacy_managed=len(states['legacy']['legacyById']),legacy_conflicts=len(states['legacy']['conflictsById']),legacy_pending=len(states['legacy']['pending_ids']),existing_unmanaged=sum(v=='existing_unmanaged' for v in next_registry['reserved'].values()),new_managed=len(next_registry['newById']),new_selected=len(selected),new_remaining=remaining,new_pending=len(next_registry['conflictsById']),source_details=len(details),details_unavailable=unavailable)
+    counts.update(n.opaque_counts(next_registry))
     unique={r.oid(data):data for data in files.values()};existing={row[2] for row in before.values()}
     plan={'contract':CONTRACT,**{k:final[k] for k in ('parent_commit','candidate_commit','candidate_tree','registry_sha256')},'state_sha256':final['legacy_sha256'],'previous_legacy_sha256':legacy_sha,'previous_registry_sha256':registry_sha,'capture_anchor':evidence.anchor,'changes':rows,'counts':counts,'conflict_reason_counts':n.reason_counts(next_registry['conflictsById']),'source_summary_sha256':a.sha(a.encoded(summaries)),'detail_receipts_sha256':a.sha(a.encoded({i:{'semantic_sha256':v['semantic_sha256']} for i,v in receipts.items()})), 'wire_receipts_sha256':a.sha(a.encoded(receipts)),'initial_preview_import':first,'transaction_bytes':sum(len(v) for oid,v in unique.items() if oid not in existing),'local_proposal_only':True,'apply_ready':False}
     plan['approval_payload_sha256']=a.sha(a.encoded(canonical_payload(reader,plan,current)))
@@ -246,7 +247,7 @@ def run(token,source,expected_parent,*,legacy_sha,registry_sha=None,apply=False,
             result.update(m.publish(reader,remote,plan,files,result['plan_sha256'],readback,checkpoint=checkpoint,verifier=verify_plan,writers_guard=lambda:m.disabled_writers(token=os.environ.get('GITHUB_TOKEN'))));result['status']='canonical_transaction_verified'
         return result
 
-COUNTS=('changed_paths','notes_changed','changed_bytes','transaction_bytes','legacy_managed','legacy_conflicts','legacy_pending','existing_unmanaged','new_managed','new_selected','new_remaining','new_pending','source_details','details_unavailable','legacy_unchanged','legacy_source_version_only','legacy_source_updated','legacy_conflicted','legacy_details_used','legacy_outside_legacy_cohort','new_created','new_preview_imported','new_updated','new_state_only','new_unchanged','new_conflicted','new_detail_required')
+COUNTS=('opaque_records','opaque_fields','changed_paths','notes_changed','changed_bytes','transaction_bytes','legacy_managed','legacy_conflicts','legacy_pending','existing_unmanaged','new_managed','new_selected','new_remaining','new_pending','source_details','details_unavailable','legacy_unchanged','legacy_source_version_only','legacy_source_updated','legacy_conflicted','legacy_details_used','legacy_outside_legacy_cohort','new_created','new_preview_imported','new_updated','new_state_only','new_unchanged','new_conflicted','new_detail_required')
 HASHES=(('parent_commit',40),('candidate_commit',40),('state_sha256',64),('registry_sha256',64),('approval_payload_sha256',64),('plan_sha256',64))
 
 def public_report(value):
@@ -262,13 +263,14 @@ def public_report(value):
     if not 0<=value['notes_changed']<=value['changed_paths']<=value['legacy_managed']+value['new_managed']+2:return bad
     if value['new_created']+value['new_preview_imported']+value['new_updated']+value['legacy_source_updated']!=value['notes_changed']:return bad
     if not n.valid_reason_counts(value.get('conflict_reason_counts',{}),value['new_pending']):return bad
+    if value['opaque_records']>value['new_managed'] or value['opaque_records']>value['opaque_fields']:return bad
     result={k:value[k] for k in COUNTS};result['conflict_reason_counts']=value.get('conflict_reason_counts',{})
     try:
         for k,width in HASHES:result[k]=a.checked(value.get(k),width)
     except Exception:return bad
     for k in ('detail_requests','api_requests','http_attempts','http_retries'):
         if type(value.get(k)) is int and 0<=value[k]<=c.MAX_RAW:result[k]=value[k]
-    result.update(status=value['status'],main_updated=value['main_updated'],cas_attempts=value['cas_attempts'],readback_verified=True,asset_downloads=0,notion_writes=0)
+    result.update(status=value['status'],main_updated=value['main_updated'],cas_attempts=value['cas_attempts'],readback_verified=True,asset_downloads=0,notion_writes=0,opaque_source_fields_rendered=False,complete_source_rendering_claimed=False)
     return result
 
 def read_report(path,checkpoint=None):

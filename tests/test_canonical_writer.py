@@ -115,7 +115,34 @@ class CanonicalTests(unittest.TestCase):
             self.assertEqual(writes,{});self.assertEqual(again['newById']['200'],state['newById']['200'])
     def test_unknown_fields_or_unmaterialized_binary_assets_defer_individually(self):
         notes={'200':self.note(extra_text='Never silently discard'),'201':self.note('201',attachments=[{'type':'image','url':'https://example.invalid/image.png'}]),'202':self.note('202')}
-        state,changes,counts=self.plan(notes,notes);self.assertEqual(counts['created'],1);self.assertEqual(counts['conflicted'],2);self.assertEqual(set(state['newById']),{'202'})
+        state,changes,counts=self.plan(notes,notes);self.assertEqual(counts['created'],2);self.assertEqual(counts['conflicted'],1);self.assertEqual(set(state['newById']),{'200','202'})
+    def test_opaque_roundtrip_collision_and_immutable_changes(self):
+        opaque={'opaque_top_level':{'private_key':[None,True,1,1.0,'https://example.invalid/no-fetch']},'extra':False}
+        note=self.note(**opaque);state,writes,_=self.plan({'200':note},['200']);current={**self.current,**writes}
+        self.assertEqual(state['newById']['200']['source_metadata']['opaque_top_level'],opaque)
+        self.assertEqual(n.opaque_counts(state),{'opaque_records':1,'opaque_fields':2})
+        self.assertNotIn(b'private_key',next(iter(writes.values())))
+        self.assertIn('源扩展字段已原样保存在私有同步记录中'.encode(),next(iter(writes.values())))
+        self.assertEqual(n.text_fields(note),n.text_fields(self.note()))
+        again,updates,_=self.plan({'200':note},state=state,current=current,details={})
+        self.assertEqual(again,state);self.assertEqual(updates,{})
+        for change in ({'extra':True},{'extra':0},{'extra':None},{'new_field':1}):
+            changed={**note,**change,'updated_at':'2026-10-16 01:02:05'}
+            after,updates,_=self.plan({'200':changed},state=state,current=current)
+            self.assertEqual(updates,{});self.assertEqual(after['conflictsById']['200'],'source_unknown_changed')
+        changed=deepcopy(note);changed.pop('extra');changed['updated_at']='2026-10-16 01:02:05'
+        after,updates,_=self.plan({'200':changed},state=state,current=current)
+        self.assertEqual(after['conflictsById']['200'],'source_unknown_changed')
+    def test_opaque_cache_type_budget_and_known_gate(self):
+        note=self.note(extra={'x':1});state,writes,_=self.plan({'200':note},['200']);current={**self.current,**writes}
+        for bad in (None,[],{'content':'collision'},{'x':float('nan')},{'x':('tuple',)},{'x':'z'*n.MAX_OPAQUE}):
+            forged=deepcopy(state);forged['newById']['200']['source_metadata']['opaque_top_level']=bad
+            with self.assertRaises((ValueError,raw.ParityFailure)):self.plan({'200':note},state=forged,current=current,details={})
+        for bad in ({'content':False},{'audio':{'unmapped':'text'}},{'content_state':{'content':'partial','ref_content':'full'}}):
+            after,updates,counts=self.plan({'200':self.note(extra=1,**bad)},['200'])
+            self.assertEqual(updates,{});self.assertEqual(counts['conflicted'],1)
+        after,updates,_=self.plan({'200':self.note(extra='x'*n.MAX_OPAQUE)},['200'])
+        self.assertEqual(updates,{});self.assertEqual(after['conflictsById']['200'],'source_metadata_shape')
     def test_duplicate_mirror_identity_and_untrusted_state_fail_closed(self):
         current={**self.current,'03 纯文本记录/duplicate.md':self.current['1.md']}
         with self.assertRaisesRegex(raw.ParityFailure,'canonical_duplicate_identity'):n.initial_registry(self.f.evidence,self.legacy,self.legacy_sha,current)
