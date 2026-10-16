@@ -83,6 +83,34 @@ class OwnedSpanTests(unittest.TestCase):
         note,state,old=self.fixture()
         for current in (old+'## 🧠 摘要\n'.encode(),old.replace('## 🧠 摘要'.encode(),b'Changed heading')):
             with self.assertRaisesRegex(ParityFailure,'legacy_structure_ambiguous'):self.update(state,old,current,note)
+    def test_exact_top_level_identity_bound_backlink_is_metadata_not_asset(self):
+        note,state,old=self.fixture({'note_url':'https://www.biji.com/note/1'})
+        before=deepcopy(note);result=self.update(state,old,old,{**note,'content':'Updated source'})
+        self.assertEqual(result['classification'],'source_updated');self.assertEqual(note,before)
+        self.assertEqual(state['metadata_sha256'],owned.metadata_hash(note))
+        self.assertNotEqual(state['metadata_sha256'],owned.metadata_hash({k:v for k,v in note.items() if k!='note_url'}))
+        with self.assertRaisesRegex(ParityFailure,'source_metadata_changed'):
+            self.update(state,old,old,{k:v for k,v in note.items() if k!='note_url'})
+        again=self.update(result['proposed_state'],result['bytes'],result['bytes'],{**note,'content':'Updated source'})
+        self.assertEqual(again['classification'],'unchanged');self.assertEqual(again['bytes'],result['bytes'])
+    def test_backlink_uses_canonical_note_identity_not_storage_id(self):
+        note,state,old=self.fixture({'note_id':'1','id':987,'note_url':'https://www.biji.com/note/1'})
+        self.assertEqual(self.update(state,old,old,note)['classification'],'unchanged')
+        with self.assertRaisesRegex(ParityFailure,'legacy_references_unresolved'):
+            self.update(state,old,old,{**note,'note_url':'https://www.biji.com/note/987'})
+    def test_backlink_lookalikes_wrong_identity_and_nonstring_fail_closed(self):
+        bad=['http://www.biji.com/note/1','https://biji.com/note/1','https://www.biji.com/note/2','https://www.biji.com/note/1/','https://www.biji.com/note/1?x=1','https://www.biji.com/note/1#x','https://www.biji.com/note/%31','https://www.biji.com/note/01','https://www.biji.com@evil.invalid/note/1','https://www.biji.com.evil.invalid/note/1','HTTPS://www.biji.com/note/1','https://www.biji.com:443/note/1',' https://www.biji.com/note/1','https://www.biji.com/note/1\n',False,0,[],{}]
+        for value in bad:
+            with self.subTest(value=value),self.assertRaisesRegex(ParityFailure,'legacy_references_unresolved'):
+                self.fixture({'note_url':value})
+    def test_backlink_exception_does_not_hide_other_source_or_local_references(self):
+        canonical='https://www.biji.com/note/1'
+        for changes in ({'unknown':{'note_url':canonical}},{'ref_content':canonical},{'attachments':[{'url':canonical}]},{'web_page':{'url':canonical}}):
+            with self.subTest(changes=changes),self.assertRaisesRegex(ParityFailure,'legacy_references_unresolved'):
+                self.fixture({'note_url':canonical,**changes})
+        for kwargs in ({'source_tail':canonical},{'asset_tail':canonical},{'extra_header':'custom_url: "'+canonical+'"\n'}):
+            with self.subTest(kwargs=kwargs),self.assertRaisesRegex(ParityFailure,'legacy_references_unresolved'):
+                self.fixture({'note_url':canonical},**kwargs)
     def test_named_transcript_cannot_be_owned_by_unrelated_equal_summary(self):
         with self.assertRaisesRegex(ParityFailure,'legacy_named_text_unmapped'):
             self.fixture(extra_header='audio_transcript: '+json.dumps('Exact source\r\nline')+'\n')
@@ -132,6 +160,14 @@ class OwnedSpanTests(unittest.TestCase):
 
 
 class OwnershipAggregateTests(unittest.TestCase):
+    def test_aggregate_identity_backlink_does_not_mask_real_reference_conflicts(self):
+        import get_legacy_capture as capture
+        from test_legacy_capture import ReconciliationAggregateTests
+        fixture=ReconciliationAggregateTests().fixture
+        counts=capture.ownership_proposal_counts(*fixture(note_changes={'note_url':'https://www.biji.com/note/1'}))
+        self.assertEqual(counts['owned_span_proposals_ready'],1);self.assertEqual(sum(counts.values()),1)
+        counts=capture.ownership_proposal_counts(*fixture(note_changes={'note_url':'https://www.biji.com/note/1','unknown_url':'https://example.invalid/a'}))
+        self.assertEqual(counts['owned_span_reference_conflicts'],1);self.assertEqual(sum(counts.values()),1)
     def test_verified_capture_counts_are_private_pure_proposals(self):
         import get_legacy_capture as capture
         from test_legacy_capture import ReconciliationAggregateTests

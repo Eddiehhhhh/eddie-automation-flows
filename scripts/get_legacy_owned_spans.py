@@ -91,8 +91,18 @@ def has_unresolved_references(note,data,header):
     audio=note.get('audio') or {};web=note.get('web_page') or {}
     if note.get('attachments') or note.get('audio_url') or audio.get('play_url') or web.get('url'):return True
     if any(header.get(key,b'') not in (b'',b'""',b"''",b'[]',b'null',b'~') for key in ('attachments','audio_url','web_url')):return True
+    reference_note=deepcopy(note)
+    backlink=reference_note.get('note_url')
+    if backlink is not None and backlink!='':
+        ident=note_identity(note)
+        # Only the API's top-level, exact identity-bound Get backlink is
+        # navigation metadata. Keep it in source/metadata hashes; omit it only
+        # from this reference scan. Other fields, local bytes and lookalikes
+        # remain subject to the same conservative asset/reference gate.
+        if not isinstance(backlink,str) or not re.fullmatch(r'[0-9]{1,64}',ident) or backlink!='https://www.biji.com/note/'+ident:return True
+        reference_note.pop('note_url')
     # References are not fetched or inferred complete by a text-only proposal.
-    return bool(re.search(rb'https?://|!\[|\]\(|<(?:img\b|audio\b|video\b|source\b)|(?m:^\s*\[[^\]]+\]:)',data+b'\n'+capture_json_bytes(note),re.IGNORECASE))
+    return bool(re.search(rb'https?://|!\[|\]\(|<(?:img\b|audio\b|video\b|source\b)|(?m:^\s*\[[^\]]+\]:)',data+b'\n'+capture_json_bytes(reference_note),re.IGNORECASE))
 
 def _slot_text(slot):
     return slot.get('value') if slot['encoding']=='json-string' else slot['bytes'].decode('utf-8')
