@@ -47,12 +47,14 @@ class RuntimeTests(unittest.TestCase):
  def test_zero_changes_queue_stays_empty(self):
   self.f.publication({});local=self.f.clone();out=self.invoke(local,True);self.assertEqual(out['status'],'queue_empty');self.assertFalse(self.request.fixture.calls);self.assertEqual(self.store.value['last_enqueued_publication'],self.f.tip)
  def test_apply_gates_before_credentials_network(self):
-  with patch.object(rt.transport,'Transport',side_effect=AssertionError('no transport')),contextlib.redirect_stdout(io.StringIO()) as output:
-   code=rt.main(['--apply','--scope-from-policy'])
-  self.assertEqual(code,1);self.assertIn('notion_activation_pending',output.getvalue())
-  with patch.object(rt.m,'Remote',side_effect=AssertionError('no remote')):
-   out=rt.run(None,None,None,apply=True)
-  self.assertEqual(out['reason'],'notion_activation_pending')
+  for get_enabled,notion_enabled in ((False,False),(True,False),(False,True)):
+   with self.subTest(get_enabled=get_enabled,notion_enabled=notion_enabled),patch.object(rt.recurring,'PRODUCTION_ACTIVATED',get_enabled),patch.object(rt,'PRODUCTION_ACTIVATED',notion_enabled):
+    with patch.object(rt.transport,'Transport',side_effect=AssertionError('no transport')),contextlib.redirect_stdout(io.StringIO()) as output:
+     code=rt.main(['--apply','--scope-from-policy'])
+    self.assertEqual(code,1);self.assertIn('notion_activation_pending',output.getvalue())
+    with patch.object(rt.m,'Remote',side_effect=AssertionError('no remote')):
+     out=rt.run(None,None,None,apply=True)
+    self.assertEqual(out['reason'],'notion_activation_pending')
  def test_schema_requires_exact_title_id_and_parent_types(self):
   data={'id':ef.DS,'parent':{'database_id':DB},'properties':{'Title':{'type':'title'},'笔记 ID':{'type':'rich_text'}}}
   with patch.object(rt,'schema',wraps=ORIGINAL_SCHEMA):

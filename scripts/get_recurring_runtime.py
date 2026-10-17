@@ -15,7 +15,7 @@ import get_recurring_entry as entry
 import get_recurring_controller as controller
 from get_recurring_entry import a, engine, m, n, r
 
-PRODUCTION_ACTIVATED = False  # Changing this requires the final code/rules review.
+PRODUCTION_ACTIVATED = True  # Changing this requires the final code/rules review.
 SCOPE_CONTRACT = 'get-recurring-production-scope-1'
 SCOPE_KEYS = {'contract', 'production_approved', 'public_policy_sha256', 'rules_sha256',
               'get_policy_sha256', 'private_repository', 'main_ref', 'max_new',

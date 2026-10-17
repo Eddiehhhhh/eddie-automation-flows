@@ -161,14 +161,14 @@ class RuntimeTests(unittest.TestCase):
 
     def test_pending_apply_stops_before_remote_or_source(self):
         source = self.f.f.source()
-        with patch.object(self.remote, 'metadata', side_effect=AssertionError('network prohibited')):
+        with patch.object(rt, 'PRODUCTION_ACTIVATED', False), patch.object(self.remote, 'metadata', side_effect=AssertionError('network prohibited')):
             with self.assertRaisesRegex(entry.EntryFailure, 'runtime_activation_pending'):
                 self.call(apply=True, source=source)
         self.assertEqual(source.lists, 0)
 
     def test_cli_pending_apply_stops_before_policy_credentials_and_network(self):
         import sync_getnote_to_raw as sync
-        with patch.object(sync, 'load_credentials', side_effect=AssertionError('credentials prohibited')), patch.object(m, 'disabled_writers', side_effect=AssertionError('network prohibited')), patch('builtins.print') as output:
+        with patch.object(rt, 'PRODUCTION_ACTIVATED', False), patch.object(sync, 'load_credentials', side_effect=AssertionError('credentials prohibited')), patch.object(m, 'disabled_writers', side_effect=AssertionError('network prohibited')), patch('builtins.print') as output:
             code = rt.main(['--apply', '--policy', '/does/not/exist', '--approved-policy-sha256', 'f' * 64])
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(output.call_args[0][0])['error'], 'runtime_activation_pending')

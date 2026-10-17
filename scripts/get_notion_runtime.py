@@ -27,7 +27,7 @@ import get_recurring_runtime as recurring
 import get_publication_provenance as provenance
 from get_recurring_entry import a,m,r
 
-PRODUCTION_ACTIVATED=False
+PRODUCTION_ACTIVATED=True
 CONTRACT='get-notion-standing-runtime-1'
 MAX_RUN_RECORDS=10
 STAGES={'input','policy','writers','clone','journal','source','initial','queue','execute','final'}

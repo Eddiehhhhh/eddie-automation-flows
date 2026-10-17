@@ -34,6 +34,7 @@ class StagedControllerTests(unittest.TestCase):
 
     def test_two_variants_differ_only_by_fixed_cron_block_and_keep_policy_scope(self):
         policy = deepcopy(self.policy); template_hash = c.template_sha256()
+        activation = (runtime.PRODUCTION_ACTIVATED, notion.PRODUCTION_ACTIVATED)
         full = c.render(policy, self.digest, self.scope_sha, scheduled=True)
         manual = c.render(policy, self.digest, self.scope_sha, scheduled=False)
         self.assertEqual(full.replace(c.SCHEDULE_BLOCK.encode(), b'', 1), manual)
@@ -47,7 +48,7 @@ class StagedControllerTests(unittest.TestCase):
             self.assertIn(b'contents: read', raw)
         self.assertEqual(policy, self.policy); self.assertEqual(c.template_sha256(), template_hash)
         self.assertEqual(c.scope_for(policy, self.digest), self.scope)
-        self.assertFalse(runtime.PRODUCTION_ACTIVATED); self.assertFalse(notion.PRODUCTION_ACTIVATED)
+        self.assertEqual((runtime.PRODUCTION_ACTIVATED, notion.PRODUCTION_ACTIVATED), activation)
 
     def test_renderer_cli_defaults_manual_then_explicit_flag_renders_schedule(self):
         with tempfile.TemporaryDirectory() as folder:
