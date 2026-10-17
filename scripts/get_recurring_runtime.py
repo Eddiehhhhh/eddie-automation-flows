@@ -25,6 +25,39 @@ SCOPE_KEYS = {'contract', 'production_approved', 'public_policy_sha256', 'rules_
 ERRORS = {'runtime_activation_pending', 'runtime_scope', 'runtime_context',
           'runtime_receipt', 'runtime_failed'}
 
+# Fixed diagnostics only; private exception text/arguments are never emitted.
+STAGES = frozenset(('policy', 'execution_provenance', 'remote_guard', 'checkout',
+    'capture_evidence', 'parent_history', 'bootstrap_history', 'bootstrap_inventory',
+    'current_inventory', 'receipt_provenance', 'trusted_inputs', 'trusted_states', 'legacy_baselines',
+    'new_baselines', 'preview_inputs', 'canonical_prepare', 'candidate_report',
+    'publication', 'old_writer_guard', 'credentials', 'source_transport'))
+ENTRY_ERRORS = frozenset(('entry_batch_bound', 'entry_bootstrap_changed',
+    'entry_content_ids', 'entry_counts', 'entry_external_anchor_required',
+    'entry_foreign_delta', 'entry_foreign_get_change', 'entry_history_bound',
+    'entry_non_linear_history', 'entry_ownership_changed', 'entry_plan',
+    'entry_policy_changed', 'entry_publication_unconfirmed', 'entry_readback',
+    'entry_receipt_anchor', 'entry_receipt_budget', 'entry_receipt_only_commit',
+    'entry_receipt_parent', 'entry_receipt_schema', 'entry_rules_changed',
+    'entry_source_detail_missing', 'entry_source_schema', 'entry_state_encoding',
+    'entry_trigger'))
+
+
+CORE_ERRORS = frozenset(('adapter_adoption_changed_note', 'adapter_alias', 'adapter_anchor', 'adapter_arguments', 'adapter_atomic_unavailable', 'adapter_baseline_hash', 'adapter_baseline_readback', 'adapter_blob_budget', 'adapter_blob_readback', 'adapter_candidate_publish', 'adapter_candidate_readback', 'adapter_detail_schema', 'adapter_detail_set', 'adapter_duplicate_source', 'adapter_file_budget', 'adapter_file_changed', 'adapter_incomplete_capture', 'adapter_incomplete_list', 'adapter_missing_blob', 'adapter_old_hash', 'adapter_operation', 'adapter_output', 'adapter_output_conflict', 'adapter_ownership_changed', 'adapter_path', 'adapter_receipt', 'adapter_source_changed', 'adapter_source_identity', 'adapter_source_tree', 'adapter_state_budget', 'adapter_state_commit', 'adapter_state_hash', 'adapter_state_schema', 'adapter_state_source_hash', 'adapter_state_worktree_changed', 'adapter_tree_budget', 'adapter_write_scope', 'asset_materialization_required', 'baseline_missing', 'canonical_alias', 'canonical_baseline_identity', 'canonical_baseline_type', 'canonical_baseline_version', 'canonical_budget', 'canonical_current_set', 'canonical_details', 'canonical_duplicate_identity', 'canonical_duplicate_path', 'canonical_generated_header', 'canonical_identity', 'canonical_legacy_binding', 'canonical_legacy_state_missing', 'canonical_note_budget', 'canonical_owner_overlap', 'canonical_parent_changed', 'canonical_path', 'canonical_preview_anchor', 'canonical_preview_blob', 'canonical_preview_schema', 'canonical_readback', 'canonical_reserved_changed', 'canonical_selection', 'canonical_source_schema', 'canonical_state_hash', 'canonical_state_schema', 'canonical_write_scope', 'destination_collision', 'detail_identity', 'detail_required', 'identity_reserved', 'legacy_missing', 'legacy_references_unresolved', 'legacy_structure_ambiguous', 'local_note_edited', 'preview_source_changed', 'provenance_budget', 'provenance_controller_policy', 'provenance_credentials', 'provenance_exclusion', 'provenance_execution', 'provenance_job', 'provenance_job_bound', 'provenance_log_redirect', 'provenance_logs_shape', 'provenance_logs_unavailable', 'provenance_no_receipt', 'provenance_no_verified_publication', 'provenance_policy', 'provenance_receipt_fork', 'provenance_receipt_sequence', 'provenance_record', 'provenance_record_count', 'provenance_repository', 'provenance_run', 'provenance_run_bound', 'provenance_run_changed', 'provenance_schema', 'provenance_target', 'provenance_timestamp', 'provenance_transport', 'provenance_unavailable', 'provenance_unconfirmed', 'provenance_workflow', 'source_created_changed', 'source_field_missing', 'source_metadata_changed', 'source_metadata_shape', 'source_missing', 'source_note_type_changed', 'source_payload_incomplete', 'source_shadowed_field', 'source_shape_unsupported', 'source_structured_text_unmapped', 'source_text_missing', 'source_transcript_pending', 'source_unknown_changed', 'source_unknown_fields', 'source_version_mismatch', 'source_version_race'))
+SOURCE_ERRORS = {'GetNote HTTP '+str(v): 'source_http_'+str(v) for v in (400,401,403,404,408,429,500,502,503,504)}
+SOURCE_ERRORS.update({'GetNote transport failed': 'source_transport_failed', 'GetNote redirect blocked': 'source_redirect_blocked', 'GetNote incomplete body': 'source_incomplete_body', 'Get response byte limit reached': 'source_response_budget'})
+
+
+def at_stage(stage, operation, *args, **kwargs):
+    if stage not in STAGES:
+        fail('runtime_failed')
+    try:
+        return operation(*args, **kwargs)
+    except (Exception, SystemExit) as exc:
+        if not isinstance(getattr(exc, 'runtime_stage', None), str) or exc.runtime_stage not in STAGES:
+            exc.runtime_stage = stage
+        raise
+
+
 
 def fail(code):
     raise entry.EntryFailure(code)
@@ -74,13 +107,13 @@ def load_receipt(reader, remote, token, root, commit):
 
 def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, client, policy, *, bootstrap, exclude_run_id, exclude_run_attempt):
     # Explicit bounded object-only reads; OfflineGit itself cannot lazy fetch.
-    fetch_commit(local, parent, entry.MAX_INTERVENING + 2)
-    fetch_commit(local, bootstrap['commit'])
-    engine.load_current(reader, remote, token, root / 'bootstrap', bootstrap['commit'])
-    current = engine.load_current(reader, remote, token, root / 'parent', parent)
+    at_stage('parent_history', fetch_commit, local, parent, entry.MAX_INTERVENING + 2)
+    at_stage('bootstrap_history', fetch_commit, local, bootstrap['commit'])
+    at_stage('bootstrap_inventory', engine.load_current, reader, remote, token, root / 'bootstrap', bootstrap['commit'])
+    current = at_stage('current_inventory', engine.load_current, reader, remote, token, root / 'parent', parent)
     anchor = None
     if entry.FULL_RECEIPT in reader.tree(parent):
-        verified = provenance.discover(client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt)
+        verified = at_stage('receipt_provenance', provenance.discover, client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt)
         anchor = verified['anchor']; commit = anchor['commit']
         fetch_commit(local, commit, entry.MAX_INTERVENING + 2)
         load_receipt(reader, remote, token, root, commit)
@@ -95,13 +128,13 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
             load_receipt(reader, remote, token, root, previous)
         for target in sorted({before, commit}):
             engine.load_current(reader, remote, token, root / target, target)
-    _, _, states = entry.trust_current(reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap)
+    _, _, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap)
     _, legacy, registry = states
-    m.selected_baselines(reader, legacy, parent, remote)
-    engine.new_baselines(reader, registry, parent, remote)
+    at_stage('legacy_baselines', m.selected_baselines, reader, legacy, parent, remote)
+    at_stage('new_baselines', engine.new_baselines, reader, registry, parent, remote)
     preview = None
     if n.STATE not in current:
-        _, preview = m.load_canonical_inputs(reader, remote, token, root, parent)
+        _, preview = at_stage('preview_inputs', m.load_canonical_inputs, reader, remote, token, root, parent)
     return anchor, preview
 
 
@@ -115,7 +148,7 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
     It runs before an optional private sink. Sink exceptions are a separate
     partial outcome and never erase verified Get success or its receipt.
     """
-    policy = validate_policy(policy, approved_policy_sha256, bootstrap)
+    policy = at_stage('policy', validate_policy, policy, approved_policy_sha256, bootstrap)
     if trigger not in ('manual', 'schedule'):
         fail('runtime_scope')
     if expected_parent is not None:
@@ -130,32 +163,32 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
     remote = remote if remote is not None else m.Remote(None, token)
     client = public_client if public_client is not None else provenance.AnonymousGithub()
     if apply:
-        provenance.verify_execution(client, policy, run_context, trigger)
-    parent = m.guard(remote)
+        at_stage('execution_provenance', provenance.verify_execution, client, policy, run_context, trigger)
+    parent = at_stage('remote_guard', m.guard, remote)
     if expected_parent is not None and parent != expected_parent:
         m.fail('manual_parent_changed')
     with tempfile.TemporaryDirectory(prefix='get-recurring-runtime-', dir=work) as folder:
         root = Path(folder)
-        local = r.readback_checkout(root / 'objects', bootstrap['capture_anchor']['capture_commit'], token)
+        local = at_stage('checkout', r.readback_checkout, root / 'objects', bootstrap['capture_anchor']['capture_commit'], token)
         remote.local = local
-        reader, evidence, _ = m.load_evidence(local, remote, token, root, parent, anchor=bootstrap['capture_anchor'])
-        anchor, preview = load_trusted_inputs(local, reader, evidence, remote, token, root, parent, client, policy,
+        reader, evidence, _ = at_stage('capture_evidence', m.load_evidence, local, remote, token, root, parent, anchor=bootstrap['capture_anchor'])
+        anchor, preview = at_stage('trusted_inputs', load_trusted_inputs, local, reader, evidence, remote, token, root, parent, client, policy,
             bootstrap=bootstrap, exclude_run_id=run_context['run_id'] if run_context else None,
             exclude_run_attempt=run_context['run_attempt'] if run_context else None)
-        m.guard(remote, parent)
-        plan, files = entry.prepare(reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
+        at_stage('remote_guard', m.guard, remote, parent)
+        plan, files = at_stage('canonical_prepare', entry.prepare, reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
             anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger)
-        m.guard(remote, parent)
-        result = entry.public_report(plan, files)
+        at_stage('remote_guard', m.guard, remote, parent)
+        result = at_stage('candidate_report', entry.public_report, plan, files)
         if result['status'] != 'recurring_local_candidate_verified':
-            fail('runtime_failed')
+            at_stage('candidate_report', fail, 'runtime_failed')
         result.update(status='recurring_candidate_verified', readback_verified=True,
                       production_activated=PRODUCTION_ACTIVATED, sink_status='not_requested')
         if not apply:
             return result
         def readback(commit, values):
             return m.fetch_selected(remote, {p: ('100644', 'blob', r.oid(data), len(data)) for p, data in values.items()}, token, root / 'readback')
-        publication = m.publish(reader, remote, plan, files, result['plan_sha256'], readback,
+        publication = at_stage('publication', m.publish, reader, remote, plan, files, result['plan_sha256'], readback,
             checkpoint=checkpoint, verifier=lambda rd, pl, fs: entry.verify_plan(rd, evidence, pl, fs, policy['rules_sha256'], bootstrap=bootstrap),
             writers_guard=writers_guard if writers_guard is not None else m.disabled_writers)
         # From this point any local callback failure must preserve actual Get
@@ -193,7 +226,14 @@ def failure(exc=None, *, attempt_started=False):
     if exc is None:
         return result
     code = str(exc)
-    result['error'] = code if code in ERRORS | m.ERRORS else 'runtime_failed'
+    result['error'] = code if code in ERRORS | m.ERRORS | ENTRY_ERRORS | m.c.ERRORS | CORE_ERRORS else SOURCE_ERRORS.get(code, 'runtime_failed')
+    stage = getattr(exc, 'runtime_stage', None)
+    if isinstance(stage, str) and stage in STAGES:
+        result['stage'] = stage
+    result['failure_kind'] = ('missing_key' if isinstance(exc, KeyError) else
+        'invalid_type' if isinstance(exc, TypeError) else
+        'invalid_value' if isinstance(exc, ValueError) else
+        'io_error' if isinstance(exc, OSError) else 'guard_or_runtime')
     state = getattr(exc, 'write_state', 'uncertain' if attempt_started else 'not_attempted')
     if state in ('not_attempted', 'uncertain', 'confirmed'):
         result.update(write_state=state, main_updated=True if state == 'confirmed' else None if state == 'uncertain' else False,
@@ -257,11 +297,11 @@ def main(argv=None):
         github_token = os.environ.get('GITHUB_TOKEN')
         public_client = provenance.PublicGithub(github_token)
         writers_guard = lambda: m.disabled_writers(token=github_token)
-        writers_guard()  # Same existing identity; denial never falls back.
+        at_stage('old_writer_guard', writers_guard)  # Same identity; no fallback.
         import sync_getnote_to_raw as sync
         from source_sync_rate import RequestPolicy
-        key, client_id = sync.load_credentials()
-        source = m.c.Source(key, client_id, RequestPolicy(seconds=35 * 60))
+        key, client_id = at_stage('credentials', sync.load_credentials)
+        source = at_stage('source_transport', m.c.Source, key, client_id, RequestPolicy(seconds=35 * 60))
         def checkpoint(plan):
             nonlocal attempt_started
             m.write_checkpoint(args.checkpoint, plan)

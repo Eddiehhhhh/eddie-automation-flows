@@ -306,6 +306,59 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(value['write_state'], 'uncertain'); self.assertIsNone(value['main_updated'])
         self.assertNotIn('private', json.dumps(value))
 
+    def test_fixed_failure_diagnostics_keep_private_exception_text_out(self):
+        for exc in (KeyError('PRIVATE_NOTE_ID'), TypeError('PRIVATE_SOURCE_TEXT'),
+                    OSError('PRIVATE_PATH'), entry.EntryFailure('entry_bootstrap_changed')):
+            with self.assertRaises(type(exc)) as caught:
+                rt.at_stage('trusted_states', lambda: (_ for _ in ()).throw(exc))
+            report = rt.failure(caught.exception)
+            self.assertEqual(report['stage'], 'trusted_states')
+            self.assertEqual(report['cas_attempts'], 0)
+            self.assertNotIn('PRIVATE', json.dumps(report))
+            if isinstance(exc, entry.EntryFailure):
+                self.assertEqual(report['error'], 'entry_bootstrap_changed')
+        unknown = RuntimeError('PRIVATE')
+        unknown.runtime_stage = 'PRIVATE_STAGE'
+        self.assertNotIn('stage', rt.failure(unknown))
+        unknown.runtime_stage = []
+        self.assertNotIn('stage', rt.failure(unknown))
+
+    def test_core_and_exact_http_diagnostics_are_fixed_and_sanitized(self):
+        for value, expected in [('canonical_owner_overlap', 'canonical_owner_overlap'),
+                                ('adapter_source_tree', 'adapter_source_tree'),
+                                ('GetNote HTTP 403', 'source_http_403'),
+                                ('GetNote HTTP 403 PRIVATE', 'runtime_failed')]:
+            self.assertEqual(rt.failure(RuntimeError(value))['error'], expected)
+        with self.assertRaises(KeyError) as caught:
+            rt.at_stage('trusted_inputs', lambda: (_ for _ in ()).throw(KeyError('PRIVATE')))
+        self.assertEqual(rt.failure(caught.exception)['stage'], 'trusted_inputs')
+
+    def test_nested_stage_preserves_inner_fixed_stage(self):
+        with self.assertRaises(KeyError) as caught:
+            rt.at_stage('canonical_prepare', rt.at_stage, 'trusted_states',
+                        lambda: (_ for _ in ()).throw(KeyError('PRIVATE')))
+        self.assertEqual(rt.failure(caught.exception)['stage'], 'trusted_states')
+
+    def test_real_runtime_capture_failure_has_fixed_stage_and_zero_write(self):
+        self.patches()
+        with patch.object(m, 'load_evidence', side_effect=r.RetentionFailure('capture-private')):
+            with self.assertRaises(r.RetentionFailure) as caught:
+                self.call()
+        report = rt.failure(caught.exception)
+        self.assertEqual(report['stage'], 'capture_evidence')
+        self.assertEqual(report['error'], 'runtime_failed')
+        self.assertEqual(self.remote.calls, [])
+
+    def test_real_runtime_trusted_state_failure_is_not_generic(self):
+        self.patches()
+        with patch.object(entry, 'trust_current', side_effect=entry.EntryFailure('entry_bootstrap_changed')):
+            with self.assertRaises(entry.EntryFailure) as caught:
+                self.call()
+        report = rt.failure(caught.exception)
+        self.assertEqual(report['stage'], 'trusted_states')
+        self.assertEqual(report['error'], 'entry_bootstrap_changed')
+        self.assertEqual(self.remote.calls, [])
+
     def test_readback_failure_cannot_emit_or_enqueue(self):
         self.patches(); self.activated(); lines = []; handed = []
         with patch.object(self.remote, 'commit', return_value={'tree': 'f' * 40, 'parents': []}):
