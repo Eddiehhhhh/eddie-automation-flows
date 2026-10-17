@@ -21,6 +21,7 @@ import get_notion_preserved_image as preserved_image
 import get_notion_writer_guard as old_writers
 import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
+import get_notion_plan_recovery as plan_recovery
 import get_confirmed_source as source_loader
 import get_recurring_entry as entry
 import get_recurring_runtime as recurring
@@ -236,6 +237,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         with tempfile.TemporaryDirectory(prefix='get-notion-runtime-',dir=work) as folder:
             root=Path(folder);stage='clone'
             local=r.readback_checkout(root/'objects',parent,token);remote.local=local
+            remote=journal.ImmutableJournalRemote(remote)
             # Private fresh metadata-only clone, local refs only; source files
             # and inherited asset blobs are never checked out or downloaded.
             local.run('update-ref',r.MAIN_REF,parent)
@@ -264,6 +266,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     'public_policy_sha256':public_hash})
             durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=confirm)
             current,sha=durable.read()
+            if present and found.get('recovery_anchor')=='exact_initial_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
+                fail('notion_state_anchor')
             old_journal=current['engine_state']['journal']
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and (old_journal['operation'].get('phase')!='prepared' or old_journal['operation'].get('kind') in ('cleanup','archive'))))
             store=durable if apply else ReadOnlyStore(current)
@@ -291,6 +295,11 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             safe=safe_result(result)
             safe.update(journal_commits=durable.commits_attempted,source_parent=parent,
                 notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
+            if old_journal is not None and plan_recovery.allows(old_journal['plan'],old_journal):
+                # Current code/controller/policy remain the actual new values
+                # in every checkpoint; this identifies the unchanged prior plan.
+                safe['resumed_prior_plan_sha256']=plan_recovery.OLD_PLAN
+                safe['resumed_prior_rules_sha256']=plan_recovery.OLD_ENGINE_RULES
             return safe
     except Exception as exc:
         reason=str(exc);reason=reason if reason in ERRORS else 'notion_failed'

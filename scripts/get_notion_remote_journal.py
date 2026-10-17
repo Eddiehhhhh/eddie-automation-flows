@@ -6,7 +6,9 @@ callback must return True before the executor may perform its next Notion write.
 Only the fixed journal path is changed; one CAS at most per call. Uncertain
 outcomes are read back, never retried. A poisoned instance cannot be reused.
 """
+from collections import OrderedDict
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 import re
 import tempfile
@@ -44,6 +46,87 @@ def checked(value, width):
     if not isinstance(value, str) or not re.fullmatch('[a-f0-9]{%d}' % width, value):
         raise JournalFailure('state_invalid', stage='anchor')
     return value
+
+
+class ImmutableJournalRemote:
+    """Bounded per-run reuse of exact Git objects; never cache mutable guards.
+
+    Repository identity, refs, writer checks and transport writes always reach
+    the original remote. Each candidate readback starts a new cache generation,
+    so its commit, journal trees and state bytes are fetched remotely again.
+    Cached responses are copied; no failed response or local-only object enters
+    this cache. Eviction changes performance only, never read/write budgets.
+    """
+    def __init__(self, remote, *, max_cache_bytes=MAX_BATCH_BYTES):
+        if type(max_cache_bytes) is not int or not 1 <= max_cache_bytes <= MAX_BATCH_BYTES:
+            raise JournalFailure('request_budget', stage='budget')
+        self.remote = remote
+        self.max_cache_bytes = max_cache_bytes
+        self.cache = OrderedDict()
+        self.cache_bytes = 0
+
+    def __getattr__(self, name):
+        return getattr(self.remote, name)
+
+    def begin_readback(self):
+        self.cache.clear()
+        self.cache_bytes = 0
+
+    def _object(self, key, read):
+        if key in self.cache:
+            value, size = self.cache.pop(key)
+            self.cache[key] = value, size
+            return deepcopy(value)
+        value = read()
+        size = len(value) if isinstance(value, bytes) else len(codec.encoded(value))
+        if size <= self.max_cache_bytes:
+            while self.cache and self.cache_bytes + size > self.max_cache_bytes:
+                _, (_, removed) = self.cache.popitem(last=False)
+                self.cache_bytes -= removed
+            self.cache[key] = deepcopy(value), size
+            self.cache_bytes += size
+        return value
+
+    def commit(self, oid):
+        checked(oid, 40)
+        def read():
+            value = self.remote.commit(oid)
+            if not isinstance(value, dict) or not isinstance(value.get('parents'), list):
+                raise JournalFailure('state_invalid', stage='readback')
+            checked(value.get('tree'), 40)
+            for parent in value['parents']: checked(parent, 40)
+            return value
+        return self._object(('commit', oid), read)
+
+    def tree_entries(self, oid, recursive=False):
+        checked(oid, 40)
+        if type(recursive) is not bool:
+            raise JournalFailure('state_invalid', stage='readback')
+        def read():
+            value = self.remote.tree_entries(oid, recursive) if recursive else self.remote.tree_entries(oid)
+            if not isinstance(value, list):
+                raise JournalFailure('state_invalid', stage='readback')
+            for row in value:
+                if not isinstance(row, dict):
+                    raise JournalFailure('state_invalid', stage='readback')
+                checked(row.get('sha'), 40)
+            return value
+        return self._object(('tree', oid, recursive), read)
+
+    def blob(self, oid, size):
+        checked(oid, 40)
+        if type(size) is not int or size < 0:
+            raise JournalFailure('state_invalid', stage='readback')
+        def read():
+            value = self.remote.blob(oid, size)
+            if not isinstance(value, bytes) or len(value) != size or retention.oid(value) != oid:
+                raise JournalFailure('state_invalid', stage='readback')
+            return value
+        return self._object(('blob', oid, size), read)
+
+    # Route immutable lookups inside this guard through the cache as well.
+    # The caller still performs its complete fresh repository/ref guards.
+    source_get_tree = retention.GitHubRemote.source_get_tree
 
 
 class RemoteJournal:
@@ -109,7 +192,7 @@ class RemoteJournal:
         if self.poisoned:
             raise JournalFailure(stage='locked', unknown=True, recovery=self.recovery)
 
-    def _head(self, expected=None):
+    def _ref(self, expected=None):
         self.stage = 'guard'
         meta = self.remote.metadata()
         if meta.get('full_name') != REPOSITORY or meta.get('private') is not True:
@@ -117,23 +200,68 @@ class RemoteJournal:
         head = checked(self.remote.ref(REF), 40)
         if expected is not None and head != expected:
             raise JournalFailure('state_changed', stage='guard')
+        return head
+
+    def _head(self, expected=None):
+        head = self._ref(expected)
         if self.guard(head) is not True:
             raise JournalFailure(stage='guard')
         return head
+
+    def _local_tree(self, head):
+        # Git can read a loose object stored under the wrong OID. Rehash the
+        # commit and every inherited tree before trusting a cached remote OID;
+        # asset blobs are deliberately neither read nor hydrated.
+        raw = self.local.run('cat-file', 'commit', head)
+        if hashlib.sha1(b'commit ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() != head:
+            raise JournalFailure('state_invalid', stage='load')
+        root = checked(self.local.run('rev-parse', head + '^{tree}').decode().strip(), 40)
+        trees = {root}; entries = {}
+        rows = self.local.run('ls-tree', '-rtz', head)
+        if len(rows) > MAX_BATCH_BYTES:
+            raise JournalFailure('request_budget', stage='load')
+        for row in rows.split(b'\0'):
+            if not row: continue
+            meta, path = row.split(b'\t', 1)
+            mode, kind, oid = meta.decode().split(); checked(oid, 40)
+            path = path.decode()
+            if kind == 'tree': trees.add(oid)
+            elif path in entries:
+                raise JournalFailure('state_invalid', stage='load')
+            else: entries[path] = (mode, kind, oid)
+        ordered = sorted(trees)
+        packed = self.local.run('cat-file', '--batch', data=('\n'.join(ordered) + '\n').encode())
+        if len(packed) > MAX_BATCH_BYTES:
+            raise JournalFailure('request_budget', stage='load')
+        offset = 0
+        for oid in ordered:
+            end = packed.index(b'\n', offset)
+            header = packed[offset:end].split()
+            if len(header) != 3 or header[:2] != [oid.encode(), b'tree'] or not header[2].isdigit():
+                raise JournalFailure('state_invalid', stage='load')
+            size = int(header[2]); offset = end + 1
+            data = packed[offset:offset + size]; offset += size
+            if (len(data) != size or packed[offset:offset + 1] != b'\n'
+                    or hashlib.sha1(b'tree ' + str(size).encode() + b'\0' + data).hexdigest() != oid):
+                raise JournalFailure('state_invalid', stage='load')
+            offset += 1
+        if offset != len(packed):
+            raise JournalFailure('state_invalid', stage='load')
+        return root, entries
 
     def _commit(self, head):
         self.stage = 'load'
         self.load_commit(head)
         if self.local.run('cat-file', '-t', head).strip() != b'commit':
             raise JournalFailure('state_invalid', stage='load')
-        tree = checked(self.local.run('rev-parse', head + '^{tree}').decode().strip(), 40)
+        tree, entries = self._local_tree(head)
         parents = self.local.run('rev-list', '--parents', '-n', '1', head).decode().split()
         if not parents or parents[0] != head:
             raise JournalFailure('state_invalid', stage='load')
         remote = self.remote.commit(head)
         if remote.get('tree') != tree or remote.get('parents') != parents[1:]:
             raise JournalFailure('state_invalid', stage='readback')
-        return tree, parents[1:], self.local.tree(head)
+        return tree, parents[1:], entries
 
     def _state(self, tree):
         row = tree.get(STATE_PATH)
@@ -156,7 +284,7 @@ class RemoteJournal:
             raise JournalFailure('state_invalid', stage='readback')
         return value, codec.digest(data), row[2], data
 
-    def _current(self):
+    def _current(self, *, recheck=True):
         head = self._head()
         _, _, anchored_tree = self._commit(self.anchor['commit'])
         _, digest, blob, _ = self._state(anchored_tree)
@@ -176,7 +304,7 @@ class RemoteJournal:
         value, digest, blob, data = self._state(tree)
         if digest != self.anchor['state_sha256'] or blob != self.anchor['state_blob']:
             raise JournalFailure('state_changed', stage='readback')
-        self._head(head)
+        if recheck: self._head(head)
         return head, tree_oid, tree, value, digest, blob, data
 
     def read(self):
@@ -221,6 +349,8 @@ class RemoteJournal:
 
     def _verify(self, commit, parent, tree_oid, wanted, data):
         self.stage = 'readback'
+        if isinstance(self.remote, ImmutableJournalRemote):
+            self.remote.begin_readback()
         actual_tree, parents, tree = self._commit(commit)
         if actual_tree != tree_oid or parents != [parent] or tree != wanted:
             raise JournalFailure(stage='readback')
@@ -231,9 +361,9 @@ class RemoteJournal:
         return {'contract': RECEIPT_CONTRACT, 'repository': REPOSITORY, 'ref': REF,
                 'path': STATE_PATH, 'parent_commit': parent, 'commit': commit,
                 'tree': tree_oid, 'state_blob': blob, 'state_sha256': digest,
-                'state_bytes': len(data), 'cas_attempts': 1, 'readback_verified': True}
+                'state_bytes': len(data), 'cas_attempts': 1, 'readback_verified': True}, value
 
-    def _confirm(self, receipt):
+    def _confirm(self, receipt, value):
         self.stage = 'confirm'
         self.confirm_entered = True
         self.recovery = deepcopy(receipt)
@@ -241,9 +371,18 @@ class RemoteJournal:
             raise JournalFailure(stage='confirm', unknown=True, recovery=receipt)
         self._head(receipt['commit'])
         self.anchor = {key: receipt[key] for key in ('commit', 'state_blob', 'state_sha256')}
-        return receipt['state_sha256']
+        return deepcopy(value), receipt['state_sha256']
 
     def compare_and_set(self, expected_sha, value):
+        return self.compare_and_set_verified(expected_sha, value)[1]
+
+    def compare_and_set_verified(self, expected_sha, value):
+        """Return the exact confirmed remote readback within the CAS lock.
+
+        Adapters may consume this instead of issuing a second durable read.
+        This is not a cached read API: every call performs its own guarded CAS
+        or fully validated no-op, checkpoint confirmation and final head guard.
+        """
         if not self.lock.acquire(blocking=False):
             raise JournalFailure('journal_busy', stage='locked')
         try:
@@ -262,15 +401,16 @@ class RemoteJournal:
             if len(data) > MAX_STATE:
                 raise JournalFailure('request_budget', stage='budget')
             codec.check_state(value)
-            parent, old_tree, before, _, digest, old_blob, old_data = self._current()
+            parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
             if expected_sha != digest:
                 raise JournalFailure('state_changed', stage='anchor')
             blob = retention.oid(data)
             if data == old_data and old_blob is not None:
+                self._head(parent)
                 return self._confirm({'contract': RECEIPT_CONTRACT, 'repository': REPOSITORY,
                     'ref': REF, 'path': STATE_PATH, 'parent_commit': None, 'commit': parent,
                     'tree': old_tree, 'state_blob': old_blob, 'state_sha256': digest,
-                    'state_bytes': len(data), 'cas_attempts': 0, 'readback_verified': True})
+                    'state_bytes': len(data), 'cas_attempts': 0, 'readback_verified': True}, old_value)
             added_bytes = 0 if blob in self.charged_blobs else len(data)
             if (self.commits_attempted >= self.max_commits
                     or self.new_blob_bytes + added_bytes > self.max_batch_bytes):
@@ -288,13 +428,15 @@ class RemoteJournal:
                 pass  # Ambiguous response: exact readback, NEVER a second CAS.
             self.stage = 'poll'
             for attempt in range(self.poll_attempts):
-                observed = self._head()
+                # Poll only mutable identity/ref. Full source guard follows the
+                # complete readback and runs again after durable confirmation.
+                observed = self._ref()
                 if observed == commit: break
                 if observed != parent or attempt == self.poll_attempts - 1:
                     raise JournalFailure(stage='poll', unknown=True)
                 self.sleep(2 ** attempt)
-            receipt = self._verify(commit, parent, tree_oid, wanted, data)
-            return self._confirm(receipt)
+            receipt, observed_value = self._verify(commit, parent, tree_oid, wanted, data)
+            return self._confirm(receipt, observed_value)
         except Exception as exc:
             # Callback/readback failures may follow a committed journal. Preserve
             # only verified candidate metadata; block all subsequent API eligibility.

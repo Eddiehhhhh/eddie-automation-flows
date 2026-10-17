@@ -12,6 +12,7 @@ import get_notion_outbox as codec
 import get_notion_remote_journal as journal
 import get_publication_provenance as provenance
 import get_recurring_controller as controller
+import get_notion_plan_recovery as plan_recovery
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '
 CONTRACT = 'get-notion-journal-checkpoint-1'
@@ -103,7 +104,8 @@ class ExactJournalLoader:
     def _cached(self, commit):
         cached = self.verified_commits[commit]
         # Immutable OIDs only: local corruption/missing objects stop. The caller
-        # still performs every remote commit/blob/head/source guard read afresh.
+        # still performs fresh head/source guards and complete candidate
+        # readback. Only exact immutable remote objects may be reused.
         raw = self.local.run('cat-file', 'commit', commit)
         if self.local.run('hash-object', '-t', 'commit', '--stdin', data=raw).decode().strip() != commit:
             fail('journal_loader_cache')
@@ -485,6 +487,14 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     public_policy=policy, approved_public_policy_sha256=approved_public_policy_sha256,
                     notion_policy_sha256=notion_policy_sha256)
             except CheckpointFailure as exc:
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(plan_recovery.OLD_RUN,plan_recovery.OLD_ATTEMPT)):
+                    # One reviewed old transaction only; same bounded client,
+                    # exact original controller/log proof and fixed state anchor.
+                    result=plan_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
+                    if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
                 if str(exc) not in ('journal_provenance_missing', 'journal_provenance_no_checkpoint',
                                    'journal_provenance_other_controller'):
                     raise

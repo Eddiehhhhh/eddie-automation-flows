@@ -192,6 +192,20 @@ class QueuePublication:
     check_assets=e.GitPublication.check_assets
     read=e.GitPublication.read
 
+def confirmed_compare_and_set(store, expected_sha, value):
+    """Consume an atomic verified CAS when supplied; keep the generic fallback."""
+    verified_cas = getattr(store, 'compare_and_set_verified', None)
+    if callable(verified_cas):
+        observed, version = verified_cas(expected_sha, value)
+    else:
+        version = store.compare_and_set(expected_sha, value)
+        observed, observed_version = store.read()
+        if observed_version != version: fail('outbox_journal_failed')
+    check_state(observed)
+    if version != digest(value) or not e.same(observed, value): fail('outbox_journal_failed')
+    return deepcopy(observed), version
+
+
 class EngineStore:
     """Fixed envelope adapter. Underlying CAS must be durable and exact-head.
 
@@ -237,10 +251,7 @@ class EngineStore:
                     if ident in next_value['rotation_order']:
                         next_value['rotation_order'].remove(ident);next_value['rotation_order'].append(ident)
         check_state(next_value)
-        new_version=self.store.compare_and_set(self.outer_version,next_value)
-        if new_version!=digest(next_value):fail('outbox_journal_failed')
-        observed,observed_version=self.store.read();check_state(observed)
-        if observed_version!=new_version or not e.same(observed,next_value):fail('outbox_journal_failed')
+        observed,new_version=confirmed_compare_and_set(self.store,self.outer_version,next_value)
         self.outer=deepcopy(next_value);self.outer_version=new_version
         return digest(value)
 
@@ -262,7 +273,5 @@ def settle_empty_plan(store,expected_outer_sha,plan,approved_plan_sha):
         updated['rotation_order'].remove(ident);updated['rotation_order'].append(ident)
     check_state(updated)
     if e.same(updated,value):return version
-    new_sha=store.compare_and_set(version,updated)
-    observed,observed_sha=store.read();check_state(observed)
-    if new_sha!=digest(updated) or observed_sha!=new_sha or not e.same(observed,updated):fail('outbox_journal_failed')
+    observed,new_sha=confirmed_compare_and_set(store,version,updated)
     return new_sha

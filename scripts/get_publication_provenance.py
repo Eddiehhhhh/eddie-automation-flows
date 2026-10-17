@@ -6,7 +6,7 @@ No credential discovery/store, new permissions, private requests or writes.
 The caller pins one reviewed repository/workflow/code policy independently.
 """
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import argparse
 import json
 from pathlib import Path
@@ -18,6 +18,7 @@ import urllib.request
 
 import get_recurring_entry as entry
 import get_recurring_controller as controller
+import get_recurring_policy_recovery as recovery
 from get_recurring_entry import a, m
 
 REPOSITORY = 'Eddiehhhhh/eddie-automation-flows'
@@ -270,6 +271,82 @@ def parse_record(raw, policy, run):
     return record
 
 
+def verified_prepare_only(raw, policy, run, job, emission):
+    """A missing apply receipt is fatal; only the fixed runtime's full safe
+    manual report, inside its successful step, proves a prepare-only execution.
+    This is a negative classification, never a publication trust anchor.
+    """
+    if not isinstance(raw, bytes) or len(raw) > MAX_LOG:
+        fail('provenance_budget')
+    try:
+        text = raw.decode('utf-8', 'strict')
+    except UnicodeError:
+        fail('provenance_logs_shape')
+    if MARKER.strip() in text or 'recurring_candidate_verified' not in text:
+        return False
+    if run['event'] != 'workflow_dispatch':
+        fail('provenance_prepare_only')
+    notion = [s for s in job['steps'] if isinstance(s, dict)
+              and s.get('name') == 'Sync confirmed Get content to Notion']
+    if len(notion) != 1 or notion[0].get('status') != 'completed' or notion[0].get('conclusion') != 'skipped':
+        fail('provenance_prepare_only')
+    start = timestamp(emission.get('started_at')); end = timestamp(emission.get('completed_at'))
+    if not (timestamp(run['created_at']) <= timestamp(job.get('started_at')) <= start <= end
+            <= timestamp(job['completed_at']) <= timestamp(run['updated_at'])):
+        fail('provenance_timestamp')
+    # GitHub may declare completed_at only to whole-second precision while
+    # runner logs retain fractions. That declared second is [end, end + 1s);
+    # a fractional API end keeps its exact inclusive bound. Metadata ordering
+    # and the start bound above remain unchanged. This affects only the
+    # prepare-only negative classification, never publication/checkpoint proof.
+    def exact_stamp(value):
+        # datetime truncates nanoseconds; preserve all declared log precision.
+        stamp = timestamp(value)
+        fraction = value.split('.', 1)[1][:-1] if '.' in value else ''
+        return stamp.replace(microsecond=0), int(fraction.ljust(9, '0'))
+    coarse_end = '.' not in emission['completed_at']
+    lower = exact_stamp(emission['started_at'])
+    upper = (end + timedelta(seconds=1), 0) if coarse_end else exact_stamp(emission['completed_at'])
+    outer_end = min(exact_stamp(job['completed_at']), exact_stamp(run['updated_at']))
+    reports = []
+    for line in text.splitlines():
+        match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z) (.*)', line)
+        if match:
+            stamp = exact_stamp(match[1])
+            in_window = lower <= stamp <= outer_end and (stamp < upper if coarse_end else stamp <= upper)
+            if in_window and match[2].startswith('{'):
+                reports.append(m.strict_capture_json(match[2].encode(), 16384))
+    if len(reports) != 1:
+        fail('provenance_prepare_only')
+    value = reports[0]
+    fixed = {'status': 'recurring_candidate_verified', 'main_updated': False,
+             'cas_attempts': 0, 'local_proposal_only': True, 'apply_ready': False,
+             'schedule_enabled': False, 'asset_downloads': 0, 'notion_writes': 0,
+             'confirmed_content_ids': 0, 'opaque_source_fields_rendered': False,
+             'complete_source_rendering_claimed': False, 'readback_verified': True,
+             'sink_status': 'not_requested', 'policy_sha256': policy['get_policy_sha256']}
+    keys = set(fixed) | set(entry.engine.COUNTS) | {k for k, _ in entry.engine.HASHES}
+    keys |= {'receipt_commit', 'receipt_sha256', 'production_activated'}
+    if (not isinstance(value, dict) or set(value) != keys
+            or any(type(value[k]) is not type(v) or value[k] != v for k, v in fixed.items())
+            or type(value['production_activated']) is not bool):
+        fail('provenance_prepare_only')
+    for key, width in entry.engine.HASHES:
+        a.checked(value[key], width)
+    for key in entry.engine.COUNTS:
+        if type(value[key]) is not int or not 0 <= value[key] <= m.MAX_CHANGED_BYTES:
+            fail('provenance_prepare_only')
+    if value['new_selected'] > 50 or value['notes_changed'] != sum(value[k] for k in (
+            'new_created', 'new_preview_imported', 'new_updated', 'legacy_source_updated')):
+        fail('provenance_prepare_only')
+    if value['receipt_sha256'] is None:
+        if value['receipt_commit'] is not None:
+            fail('provenance_prepare_only')
+    else:
+        a.checked(value['receipt_sha256'], 64); a.checked(value['receipt_commit'], 40)
+    return True
+
+
 def check_run_identity(run, policy):
     if not isinstance(run, dict):
         fail('provenance_run')
@@ -319,13 +396,14 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         fail('provenance_run_changed')
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
         return None
+    candidate_policy, original_recovery = recovery.candidate_policy(policy, run)
     try:
         # One discovery may encounter the same immutable controller repeatedly.
         # Deduplicate only after exact deterministic-byte verification; no cache
         # survives this call or accepts a policy learned from a workflow.
-        controller_key = (run['head_sha'], run['event'])
+        controller_key = (run['head_sha'], run['event'], a.sha(a.encoded(candidate_policy)))
         if verified_controllers is None or controller_key not in verified_controllers:
-            controller.verify_remote(client, run['head_sha'], policy, event=run['event'])
+            controller.verify_remote(client, run['head_sha'], candidate_policy, event=run['event'])
             if verified_controllers is not None:
                 verified_controllers.add(controller_key)
     except ProvenanceFailure as exc:
@@ -357,7 +435,15 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     completed = timestamp(job.get('completed_at'))
     if completed > timestamp(run['updated_at']):
         fail('provenance_timestamp')
-    record = parse_record(client.logs(job['id']), policy, run)
+    raw = client.logs(job['id'])
+    if verified_prepare_only(raw, candidate_policy, run, job, emission[0]):
+        record = None
+    else:
+        record = parse_record(raw, candidate_policy, run)
+    if original_recovery:
+        if record is None:
+            fail('provenance_record')
+        recovery.verify_original_record(record, job['id'])
     # Re-read the *original* attempt, then ensure latest is still the same run.
     # A failed/in-progress later rerun cannot erase this successful publication,
     # or inherit it: the record remains bound to the original attempt and job.
@@ -370,6 +456,8 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
             or timestamp(current['updated_at']) < max(timestamp(listed['updated_at']), timestamp(run['updated_at']))
             or current['run_attempt'] == attempt and run_binding(current) != run_binding(run)):
         fail('provenance_run_changed')
+    if record is None:
+        return None  # Strict prepare proof was rechecked against the original attempt.
     return {'anchor': {'commit': record['receipt_commit'], 'receipt_sha256': record['receipt_sha256']},
             'receipt_sequence': record['receipt_sequence'], 'record_sha256': record['record_sha256'],
             'run_id': run_id, 'run_attempt': attempt, 'job_id': job['id'],

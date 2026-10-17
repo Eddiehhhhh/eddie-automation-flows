@@ -18,6 +18,8 @@ import tempfile
 
 import get_notion_sink_plan as p
 import get_legacy_adapter as git
+import get_notion_plan_recovery as plan_recovery
+import get_notion_live_transport as transport
 
 CONTRACT = 'get-notion-journal-engine-1'
 STATE_PATH = '.sync/get-notion/state.json'
@@ -30,7 +32,7 @@ REASONS = frozenset(('source_changed', 'source_invalid', 'state_changed', 'state
     'missing_target', 'missing_block_ownership', 'human_edit_conflict', 'wrong_parent',
     'unsupported_source_format', 'missing_asset', 'asset_write_contract_missing',
     'archive_not_approved', 'create_not_approved', 'format_not_approved', 'writer_gate_unknown',
-    'request_budget', 'journal_failed', 'journal_busy', 'uncertain_append', 'uncertain_create',
+    'request_budget', 'request_not_dispatched', 'journal_failed', 'journal_busy', 'uncertain_append', 'uncertain_create',
     'uncertain_archive', 'readback_mismatch', 'transport_read_failed', 'transport_write_uncertain',
     'recovery_not_approved', 'unsupported_prepend', 'other'))
 
@@ -553,13 +555,32 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         try: evidence = writers_guard()
         except Exception: fail('writer_gate_unknown')
         if not p.writer_gate({'old_writer_evidence':evidence}): fail('writer_gate_unknown')
+    def request_fingerprint(kind,row,data_source,root=None):
+        if kind=='archive':return transport.fingerprint('PATCH','/blocks/'+root,{'archived':True})
+        blocks=transport.wire_blocks(row['request_blocks'])
+        if kind=='create':
+            return transport.fingerprint('POST','/pages',{'parent':{'type':'data_source_id','data_source_id':data_source},'properties':row['properties'],'children':blocks})
+        body={'children':blocks}
+        if row['after_anchor'] is not None:body['after']=row['after_anchor']
+        return transport.fingerprint('PATCH','/blocks/'+row['page_id']+'/children',body)
+    def restore_prepared():
+        nonlocal version
+        operation['phase']='prepared'
+        version=store.compare_and_set(version,value)
+    def final_writer_guard():
+        try:guard_writers()
+        except Blocked:
+            # No API method has been called since this in_flight checkpoint.
+            restore_prepared()
+            raise
     try:
         if not isinstance(plan, dict) or plan.get('contract') != CONTRACT or digest(plan) != approved_plan_sha: fail('approval_missing')
-        if plan.get('rules_sha256') != rules_sha256(): fail('rules_changed')
         publication.check(plan['publication'])
         counts.update(deferred=len(plan['deferred_ids']),retained_conflicts=len(plan['skipped_conflicts']))
         value, version = store.read(); check_state(value)
         if version != expected_store_sha: fail('state_changed')
+        if (plan.get('rules_sha256') != rules_sha256()
+                and not plan_recovery.allows(plan,value['journal'])): fail('rules_changed')
         if not plan['records']:
             if plan['records'] or value['journal'] is not None or version != plan['state_sha256']: fail('state_changed')
             return {'status':'partial' if counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':0,'write_state':'not_attempted'}
@@ -612,9 +633,18 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                         continue
                 operation['phase']='in_flight'
                 version=store.compare_and_set(version,value)
+                # Recheck after checkpoint persistence, immediately before the
+                # external write; a writer may have activated during the CAS.
+                final_writer_guard()
                 try:
                     counts['write_calls'] += 1
                     response = api.create_page(data_source, ident, row['properties'], row['request_blocks']) if operation['kind']=='create' else api.append_blocks(row['page_id'], row['request_blocks'], row['after_anchor'])
+                except transport.NotDispatched as exc:
+                    if exc.request_fingerprint!=request_fingerprint(operation['kind'],row,data_source):
+                        fail('uncertain_create' if operation['kind']=='create' else 'uncertain_append')
+                    counts['write_calls']-=1
+                    restore_prepared()
+                    fail('request_not_dispatched')
                 except Exception:
                     fail('uncertain_create' if operation['kind']=='create' else 'uncertain_append')
                 operation.update(phase='acknowledged',response=response)
@@ -676,8 +706,16 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                         continue
                 operation['phase']='in_flight'
                 version=store.compare_and_set(version,value)
+                # Recheck after checkpoint persistence, immediately before the
+                # external write; a writer may have activated during the CAS.
+                final_writer_guard()
                 try:
                     counts['write_calls'] += 1; api.archive_block(old_root)
+                except transport.NotDispatched as exc:
+                    if exc.request_fingerprint!=request_fingerprint('archive',row,data_source,old_root):fail('uncertain_archive')
+                    counts['write_calls']-=1
+                    restore_prepared()
+                    fail('request_not_dispatched')
                 except Exception: fail('uncertain_archive')
                 # Resume and normal paths share the same full post-write check.
             final = read_target(api,ident,data_source)

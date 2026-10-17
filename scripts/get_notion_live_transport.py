@@ -16,6 +16,12 @@ VERSION='2025-09-03'
 class Failure(ValueError):
     def __init__(self,reason,status=None):super().__init__(reason);self.status=status
 
+class NotDispatched(Failure):
+    """Exact write rejected before opener/physical-attempt accounting."""
+    def __init__(self,request_fingerprint):
+        super().__init__('request_not_dispatched')
+        self.request_fingerprint=request_fingerprint
+
 def fail(reason,status=None):raise Failure(reason,status) from None
 
 def fingerprint(method,path,body):return native.sha({'method':method,'path':path,'body':body})
@@ -36,11 +42,14 @@ class Transport:
         if not read and (key not in self.approved or key in self.attempted):fail('write_not_authorized_or_already_attempted')
         try:data=None if body is None else native.encoded(body)
         except Exception:fail('malformed_payload')
-        if data is not None and len(data)>(16384 if read else 500000):fail('request_budget')
+        def before_network_budget():
+            if not read:raise NotDispatched(key)
+            fail('request_budget')
+        if data is not None and len(data)>(16384 if read else 500000):before_network_budget()
         for attempt in range(3 if read else 1):
-            if self.attempts>=2000 or self.clock()>=self.deadline:fail('request_budget')
+            if self.attempts>=2000 or self.clock()>=self.deadline:before_network_budget()
             if self.last is not None:self.sleep(max(0,.4-(self.clock()-self.last)))
-            if self.clock()>=self.deadline:fail('request_budget')
+            if self.clock()>=self.deadline:before_network_budget()
             self.last=self.clock();self.attempts+=1
             req=urllib.request.Request('https://api.notion.com/v1'+path,data=data,method=method,headers={'Authorization':'Bearer '+self._token,'Notion-Version':VERSION,'Content-Type':'application/json'})
             if not read:self.attempted.add(key)
@@ -69,6 +78,7 @@ class Transport:
                 delay=int(retry) if re.fullmatch('[0-9]+',retry) else 2**attempt
                 if self.clock()+delay>=self.deadline:fail('request_budget')
                 self.sleep(delay)
+            except NotDispatched:fail('read_transport_failed' if read else 'write_uncertain')
             except Failure:raise
             except ro.ReadFailure:fail('invalid_route')
             except (TimeoutError,urllib.error.URLError,ConnectionError):
@@ -176,7 +186,10 @@ class API:
         key=fingerprint(method,path,body)
         if key not in self.approved or key in self.attempted:fail('write_not_authorized_or_already_attempted')
         self.attempted.add(key)
-        return self.request(method,path,body)
+        try:return self.request(method,path,body)
+        except NotDispatched as exc:
+            if exc.request_fingerprint!=key:fail('write_uncertain')
+            raise
     def preflight_append(self,page_id,blocks,after):
         page=native.uuid(page_id)
         if page not in self.known_pages:fail('unread_target')

@@ -14,6 +14,7 @@ from pathlib import Path
 import tempfile
 
 import get_canonical_manual as engine
+import get_recurring_policy_recovery as recovery
 from get_canonical_manual import a, m, n, r
 
 CONTRACT = 'get-recurring-local-entry-1'
@@ -138,7 +139,8 @@ def read_receipt(reader, commit, expected_sha, policy):
     value = m.strict_capture_json(raw, MAX_RECEIPT)
     if not isinstance(value, dict) or set(value) != RECEIPT_KEYS or a.encoded(value) != raw:
         fail('entry_receipt_schema')
-    if value['contract'] != RECEIPT_CONTRACT or value['policy_sha256'] != policy:
+    if value['contract'] != RECEIPT_CONTRACT or (value['policy_sha256'] != policy
+            and not recovery.accepts_receipt(commit, expected_sha, value, policy)):
         fail('entry_policy_changed')
     if type(value['sequence']) is not int or not 1 <= value['sequence'] <= 1000000:
         fail('entry_receipt_schema')
