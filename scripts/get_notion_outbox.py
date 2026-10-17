@@ -222,7 +222,9 @@ class EngineStore:
     def compare_and_set(self,expected_sha,value):
         e.check_state(value)
         if self.outer is None or digest(self.outer['engine_state'])!=expected_sha:fail('outbox_state_changed')
-        next_value=deepcopy(self.outer);old=self.outer['engine_state'];next_value['engine_state']=deepcopy(value)
+        next_value=deepcopy(self.outer);old=self.outer['engine_state']
+        e.plan_recovery.preserve_holds(old,value)
+        next_value['engine_state']=deepcopy(value)
         journal=value['journal'] or old['journal']
         if journal is not None:
             plan=journal['plan'];desc=plan['publication']

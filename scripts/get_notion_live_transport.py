@@ -4,6 +4,7 @@ No credential loading, workflow entry, uploads or automatic write retries.
 Private snapshots remain caller-owned memory. Never log requests/responses.
 """
 from copy import deepcopy
+import get_notion_list_semantics as list_semantics
 import re
 import time
 import urllib.request
@@ -15,6 +16,11 @@ from get_mirror_incremental_replay import strict_capture_json
 VERSION='2025-09-03'
 class Failure(ValueError):
     def __init__(self,reason,status=None):super().__init__(reason);self.status=status
+
+class WriteFailure(Failure):
+    """Observed HTTP response to one exact physically attempted write."""
+    def __init__(self,reason,status,request_fingerprint):
+        super().__init__(reason,status);self.request_fingerprint=request_fingerprint
 
 class NotDispatched(Failure):
     """Exact write rejected before opener/physical-attempt accounting."""
@@ -53,9 +59,13 @@ class Transport:
             self.last=self.clock();self.attempts+=1
             req=urllib.request.Request('https://api.notion.com/v1'+path,data=data,method=method,headers={'Authorization':'Bearer '+self._token,'Notion-Version':VERSION,'Content-Type':'application/json'})
             if not read:self.attempted.add(key)
+            observed_status=None
             try:
                 with self.opener.open(req,timeout=30) as response:
-                    if response.status not in (200,201):fail('read_api_failed' if read else 'write_uncertain',response.status)
+                    observed_status=response.status
+                    if observed_status not in (200,201):
+                        if read:fail('read_api_failed',observed_status)
+                        raise WriteFailure('permission_denied' if observed_status in (401,403) else 'write_uncertain',observed_status,key)
                     raw=response.read(ro.MAX_RESPONSE+1)
                 self.bytes+=len(raw)
                 if len(raw)>ro.MAX_RESPONSE or self.bytes>ro.MAX_HTTP_BYTES:fail('response_budget' if read else 'write_uncertain')
@@ -66,7 +76,9 @@ class Transport:
             except urllib.error.HTTPError as exc:
                 status=exc.code;retry=exc.headers.get('Retry-After','') if exc.headers else ''
                 # Never retry write requests, even for 429 or service errors.
-                if not read:exc.close();fail('permission_denied' if status in (401,403) else 'write_uncertain',status)
+                if not read:
+                    exc.close()
+                    raise WriteFailure('permission_denied' if status in (401,403) else 'write_uncertain',status,key) from None
                 raw=exc.read(ro.MAX_RESPONSE+1);exc.close();self.bytes+=len(raw)
                 if len(raw)>ro.MAX_RESPONSE or self.bytes>ro.MAX_HTTP_BYTES:fail('response_budget')
                 try:err=strict_capture_json(raw,ro.MAX_RESPONSE)
@@ -78,6 +90,9 @@ class Transport:
                 delay=int(retry) if re.fullmatch('[0-9]+',retry) else 2**attempt
                 if self.clock()+delay>=self.deadline:fail('request_budget')
                 self.sleep(delay)
+            except WriteFailure as exc:
+                if not read and type(observed_status) is int and 400<=observed_status<=599 and exc.status==observed_status and exc.request_fingerprint==key:raise
+                fail('read_transport_failed' if read else 'write_uncertain')
             except NotDispatched:fail('read_transport_failed' if read else 'write_uncertain')
             except Failure:raise
             except ro.ReadFailure:fail('invalid_route')
@@ -89,7 +104,7 @@ class Transport:
         fail('read_transport_failed')
 
 
-def wire_blocks(rows):
+def wire_blocks(rows, previous_type=list_semantics.UNKNOWN):
     count=[0]
     def split_runs(runs):
         out=[]
@@ -124,7 +139,9 @@ def wire_blocks(rows):
             if children:payload['children']=children
             result.append({'object':'block','type':kind,kind:payload})
         return result
-    value=walk(rows,0)
+    try: normalized=list_semantics.defaults(rows,previous_type,wire=True)
+    except (KeyError,TypeError,ValueError):fail('unsupported_source_format')
+    value=walk(normalized,0)
     def limits(x):
         if isinstance(x,list):
             if len(x)>100:fail('request_budget')
@@ -145,7 +162,7 @@ class API:
         if native.sha(self.source)!=data_source_pin:fail('wrong_parent')
         if not isinstance(note_ids,list) or not 1<=len(note_ids)<=50 or any(not isinstance(i,str) or not re.fullmatch('[0-9]{19}',i) for i in note_ids) or len(set(note_ids))!=len(note_ids):fail('invalid_cohort')
         self.ids=frozenset(note_ids);self.ds_pin=data_source_pin;self.db_pin=database_pin
-        self.approved=frozenset(approved_writes);self.attempted=set();self.known_pages=set();self.known_blocks=set();self.page_roots={}
+        self.approved=frozenset(approved_writes);self.attempted=set();self.known_pages=set();self.known_blocks=set();self.page_roots={};self.page_root_types={}
     def schema(self):
         value=self.request('GET','/data_sources/'+self.source,None)
         if not isinstance(value,dict) or value.get('object')!='data_source' or native.uuid(value.get('id'))!=self.source:fail('wrong_parent')
@@ -179,6 +196,7 @@ class API:
             return self.request(method,path,body)
         result=native.collect(selected,page_pins={native.sha(page):native.sha(ident)},data_source_pin=self.ds_pin,database_pin=self.db_pin)['snapshots'][ident]
         self.page_roots[page]=[x['id'] for x in result['recursive_blocks'] if x['parent_id']==page]
+        self.page_root_types[page]={x['id']:x['type'] for x in result['recursive_blocks'] if x['parent_id']==page}
         self.known_pages.add(page);self.known_blocks.update(x['id'] for x in result['recursive_blocks'])
         result['asset_blockers']=['native_image_binding_required'] if any(x['type']=='image' for x in result['recursive_blocks']) else []
         return self.snapshot_adapter(result,ident) if self.snapshot_adapter is not None else result
@@ -193,7 +211,8 @@ class API:
     def preflight_append(self,page_id,blocks,after):
         page=native.uuid(page_id)
         if page not in self.known_pages:fail('unread_target')
-        payload={'children':wire_blocks(blocks)}
+        previous=None if after is None else self.page_root_types.get(page,{}).get(native.uuid(after),list_semantics.UNKNOWN)
+        payload={'children':wire_blocks(blocks,previous)}
         if after is None and self.page_roots.get(page):fail('unsupported_prepend')
         if after is not None:
             after=native.uuid(after)
@@ -218,7 +237,7 @@ class API:
         if native.note_id({'properties':properties})!=ident:fail('wrong_note_identity')
         self.schema()
         if self.matches(ident):fail('duplicate_id')
-        payload={'parent':{'type':'data_source_id','data_source_id':self.source},'properties':deepcopy(properties),'children':wire_blocks(blocks)}
+        payload={'parent':{'type':'data_source_id','data_source_id':self.source},'properties':deepcopy(properties),'children':wire_blocks(blocks,None)}
         value=self._write('POST','/pages',payload)
         if value.get('object')!='page' or native.note_id(value)!=ident:fail('write_uncertain')
         parent=value.get('parent')

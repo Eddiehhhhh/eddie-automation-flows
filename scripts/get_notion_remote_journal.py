@@ -402,6 +402,7 @@ class RemoteJournal:
                 raise JournalFailure('request_budget', stage='budget')
             codec.check_state(value)
             parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
+            engine.plan_recovery.preserve_holds(old_value['engine_state'],value['engine_state'])
             if expected_sha != digest:
                 raise JournalFailure('state_changed', stage='anchor')
             blob = retention.oid(data)

@@ -5,6 +5,7 @@ evidence. External hashes in policy pin ownership receipts; hashing a newly
 observed page is never ownership adoption. Every operation below is a preview.
 """
 from copy import deepcopy
+import get_notion_list_semantics as list_semantics
 import hashlib
 import json
 import re
@@ -99,10 +100,10 @@ def rich_text(value):
         if re.search(r'\\<[bB][rR] ?/?>', text):
             stop('unsupported_source_format')
         text = re.sub(r'<[bB][rR] ?/?>', '\n', text)
-        if re.search(r'(?<!\w)_|_(?!\w)|__|[~<]', text):
+        if re.search(r'(?<!\w)_|_(?!\w)|__|~~|<', text):
             stop('unsupported_source_format')
         return text
-    token = re.compile(r'(\\[\\`*\[\]()]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\))')
+    token = re.compile(r'(\\[\\`*\[\]()~]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\))')
     cursor = 0
     for match in token.finditer(value):
         plain = value[cursor:match.start()]
@@ -256,6 +257,48 @@ def source_body(data, ident):
     return body
 
 
+def compact_paragraph_pairs(blocks):
+    """Fit one request by joining only disjoint adjacent paragraph pairs.
+
+    This deliberately changes a pair of block-level paragraph boundaries into
+    an internal blank line. Every source rich-text run is retained verbatim and
+    in order, with exactly one plain double-newline run inserted per pair.
+    No structural block, child, color boundary or request limit is crossed.
+    Return the input unchanged in value if the bounded pairing cannot fit.
+    """
+    limit = 100
+    if not limit < len(blocks) <= 2 * limit:
+        return deepcopy(blocks), 0
+    needed = len(blocks) - limit
+    def eligible(row):
+        return (isinstance(row, dict) and set(row) == {'type', 'payload', 'children'}
+                and row['type'] == 'paragraph' and row['children'] == []
+                and isinstance(row['payload'], dict)
+                and 'rich_text' in row['payload']
+                and not set(row['payload']) - {'rich_text', 'color'}
+                and isinstance(row['payload']['rich_text'], list)
+                and all(isinstance(run, dict) and run.get('type') == 'text'
+                    and isinstance(run.get('text'), dict)
+                    and isinstance(run['text'].get('content'), str)
+                    for run in row['payload']['rich_text']))
+    output = []; merged = 0; index = 0
+    while index < len(blocks):
+        left = blocks[index]
+        if merged < needed and index + 1 < len(blocks):
+            right = blocks[index + 1]
+            if (eligible(left) and eligible(right)
+                    and left['payload'].get('color', 'default') == right['payload'].get('color', 'default')):
+                runs = left['payload']['rich_text'] + [text_run('\n\n')] + right['payload']['rich_text']
+                # Respect the unchanged 100-run/2000-character wire limits.
+                chunks = sum(max(1, (len(run['text']['content']) + 1999) // 2000) for run in runs)
+                if chunks <= 100:
+                    joined = deepcopy(left); joined['payload']['rich_text'] = deepcopy(runs)
+                    output.append(joined); merged += 1; index += 2
+                    continue
+        output.append(deepcopy(left)); index += 1
+    return (output, merged) if len(output) <= limit else (deepcopy(blocks), 0)
+
+
 def render_markdown(data, ident, assets, source_path, content_tree, *, preserved_image=None):
     """Native preview subset. Unsupported input is blocked, never flattened."""
     if preserved_image is not None:
@@ -369,10 +412,21 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
             task = re.fullmatch(r'\[([ xX])\] (.*)', value)
             payload = {'rich_text': rich_text(task[2] if task else value)}
             if kind=='numbered_list_item' and not task:
-                first=index==0 or re.fullmatch(r'[0-9]+\. .*',lines[index-1]) is None
+                first = index == 0 or re.fullmatch(r'[0-9]+\. .*', lines[index - 1]) is None
                 if first:
-                    if int(listing[3])!=1: stop('unsupported_source_format')
-                    payload['list_start_index']=1
+                    number = int(listing[3])
+                    if number == 1:
+                        payload['list_start_index'] = 1
+                    else:
+                        # Blank lines alone do not end a Markdown ordered list.
+                        # Keep only an exactly consecutive item in the same list;
+                        # a real start>1 or an intervening block still fails.
+                        prior = index - 1
+                        while prior >= 0 and not lines[prior].strip(): prior -= 1
+                        previous = re.fullmatch(r'([0-9]+)\. .*', lines[prior]) if prior >= 0 else None
+                        if (previous is None or number != int(previous[1]) + 1
+                                or not output or output[-1]['type'] != 'numbered_list_item'):
+                            stop('unsupported_source_format')
             if task: kind = 'to_do'; payload['checked'] = task[1].lower() == 'x'
             output.append(block(kind, payload)); index += 1; continue
         if line.startswith('> '):
@@ -387,6 +441,8 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
                 break
             paragraph.append(lines[index]); index += 1
         output.append(block('paragraph', {'rich_text': rich_text('\n'.join(paragraph))}))
+    output, joined_pairs = compact_paragraph_pairs(output)
+    if joined_pairs: warnings.append('paragraph_boundaries_compacted')
     if len(encoded(output)) > MAX_TARGET or len(output) > MAX_BLOCKS:
         stop('incomplete_source')
     return output, used, sorted(set(warnings))
@@ -508,7 +564,9 @@ def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy,
         result['protected_block_ids'] = [i for i in order if i not in owned]
         result['properties_sha256'] = digest(snapshot['properties_raw'])
         result['protected_blocks_sha256'] = digest([nodes[i] for i in order if i not in owned])
-        if current == rendered:
+        start=roots.index(managed_roots[0]) if managed_roots else 0
+        previous=nodes[roots[start-1]]['type'] if start else None
+        if list_semantics.defaults(current,previous) == list_semantics.defaults(rendered,previous):
             result['decision'] = 'noop_verified'
             return result
         result['decision'] = 'preview_diff'

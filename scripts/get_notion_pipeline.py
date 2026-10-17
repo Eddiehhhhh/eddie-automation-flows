@@ -36,10 +36,12 @@ def pending(publication,state,engine_policy,initial_scope,retry):
     key=e.digest({'policy':engine_policy,'initial_scope':initial_scope})
     result=[]
     for ident,source in sorted(publication.descriptor['records'].items()):
+        if plan_recovery.held(state,ident):continue
         prior=state['receipts'].get(ident,{})
         if prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit']:continue
         prior=state['failures'].get(ident,{})
         if not retry and prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit'] and prior.get('policy_sha256')==key:continue
+        if e.content_scope.reason(ident,publication.read(ident)):continue
         result.append(ident)
     return result[:e.MAX_RECORDS]
 
@@ -49,10 +51,10 @@ def wire_allowlist(plan,api):
     keys=set()
     for row in plan['records']:
         if row['action']=='create':
-            body={'parent':{'type':'data_source_id','data_source_id':api.source},'properties':deepcopy(row['properties']),'children':t.wire_blocks(row['request_blocks'])}
+            body={'parent':{'type':'data_source_id','data_source_id':api.source},'properties':deepcopy(row['properties']),'children':t.wire_blocks(row['request_blocks'],None)}
             keys.add(t.fingerprint('POST','/pages',body))
         elif row['action']=='update':
-            body={'children':t.wire_blocks(row['request_blocks'])}
+            body={'children':t.wire_blocks(row['request_blocks'],e.append_previous_type(row))}
             if row['after_anchor'] is not None:body['after']=t.native.uuid(row['after_anchor'])
             keys.add(t.fingerprint('PATCH','/blocks/'+t.native.uuid(row['page_id'])+'/children',body))
             for ident in row['old_roots']:keys.add(t.fingerprint('PATCH','/blocks/'+t.native.uuid(ident),{'archived':True}))
@@ -96,6 +98,7 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
         if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
         counts=Counter(r['action'] for r in plan['records']);reasons=Counter(r['reason'] for r in plan['records'] if r['action']=='blocked')
         report={'contract':CONTRACT,'status':'prepared','source_mode':plan['source_mode'],'plan_sha256':e.digest(plan),'journal_sha256':sha,'selected':len(plan['records']),'deferred':len(plan['deferred_ids']),'retained_conflicts':len(plan['skipped_conflicts']),'actions':dict(counts),'reason_counts':dict(reasons),'native_notes_read':len(ids),'get_requests':0,'asset_downloads':getattr(snapshot_adapter,'downloads',0),'external_write_attempts':None if prior_attempt else 0,'write_state':'unknown' if prior_attempt else 'not_attempted','prior_journal_effects':'unresolved' if prior_attempt else 'none','complete_library_claimed':False}
+        report['paragraph_compaction_notes']=sum('paragraph_boundaries_compacted' in row.get('warnings',[]) for row in plan['records'])
         if snapshot_adapter is not None:report['image_binding']=snapshot_adapter.report()
         if not apply:return public_report(report)
         stage='execute';attempted=True
@@ -134,6 +137,9 @@ def public_report(value):
         if value['source_mode'] not in ('initial_review','changed_content'):return unknown
         keep=('contract','status','source_mode','plan_sha256','journal_sha256','selected','deferred','retained_conflicts','actions','reason_counts','native_notes_read','get_requests','asset_downloads','external_write_attempts','write_state','prior_journal_effects','complete_library_claimed')
         clean={k:deepcopy(value[k]) for k in keep}
+        compacted=value.get('paragraph_compaction_notes',0)
+        if type(compacted) is not int or not 0<=compacted<=value['selected']:return unknown
+        clean['paragraph_compaction_notes']=compacted
         if 'image_binding' in value:
             image=value['image_binding']
             if not isinstance(image,dict) or set(image)!={'verified','failures','host'} or image['host'] not in ('not_observed','exact_known_s3','exact_prod_files_secure','other') or type(image['verified']) is not int or not 0<=image['verified']<=1 or not isinstance(image['failures'],dict) or set(image['failures'])-IMAGE_FAILURES or any(type(n) is not int or not 0<n<=1 for n in image['failures'].values()) or image['verified']+sum(image['failures'].values())>1:return unknown

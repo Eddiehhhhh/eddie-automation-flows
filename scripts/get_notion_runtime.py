@@ -53,7 +53,7 @@ def scope_for(public_policy):
         'initial_proof_sha256':ro.HISTORICAL_TEMPLATE['proof_sha256'],
         'initial_image_proof_sha256':preserved_image.TEMPLATE['proof_sha256'],
         'preserve_existing_image_only':True,
-        'initial_two_first':True,'unknown_existing_pages':'isolate','plan_authorization':'standing_bounded'}
+        'initial_two_first':True,'uncertain_hold_sha256':plan_recovery.HOLD_SHA256,'unknown_existing_pages':'isolate','plan_authorization':'standing_bounded'}
 
 
 def schema(request,data_source):
@@ -134,14 +134,22 @@ def initial_done(state):
 
     This does not claim both samples were written or that assets are supported.
     """
-    known=set(state['engine_state']['receipts'])|set(state['engine_state']['failures'])
+    known=set(state['engine_state']['receipts'])|set(state['engine_state']['failures'])|set(state['engine_state'].get('unresolved_by_id',{}))
     return set(transport.native.PAGE_PINS.values()) <= {transport.native.sha(i) for i in known}
 
 
 def dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writers_guard,initial_factory=initial_inputs,create_recovery=None,approved_recovery_sha=None):
     state,sha=store.read();outbox.check_state(state)
     if sha!=outbox.digest(state):fail('notion_state_anchor')
-    pending_journal=state['engine_state']['journal'];counts={'initial_notes':0,'initial_range_candidates':0}
+    isolated=0
+    if plan_recovery.validate_initial_state(state,sha):
+        candidate=plan_recovery.isolate_outer(state,sha)
+        if apply:
+            observed,sha=outbox.confirmed_compare_and_set(store,sha,candidate);state=observed
+        else:
+            store=ReadOnlyStore(candidate);state,sha=store.read()
+        isolated=1
+    pending_journal=state['engine_state']['journal'];counts={'initial_notes':0,'initial_range_candidates':0,'unresolved_operations':len(state['engine_state'].get('unresolved_by_id',{})),'quarantine_transitions':isolated if apply else 0,'quarantine_candidates':isolated,'unresolved_effects':'unknown' if state['engine_state'].get('unresolved_by_id') else 'none'}
     if pending_journal is not None:
         plan=pending_journal['plan'];desc=plan['publication']
         if desc.get('initial_cohort') is not None:
@@ -191,6 +199,8 @@ def safe_result(value):
         known_no_attempt=trusted_shape and value.get('write_state')=='not_attempted' and type(value.get('external_write_attempts')) is int and value['external_write_attempts']==0
         return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,
             'write_state':'not_attempted' if known_no_attempt else 'unknown',
+            'unresolved_operations':value.get('unresolved_operations') if type(value.get('unresolved_operations')) is int and 0<=value['unresolved_operations']<=1 else None,
+            'unresolved_effects':'unknown',
             'external_write_attempts':0 if known_no_attempt else None,'asset_downloads':value.get('asset_downloads') if type(value.get('asset_downloads')) is int and 0<=value['asset_downloads']<=200 else None,'complete_library_claimed':False}
     base=pipeline.public_report(value)
     if value.get('status') in ('queue_empty','queue_partial'):
@@ -203,6 +213,12 @@ def safe_result(value):
     for key,cap in (('initial_notes',2),('initial_range_candidates',2),('queued',2500)):
         if type(value.get(key)) is not int or not 0<=value[key]<=cap:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
         base[key]=value[key]
+    for key in ('unresolved_operations','quarantine_transitions','quarantine_candidates'):
+        count=value.get(key,0)
+        if type(count) is not int or not 0<=count<=1:fail('notion_scope')
+        base[key]=count
+    if value.get('unresolved_effects','none') not in ('none','unknown'):fail('notion_scope')
+    base['unresolved_effects']=value.get('unresolved_effects','none')
     if 'outer_journal_sha256' in value:e.p.hex_hash(value['outer_journal_sha256'],64);base['outer_journal_sha256']=value['outer_journal_sha256']
     base.update(contract=CONTRACT,complete_library_claimed=False,get_requests=0)
     if 'asset_downloads' not in base:base['asset_downloads']=0
@@ -266,7 +282,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     'public_policy_sha256':public_hash})
             durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=confirm)
             current,sha=durable.read()
-            if present and found.get('recovery_anchor')=='exact_initial_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
+            if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
                 fail('notion_state_anchor')
             old_journal=current['engine_state']['journal']
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and (old_journal['operation'].get('phase')!='prepared' or old_journal['operation'].get('kind') in ('cleanup','archive'))))
@@ -277,7 +293,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 # Verify the current Get marker before any initial Notion call.
                 # No successful old source payload is requested again.
                 source_loader.load_confirmed_chain(local,remote,token,root,tip,chain_origin,current['last_enqueued_publication'] or chain_origin,public_policy['get_policy_sha256'])
-            elif initial_done(current):
+            elif initial_done(current) or plan_recovery.validate_initial_state(current,sha):
                 if public_policy is None:fail('notion_marker')
                 found=provenance.discover(client,public_policy)
                 tip={**found['anchor'],'sequence':found['receipt_sequence']}
@@ -298,7 +314,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if old_journal is not None and plan_recovery.allows(old_journal['plan'],old_journal):
                 # Current code/controller/policy remain the actual new values
                 # in every checkpoint; this identifies the unchanged prior plan.
-                safe['resumed_prior_plan_sha256']=plan_recovery.OLD_PLAN
+                safe['isolated_prior_plan_sha256' if result.get('quarantine_candidates') else 'resumed_prior_plan_sha256']=plan_recovery.OLD_PLAN
                 safe['resumed_prior_rules_sha256']=plan_recovery.OLD_ENGINE_RULES
             return safe
     except Exception as exc:

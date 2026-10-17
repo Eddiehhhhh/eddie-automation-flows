@@ -1,4 +1,4 @@
-"""One explicitly reviewed predecessor for the first production code repair.
+"""Two exact publication proofs for the production recovery code repairs.
 
 These are external publication evidence, not values learned from a receipt or
 repository state. This exception admits only the original sequence-one receipt
@@ -27,6 +27,26 @@ ORIGINAL_RECEIPT_COMMIT = 'a37cc108096210d0fb9847609e906ca22c88acf4'
 ORIGINAL_RECEIPT_SHA256 = 'e49b99c42729ca079cdc04ed75145f39b12aad2d1a587dfcd0cafce9344f7293'
 ORIGINAL_RECORD_SHA256 = '156ee549a46a3d5c6501fe7e0d729d14905e47723750152db849785968e6854f'
 
+# The later confirmed no-op refreshes provenance, not the original receipt.
+# This policy/proof was independently verified before this recovery was built.
+NOOP_PUBLIC_POLICY_SHA256 = '3f44a9e855935f1d5b350b5aab10fe7e6456abad4c4b16e899b94a96ccea0c2f'
+_NOOP_PUBLIC_POLICY = {
+    'code_sha': '5a12166c39289b6ce4aabe1fdd73640cc34981ad',
+    'contract': 'get-public-actions-provenance-policy-1',
+    'controller_template_sha256': '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2',
+    'get_policy_sha256': '6e4df4f707c0e74a1205f1fa6219c51a750866704228d67897bde0263b2130df',
+    'head_branch': 'main', 'job_name': 'canonical-get',
+    'publication_step_name': 'Emit verified canonical publication anchor',
+    'repository': 'Eddiehhhhh/eddie-automation-flows', 'repository_id': 1270807355,
+    'rules_sha256': 'b950cc2dca2ea0742e039bea86afc0e1ff1c75068b85db97438f0a2a79a69662',
+    'workflow_id': 387242896, 'workflow_path': '.github/workflows/get-canonical.yml',
+}
+NOOP_RUN_ID = 39026550645
+NOOP_RUN_ATTEMPT = 1
+NOOP_JOB_ID = 117378551709
+NOOP_CONTROLLER_SHA = 'b257083bcc811f17804be95bbf6b206488ffd4cf'
+NOOP_RECORD_SHA256 = 'c8f9767395429c2ec094c28ed0ebd7c901b2f93ffdf75ba3319884e77a3e65b6'
+
 
 def old_public_policy():
     """Immutable externally approved old P, also used by the exact Notion repair."""
@@ -34,6 +54,15 @@ def old_public_policy():
     if a.sha(a.encoded(_OLD_PUBLIC_POLICY)) != OLD_PUBLIC_POLICY_SHA256:
         raise ValueError('recovery_policy_changed')
     return deepcopy(_OLD_PUBLIC_POLICY)
+
+
+
+def noop_public_policy():
+    """Exact independently approved policy of the successful run-eight no-op."""
+    from get_recurring_entry import a
+    if a.sha(a.encoded(_NOOP_PUBLIC_POLICY)) != NOOP_PUBLIC_POLICY_SHA256:
+        raise ValueError('recovery_policy_changed')
+    return deepcopy(_NOOP_PUBLIC_POLICY)
 
 
 def current_get_policy():
@@ -51,17 +80,21 @@ def accepts_receipt(commit, receipt_sha256, value, requested_policy):
 
 
 def candidate_policy(policy, run):
-    """Only the original successful attempt can use old controller/log proof."""
+    """Only either exact successful predecessor can use its old policy proof."""
     import get_recurring_entry as entry
     old = old_public_policy()
+    run_id, attempt, controller = ORIGINAL_RUN_ID, ORIGINAL_RUN_ATTEMPT, ORIGINAL_CONTROLLER_SHA
+    if run.get('id') == NOOP_RUN_ID:
+        old = noop_public_policy()
+        run_id, attempt, controller = NOOP_RUN_ID, NOOP_RUN_ATTEMPT, NOOP_CONTROLLER_SHA
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
     if (all(policy.get(k) == old[k] for k in stable)
             and policy.get('code_sha') != old['code_sha']
             and policy.get('rules_sha256') == entry.rules_sha256()
             and policy.get('get_policy_sha256') == current_get_policy()
-            and run.get('id') == ORIGINAL_RUN_ID
-            and run.get('run_attempt') == ORIGINAL_RUN_ATTEMPT
-            and run.get('head_sha') == ORIGINAL_CONTROLLER_SHA
+            and run.get('id') == run_id
+            and run.get('run_attempt') == attempt
+            and run.get('head_sha') == controller
             and run.get('event') == 'workflow_dispatch'):
         return old, True
     return policy, False
@@ -69,8 +102,17 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id):
     from get_publication_provenance import fail
-    if (job_id != ORIGINAL_JOB_ID or record['record_sha256'] != ORIGINAL_RECORD_SHA256
+    if record['run_id'] == NOOP_RUN_ID:
+        expected_job, expected_record, updated = NOOP_JOB_ID, NOOP_RECORD_SHA256, False
+        expected_attempt = NOOP_RUN_ATTEMPT
+    elif record['run_id'] == ORIGINAL_RUN_ID:
+        expected_job, expected_record, updated = ORIGINAL_JOB_ID, ORIGINAL_RECORD_SHA256, True
+        expected_attempt = ORIGINAL_RUN_ATTEMPT
+    else:
+        fail('provenance_record')
+    if (job_id != expected_job or record['record_sha256'] != expected_record
+            or record['run_attempt'] != expected_attempt
             or record['receipt_commit'] != ORIGINAL_RECEIPT_COMMIT
             or record['receipt_sha256'] != ORIGINAL_RECEIPT_SHA256
-            or record['receipt_sequence'] != 1 or record['main_updated'] is not True):
+            or record['receipt_sequence'] != 1 or record['main_updated'] is not updated):
         fail('provenance_record')

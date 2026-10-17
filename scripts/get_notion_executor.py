@@ -8,6 +8,7 @@ from separate trusted approval/committed evidence, never from self-hashing a
 fresh observation. This module never treats an unowned existing page as owned.
 """
 from copy import deepcopy
+import get_notion_list_semantics as list_semantics
 import fcntl
 import hashlib
 import json
@@ -20,6 +21,7 @@ import get_notion_sink_plan as p
 import get_legacy_adapter as git
 import get_notion_plan_recovery as plan_recovery
 import get_notion_live_transport as transport
+import get_notion_content_scope as content_scope
 
 CONTRACT = 'get-notion-journal-engine-1'
 STATE_PATH = '.sync/get-notion/state.json'
@@ -34,7 +36,7 @@ REASONS = frozenset(('source_changed', 'source_invalid', 'state_changed', 'state
     'archive_not_approved', 'create_not_approved', 'format_not_approved', 'writer_gate_unknown',
     'request_budget', 'request_not_dispatched', 'journal_failed', 'journal_busy', 'uncertain_append', 'uncertain_create',
     'uncertain_archive', 'readback_mismatch', 'transport_read_failed', 'transport_write_uncertain',
-    'recovery_not_approved', 'unsupported_prepend', 'other'))
+    'recovery_not_approved', 'unsupported_prepend', 'unresolved_operation', 'privacy_scope_required', 'content_review_required', 'empty_source', 'prior_denial', 'other'))
 
 
 class Blocked(ValueError):
@@ -94,7 +96,8 @@ def check_preserved_bindings(bindings, *, page=None, managed=(), protected=None,
 
 def check_state(value):
     try:
-        if not isinstance(value, dict) or set(value) != {'contract', 'receipts', 'failures', 'journal'} or value['contract'] != CONTRACT or not isinstance(value['receipts'], dict) or not isinstance(value['failures'], dict): fail('state_invalid')
+        if not isinstance(value, dict) or set(value) not in ({'contract', 'receipts', 'failures', 'journal'}, {'contract', 'receipts', 'failures', 'journal', 'unresolved_by_id'}) or value['contract'] != CONTRACT or not isinstance(value['receipts'], dict) or not isinstance(value['failures'], dict): fail('state_invalid')
+        plan_recovery.validate_holds(value.get('unresolved_by_id',{}))
         if len(value['receipts'])>2500 or len(value['failures'])>2500: fail('request_budget')
         for ident,row in value['receipts'].items():
             p.note_id(ident)
@@ -156,7 +159,8 @@ class LocalJournal:
         fd = os.open(self.lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            _, current = self.read()
+            prior, current = self.read()
+            plan_recovery.preserve_holds(prior,value)
             if current != expected_sha: fail('state_changed')
             handle, name = tempfile.mkstemp(dir=self.path.parent, prefix='.notion-journal-')
             try:
@@ -409,6 +413,8 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
     pending = []; skipped_conflicts=[]
     for ident in sorted(publication.descriptor['records']):
         source = publication.descriptor['records'][ident]
+        if plan_recovery.held(state,ident):
+            skipped_conflicts.append(ident);continue
         prior = state['receipts'].get(ident,{})
         if prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit']: continue
         failed = state['failures'].get(ident,{})
@@ -421,9 +427,12 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         source = publication.descriptor['records'][ident]
         row = {'note_id': ident, 'source': source, 'action': 'blocked', 'reason': None}
         try:
-            snapshot = snapshots.get(ident); view = target(snapshot, ident, data_source)
-            if preserved_images.get(ident) is not None and view is None:fail('missing_asset')
             data = publication.read(ident)
+            scope_reason=content_scope.reason(ident,data)
+            if scope_reason:fail(scope_reason)
+            snapshot = snapshots.get(ident); view = target(snapshot, ident, data_source)
+            if plan_recovery.held(state,ident,view['page_id'] if view else None):fail('unresolved_operation')
+            if preserved_images.get(ident) is not None and view is None:fail('missing_asset')
             rendered, bindings, warnings = p.render_markdown(data, ident, assets or {}, source['path'],
                 publication.descriptor['content_tree'],preserved_image=preserved_images.get(ident))
             row.update(rendered=rendered, before_sha256=digest(view), warnings=warnings, asset_bindings_sha256=digest(bindings), source_assets={v['path']:v['git_blob'] for v in bindings.values()})
@@ -464,6 +473,7 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                     row.update(page_id=view['page_id'],managed=[],old_roots=[],before=deepcopy(snapshot),after_anchor=None,creation_plan_sha256=origin)
                     if not rendered: row['action']='noop'
                     else: row.update(action='update',request_blocks=request_blocks(rendered))
+                    if row['action']=='update': transport.wire_blocks(row['request_blocks'],append_previous_type(row))
                     records.append(row); continue
                 batch = {'commit': publication.descriptor['commit'], 'content_complete': {ident: True},
                     'content_tree': publication.descriptor['content_tree'], 'content_sha256': {source['path']: source['sha256']}}
@@ -483,7 +493,9 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                     if not policy['allow_archive']: fail('archive_not_approved')
                     if not rendered: fail('unsupported_source_format')
                     row.update(action='update', request_blocks=request_blocks(rendered))
-        except (Blocked, p.Blocked) as exc:
+            if row['action'] in ('create','update'):
+                transport.wire_blocks(row['request_blocks'],None if row['action']=='create' else append_previous_type(row))
+        except (Blocked, p.Blocked, transport.Failure) as exc:
             row.update(action='blocked', reason=str(exc) if str(exc) in REASONS else 'other')
         except Exception:
             row.update(action='blocked', reason='source_invalid')
@@ -516,7 +528,8 @@ def appended(before_snapshot, after_snapshot, row, data_source, response_ids=Non
     count = len(row['rendered']); roots = after['roots'][position:position+count]
     if len(roots) != count or after['roots'] != before['roots'][:position] + roots + before['roots'][position:]: fail('readback_mismatch')
     if response_ids is not None and roots != response_ids: fail('readback_mismatch')
-    if set(roots) & set(before['nodes']) or not same([semantic(after['nodes'], i) for i in roots], row['rendered']): fail('readback_mismatch')
+    previous=before['nodes'][before['roots'][position-1]]['type'] if position else None
+    if set(roots) & set(before['nodes']) or not same(list_semantics.defaults([semantic(after['nodes'], i) for i in roots],previous), list_semantics.defaults(row['rendered'],previous)): fail('readback_mismatch')
     new_ids = {i for root in roots for i in subtree(after['nodes'], root)}
     if set(after['nodes']) != set(before['nodes']) | new_ids: fail('readback_mismatch')
     return roots, [i for i in after['order'] if i in new_ids]
@@ -529,9 +542,16 @@ def archived(before_snapshot, after_snapshot, ident, data_source, root):
     if not same(after['nodes'], {i:v for i,v in before['nodes'].items() if i not in removed}) or after['roots'] != [i for i in before['roots'] if i != root]: fail('readback_mismatch')
 
 
+def append_previous_type(row):
+    anchor=row.get('after_anchor')
+    if anchor is None:return None
+    before=row.get('before',{})
+    return next((x['type'] for x in before.get('recursive_blocks',[]) if x.get('id')==anchor and x.get('parent_id')==row.get('page_id')),list_semantics.UNKNOWN)
+
+
 def created(snapshot, row, data_source, expected_page):
     view = target(snapshot, row['note_id'], data_source)
-    if view is None or view['page_id'] != expected_page or not same(view['semantic'], row['rendered']): fail('readback_mismatch')
+    if view is None or view['page_id'] != expected_page or not same(list_semantics.defaults(view['semantic'],None), list_semantics.defaults(row['rendered'],None)): fail('readback_mismatch')
     for key, submitted in row['properties'].items():
         actual = view['properties'].get(key)
         kind = submitted['type']
@@ -550,14 +570,14 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
     recovery approval; a matching current observation alone cannot adopt it.
     """
     counts = {'created':0,'updated':0,'noop':0,'blocked':0,'write_calls':0,'deferred':0,'retained_conflicts':0}
-    reason = None
+    reason = None; write_http_status=None
     def guard_writers():
         try: evidence = writers_guard()
         except Exception: fail('writer_gate_unknown')
         if not p.writer_gate({'old_writer_evidence':evidence}): fail('writer_gate_unknown')
     def request_fingerprint(kind,row,data_source,root=None):
         if kind=='archive':return transport.fingerprint('PATCH','/blocks/'+root,{'archived':True})
-        blocks=transport.wire_blocks(row['request_blocks'])
+        blocks=transport.wire_blocks(row['request_blocks'],None if kind=='create' else append_previous_type(row))
         if kind=='create':
             return transport.fingerprint('POST','/pages',{'parent':{'type':'data_source_id','data_source_id':data_source},'properties':row['properties'],'children':blocks})
         body={'children':blocks}
@@ -567,8 +587,16 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         nonlocal version
         operation['phase']='prepared'
         version=store.compare_and_set(version,value)
+    def held_guard():
+        fresh,fresh_sha=store.read();check_state(fresh)
+        if fresh_sha!=version or digest(fresh)!=fresh_sha:fail('state_changed')
+        page=row.get('page_id') or operation.get('before',{}).get('page_id')
+        if plan_recovery.held(fresh,ident,page):fail('unresolved_operation')
+        scope_reason=content_scope.reason(ident,publication.read(ident))
+        if scope_reason:fail(scope_reason)
     def final_writer_guard():
-        try:guard_writers()
+        try:
+            held_guard();guard_writers()
         except Blocked:
             # No API method has been called since this in_flight checkpoint.
             restore_prepared()
@@ -595,6 +623,10 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         while journal['index'] < len(plan['records']):
             row = plan['records'][journal['index']]; ident = row['note_id']
             publication.check(plan['publication'])
+            if plan_recovery.held(value,ident,row.get('page_id')):fail('unresolved_operation')
+            if row['action'] != 'blocked':
+                scope_reason=content_scope.reason(ident,publication.read(ident))
+                if scope_reason:fail(scope_reason)
             if row['action'] == 'blocked':
                 value['failures'][ident]={'md_blob':row['source']['blob'],'source_commit':plan['publication']['commit'],'policy_sha256':plan['policy_sha256'],'reason':row['reason']}
                 counts['blocked'] += 1; journal['index'] += 1
@@ -645,6 +677,14 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                     counts['write_calls']-=1
                     restore_prepared()
                     fail('request_not_dispatched')
+                except transport.Failure as exc:
+                    # This diagnoses a new uncertain call; it never proves an
+                    # old call failed and never grants a retry. No error body.
+                    if isinstance(exc,transport.WriteFailure) and exc.request_fingerprint==request_fingerprint(operation['kind'],row,data_source) and type(exc.status) is int and 400<=exc.status<=599:
+                        write_http_status=exc.status
+                        operation['write_failure']={'http_status':exc.status,'request_fingerprint':request_fingerprint(operation['kind'],row,data_source)}
+                        version=store.compare_and_set(version,value)
+                    fail('uncertain_create' if operation['kind']=='create' else 'uncertain_append')
                 except Exception:
                     fail('uncertain_create' if operation['kind']=='create' else 'uncertain_append')
                 operation.update(phase='acknowledged',response=response)
@@ -716,6 +756,12 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                     counts['write_calls']-=1
                     restore_prepared()
                     fail('request_not_dispatched')
+                except transport.Failure as exc:
+                    if isinstance(exc,transport.WriteFailure) and exc.request_fingerprint==request_fingerprint('archive',row,data_source,old_root) and type(exc.status) is int and 400<=exc.status<=599:
+                        write_http_status=exc.status
+                        operation['write_failure']={'http_status':exc.status,'request_fingerprint':request_fingerprint('archive',row,data_source,old_root)}
+                        version=store.compare_and_set(version,value)
+                    fail('uncertain_archive')
                 except Exception: fail('uncertain_archive')
                 # Resume and normal paths share the same full post-write check.
             final = read_target(api,ident,data_source)
@@ -731,7 +777,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         return {'status':'partial' if counts['blocked'] or counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':counts['write_calls'],'write_state':'confirmed' if counts['created']+counts['updated'] else 'not_attempted'}
     except Blocked as exc: reason = str(exc)
     except Exception: reason = 'journal_failed'
-    return {'status':'blocked','reason':reason,**counts,'external_write_attempts':counts['write_calls'],'write_state':'uncertain' if reason.startswith('uncertain_') or counts['write_calls'] else 'unknown'}
+    return {'status':'blocked','reason':reason,'write_http_status':write_http_status,**counts,'external_write_attempts':counts['write_calls'],'write_state':'uncertain' if reason.startswith('uncertain_') or counts['write_calls'] else 'unknown'}
 
 
 def public_report(result):
@@ -743,5 +789,7 @@ def public_report(result):
     out.update({key:result[key] for key in out if key not in ('status','reason','write_state')})
     if result.get('write_state') in ('confirmed','not_attempted','uncertain','unknown'): out['write_state']=result['write_state']
     reason=result.get('reason')
+    status=result.get('write_http_status')
+    if status is not None and type(status) is int and 400<=status<=599:out['write_http_status']=status
     out['status'] = result['status']; out['reason'] = reason if reason is None or (isinstance(reason,str) and reason in REASONS) else 'other'
     return out

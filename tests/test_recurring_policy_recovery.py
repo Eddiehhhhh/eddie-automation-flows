@@ -175,6 +175,106 @@ class RecoveryAPI(public.FakeAPI):
         return value
 
 
+
+class NoopRecoveryAPI(RecoveryAPI):
+    def __init__(self, current, **changes):
+        super().__init__(current)
+        self.old = recovery.noop_public_policy()
+        row = {**self.runs[0], 'id': recovery.NOOP_RUN_ID,
+               'head_sha': recovery.NOOP_CONTROLLER_SHA, **changes}
+        self.runs = [row]
+        self.records = {row['id']: public.record(row, code_sha=self.old['code_sha'],
+            rules_sha256=self.old['rules_sha256'], policy_sha256=self.old['get_policy_sha256'],
+            observed_main_commit='c1339b2575a4097b5aee8377e7bbb45487eabd0f',
+            receipt_commit=recovery.ORIGINAL_RECEIPT_COMMIT,
+            receipt_sha256=recovery.ORIGINAL_RECEIPT_SHA256,
+            main_updated=False, cas_attempts=0)}
+
+    def json(self, path):
+        value = super().json(path)
+        if '/jobs?' in path and path not in self.overrides:
+            row = value['jobs'][0]; old_id = row['id']; row['id'] = recovery.NOOP_JOB_ID
+            self.job_attempts[row['id']] = self.job_attempts[old_id]
+        return value
+
+
+class ConfirmedNoopBridgeTests(unittest.TestCase):
+    def test_fixed_noop_policy_and_record_hash_match_external_evidence(self):
+        old = recovery.noop_public_policy()
+        self.assertEqual(a.sha(a.encoded(old)), recovery.NOOP_PUBLIC_POLICY_SHA256)
+        old['code_sha'] = 'b' * 40
+        self.assertNotEqual(old, recovery.noop_public_policy())
+        api = NoopRecoveryAPI(current_policy())
+        self.assertEqual(api.records[recovery.NOOP_RUN_ID]['record_sha256'], recovery.NOOP_RECORD_SHA256)
+
+    def test_noop_is_discoverable_when_original_run_is_out_of_window(self):
+        policy = current_policy(); api = NoopRecoveryAPI(policy)
+        value = p.discover(api, policy)
+        self.assertEqual(value['run_id'], recovery.NOOP_RUN_ID)
+        self.assertEqual(value['job_id'], recovery.NOOP_JOB_ID)
+        self.assertEqual(value['record_sha256'], recovery.NOOP_RECORD_SHA256)
+        self.assertEqual(value['anchor'], {'commit': recovery.ORIGINAL_RECEIPT_COMMIT,
+                                          'receipt_sha256': recovery.ORIGINAL_RECEIPT_SHA256})
+        self.assertEqual(value['receipt_sequence'], 1)
+        self.assertEqual(value['candidate_runs_checked'], 1)
+        self.assertEqual(api.called.count('/actions/runs/' + str(recovery.NOOP_RUN_ID) + '/attempts/1'), 2)
+        self.assertFalse(any(str(recovery.ORIGINAL_RUN_ID) in path for path in api.called))
+        self.assertEqual((p.MAX_REQUESTS, p.MAX_CANDIDATES, p.MAX_RUN_PAGES), (32, 4, 3))
+
+    def test_other_run_attempt_controller_and_current_policy_are_rejected(self):
+        for changes in ({'id': recovery.NOOP_RUN_ID + 1}, {'run_attempt': 2},
+                        {'head_sha': 'b' * 40}, {'event': 'schedule'}):
+            policy = current_policy(); api = NoopRecoveryAPI(policy, **changes)
+            if changes.get('run_attempt') == 2:
+                api.attempts[(recovery.NOOP_RUN_ID, 1)] = {**api.runs[0], 'run_attempt': 1, 'conclusion': 'failure'}
+            with self.subTest(changes=changes):
+                with self.assertRaises(p.ProvenanceFailure): p.discover(api, policy)
+        for key in ('rules_sha256', 'get_policy_sha256'):
+            policy = current_policy(); policy[key] = 'e' * 64
+            with self.assertRaises(p.ProvenanceFailure): p.discover(NoopRecoveryAPI(policy), policy)
+
+    def test_exact_job_record_noop_and_original_receipt_are_mandatory(self):
+        policy = current_policy()
+        for mode in ('job', 'observed', 'updated', 'receipt', 'sequence'):
+            api = NoopRecoveryAPI(policy)
+            if mode == 'job':
+                path = '/actions/runs/' + str(recovery.NOOP_RUN_ID) + '/attempts/1/jobs?per_page=100&page=1'
+                jobs = api.json(path); jobs['jobs'][0]['id'] += 1
+                api.overrides[path] = jobs; api.job_attempts[jobs['jobs'][0]['id']] = (recovery.NOOP_RUN_ID, 1)
+            else:
+                row = api.runs[0]
+                changes = {'observed': {'observed_main_commit': 'a' * 40},
+                    'updated': {'main_updated': True, 'cas_attempts': 1, 'observed_main_commit': recovery.ORIGINAL_RECEIPT_COMMIT},
+                    'receipt': {'receipt_sha256': 'a' * 64}, 'sequence': {'receipt_sequence': 2}}[mode]
+                api.records[row['id']] = public.record(row, **{**api.records[row['id']], **changes})
+            with self.subTest(mode=mode):
+                with self.assertRaises(p.ProvenanceFailure): p.discover(api, policy)
+
+    def test_denied_controller_read_fails_without_policy_or_transport_fallback(self):
+        policy = current_policy(); api = NoopRecoveryAPI(policy); calls = []
+        read = api.json
+        def denied(path):
+            calls.append(path)
+            if path.startswith('/contents/'):
+                p.fail('provenance_unavailable')
+            return read(path)
+        api.json = denied
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_unavailable'):
+            p.discover(api, policy)
+        self.assertEqual(sum(path.startswith('/contents/') for path in calls), 1)
+        self.assertFalse(any(path.startswith('logs:') for path in api.called))
+
+    def test_noop_policy_does_not_expand_old_receipt_policy_exception(self):
+        value = {'sequence': 1, 'policy_sha256': recovery.noop_public_policy()['get_policy_sha256']}
+        self.assertFalse(recovery.accepts_receipt(recovery.ORIGINAL_RECEIPT_COMMIT,
+            recovery.ORIGINAL_RECEIPT_SHA256, value, recovery.current_get_policy()))
+        value['policy_sha256'] = recovery.old_public_policy()['get_policy_sha256']
+        self.assertTrue(recovery.accepts_receipt(recovery.ORIGINAL_RECEIPT_COMMIT,
+            recovery.ORIGINAL_RECEIPT_SHA256, value, recovery.current_get_policy()))
+        self.assertFalse(recovery.accepts_receipt('a' * 40, recovery.ORIGINAL_RECEIPT_SHA256,
+            value, recovery.current_get_policy()))
+
+
 def current_policy():
     return {**recovery.old_public_policy(), 'code_sha': 'f' * 40,
             'rules_sha256': p.entry.rules_sha256(), 'get_policy_sha256': recovery.current_get_policy()}

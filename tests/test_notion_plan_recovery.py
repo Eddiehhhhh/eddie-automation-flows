@@ -34,7 +34,7 @@ class RecoveryPins(unittest.TestCase):
 
     def proof(self):
         return {'anchor':deepcopy(recovery.OLD_ANCHOR),'job_id':recovery.OLD_JOB,
-            'checkpoint_count':31,'checkpoint':{'record_sha256':recovery.OLD_CHECKPOINT,
+            'checkpoint_count':recovery.OLD_CHECKPOINT_COUNT,'checkpoint':{'record_sha256':recovery.OLD_CHECKPOINT,
                 'controller_sha':recovery.OLD_CONTROLLER},'get_step_record':deepcopy(recovery.OLD_GET),
             'private_readback_required':True}
 
