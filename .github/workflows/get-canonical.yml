@@ -1,0 +1,10 @@
+name: Canonical Get single writer
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  register:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: ':'
