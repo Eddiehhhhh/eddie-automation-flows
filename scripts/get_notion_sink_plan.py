@@ -232,6 +232,28 @@ def block(kind, payload, children=None):
     return {'type': kind, 'payload': normalize_payload(kind, payload), 'children': children or []}
 
 
+def comparison_semantics(rows, previous_type=list_semantics.UNKNOWN):
+    """Compare semantic trees using the same payload normalization as readback.
+
+    Compaction retains original rich-text runs, while wire encoding and native
+    readback merge adjacent runs with identical annotations and links. Normalize
+    only copies for comparison; approved plans, requests and receipt node hashes
+    are never rewritten. Root/child boundaries and ordering remain exact.
+    """
+    def walk(items, depth):
+        if not isinstance(items, list) or depth > 32:
+            stop('incomplete_target_read')
+        result = []
+        for row in items:
+            if not isinstance(row, dict) or set(row) != {'type', 'payload', 'children'}:
+                stop('incomplete_target_read')
+            result.append({'type': row['type'],
+                'payload': normalize_payload(row['type'], row['payload']),
+                'children': walk(row['children'], depth + 1)})
+        return result
+    return list_semantics.defaults(walk(rows, 0), previous_type)
+
+
 def source_body(data, ident):
     if not isinstance(data, bytes) or len(data) > MAX_NOTE:
         stop('incomplete_source')
@@ -566,7 +588,7 @@ def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy,
         result['protected_blocks_sha256'] = digest([nodes[i] for i in order if i not in owned])
         start=roots.index(managed_roots[0]) if managed_roots else 0
         previous=nodes[roots[start-1]]['type'] if start else None
-        if list_semantics.defaults(current,previous) == list_semantics.defaults(rendered,previous):
+        if comparison_semantics(current,previous) == comparison_semantics(rendered,previous):
             result['decision'] = 'noop_verified'
             return result
         result['decision'] = 'preview_diff'

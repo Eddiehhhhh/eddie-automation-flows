@@ -529,7 +529,7 @@ def appended(before_snapshot, after_snapshot, row, data_source, response_ids=Non
     if len(roots) != count or after['roots'] != before['roots'][:position] + roots + before['roots'][position:]: fail('readback_mismatch')
     if response_ids is not None and roots != response_ids: fail('readback_mismatch')
     previous=before['nodes'][before['roots'][position-1]]['type'] if position else None
-    if set(roots) & set(before['nodes']) or not same(list_semantics.defaults([semantic(after['nodes'], i) for i in roots],previous), list_semantics.defaults(row['rendered'],previous)): fail('readback_mismatch')
+    if set(roots) & set(before['nodes']) or not same(p.comparison_semantics([semantic(after['nodes'], i) for i in roots],previous), p.comparison_semantics(row['rendered'],previous)): fail('readback_mismatch')
     new_ids = {i for root in roots for i in subtree(after['nodes'], root)}
     if set(after['nodes']) != set(before['nodes']) | new_ids: fail('readback_mismatch')
     return roots, [i for i in after['order'] if i in new_ids]
@@ -551,7 +551,7 @@ def append_previous_type(row):
 
 def created(snapshot, row, data_source, expected_page):
     view = target(snapshot, row['note_id'], data_source)
-    if view is None or view['page_id'] != expected_page or not same(list_semantics.defaults(view['semantic'],None), list_semantics.defaults(row['rendered'],None)): fail('readback_mismatch')
+    if view is None or view['page_id'] != expected_page or not same(p.comparison_semantics(view['semantic'],None), p.comparison_semantics(row['rendered'],None)): fail('readback_mismatch')
     for key, submitted in row['properties'].items():
         actual = view['properties'].get(key)
         kind = submitted['type']
@@ -608,7 +608,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         value, version = store.read(); check_state(value)
         if version != expected_store_sha: fail('state_changed')
         if (plan.get('rules_sha256') != rules_sha256()
-                and not plan_recovery.allows(plan,value['journal'])): fail('rules_changed')
+                and not plan_recovery.allows(plan,value['journal'])
+                and not plan_recovery.allows_run10(plan,value['journal'])): fail('rules_changed')
         if not plan['records']:
             if plan['records'] or value['journal'] is not None or version != plan['state_sha256']: fail('state_changed')
             return {'status':'partial' if counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':0,'write_state':'not_attempted'}

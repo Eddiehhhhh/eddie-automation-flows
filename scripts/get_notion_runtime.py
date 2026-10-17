@@ -287,6 +287,13 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             old_journal=current['engine_state']['journal']
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and (old_journal['operation'].get('phase')!='prepared' or old_journal['operation'].get('kind') in ('cleanup','archive'))))
             store=durable if apply else ReadOnlyStore(current)
+            if present and found.get('recovery_anchor')=='exact_run10_acknowledged_create_v1':
+                if not plan_recovery.validate_run10_state(current,sha):fail('notion_state_anchor')
+                candidate=plan_recovery.transition_run10_outer(current,sha,public_policy['get_policy_sha256'])
+                if apply:
+                    current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                else:
+                    store=ReadOnlyStore(candidate);current,sha=store.read()
             stage='source'
             if tip is not None:
                 chain_origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
@@ -316,6 +323,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 # in every checkpoint; this identifies the unchanged prior plan.
                 safe['isolated_prior_plan_sha256' if result.get('quarantine_candidates') else 'resumed_prior_plan_sha256']=plan_recovery.OLD_PLAN
                 safe['resumed_prior_rules_sha256']=plan_recovery.OLD_ENGINE_RULES
+            elif old_journal is not None and plan_recovery.allows_run10(old_journal['plan'],old_journal):
+                safe['resumed_prior_plan_sha256']=plan_recovery.RUN10_PLAN
+                safe['resumed_prior_rules_sha256']=plan_recovery.RUN10_ENGINE_RULES
             return safe
     except Exception as exc:
         reason=str(exc);reason=reason if reason in ERRORS else 'notion_failed'

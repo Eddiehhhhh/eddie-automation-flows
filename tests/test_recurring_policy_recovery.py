@@ -185,7 +185,7 @@ class NoopRecoveryAPI(RecoveryAPI):
         self.runs = [row]
         self.records = {row['id']: public.record(row, code_sha=self.old['code_sha'],
             rules_sha256=self.old['rules_sha256'], policy_sha256=self.old['get_policy_sha256'],
-            observed_main_commit='c1339b2575a4097b5aee8377e7bbb45487eabd0f',
+            observed_main_commit='df1bf90967ce4a707ec8fe781ccc41e254fb1006',
             receipt_commit=recovery.ORIGINAL_RECEIPT_COMMIT,
             receipt_sha256=recovery.ORIGINAL_RECEIPT_SHA256,
             main_updated=False, cas_attempts=0)}

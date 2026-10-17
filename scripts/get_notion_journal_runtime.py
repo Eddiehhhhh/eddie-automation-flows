@@ -495,6 +495,12 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(plan_recovery.RUN10_RUN,plan_recovery.RUN10_ATTEMPT)):
+                    result=plan_recovery.recover_run10_checkpoint(bounded,row['id'],row['run_attempt'])
+                    if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
                 if str(exc) not in ('journal_provenance_missing', 'journal_provenance_no_checkpoint',
                                    'journal_provenance_other_controller'):
                     raise

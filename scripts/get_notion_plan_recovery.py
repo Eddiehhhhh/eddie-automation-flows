@@ -121,3 +121,78 @@ def isolate_outer(state, expected_sha):
     result=deepcopy(state);result['engine_state']['journal']=None
     result['engine_state']['unresolved_by_id']={row['note_id']:hold}
     return result
+
+
+# Exact acknowledged-create checkpoint from run10. These are separate from the
+# immutable uncertain-append hold above; no hold permission or evidence changes.
+RUN10_RUN = 39031368105
+RUN10_ATTEMPT = 1
+RUN10_JOB = 117392320462
+RUN10_CONTROLLER = 'f3fc06fe86f6da4dd52863f76837781260f5513d'
+RUN10_PUBLIC_SHA = 'c8e3752f75bf2f70b0f436c47d8a7274c0c07421708ff20c7a39f1abb28ad5a1'
+RUN10_NOTION_POLICY = 'ce4781215381b5fecf5609593aa7d4e8a7b20805802a84cc0a701d5c9f77cfd5'
+RUN10_PLAN = '47334c1c6712482389f53570fc13f8a3400206f1a607ab6684e6b5939a899c69'
+RUN10_ENGINE_RULES = '2602fc81bc57af77d83efaf8b3fa8cccc18d3d1e78eaee1e4b8596781859ab3f'
+RUN10_CHECKPOINT = '3abd4a6188bb75093d2eaa8e2fd17ae1128265bbff37acb3967f56623d0d2e57'
+RUN10_CHECKPOINT_COUNT = 17
+RUN10_STATE_BYTES = 800216
+RUN10_ANCHOR = {'commit': 'f2275d4790dd42faa8a36df675c80797e0641164', 'state_blob': '2174815439704fa4323859266429a6869c2d9c5e', 'state_sha256': 'b225c928c1b768ca50ed49e7c87ee4fa5732f554f9bcab24936dc716e5ac6662'}
+RUN10_GET = {'receipt_commit': 'a37cc108096210d0fb9847609e906ca22c88acf4', 'receipt_sha256': 'e49b99c42729ca079cdc04ed75145f39b12aad2d1a587dfcd0cafce9344f7293', 'receipt_sequence': 1, 'record_sha256': '97040c2fcae5b0d07dbaa7c9a8dad5fc54de7c2b12b339325fe09ad1a8edeece'}
+RUN10_PUBLIC_POLICY = {'code_sha': '03fef874bc9fea14f3908dc7440ca53e3e5341b2', 'contract': 'get-public-actions-provenance-policy-1', 'controller_template_sha256': '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2', 'get_policy_sha256': 'e90c8a51f41697d5351744d4c6de25a6e5ebb290d1efa3c5bafe31f880db73d8', 'head_branch': 'main', 'job_name': 'canonical-get', 'publication_step_name': 'Emit verified canonical publication anchor', 'repository': 'Eddiehhhhh/eddie-automation-flows', 'repository_id': 1270807355, 'rules_sha256': 'c3263912da1a0f6992ab65d86411e517a5cb59851b5639dd23eff1fba2d8beef', 'workflow_id': 387242896, 'workflow_path': '.github/workflows/get-canonical.yml'}
+
+
+def allows_run10(plan, journal):
+    """Only an authenticated durable copy of this exact plan, never prepare."""
+    try:
+        return (isinstance(plan,dict) and isinstance(journal,dict)
+            and plan.get('rules_sha256') == RUN10_ENGINE_RULES
+            and p.digest(plan) == RUN10_PLAN and journal.get('plan_sha256') == RUN10_PLAN
+            and p.encoded(journal.get('plan')) == p.encoded(plan))
+    except Exception:
+        return False
+
+
+def recover_run10_checkpoint(client, run_id, run_attempt):
+    """The caller retains its one shared discovery read/byte budget."""
+    import get_notion_journal_runtime as checkpoints
+    if type(run_id) is not int or type(run_attempt) is not int or (run_id,run_attempt)!=(RUN10_RUN,RUN10_ATTEMPT):
+        checkpoints.fail('journal_provenance_other_controller')
+    result=checkpoints.recover_anchor(client,run_id=RUN10_RUN,run_attempt=RUN10_ATTEMPT,
+        public_policy=deepcopy(RUN10_PUBLIC_POLICY),approved_public_policy_sha256=RUN10_PUBLIC_SHA,
+        notion_policy_sha256=RUN10_NOTION_POLICY)
+    record=result.get('checkpoint',{});get=result.get('get_step_record',{})
+    if (result.get('anchor')!=RUN10_ANCHOR or result.get('job_id')!=RUN10_JOB
+            or result.get('checkpoint_count')!=RUN10_CHECKPOINT_COUNT or record.get('record_sha256')!=RUN10_CHECKPOINT
+            or record.get('controller_sha')!=RUN10_CONTROLLER
+            or any(get.get(k)!=v for k,v in RUN10_GET.items())
+            or result.get('private_readback_required') is not True):
+        checkpoints.fail('journal_provenance_record')
+    return {**result,'recovery_anchor':'exact_run10_acknowledged_create_v1'}
+
+
+def validate_run10_state(state, sha):
+    """Authenticate the one original envelope, including saved response/hold."""
+    try:
+        journal=state['engine_state']['journal']
+        return (sha==RUN10_ANCHOR['state_sha256'] and p.digest(state)==sha
+            and len(p.encoded(state))==RUN10_STATE_BYTES
+            and state['policy_sha256']==RUN10_PUBLIC_POLICY['get_policy_sha256']
+            and allows_run10(journal['plan'],journal))
+    except Exception:
+        return False
+
+
+def transition_run10_outer(state, sha, current_get_policy_sha256):
+    """After authenticated remote readback, change only the queue policy field.
+
+    Runtime supplies the already verified current policy and persists this by
+    confirmed CAS before using QueuePublication. New checkpoints carry the new
+    policy context. This transition cannot be reused on its resulting state;
+    the exact old plan may continue under the newly authenticated checkpoint.
+    Saved plan/response, holds and queue bytes stay intact.
+    """
+    if not validate_run10_state(state,sha):raise ValueError('state_invalid')
+    p.hex_hash(current_get_policy_sha256,64)
+    if current_get_policy_sha256==state['policy_sha256']:raise ValueError('state_invalid')
+    result=deepcopy(state);result['policy_sha256']=current_get_policy_sha256
+    return result

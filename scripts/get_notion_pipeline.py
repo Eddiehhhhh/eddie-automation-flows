@@ -84,7 +84,8 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             operation=journal.get('operation')
             prior_attempt=bool(journal.get('index')) or bool(operation and (operation.get('kind') in ('archive','cleanup') or operation.get('phase')!='prepared'))
             plan=deepcopy(journal['plan'])
-            if ((plan.get('rules_sha256')!=approved['rules_sha256'] and not plan_recovery.allows(plan,journal))
+            if ((plan.get('rules_sha256')!=approved['rules_sha256'] and not plan_recovery.allows(plan,journal)
+                    and not plan_recovery.allows_run10(plan,journal))
                     or not e.same(plan.get('policy'),engine_policy) or plan.get('initial_scope_sha256')!=e.digest(initial_scope) or plan.get('retry_conflicts')!=retry_conflicts):e.fail('journal_busy')
             publication.check(plan['publication']);ids=[r['note_id'] for r in plan['records']]
         else:ids=pending(publication,state,engine_policy,initial_scope,retry_conflicts)
