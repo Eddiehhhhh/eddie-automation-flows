@@ -149,6 +149,7 @@ class RemoteJournal:
                  max_commits=MAX_COMMITS, max_batch_bytes=MAX_BATCH_BYTES,
                  poll_attempts=6, sleep=time.sleep):
         self.poisoned = False
+        self._png_not_dispatched = None
         self.lock = threading.Lock()
         self.recovery = None
         self.stage = 'anchor'
@@ -319,6 +320,8 @@ class RemoteJournal:
         self._ready()
         try:
             _, _, _, value, digest, _, _ = self._current()
+            ticket = getattr(self, '_png_not_dispatched', None)
+            if ticket is not None and digest != ticket['after_sha256']: self._png_not_dispatched = None
             return deepcopy(value), digest
         except JournalFailure:
             raise
@@ -390,7 +393,23 @@ class RemoteJournal:
         finally:
             self.lock.release()
 
-    def _compare_and_set(self, expected_sha, value):
+    def compare_and_set_png_not_dispatched(self, expected_sha, value, typed_evidence):
+        """Single-use same-process rollback of an unattempted PNG request only."""
+        if not self.lock.acquire(blocking=False):
+            raise JournalFailure('journal_busy', stage='locked')
+        try:
+            ticket = getattr(self, '_png_not_dispatched', None)
+            self._png_not_dispatched = None
+            if ticket is None:
+                raise JournalFailure('state_changed', stage='anchor')
+            return self._compare_and_set(expected_sha, value,
+                png_reset_ticket=ticket, typed_evidence=typed_evidence)
+        finally:
+            self.lock.release()
+
+    def _compare_and_set(self, expected_sha, value, *, png_reset_ticket=None, typed_evidence=None):
+        # Every CAS attempt consumes the old ticket, including a no-op/failure.
+        self._png_not_dispatched = None
         self._ready()
         self.recovery = None
         self.confirm_entered = False
@@ -403,6 +422,10 @@ class RemoteJournal:
             codec.check_state(value)
             parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
             engine.plan_recovery.preserve_holds(old_value['engine_state'],value['engine_state'])
+            if png_reset_ticket is None:
+                codec.png_store.preserve(old_value,value)
+            else:
+                codec.png_store.check_not_dispatched(png_reset_ticket,old_value,value,typed_evidence)
             if expected_sha != digest:
                 raise JournalFailure('state_changed', stage='anchor')
             blob = retention.oid(data)
@@ -437,7 +460,10 @@ class RemoteJournal:
                     raise JournalFailure(stage='poll', unknown=True)
                 self.sleep(2 ** attempt)
             receipt, observed_value = self._verify(commit, parent, tree_oid, wanted, data)
-            return self._confirm(receipt, observed_value)
+            result = self._confirm(receipt, observed_value)
+            if png_reset_ticket is None:
+                self._png_not_dispatched = codec.png_store.not_dispatched_ticket(old_value,observed_value)
+            return result
         except Exception as exc:
             # Callback/readback failures may follow a committed journal. Preserve
             # only verified candidate metadata; block all subsequent API eligibility.

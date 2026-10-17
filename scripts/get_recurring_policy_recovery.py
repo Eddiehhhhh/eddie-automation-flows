@@ -29,23 +29,23 @@ ORIGINAL_RECORD_SHA256 = '156ee549a46a3d5c6501fe7e0d729d14905e47723750152db84978
 
 # The later confirmed no-op refreshes provenance, not the original receipt.
 # This policy/proof was independently verified before this recovery was built.
-NOOP_PUBLIC_POLICY_SHA256 = 'c8e3752f75bf2f70b0f436c47d8a7274c0c07421708ff20c7a39f1abb28ad5a1'
+NOOP_PUBLIC_POLICY_SHA256 = 'f3fb5d9e326a59d166b638712fd02107c4e3c2d9fd1c29534398dd8d55efce18'
 _NOOP_PUBLIC_POLICY = {
-    'code_sha': '03fef874bc9fea14f3908dc7440ca53e3e5341b2',
+    'code_sha': 'b061ef1eab804693d3987f60971b37a1297c90d7',
     'contract': 'get-public-actions-provenance-policy-1',
     'controller_template_sha256': '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2',
-    'get_policy_sha256': 'e90c8a51f41697d5351744d4c6de25a6e5ebb290d1efa3c5bafe31f880db73d8',
+    'get_policy_sha256': 'cc204614334fadaa21e20d6816f70518dbab56c31ab96f24b4f08176822faed5',
     'head_branch': 'main', 'job_name': 'canonical-get',
     'publication_step_name': 'Emit verified canonical publication anchor',
     'repository': 'Eddiehhhhh/eddie-automation-flows', 'repository_id': 1270807355,
-    'rules_sha256': 'c3263912da1a0f6992ab65d86411e517a5cb59851b5639dd23eff1fba2d8beef',
+    'rules_sha256': '19bb3c40ee1b6fef1fd98b64a25fd44fbfce6a1d03b75afb921fe18ab112b2ee',
     'workflow_id': 387242896, 'workflow_path': '.github/workflows/get-canonical.yml',
 }
-NOOP_RUN_ID = 39031368105
+NOOP_RUN_ID = 39052510643
 NOOP_RUN_ATTEMPT = 1
-NOOP_JOB_ID = 117392320462
-NOOP_CONTROLLER_SHA = 'f3fc06fe86f6da4dd52863f76837781260f5513d'
-NOOP_RECORD_SHA256 = '97040c2fcae5b0d07dbaa7c9a8dad5fc54de7c2b12b339325fe09ad1a8edeece'
+NOOP_JOB_ID = 117453779434
+NOOP_CONTROLLER_SHA = '4361f151af7c4206f526e7510e9d24b12f88551f'
+NOOP_RECORD_SHA256 = 'b57c2589a7358b2413c5e1a5921f3d765a936db387023b87fe90648dc9e8f297'
 
 
 def old_public_policy():
@@ -58,7 +58,7 @@ def old_public_policy():
 
 
 def noop_public_policy():
-    """Exact independently approved policy of the successful run-ten no-op."""
+    """Exact independently approved policy of the successful run-thirteen scheduled no-op."""
     from get_recurring_entry import a
     if a.sha(a.encoded(_NOOP_PUBLIC_POLICY)) != NOOP_PUBLIC_POLICY_SHA256:
         raise ValueError('recovery_policy_changed')
@@ -84,9 +84,11 @@ def candidate_policy(policy, run):
     import get_recurring_entry as entry
     old = old_public_policy()
     run_id, attempt, controller = ORIGINAL_RUN_ID, ORIGINAL_RUN_ATTEMPT, ORIGINAL_CONTROLLER_SHA
+    event = 'workflow_dispatch'
     if run.get('id') == NOOP_RUN_ID:
         old = noop_public_policy()
         run_id, attempt, controller = NOOP_RUN_ID, NOOP_RUN_ATTEMPT, NOOP_CONTROLLER_SHA
+        event = 'schedule'
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
     if (all(policy.get(k) == old[k] for k in stable)
             and policy.get('code_sha') != old['code_sha']
@@ -95,7 +97,7 @@ def candidate_policy(policy, run):
             and run.get('id') == run_id
             and run.get('run_attempt') == attempt
             and run.get('head_sha') == controller
-            and run.get('event') == 'workflow_dispatch'):
+            and run.get('event') == event):
         return old, True
     return policy, False
 

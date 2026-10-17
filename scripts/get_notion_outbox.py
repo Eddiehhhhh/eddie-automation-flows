@@ -11,6 +11,7 @@ import json
 
 import get_notion_executor as e
 import get_recurring_entry as entry
+import get_notion_png_store as png_store
 
 p=e.p;git=e.git
 STATE_PATH=e.STATE_PATH
@@ -39,8 +40,9 @@ def anchor(value):
 
 def check_state(value):
     try:
-        if not isinstance(value,dict) or set(value)!=set(initial_state()) or value['contract']!=CONTRACT:fail('outbox_state_invalid')
+        if not isinstance(value,dict) or set(value) not in (set(initial_state()), set(initial_state()) | {'png_assets'}) or value['contract']!=CONTRACT:fail('outbox_state_invalid')
         e.check_state(value['engine_state'])
+        if 'png_assets' in value: png_store.check_container(value['png_assets'], value['engine_state'])
         pending=value['pending_by_id'];order=value['rotation_order'];origin=value['origin'];cursor=value['last_enqueued_publication'];tip=value['observed_publication_tip']
         if not isinstance(pending,dict) or not isinstance(order,list) or len(pending)>MAX_RECORDS or len(order)!=len(pending) or any(not isinstance(i,str) for i in order) or len(set(order))!=len(order) or set(order)!=set(pending):fail('outbox_state_invalid')
         if origin is None:
@@ -213,7 +215,9 @@ class EngineStore:
     journal changes fail the CAS, even when the nested engine hash is unchanged.
     Completion/dequeue/rotation are in the SAME CAS as verified receipt/index.
     """
-    def __init__(self,store):self.store=store;self.outer_version=None;self.outer=None
+    def __init__(self,store,*,attachment_provider=None):
+        if attachment_provider is not None and not callable(attachment_provider):fail('outbox_state_invalid')
+        self.store=store;self.outer_version=None;self.outer=None;self.attachment_provider=attachment_provider
     def read(self):
         value,version=self.store.read();check_state(value)
         if version!=digest(value):fail('outbox_state_invalid')
@@ -252,6 +256,8 @@ class EngineStore:
                 for ident in plan['skipped_conflicts']:
                     if ident in next_value['rotation_order']:
                         next_value['rotation_order'].remove(ident);next_value['rotation_order'].append(ident)
+        candidates={} if self.attachment_provider is None else self.attachment_provider(deepcopy(old),deepcopy(value))
+        png_store.join_engine(self.outer,next_value,candidates)
         check_state(next_value)
         observed,new_version=confirmed_compare_and_set(self.store,self.outer_version,next_value)
         self.outer=deepcopy(next_value);self.outer_version=new_version

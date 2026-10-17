@@ -100,10 +100,10 @@ def rich_text(value):
         if re.search(r'\\<[bB][rR] ?/?>', text):
             stop('unsupported_source_format')
         text = re.sub(r'<[bB][rR] ?/?>', '\n', text)
-        if re.search(r'(?<!\w)_|_(?!\w)|__|~~|<', text):
+        if '![' in text or re.search(r'(?<!\w)_|_(?!\w)|__|~~|<', text):
             stop('unsupported_source_format')
         return text
-    token = re.compile(r'(\\[\\`*\[\]()~]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\))')
+    token = re.compile(r'(\\[\\`*\[\]()~]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\)|\[(?:[0-9]{2}:[0-5][0-9]:[0-5][0-9]|📄 工作)\])')
     cursor = 0
     for match in token.finditer(value):
         plain = value[cursor:match.start()]
@@ -117,11 +117,21 @@ def rich_text(value):
             out.append(text_run(part[1:]))
         elif part.startswith('`'):
             out.append(text_run(part[1:-1], code=True))
+        elif re.fullmatch(r'\[(?:[0-9]{2}:[0-5][0-9]:[0-5][0-9]|📄 工作)\]', part):
+            # Explicit source literals, never reference definitions/links. A
+            # real inline link wins the token alternative before this branch.
+            if value[match.end():].lstrip(' \t').startswith(('[', '(', ':')):
+                stop('unsupported_source_format')
+            out.append(text_run(part))
         elif part.startswith('**'):
             out.append(text_run(plain_text(part[2:-2]), bold=True))
         elif part.startswith('*'):
             out.append(text_run(plain_text(part[1:-1]), italic=True))
         else:
+            # An unsupported inline image must not lose its image semantics
+            # by becoming an exclamation mark followed by a caption link.
+            if match.start() and value[match.start() - 1] == '!':
+                stop('unsupported_source_format')
             label, url = part[1:].split('](', 1)
             run = text_run(plain_text(label))
             run['text']['link'] = {'url': url[:-1]}
@@ -215,7 +225,14 @@ def normalize_payload(kind, payload):
     elif kind == 'image':
         # Collector must resolve the persistent upload identity against an
         # independently confirmed asset binding. Signed URLs are never identity.
-        if value.get('kind') == 'notion_existing_image_block':
+        if value.get('kind') == 'notion_png_preflight':
+            if set(value) != {'kind','sha256','byte_count','mime','caption'} or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= 512000 or value['mime'] != 'image/png':
+                stop('missing_asset')
+        elif value.get('kind') == 'notion_uploaded_png':
+            if set(value) != {'kind','upload_id','sha256','byte_count','mime','caption'} or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= 512000 or value['mime'] != 'image/png':
+                stop('missing_asset')
+            value['upload_id'] = notion_id(value['upload_id'])
+        elif value.get('kind') == 'notion_existing_image_block':
             if set(value) != {'kind','block_id','sha256','byte_count','mime','caption'} or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= MAX_ASSET or value['mime'] != 'image/jpeg':
                 stop('missing_asset')
             value['block_id'] = notion_id(value['block_id'])
@@ -321,7 +338,7 @@ def compact_paragraph_pairs(blocks):
     return (output, merged) if len(output) <= limit else (deepcopy(blocks), 0)
 
 
-def render_markdown(data, ident, assets, source_path, content_tree, *, preserved_image=None):
+def render_markdown(data, ident, assets, source_path, content_tree, *, preserved_image=None,reviewed_png=None):
     """Native preview subset. Unsupported input is blocked, never flattened."""
     if preserved_image is not None:
         # A preserved native block is not a writable file identity. Only the
@@ -343,6 +360,15 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
     lines = source_body(data, ident).splitlines()
     output = []; warnings = []; used = {}; index = 0
     def bound_image(reference, caption=''):
+        if reviewed_png is not None and ':' in reference:
+            from get_notion_uploaded_png import Resolver
+            if not isinstance(reviewed_png,Resolver):stop('missing_asset')
+            try:payload,binding=reviewed_png.bound(ident,data,reference,[text_run(caption)] if caption else [])
+            except ValueError:stop('missing_asset')
+            if used:stop('missing_asset')
+            used['uploaded_png']=binding
+            used['uploaded_png_manifest']=reviewed_png.manifest_binding()
+            return block('image',payload)
         entry = assets.get(reference)
         if not isinstance(entry, dict) or entry.get('readback_verified') is not True or not isinstance(entry.get('bytes'), bytes):
             stop('missing_asset')
@@ -375,6 +401,25 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
         if not re.search(r'\.(?:png|jpe?g|gif|webp)$', reference, re.I):
             stop('unsupported_source_format')
         return label, bound_image(reference)
+
+    def continued_bullet(start, first):
+        # Exactly '*   text' (or -/+): its Markdown content column is four.
+        # Equal indentation continues the same item. Blank-separated ordinary
+        # paragraphs become children; code/nested block syntax is never flattened.
+        paragraphs = [[first]]; cursor = start + 1
+        while cursor < len(lines):
+            next_line = cursor
+            while next_line < len(lines) and not lines[next_line].strip(): next_line += 1
+            if next_line == len(lines) or not lines[next_line].startswith('    '):
+                break
+            content = lines[next_line][4:]
+            if (not content or content[0].isspace()
+                    or re.match(r'^(?:#|>|[-+*](?:[ \t]|$)|[0-9]+[.)][ \t]|\||```|~~~|!\[|<)', content)
+                    or re.fullmatch(r'[-*_=]+', content)):
+                stop('unsupported_source_format')
+            if next_line > cursor: paragraphs.append([])
+            paragraphs[-1].append(content); cursor = next_line + 1
+        return ['\n'.join(part) for part in paragraphs], cursor
 
     while index < len(lines):
         line = lines[index]
@@ -425,6 +470,8 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
             if listing[1]:
                 stop('unsupported_source_format')
             kind = 'bulleted_list_item' if listing[2] else 'numbered_list_item'; value = listing[4]
+            aligned = re.fullmatch(r'[-+*]   (\S.*)', line)
+            if aligned: value = aligned[1]
             if value.startswith('>'): stop('unsupported_source_format')
             embedded = wiki_image(value)
             if embedded is not None:
@@ -432,7 +479,9 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
                 output.append(block(kind, {'rich_text': rich_text(label)}, [image_block]))
                 index += 1; continue
             task = re.fullmatch(r'\[([ xX])\] (.*)', value)
-            payload = {'rich_text': rich_text(task[2] if task else value)}
+            paragraphs, following = continued_bullet(index, value) if aligned and not task else ([task[2] if task else value], index + 1)
+            payload = {'rich_text': rich_text(paragraphs[0])}
+            children = [block('paragraph', {'rich_text': rich_text(part)}) for part in paragraphs[1:]]
             if kind=='numbered_list_item' and not task:
                 first = index == 0 or re.fullmatch(r'[0-9]+\. .*', lines[index - 1]) is None
                 if first:
@@ -450,7 +499,7 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
                                 or not output or output[-1]['type'] != 'numbered_list_item'):
                             stop('unsupported_source_format')
             if task: kind = 'to_do'; payload['checked'] = task[1].lower() == 'x'
-            output.append(block(kind, payload)); index += 1; continue
+            output.append(block(kind, payload, children)); index = following; continue
         if line.startswith('> '):
             output.append(block('quote', {'rich_text': rich_text(line[2:])})); index += 1; continue
         if line.startswith(('<', ' ', '\t', '#', '![', '![[', '~~~')):
@@ -526,7 +575,7 @@ def writer_gate(policy):
     return isinstance(rows, dict) and set(rows) == wanted and all(isinstance(v, dict) and v.get('disabled') is True and type(v.get('active_runs')) is int and v['active_runs'] == 0 for v in rows.values())
 
 
-def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy, *, preserved_image=None):
+def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy, *, preserved_image=None,reviewed_png=None):
     result = {'note_id': ident, 'mode': 'read_only', 'apply_ready': False, 'decision': 'blocked', 'reason_codes': [],
         'target': None, 'source_commit': batch.get('commit'), 'source_blob': None, 'renderer_version': RENDERER,
         'before_hash': None, 'after_hash': None, 'operations': [], 'protected_fields': ['all_page_properties', 'all_unowned_blocks'],
@@ -543,7 +592,7 @@ def record_plan(ident, batch, mapping, blobs, assets, snapshot, receipt, policy,
         if not isinstance(data, bytes) or git_blob(data) != source_blob: stop('incomplete_source')
         expected_sha = batch['content_sha256'].get(source_path)
         if not isinstance(expected_sha, str) or digest(data) != expected_sha: stop('incomplete_source')
-        rendered, bindings, warnings = render_markdown(data, ident, assets, source_path, batch['content_tree'], preserved_image=preserved_image)
+        rendered, bindings, warnings = render_markdown(data, ident, assets, source_path, batch['content_tree'], preserved_image=preserved_image,reviewed_png=reviewed_png)
         result['after_hash'] = digest(rendered); result['render_warnings'] = warnings
         result['asset_bindings_sha256'] = digest(bindings)
         if not isinstance(snapshot, dict): stop('missing_target')

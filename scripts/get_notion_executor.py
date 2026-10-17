@@ -338,7 +338,9 @@ def request_blocks(blocks):
         for row in rows:
             total[0] += 1
             if total[0] > MAX_WRITE_BLOCKS: fail('request_budget')
-            if row['type'] == 'image': fail('asset_write_contract_missing')
+            if row['type'] == 'image':
+                if row['payload'].get('kind')!='notion_uploaded_png' or row['children']:fail('asset_write_contract_missing')
+                p.normalize_payload('image',row['payload'])
             payload = row['payload']
             if 'rich_text' in payload: payload['rich_text'] = rich(payload['rich_text'])
             if 'caption' in payload: payload['caption'] = rich(payload['caption'])
@@ -388,7 +390,7 @@ def propose_initial_scope(publication, snapshots, data_source_id, previous_previ
 
 
 def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets=None,
-            initial_scope=None, expected_scope_sha=None, retry_conflicts=False, preserved_images=None):
+            initial_scope=None, expected_scope_sha=None, retry_conflicts=False, preserved_images=None,reviewed_png=None):
     """Create an exact private approval plan; existing unowned pages block.
 
     An initial_scope is optional and must itself be externally approved and
@@ -418,7 +420,7 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         prior = state['receipts'].get(ident,{})
         if prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit']: continue
         failed = state['failures'].get(ident,{})
-        if not retry_conflicts and failed.get('md_blob')==source['blob'] and failed.get('source_commit')==publication.descriptor['commit'] and failed.get('policy_sha256')==policy_sha:
+        if not retry_conflicts and failed.get('md_blob')==source['blob'] and failed.get('source_commit')==publication.descriptor['commit'] and failed.get('policy_sha256')==policy_sha and not (reviewed_png is not None and reviewed_png.may_retry(ident,source,failed)):
             skipped_conflicts.append(ident);continue
         pending.append(ident)
     ids = pending[:MAX_RECORDS]
@@ -434,9 +436,11 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
             if plan_recovery.held(state,ident,view['page_id'] if view else None):fail('unresolved_operation')
             if preserved_images.get(ident) is not None and view is None:fail('missing_asset')
             rendered, bindings, warnings = p.render_markdown(data, ident, assets or {}, source['path'],
-                publication.descriptor['content_tree'],preserved_image=preserved_images.get(ident))
+                publication.descriptor['content_tree'],preserved_image=preserved_images.get(ident),reviewed_png=reviewed_png)
             row.update(rendered=rendered, before_sha256=digest(view), warnings=warnings, asset_bindings_sha256=digest(bindings), source_assets={v['path']:v['git_blob'] for v in bindings.values()})
             row['preserved_asset_bindings']=bindings if preserved_images.get(ident) is not None else {}
+            if 'uploaded_png' in bindings:
+                row['uploaded_pngs']=reviewed_png.handles()
             publication.check_assets(row['source_assets'])
             if not policy['format_accepted']: fail('format_not_approved')
             if not p.writer_gate(policy): fail('writer_gate_unknown')
@@ -473,13 +477,13 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                     row.update(page_id=view['page_id'],managed=[],old_roots=[],before=deepcopy(snapshot),after_anchor=None,creation_plan_sha256=origin)
                     if not rendered: row['action']='noop'
                     else: row.update(action='update',request_blocks=request_blocks(rendered))
-                    if row['action']=='update': transport.wire_blocks(row['request_blocks'],append_previous_type(row))
+                    if row['action']=='update': transport.wire_blocks(row['request_blocks'],append_previous_type(row),uploaded_pngs=row.get('uploaded_pngs'))
                     records.append(row); continue
                 batch = {'commit': publication.descriptor['commit'], 'content_complete': {ident: True},
                     'content_tree': publication.descriptor['content_tree'], 'content_sha256': {source['path']: source['sha256']}}
                 mapping = {'path': source['path'], 'md_blob': source['blob'], 'page_id': view['page_id'], 'data_source_id': data_source}
                 validation_policy = {**policy, 'allowlist':[ident], 'ownership_sha256':{ident:digest(prior)}}
-                validated = p.record_plan(ident, batch, mapping, {source['blob']:data}, assets or {}, snapshot, prior, validation_policy,preserved_image=preserved_images.get(ident))
+                validated = p.record_plan(ident, batch, mapping, {source['blob']:data}, assets or {}, snapshot, prior, validation_policy,preserved_image=preserved_images.get(ident),reviewed_png=reviewed_png)
                 if validated['decision'] == 'blocked': fail(validated['reason_codes'][0])
                 managed = [x['id'] for x in prior['managed_blocks']]
                 roots = [x for x in view['roots'] if x in managed]
@@ -494,7 +498,7 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                     if not rendered: fail('unsupported_source_format')
                     row.update(action='update', request_blocks=request_blocks(rendered))
             if row['action'] in ('create','update'):
-                transport.wire_blocks(row['request_blocks'],None if row['action']=='create' else append_previous_type(row))
+                transport.wire_blocks(row['request_blocks'],None if row['action']=='create' else append_previous_type(row),uploaded_pngs=row.get('uploaded_pngs'))
         except (Blocked, p.Blocked, transport.Failure) as exc:
             row.update(action='blocked', reason=str(exc) if str(exc) in REASONS else 'other')
         except Exception:
@@ -577,7 +581,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         if not p.writer_gate({'old_writer_evidence':evidence}): fail('writer_gate_unknown')
     def request_fingerprint(kind,row,data_source,root=None):
         if kind=='archive':return transport.fingerprint('PATCH','/blocks/'+root,{'archived':True})
-        blocks=transport.wire_blocks(row['request_blocks'],None if kind=='create' else append_previous_type(row))
+        blocks=transport.wire_blocks(row['request_blocks'],None if kind=='create' else append_previous_type(row),uploaded_pngs=row.get('uploaded_pngs'))
         if kind=='create':
             return transport.fingerprint('POST','/pages',{'parent':{'type':'data_source_id','data_source_id':data_source},'properties':row['properties'],'children':blocks})
         body={'children':blocks}

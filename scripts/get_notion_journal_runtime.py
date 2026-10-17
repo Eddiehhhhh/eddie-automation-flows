@@ -13,6 +13,7 @@ import get_notion_remote_journal as journal
 import get_publication_provenance as provenance
 import get_recurring_controller as controller
 import get_notion_plan_recovery as plan_recovery
+import get_notion_png_recovery as png_recovery
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '
 CONTRACT = 'get-notion-journal-checkpoint-1'
@@ -498,6 +499,12 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(plan_recovery.RUN10_RUN,plan_recovery.RUN10_ATTEMPT)):
                     result=plan_recovery.recover_run10_checkpoint(bounded,row['id'],row['run_attempt'])
+                    if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(png_recovery.RUN,png_recovery.ATTEMPT)):
+                    result=png_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
                     if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}

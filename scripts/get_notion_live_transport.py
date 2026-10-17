@@ -104,7 +104,7 @@ class Transport:
         fail('read_transport_failed')
 
 
-def wire_blocks(rows, previous_type=list_semantics.UNKNOWN):
+def wire_blocks(rows, previous_type=list_semantics.UNKNOWN,*,uploaded_pngs=None):
     count=[0]
     def split_runs(runs):
         out=[]
@@ -122,7 +122,15 @@ def wire_blocks(rows, previous_type=list_semantics.UNKNOWN):
         for row in items:
             if not isinstance(row,dict) or set(row)!={'type','payload','children'}:fail('invalid_blocks')
             kind=row['type'];payload=deepcopy(row['payload']);count[0]+=1
-            if kind=='image':fail('asset_write_contract_missing')
+            if count[0]>1000:fail('request_budget')
+            if kind=='image':
+                try:payload=ro.planner.normalize_payload('image',payload)
+                except Exception:fail('asset_write_contract_missing')
+                if payload.get('kind')!='notion_uploaded_png' or row['children'] or not isinstance(uploaded_pngs,dict):fail('asset_write_contract_missing')
+                wanted={k:payload[k] for k in ('sha256','byte_count','mime')}
+                if uploaded_pngs.get(payload['upload_id'])!=wanted:fail('asset_write_contract_missing')
+                result.append({'object':'block','type':'image','image':{'type':'file_upload','file_upload':{'id':payload['upload_id']},'caption':split_runs(payload['caption'])}})
+                continue
             if kind not in ro.planner.KINDS or not isinstance(payload,dict) or count[0]>1000:fail('invalid_blocks')
             try:payload=ro.planner.normalize_payload(kind,payload)
             except Exception:fail('invalid_blocks')
@@ -156,8 +164,9 @@ def wire_blocks(rows, previous_type=list_semantics.UNKNOWN):
 
 class API:
     """Executor interface. Approval of writes is separate from read allowlist."""
-    def __init__(self,request,data_source_id,note_ids,*,approved_writes=(),data_source_pin=native.DATA_SOURCE_PIN,database_pin=native.DATABASE_PIN,snapshot_adapter=None):
+    def __init__(self,request,data_source_id,note_ids,*,approved_writes=(),data_source_pin=native.DATA_SOURCE_PIN,database_pin=native.DATABASE_PIN,snapshot_adapter=None,uploaded_pngs=None):
         self.snapshot_adapter=snapshot_adapter
+        self.uploaded_pngs=deepcopy(uploaded_pngs) if uploaded_pngs is not None else {}
         self.request=request;self.source=native.uuid(data_source_id)
         if native.sha(self.source)!=data_source_pin:fail('wrong_parent')
         if not isinstance(note_ids,list) or not 1<=len(note_ids)<=50 or any(not isinstance(i,str) or not re.fullmatch('[0-9]{19}',i) for i in note_ids) or len(set(note_ids))!=len(note_ids):fail('invalid_cohort')
@@ -212,7 +221,7 @@ class API:
         page=native.uuid(page_id)
         if page not in self.known_pages:fail('unread_target')
         previous=None if after is None else self.page_root_types.get(page,{}).get(native.uuid(after),list_semantics.UNKNOWN)
-        payload={'children':wire_blocks(blocks,previous)}
+        payload={'children':wire_blocks(blocks,previous,uploaded_pngs=self.uploaded_pngs)}
         if after is None and self.page_roots.get(page):fail('unsupported_prepend')
         if after is not None:
             after=native.uuid(after)
@@ -237,7 +246,7 @@ class API:
         if native.note_id({'properties':properties})!=ident:fail('wrong_note_identity')
         self.schema()
         if self.matches(ident):fail('duplicate_id')
-        payload={'parent':{'type':'data_source_id','data_source_id':self.source},'properties':deepcopy(properties),'children':wire_blocks(blocks,None)}
+        payload={'parent':{'type':'data_source_id','data_source_id':self.source},'properties':deepcopy(properties),'children':wire_blocks(blocks,None,uploaded_pngs=self.uploaded_pngs)}
         value=self._write('POST','/pages',payload)
         if value.get('object')!='page' or native.note_id(value)!=ident:fail('write_uncertain')
         parent=value.get('parent')

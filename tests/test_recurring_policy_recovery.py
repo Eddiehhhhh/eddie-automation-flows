@@ -164,7 +164,7 @@ class RecoveryAPI(public.FakeAPI):
             return {'id': self.old['workflow_id'], 'path': self.old['workflow_path']}
         if path.startswith('/contents/'):
             self.called.append(path)
-            raw = p.controller.expected_bytes(self.old, scheduled=False)
+            raw = p.controller.expected_bytes(self.old, scheduled=self.runs[0]['event'] == 'schedule')
             return {'type': 'file', 'path': self.old['workflow_path'], 'encoding': 'base64',
                 'size': len(raw), 'sha': p.entry.r.oid(raw), 'content': base64.b64encode(raw).decode()}
         path = path.replace('/actions/workflows/' + str(self.old['workflow_id']) + '/', '/actions/workflows/21/')
@@ -181,11 +181,11 @@ class NoopRecoveryAPI(RecoveryAPI):
         super().__init__(current)
         self.old = recovery.noop_public_policy()
         row = {**self.runs[0], 'id': recovery.NOOP_RUN_ID,
-               'head_sha': recovery.NOOP_CONTROLLER_SHA, **changes}
+               'head_sha': recovery.NOOP_CONTROLLER_SHA, 'event': 'schedule', **changes}
         self.runs = [row]
         self.records = {row['id']: public.record(row, code_sha=self.old['code_sha'],
             rules_sha256=self.old['rules_sha256'], policy_sha256=self.old['get_policy_sha256'],
-            observed_main_commit='df1bf90967ce4a707ec8fe781ccc41e254fb1006',
+            observed_main_commit='8012fba794ad32655e5f97449f05f8449835e670',
             receipt_commit=recovery.ORIGINAL_RECEIPT_COMMIT,
             receipt_sha256=recovery.ORIGINAL_RECEIPT_SHA256,
             main_updated=False, cas_attempts=0)}
@@ -207,6 +207,36 @@ class ConfirmedNoopBridgeTests(unittest.TestCase):
         api = NoopRecoveryAPI(current_policy())
         self.assertEqual(api.records[recovery.NOOP_RUN_ID]['record_sha256'], recovery.NOOP_RECORD_SHA256)
 
+    def test_fixed_run13_metadata_and_replaced_run10_cannot_choose_policy(self):
+        self.assertEqual((recovery.NOOP_RUN_ID, recovery.NOOP_RUN_ATTEMPT, recovery.NOOP_JOB_ID),
+                         (39052510643, 1, 117453779434))
+        self.assertEqual(recovery.NOOP_CONTROLLER_SHA, '4361f151af7c4206f526e7510e9d24b12f88551f')
+        self.assertEqual(recovery.noop_public_policy()['code_sha'], 'b061ef1eab804693d3987f60971b37a1297c90d7')
+        self.assertEqual(recovery.NOOP_PUBLIC_POLICY_SHA256, 'f3fb5d9e326a59d166b638712fd02107c4e3c2d9fd1c29534398dd8d55efce18')
+        policy = current_policy()
+        row = NoopRecoveryAPI(policy).runs[0]
+        self.assertTrue(recovery.candidate_policy(policy, row)[1])
+        for changes in ({'id':39031368105, 'head_sha':'f3fc06fe86f6da4dd52863f76837781260f5513d', 'event':'workflow_dispatch'},
+                        {'event':'workflow_dispatch'}, {'event':'push'}):
+            self.assertEqual(recovery.candidate_policy(policy, {**row, **changes}), (policy, False))
+
+    def test_scheduled_predecessor_requires_exact_cron_enabled_controller(self):
+        policy = current_policy(); api = NoopRecoveryAPI(policy); read = api.json
+        def manual_bytes(path):
+            result = read(path)
+            if path.startswith('/contents/'):
+                raw = p.controller.expected_bytes(api.old, scheduled=False)
+                result.update(size=len(raw), sha=p.entry.r.oid(raw), content=base64.b64encode(raw).decode())
+            return result
+        api.json = manual_bytes
+        with self.assertRaises(p.ProvenanceFailure): p.discover(api, policy)
+
+    def test_in_progress_run13_cannot_be_used_before_terminal_success(self):
+        policy = current_policy()
+        for changes in ({'status':'in_progress', 'conclusion':None}, {'conclusion':'failure'}, {'conclusion':'cancelled'}):
+            api = NoopRecoveryAPI(policy, **changes)
+            with self.subTest(changes=changes), self.assertRaises(p.ProvenanceFailure): p.discover(api, policy)
+
     def test_noop_is_discoverable_when_original_run_is_out_of_window(self):
         policy = current_policy(); api = NoopRecoveryAPI(policy)
         value = p.discover(api, policy)
@@ -223,7 +253,7 @@ class ConfirmedNoopBridgeTests(unittest.TestCase):
 
     def test_other_run_attempt_controller_and_current_policy_are_rejected(self):
         for changes in ({'id': recovery.NOOP_RUN_ID + 1}, {'run_attempt': 2},
-                        {'head_sha': 'b' * 40}, {'event': 'schedule'}):
+                        {'head_sha': 'b' * 40}, {'event': 'workflow_dispatch'}):
             policy = current_policy(); api = NoopRecoveryAPI(policy, **changes)
             if changes.get('run_attempt') == 2:
                 api.attempts[(recovery.NOOP_RUN_ID, 1)] = {**api.runs[0], 'run_attempt': 1, 'conclusion': 'failure'}
