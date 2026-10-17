@@ -62,7 +62,7 @@ class Pins(unittest.TestCase):
 
     def test_discovery_reuses_shared_budget_only_exact_controller_mismatch(self):
         old=pf.policy();new=pf.policy(code_sha='9'*40);api=cf.LogsAPI(old,'');api.row['conclusion']='success'
-        result={**self.proof(),'run_binding':c.provenance.run_binding(api.row),
+        result={**self.proof(),'run_binding':c.provenance.run_binding(api.row),'latest_binding':c.provenance.run_binding(api.row),
             'recovery_anchor':'exact_run10_acknowledged_create_v1'}
         args={'public_policy':new,'approved_public_policy_sha256':c.provenance.a.sha(c.provenance.a.encoded(new)),'notion_policy_sha256':'d'*64}
         with patch.object(r,'RUN10_RUN',1001),patch.object(r,'recover_run10_checkpoint',return_value=result) as call:

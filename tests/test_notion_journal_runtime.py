@@ -434,7 +434,7 @@ class DiscoveryTests(unittest.TestCase):
             self.discover(api)
         self.assertFalse(any('/runs/1001/' in p for p in api.called))
     def test_list_attempt_drift_stops(self):
-        one = self.api(); one.overrides['/actions/runs/1001/attempts/1'] = {**one.row, 'updated_at': '2026-10-16T10:07:00Z'}
+        one = self.api(); one.overrides['/actions/runs/1001/attempts/1'] = {**one.row, 'conclusion':'cancelled'}
         one.overrides['/actions/runs/1001'] = one.overrides['/actions/runs/1001/attempts/1']
         with self.assertRaisesRegex(rt.CheckpointFailure, '^journal_provenance_changed$'):
             self.discover(MultiAPI([one]))

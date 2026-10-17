@@ -381,6 +381,13 @@ def run_binding(run):
                                    'event', 'status', 'conclusion', 'created_at', 'updated_at')}
 
 
+def run_semantic_binding(run):
+    # List/latest and exact-attempt endpoints have distinct updated_at clocks.
+    # Compare every other binding field across endpoints; same-endpoint rereads
+    # must still use run_binding, including updated_at, without any tolerance.
+    return {k: v for k, v in run_binding(run).items() if k != 'updated_at'}
+
+
 def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None):
     """Prove one original successful attempt, never a later attempt's result."""
     check_run_identity(listed, policy)
@@ -392,7 +399,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     attempt_path = root + '/attempts/' + str(attempt)
     run = check_run_identity(client.json(attempt_path), policy)
     if (run['run_attempt'] != attempt or run_identity(run) != run_identity(listed)
-            or attempt == listed['run_attempt'] and run_binding(run) != run_binding(listed)):
+            or attempt == listed['run_attempt'] and run_semantic_binding(run) != run_semantic_binding(listed)):
         fail('provenance_run_changed')
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
         return None
@@ -453,8 +460,8 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     current = check_run_identity(client.json(root), policy)
     if (run_identity(current) != run_identity(run)
             or current['run_attempt'] < listed['run_attempt']
-            or timestamp(current['updated_at']) < max(timestamp(listed['updated_at']), timestamp(run['updated_at']))
-            or current['run_attempt'] == attempt and run_binding(current) != run_binding(run)):
+            or timestamp(current['updated_at']) < timestamp(listed['updated_at'])
+            or current['run_attempt'] == attempt and run_semantic_binding(current) != run_semantic_binding(run)):
         fail('provenance_run_changed')
     if record is None:
         return None  # Strict prepare proof was rechecked against the original attempt.

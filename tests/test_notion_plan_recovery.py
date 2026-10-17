@@ -63,7 +63,7 @@ class RecoveryPins(unittest.TestCase):
     def test_discovery_old_branch_only_on_exact_controller_mismatch(self):
         old=pf.policy();new=pf.policy(code_sha='9'*40)
         api=cf.LogsAPI(old,'');api.row['conclusion']='success'
-        returned={'anchor':deepcopy(recovery.OLD_ANCHOR),'run_binding':checkpoints.provenance.run_binding(api.row),
+        returned={'anchor':deepcopy(recovery.OLD_ANCHOR),'run_binding':checkpoints.provenance.run_binding(api.row),'latest_binding':checkpoints.provenance.run_binding(api.row),
             'recovery_anchor':'exact_initial_transaction_v1','private_readback_required':True}
         with patch.object(recovery,'OLD_RUN',1001),patch.object(recovery,'recover_checkpoint',return_value=returned) as call:
             out=checkpoints.discover_anchor(api,public_policy=new,

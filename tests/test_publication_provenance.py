@@ -346,6 +346,91 @@ class AttemptRecoveryTests(unittest.TestCase):
                          {'status': 'public_provenance_failed', 'new_permissions': 0, 'credentials_used': 0})
 
 
+class EndpointClockTests(unittest.TestCase):
+    def api(self):
+        listed = run(created_at='2026-10-17T17:09:24Z', updated_at='2026-10-17T17:25:25Z')
+        attempt = {**listed, 'updated_at': '2026-10-17T17:25:26Z'}
+        api = FakeAPI([listed], attempts={(1001, 1): attempt})
+        api.log_overrides[1501] = b'2026-10-17T17:23:17Z ' + p.MARKER.encode() + a.encoded(record(listed))
+        return api
+
+    def test_semantic_binding_excludes_only_endpoint_clock(self):
+        before = run(); after = {**before, 'updated_at': '2026-10-17T17:25:26Z'}
+        self.assertNotEqual(p.run_binding(before), p.run_binding(after))
+        self.assertEqual(p.run_semantic_binding(before), p.run_semantic_binding(after))
+        self.assertEqual(set(p.run_semantic_binding(before)), set(p.run_binding(before)) - {'updated_at'})
+        self.assertIn('updated_at', before)
+
+    def test_observed_one_second_endpoint_difference_preserves_confirmed_anchor(self):
+        api = self.api(); value = p.discover(api, policy())
+        self.assertEqual(value['anchor'], {'commit': 'd' * 40, 'receipt_sha256': 'e' * 64})
+        self.assertEqual(api.called.count('/actions/runs/1001/attempts/1'), 2)
+        self.assertEqual(api.called[-1], '/actions/runs/1001')
+
+    def test_exact_run13_bridge_with_observed_endpoint_clocks(self):
+        import test_recurring_policy_recovery as bridge
+        current = bridge.current_policy(); api = bridge.NoopRecoveryAPI(current)
+        row = api.runs[0]
+        row.update(created_at='2026-10-17T17:09:24Z', updated_at='2026-10-17T17:25:25Z')
+        api.attempts[(row['id'], 1)] = {**row, 'updated_at': '2026-10-17T17:25:26Z'}
+        path = '/actions/runs/' + str(row['id']) + '/attempts/1/jobs?per_page=100&page=1'
+        jobs = api.json(path); jobs['jobs'][0]['completed_at'] = '2026-10-17T17:25:24Z'
+        api.overrides[path] = jobs
+        api.log_overrides[bridge.recovery.NOOP_JOB_ID] = (b'2026-10-17T17:23:17Z ' + p.MARKER.encode()
+            + a.encoded(api.records[row['id']]))
+        api.called.clear()
+        value = p.discover(api, current)
+        self.assertEqual(value['run_id'], 39052510643)
+        self.assertEqual(value['job_id'], 117453779434)
+        self.assertEqual(value['record_sha256'], 'b57c2589a7358b2413c5e1a5921f3d765a936db387023b87fe90648dc9e8f297')
+        self.assertEqual(value['anchor'], {'commit': bridge.recovery.ORIGINAL_RECEIPT_COMMIT,
+            'receipt_sha256': bridge.recovery.ORIGINAL_RECEIPT_SHA256})
+        self.assertEqual(value['receipt_sequence'], 1)
+        self.assertEqual(api.called.count('/actions/runs/39052510643/attempts/1'), 2)
+
+    def test_cross_endpoint_identity_status_and_conclusion_are_still_exact(self):
+        for change in ({'id': 2000}, {'run_attempt': 2}, {'head_sha': 'f' * 40},
+                       {'event': 'workflow_dispatch'}, {'created_at': '2026-10-17T17:09:23Z'},
+                       {'status': 'in_progress'}, {'conclusion': 'failure'}):
+            api = self.api()
+            api.overrides['/actions/runs/1001/attempts/1'] = {**api.attempts[(1001, 1)], **change}
+            with self.subTest(change=change), self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_run_changed'):
+                p.discover(api, policy())
+            self.assertFalse(any(x.startswith('logs:') for x in api.called))
+
+    def test_exact_attempt_clock_mutation_after_logs_still_fails(self):
+        api = self.api(); first = api.attempts[(1001, 1)]
+        reads = [first, {**first, 'updated_at': '2026-10-17T17:25:27Z'}]
+        api.overrides['/actions/runs/1001/attempts/1'] = lambda: deepcopy(reads.pop(0))
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_run_changed'):
+            p.discover(api, policy())
+        self.assertIn('logs:1501', api.called)
+        self.assertNotIn('/actions/runs/1001', api.called)
+
+    def test_latest_same_attempt_semantic_mutation_still_fails_after_logs(self):
+        for change in ({'id': 2000}, {'head_sha': 'f' * 40}, {'event': 'workflow_dispatch'},
+                       {'status': 'in_progress'}, {'conclusion': 'failure'}):
+            api = self.api(); api.overrides['/actions/runs/1001'] = {**api.runs[0], **change}
+            with self.subTest(change=change), self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_run_changed'):
+                p.discover(api, policy())
+            self.assertIn('logs:1501', api.called)
+
+    def test_latest_clock_cannot_regress_behind_listed_clock(self):
+        api = self.api()
+        api.overrides['/actions/runs/1001'] = {**api.runs[0], 'updated_at': '2026-10-17T17:25:24Z'}
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_run_changed'):
+            p.discover(api, policy())
+        self.assertIn('logs:1501', api.called)
+
+    def test_job_completion_remains_bounded_by_exact_attempt_clock(self):
+        api = self.api(); path = '/actions/runs/1001/attempts/1/jobs?per_page=100&page=1'
+        jobs = api.json(path); jobs['jobs'][0]['completed_at'] = '2026-10-17T17:25:27Z'
+        api.overrides[path] = jobs
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_timestamp'):
+            p.discover(api, policy())
+        self.assertFalse(any(x.startswith('logs:') for x in api.called))
+
+
 class Response:
     def __init__(self, status, body=b'{}', headers=None):
         self.status = status; self.body = body; self.headers = headers or {}

@@ -99,7 +99,7 @@ class PublicTests(unittest.TestCase):
     def test_normal_new_checkpoint_does_not_invoke_old_policy_recovery(self):
         policy=current_policy();api=Public()
         result={'anchor':{'commit':'f'*40,'state_blob':'e'*40,'state_sha256':'d'*64},
-                'run_binding':c.provenance.run_binding(api.run)}
+                'run_binding':c.provenance.run_binding(api.run),'latest_binding':c.provenance.run_binding(api.run)}
         with patch.object(c,'recover_anchor',return_value=result),patch.object(r,'recover_checkpoint') as old:
             observed=c.discover_anchor(api,public_policy=policy,
                 approved_public_policy_sha256=c.provenance.a.sha(c.provenance.a.encoded(policy)),notion_policy_sha256='6'*64)

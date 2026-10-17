@@ -255,11 +255,11 @@ def _latest_run(run, policy):
     return run
 
 
-def _same_run(older, newer):
+def _same_run(older, newer, *, cross_endpoint=False):
     keys = ('id', 'workflow_id', 'path', 'head_sha', 'head_branch', 'event', 'created_at')
     if (any(older.get(key) != newer.get(key) for key in keys)
             or newer['run_attempt'] < older['run_attempt']
-            or provenance.timestamp(newer['updated_at']) < provenance.timestamp(older['updated_at'])):
+            or (not cross_endpoint and provenance.timestamp(newer['updated_at']) < provenance.timestamp(older['updated_at']))):
         fail('journal_provenance_changed')
 
 
@@ -371,8 +371,8 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
         original = _terminal_run(client.json(root + '/attempts/' + str(run_attempt)), policy)
         if provenance.run_binding(original) != provenance.run_binding(run): fail('journal_provenance_changed')
         current = _latest_run(client.json(root), policy)
-        _same_run(run, current)
-        if current['run_attempt'] == run_attempt and provenance.run_binding(current) != provenance.run_binding(run):
+        _same_run(run, current, cross_endpoint=True)
+        if current['run_attempt'] == run_attempt and provenance.run_semantic_binding(current) != provenance.run_semantic_binding(run):
             fail('journal_provenance_changed')
         final = records[-1]
         return {'status': 'journal_provenance_verified',
@@ -380,7 +380,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'checkpoint': final, 'checkpoint_count': len(records), 'run_id': run_id,
             'run_attempt': run_attempt, 'job_id': job['id'],
             'get_step_record': get_record, 'get_run_success_claim': False,
-            'run_binding': provenance.run_binding(run), 'latest_attempt': current['run_attempt'],
+            'run_binding': provenance.run_binding(run), 'latest_binding':provenance.run_binding(current), 'latest_attempt': current['run_attempt'],
             'completed_at': job['completed_at'],
             'private_readback_required': True, 'credentials_created': 0,
             'transport': 'caller_injected', 'new_permissions': 0}
@@ -451,7 +451,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
         rows = listing.get('workflow_runs') if isinstance(listing, dict) else None
         if (not isinstance(rows, list) or len(rows) > 5 or type(listing.get('total_count')) is not int
                 or listing['total_count'] < len(rows)): fail('journal_provenance_runs')
-        candidates = []; seen = set(); latest = {}
+        candidates = []; seen = set(); latest = {}; attempt_candidates=set()
         for row in rows:
             row = _latest_run(row, policy)
             if row['id'] in latest: fail('journal_provenance_changed')
@@ -462,22 +462,35 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 fail('journal_provenance_changed')
             if exclude_run_id in latest: _same_run(latest[exclude_run_id], current)
             latest[exclude_run_id] = current
-        def enqueue(row):
+        def enqueue(row, *, from_attempt=False):
             key = (row['id'], row['run_attempt'])
             if key in seen: fail('journal_provenance_changed')
             seen.add(key); candidates.append(row)
+            if from_attempt:attempt_candidates.add(key)
         def previous(row):
             if row['run_attempt'] <= 1: return
             number = row['run_attempt'] - 1
             prior = _terminal_run(bounded.json('/actions/runs/' + str(row['id'])
                 + '/attempts/' + str(number)), policy)
             if prior['run_attempt'] != number: fail('journal_provenance_changed')
-            _same_run(prior, row); enqueue(prior)
+            _same_run(prior, row, cross_endpoint=(row['id'],row['run_attempt']) not in attempt_candidates); enqueue(prior,from_attempt=True)
         for row in latest.values():
             if ((row['id'], row['run_attempt']) == (exclude_run_id, exclude_run_attempt)
                     or row['status'] != 'completed'):
                 previous(row)
             else: enqueue(row)
+        def match_candidate(result,row):
+            binding=provenance.run_binding(row)
+            if (row['id'],row['run_attempt']) in attempt_candidates:
+                if result['run_binding']!=binding:fail('journal_provenance_changed')
+            elif provenance.run_semantic_binding(result['run_binding'])!=provenance.run_semantic_binding(row):
+                fail('journal_provenance_changed')
+            # Only listing/alias observations bound the mutable latest clock.
+            now=result.get('latest_binding')
+            if not isinstance(now,dict):fail('journal_provenance_changed')
+            before=latest[row['id']]
+            _same_run(before,now)
+            if now['run_attempt']==before['run_attempt'] and provenance.run_semantic_binding(now)!=provenance.run_semantic_binding(before):fail('journal_provenance_changed')
         checked = 0
         while candidates and checked < 4:
             candidates.sort(key=lambda row: (provenance.timestamp(row['updated_at']),
@@ -493,26 +506,26 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     # One reviewed old transaction only; same bounded client,
                     # exact original controller/log proof and fixed state anchor.
                     result=plan_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
-                    if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
+                    match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(plan_recovery.RUN10_RUN,plan_recovery.RUN10_ATTEMPT)):
                     result=plan_recovery.recover_run10_checkpoint(bounded,row['id'],row['run_attempt'])
-                    if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
+                    match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(png_recovery.RUN,png_recovery.ATTEMPT)):
                     result=png_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
-                    if result['run_binding']!=provenance.run_binding(row):fail('journal_provenance_changed')
+                    match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
                 if str(exc) not in ('journal_provenance_missing', 'journal_provenance_no_checkpoint',
                                    'journal_provenance_other_controller'):
                     raise
             else:
-                if result['run_binding'] != provenance.run_binding(row): fail('journal_provenance_changed')
+                match_candidate(result,row)
                 # All known candidates are ordered by original attempt time.
                 # An earlier attempt can never outrank the attempt above it.
                 # Stop as soon as the newest eligible checkpoint is verified;
