@@ -21,19 +21,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: '95765af687b982bbf19ed8ebc398f4682259ae6c'
+          ref: '233d0b8fb5e82a65437d5bb6e6d90d682c81ae68'
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
       - name: Verify pinned reviewed runtime
         env:
-          RUNTIME_SHA: '95765af687b982bbf19ed8ebc398f4682259ae6c'
+          RUNTIME_SHA: '233d0b8fb5e82a65437d5bb6e6d90d682c81ae68'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Prepare reviewed public policy
         env:
-          POLICY_B64: 'eyJjb2RlX3NoYSI6Ijk1NzY1YWY2ODdiOTgyYmJmMTllZDhlYmMzOThmNDY4MjI1OWFlNmMiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI2NjIwN2RhM2NhZmQ0OTc3ODU3MGQzMmNhNjFjMjNiZmExM2Q4NmE0Y2ViZDQ5ZmFiY2NhZWJlOTUyZjg1NWQyIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiI4NjQwYTc1NTI3ZjAzNGIzYTZmYzQ0MDRmYTZkMmQxNTljNjIwODEyODllYTg3NDEzMWMwOTQ2OTM0NGNjNzQyIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjU3MTljNDZiYWE2YmViOTk3OWM5ODE5NjA5N2VkMWFlM2NjNDIxNDc1MzdhNGQ1YjVkZTM5ZTdkOGJjZDlmMGMiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
-          POLICY_SHA256: '41c47b8f9fb49ad4d1dd90b4c840b7c1b852ff926a52ba92a30e83975cd624a2'
+          POLICY_B64: 'eyJjb2RlX3NoYSI6IjIzM2QwYjhmYjVlODJhNjU0MzdkNWJiNmU2ZDkwZDY4MmM4MWFlNjgiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI2NjIwN2RhM2NhZmQ0OTc3ODU3MGQzMmNhNjFjMjNiZmExM2Q4NmE0Y2ViZDQ5ZmFiY2NhZWJlOTUyZjg1NWQyIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiIzMjNkM2FmMTA2NzcyNjAyN2NmZTdhNjBlNjRhY2IwNWU4YzQ4ODE0NDkzZGIxMGQ0YzdjYjM0ZmYyMWE4NjAwIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjRmYTY1M2MwZjZjMWRmYjUxMzVhMGI5ZTFjNzM2MWE3NDY0YWY0NzY1NGRmMzhjMWU1NjIzOGFmNzA5MzMxYmUiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
+          POLICY_SHA256: 'd36a871f7922e012dad35c8fc921e8c36489a0b2b9d9a0ad4aade580cdfb41c7'
         run: |
           python - <<'PY'
           import base64, hashlib, os
@@ -52,8 +52,8 @@ jobs:
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          POLICY_SHA256: '41c47b8f9fb49ad4d1dd90b4c840b7c1b852ff926a52ba92a30e83975cd624a2'
-          SCOPE_SHA256: '8cedac9f00253da276037e4606475e7aa4448c8f3ac20881fd5b10c1a6ec02c1'
+          POLICY_SHA256: 'd36a871f7922e012dad35c8fc921e8c36489a0b2b9d9a0ad4aade580cdfb41c7'
+          SCOPE_SHA256: 'c19fb3af65e391a46139d2421296cd2e1bd08ac76b3d6d0740511673005979f0'
         run: |
           args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
           if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
@@ -69,7 +69,7 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          POLICY_SHA256: '41c47b8f9fb49ad4d1dd90b4c840b7c1b852ff926a52ba92a30e83975cd624a2'
+          POLICY_SHA256: 'd36a871f7922e012dad35c8fc921e8c36489a0b2b9d9a0ad4aade580cdfb41c7'
         run: >-
           python scripts/get_notion_runtime.py
           --policy "$RUNNER_TEMP/get-recurring-public-policy.json"
