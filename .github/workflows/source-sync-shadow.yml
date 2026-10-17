@@ -6,7 +6,7 @@ on:
       mode:
         description: Bounded sample, private pair, list inventory, or full-library acceptance
         type: choice
-        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, canonical_manual, canonical_probe, notion_readonly, notion_prepare, full]
+        options: [sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, canonical_manual, canonical_probe, notion_readonly, notion_prepare, saved_create_inspection, full]
         default: sample
         required: true
       preview_source_commit:
@@ -59,6 +59,7 @@ concurrency:
 
 jobs:
   validate:
+    if: inputs.mode != 'saved_create_inspection'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ (inputs.mode == 'full_replay' || inputs.mode == 'mirror_replay' || inputs.mode == 'pending_diagnostic' || inputs.mode == 'private_preview' || inputs.mode == 'legacy_capture') && 120 || 60 }}
     steps:
@@ -346,3 +347,27 @@ jobs:
           else
             python scripts/verify_shadow_repeat.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
+
+  saved-create-inspection:
+    if: inputs.mode == 'saved_create_inspection'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: diagnostic-code
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: 086fc1425a95f7bce6df55b3e36aa449f679a316
+          path: inspected-runtime
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Inspect one saved create without writes
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python diagnostic-code/diagnostics/run_saved_create_diagnostic.py --runtime inspected-runtime
