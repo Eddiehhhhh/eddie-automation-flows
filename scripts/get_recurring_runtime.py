@@ -93,6 +93,14 @@ def fetch_commit(local, commit, depth=1):
               '--no-recurse-submodules', '--no-write-fetch-head', 'origin', commit)
 
 
+def load_inventory(reader, remote, token, directory, commit):
+    # The exact-object downloader creates only its final child directory.
+    # Each caller-owned container must exist first; never reuse/replace a
+    # foreign directory or symlink, and never broaden the selected blob set.
+    directory.mkdir(mode=0o700)
+    return engine.load_current(reader, remote, token, directory, commit)
+
+
 def load_receipt(reader, remote, token, root, commit):
     """Only the exact receipt blob proven at the exact known commit is fetched."""
     row = remote.check_source_budget(commit).get(entry.FULL_RECEIPT)
@@ -109,8 +117,8 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
     # Explicit bounded object-only reads; OfflineGit itself cannot lazy fetch.
     at_stage('parent_history', fetch_commit, local, parent, entry.MAX_INTERVENING + 2)
     at_stage('bootstrap_history', fetch_commit, local, bootstrap['commit'])
-    at_stage('bootstrap_inventory', engine.load_current, reader, remote, token, root / 'bootstrap', bootstrap['commit'])
-    current = at_stage('current_inventory', engine.load_current, reader, remote, token, root / 'parent', parent)
+    at_stage('bootstrap_inventory', load_inventory, reader, remote, token, root / 'bootstrap', bootstrap['commit'])
+    current = at_stage('current_inventory', load_inventory, reader, remote, token, root / 'parent', parent)
     anchor = None
     if entry.FULL_RECEIPT in reader.tree(parent):
         verified = at_stage('receipt_provenance', provenance.discover, client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt)
@@ -127,7 +135,7 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
         if receipt['sequence'] > 1:
             load_receipt(reader, remote, token, root, previous)
         for target in sorted({before, commit}):
-            engine.load_current(reader, remote, token, root / target, target)
+            at_stage('current_inventory', load_inventory, reader, remote, token, root / target, target)
     _, _, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap)
     _, legacy, registry = states
     at_stage('legacy_baselines', m.selected_baselines, reader, legacy, parent, remote)

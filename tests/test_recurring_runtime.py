@@ -144,6 +144,71 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(any('/assets/' in path for path in self.fetches))
         self.assertEqual(self.remote.calls, [])
 
+    def test_real_pack_materialization_creates_bootstrap_parent_and_keeps_assets_missing(self):
+        import source_sync_pack_seed as pack
+        unmanaged = self.reader.read(self.parent, r.GET + '/1.md').replace(b'note_id: "1"', b'note_id: "808"')
+        self.parent = self.f.commit_change(self.parent, {r.GET + '/unmanaged.md': unmanaged})
+        self.f.parent = self.parent; self.remote.head = self.parent
+        self.bootstrap['commit'] = self.parent
+        self.bootstrap['get_tree'] = self.reader.source_get_tree(self.parent)
+        self.bootstrap['existing_unmanaged'] += 1
+        self.policy['get_policy_sha256'] = entry.policy_sha256(self.rules, self.bootstrap)
+        self.policy_hash = a.sha(a.encoded(self.policy))
+        source_reader = self.reader; source_local = self.local; source_repo = self.f.f.f.repo
+        self.f.f.f.git('config', 'uploadpack.allowFilter', 'true')
+        for commit in self.f.f.f.git('rev-list', '--all').decode().splitlines():
+            for mode, kind, oid in source_reader.tree(commit).values():
+                if kind == 'blob' and oid not in self.store:
+                    self.store[oid] = source_local.blob(oid)
+        clone = self.f.f.f.base / 'pack-materialized-clone'
+        subprocess.run(['git', '-c', 'protocol.file.allow=always', 'clone', '--quiet',
+                        '--filter=blob:none', '--no-checkout', source_repo.as_uri(), str(clone)],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        disable_auto_maintenance(clone)
+        self.reader = a.OfflineGit(clone); self.local = self.reader.local
+        self.remote.tree_entries = source_reader.tree_entries
+        inherited = self.reader.tree(self.parent)[r.GET + '/assets/inherited.bin'][2]
+        real_selected = m.fetch_selected; directories = []
+        def local_pack(token, expected, destination, maximum, protocol):
+            directories.append(destination.parent)
+            raw = source_local.run('pack-objects', '--stdout', '--no-reuse-delta',
+                                   '--no-reuse-object', '--window=0',
+                                   data=('\n'.join(expected) + '\n').encode())
+            self.assertLessEqual(len(raw), maximum)
+            destination.write_bytes(raw)
+            return len(raw)
+        self.patches(real_evidence=True)
+        with patch.object(m, 'fetch_selected', side_effect=real_selected), \
+             patch.object(pack, 'capabilities', return_value=2), \
+             patch.object(pack, 'fetch_pack', side_effect=local_pack):
+            result = self.call()
+        self.assertEqual(result['status'], 'recurring_candidate_verified')
+        self.assertTrue(any(p.parent.name == 'bootstrap' and p.name == 'canonical-current' for p in directories))
+        self.assertEqual(self.remote.calls, [])
+        self.assertTrue(self.local.run('cat-file', '--batch-check', data=(inherited + '\n').encode()).endswith(b' missing\n'))
+
+    def test_transfer_missing_parent_reproduces_before_any_transport(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder, patch.object(r.pack_seed, 'fetch_pack') as fetch:
+            with self.assertRaises(FileNotFoundError):
+                r.fetch_readback_blobs('synthetic', {r.oid(b'x'): 1},
+                    Path(folder) / 'bootstrap' / 'canonical-current', 1024, 2)
+            fetch.assert_not_called()
+
+    def test_inventory_container_is_exclusive_and_covers_receipt_directories(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ('bootstrap', 'parent', 'a' * 40, 'b' * 40):
+                target = Path(folder) / name
+                with patch.object(engine, 'load_current', return_value={}) as load:
+                    self.assertEqual(rt.load_inventory(None, None, None, target, self.parent), {})
+                    self.assertTrue(target.is_dir())
+                    self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+                    load.assert_called_once()
+                    with self.assertRaises(FileExistsError):
+                        rt.load_inventory(None, None, None, target, self.parent)
+                    self.assertEqual(load.call_count, 1)
+
     def test_cli_default_wires_existing_source_and_readonly_runtime(self):
         import sync_getnote_to_raw as sync
         policy_path = self.f.f.f.base / 'public-policy.json'; policy_path.write_bytes(a.encoded(self.policy))
