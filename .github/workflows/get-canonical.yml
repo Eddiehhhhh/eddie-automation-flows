@@ -1,10 +1,80 @@
+# Local deterministic template only. Publish only after final production approval.
 name: Canonical Get single writer
 on:
   workflow_dispatch:
-permissions: {}
+    inputs:
+      apply:
+        description: Apply only under the separately approved recurring scope
+        type: boolean
+        default: false
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
 jobs:
-  register:
-    if: ${{ false }}
+  canonical-get:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
-      - run: ':'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: '95765af687b982bbf19ed8ebc398f4682259ae6c'
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Verify pinned reviewed runtime
+        env:
+          RUNTIME_SHA: '95765af687b982bbf19ed8ebc398f4682259ae6c'
+        run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
+      - name: Prepare reviewed public policy
+        env:
+          POLICY_B64: 'eyJjb2RlX3NoYSI6Ijk1NzY1YWY2ODdiOTgyYmJmMTllZDhlYmMzOThmNDY4MjI1OWFlNmMiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI2NjIwN2RhM2NhZmQ0OTc3ODU3MGQzMmNhNjFjMjNiZmExM2Q4NmE0Y2ViZDQ5ZmFiY2NhZWJlOTUyZjg1NWQyIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiI4NjQwYTc1NTI3ZjAzNGIzYTZmYzQ0MDRmYTZkMmQxNTljNjIwODEyODllYTg3NDEzMWMwOTQ2OTM0NGNjNzQyIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjU3MTljNDZiYWE2YmViOTk3OWM5ODE5NjA5N2VkMWFlM2NjNDIxNDc1MzdhNGQ1YjVkZTM5ZTdkOGJjZDlmMGMiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
+          POLICY_SHA256: '41c47b8f9fb49ad4d1dd90b4c840b7c1b852ff926a52ba92a30e83975cd624a2'
+        run: |
+          python - <<'PY'
+          import base64, hashlib, os
+          from pathlib import Path
+          value = base64.b64decode(os.environ['POLICY_B64'], validate=True)
+          assert hashlib.sha256(value).hexdigest() == os.environ['POLICY_SHA256']
+          path = Path(os.environ['RUNNER_TEMP']) / 'get-recurring-public-policy.json'
+          with path.open('xb') as stream:
+              stream.write(value)
+          PY
+      - name: Emit verified canonical publication anchor
+        id: get_sync
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          POLICY_SHA256: '41c47b8f9fb49ad4d1dd90b4c840b7c1b852ff926a52ba92a30e83975cd624a2'
+          SCOPE_SHA256: '8cedac9f00253da276037e4606475e7aa4448c8f3ac20881fd5b10c1a6ec02c1'
+        run: |
+          args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
+          if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
+          if test "$APPLY" = true; then
+            args+=(--apply --scope-from-policy --approved-scope-sha256 "$SCOPE_SHA256" --checkpoint "$RUNNER_TEMP/get-recurring-attempt.json" --publication-file "$RUNNER_TEMP/get-canonical-publication.txt")
+          fi
+          python scripts/get_recurring_runtime.py "${args[@]}"
+      - name: Sync confirmed Get content to Notion
+        id: notion_sync
+        if: ${{ steps.get_sync.outcome == 'success' && (github.event_name == 'schedule' || inputs.apply) }}
+        continue-on-error: true
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          POLICY_SHA256: '41c47b8f9fb49ad4d1dd90b4c840b7c1b852ff926a52ba92a30e83975cd624a2'
+        run: >-
+          python scripts/get_notion_runtime.py
+          --policy "$RUNNER_TEMP/get-recurring-public-policy.json"
+          --approved-policy-sha256 "$POLICY_SHA256"
+          --publication-file "$RUNNER_TEMP/get-canonical-publication.txt"
+          --apply --scope-from-policy
+# The same job has independent Get and Notion failure reporting. A Notion partial
+# outcome must not erase the successful Get step or its confirmed receipt marker.
