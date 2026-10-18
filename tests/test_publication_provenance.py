@@ -367,10 +367,11 @@ class EndpointClockTests(unittest.TestCase):
         self.assertEqual(api.called.count('/actions/runs/1001/attempts/1'), 2)
         self.assertEqual(api.called[-1], '/actions/runs/1001')
 
-    def test_exact_run13_bridge_with_observed_endpoint_clocks(self):
+    def test_current_noop_bridge_preserves_observed_endpoint_clock_contract(self):
         import test_recurring_policy_recovery as bridge
         current = bridge.current_policy(); api = bridge.NoopRecoveryAPI(current)
         row = api.runs[0]
+        # Replay the retained run13 endpoint clock asymmetry on the current exact bridge.
         row.update(created_at='2026-10-17T17:09:24Z', updated_at='2026-10-17T17:25:25Z')
         api.attempts[(row['id'], 1)] = {**row, 'updated_at': '2026-10-17T17:25:26Z'}
         path = '/actions/runs/' + str(row['id']) + '/attempts/1/jobs?per_page=100&page=1'
@@ -380,13 +381,13 @@ class EndpointClockTests(unittest.TestCase):
             + a.encoded(api.records[row['id']]))
         api.called.clear()
         value = p.discover(api, current)
-        self.assertEqual(value['run_id'], 39052510643)
-        self.assertEqual(value['job_id'], 117453779434)
-        self.assertEqual(value['record_sha256'], 'b57c2589a7358b2413c5e1a5921f3d765a936db387023b87fe90648dc9e8f297')
+        self.assertEqual(value['run_id'], bridge.recovery.NOOP_RUN_ID)
+        self.assertEqual(value['job_id'], bridge.recovery.NOOP_JOB_ID)
+        self.assertEqual(value['record_sha256'], bridge.recovery.NOOP_RECORD_SHA256)
         self.assertEqual(value['anchor'], {'commit': bridge.recovery.ORIGINAL_RECEIPT_COMMIT,
             'receipt_sha256': bridge.recovery.ORIGINAL_RECEIPT_SHA256})
         self.assertEqual(value['receipt_sequence'], 1)
-        self.assertEqual(api.called.count('/actions/runs/39052510643/attempts/1'), 2)
+        self.assertEqual(api.called.count('/actions/runs/' + str(bridge.recovery.NOOP_RUN_ID) + '/attempts/1'), 2)
 
     def test_cross_endpoint_identity_status_and_conclusion_are_still_exact(self):
         for change in ({'id': 2000}, {'run_attempt': 2}, {'head_sha': 'f' * 40},

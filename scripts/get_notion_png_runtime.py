@@ -134,9 +134,31 @@ class Session:
     def verify_unattached(self):
         """Fresh saved-ID GET before page writes; attached joins stay stable."""
         self.fresh_guard();state,_=self.read();assets=state.get('png_assets',{})
+        selected=set(self.publication.descriptor['records'])
+        journal=state['engine_state']['journal']
+        if journal is not None:
+            plan=journal['plan']
+            if not e.same(plan['publication'],self.publication.descriptor):fail('source_changed')
+            index=journal['index'];rows=plan['records'];operation=journal['operation']
+            selected=set()
+            if operation is not None:
+                valid_phases={'create':{'prepared','in_flight','acknowledged'},'append':{'prepared','in_flight','acknowledged'},'archive':{'prepared','in_flight'},'cleanup':{'verified'}}
+                if operation.get('kind') not in valid_phases or operation.get('phase') not in valid_phases[operation['kind']] or index>=len(rows):fail('state_invalid')
+            if index<len(rows):
+                row=rows[index];ident=row['note_id']
+                if ident not in self.publication.descriptor['records'] or not e.same(row['source'],self.publication.descriptor['records'][ident]):fail('source_changed')
+                # A saved create response is read back, never re-dispatched.
+                # Its native image bytes and full tree still need verification.
+                # Do not let a later, unattached upload block this readback.
+                acknowledged=(operation is not None and operation['kind']=='create'
+                    and operation['phase']=='acknowledged' and operation.get('response') is not None)
+                if acknowledged:
+                    if row['action']!='create':fail('state_invalid')
+                    e.p.notion_id(operation['response'])
+                else:selected={ident}
         for ident,row in assets.get('uploads',{}).items():
             if ident in assets.get('attachments',{}):continue
-            if ident not in self.publication.descriptor['records']:continue
+            if ident not in selected:continue
             if row['state']['phase']!='uploaded_verified':fail('png_upload_unverified')
             data=self.publication.read(ident);plan,raw=self._binding(ident,data)
             if not e.same(plan,row['plan']):fail('asset_receipt_invalid')

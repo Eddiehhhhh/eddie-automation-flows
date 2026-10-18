@@ -20,6 +20,7 @@ import tempfile
 import get_notion_sink_plan as p
 import get_legacy_adapter as git
 import get_notion_plan_recovery as plan_recovery
+import get_notion_run15_recovery as run15_recovery
 import get_notion_live_transport as transport
 import get_notion_content_scope as content_scope
 
@@ -613,7 +614,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         if version != expected_store_sha: fail('state_changed')
         if (plan.get('rules_sha256') != rules_sha256()
                 and not plan_recovery.allows(plan,value['journal'])
-                and not plan_recovery.allows_run10(plan,value['journal'])): fail('rules_changed')
+                and not plan_recovery.allows_run10(plan,value['journal'])
+                and not run15_recovery.allows(plan,value['journal'])): fail('rules_changed')
         if not plan['records']:
             if plan['records'] or value['journal'] is not None or version != plan['state_sha256']: fail('state_changed')
             return {'status':'partial' if counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':0,'write_state':'not_attempted'}

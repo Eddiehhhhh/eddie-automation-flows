@@ -150,7 +150,7 @@ class LinkTests(unittest.TestCase):
         out=self.run_d(row,snap);self.assertEqual(out['stage'],'target');self.assertNotIn('link_differences',out)
         self.assertNotIn('PRIVATE',json.dumps(out))
 
-    def test_explicit_target_shape_categories_do_not_accept_changes(self):
+    def test_explicit_target_shapes_follow_current_comparison_contract(self):
         cases=[('https://example.invalid','https://example.invalid/','empty_path_to_slash'),
                ('https://example.invalid/','https://example.invalid','slash_to_empty'),
                ('HTTPS://example.invalid/','https://example.invalid/','scheme_case_only'),
@@ -167,9 +167,18 @@ class LinkTests(unittest.TestCase):
                ('https://User@example.invalid','https://user@example.invalid','other')]
         for before,after,category in cases:
             with self.subTest(category=category):
-                _,_,out=self.link_case('private label',{'url':before},{'url':after})
-                self.assertEqual(out['link_differences']['explicit_target_shapes'][category],1)
-                self.assertEqual(out['status'],'mismatch');self.assertFalse(out['created_accepts'])
+                row,snapshot,out=self.link_case('private label',{'url':before},{'url':after})
+                # Raw shape classification remains exact, including the two
+                # path forms normalized only by the reviewed comparison layer.
+                actual=e.target(snapshot,f.N,f.DS)['semantic']
+                raw=d._link_differences(row['rendered'],actual)
+                self.assertEqual(raw['explicit_target_shapes'][category],1)
+                if category in ('empty_path_to_slash','slash_to_empty'):
+                    self.assertEqual(out['link_differences']['changed_pairs'],0)
+                    self.assertEqual(out['status'],'matched');self.assertTrue(out['created_accepts'])
+                else:
+                    self.assertEqual(out['link_differences']['explicit_target_shapes'][category],1)
+                    self.assertEqual(out['status'],'mismatch');self.assertFalse(out['created_accepts'])
     def test_changed_pairs_are_distinct_from_nodes_and_roots(self):
         runs=[p.text_run('first'),p.text_run('second')];runs[1]['annotations']['bold']=True
         row,snap=self.fixture([p.block('paragraph',{'rich_text':runs})])

@@ -9,6 +9,7 @@ from collections import Counter
 import get_notion_executor as e
 import get_notion_live_transport as t
 import get_notion_plan_recovery as plan_recovery
+import get_notion_run15_recovery as run15_recovery
 from get_notion_preserved_image import IMAGE_FAILURES
 
 CONTRACT='get-notion-bounded-pipeline-1'
@@ -88,7 +89,8 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             prior_attempt=bool(journal.get('index')) or bool(operation and (operation.get('kind') in ('archive','cleanup') or operation.get('phase')!='prepared'))
             plan=deepcopy(journal['plan'])
             if ((plan.get('rules_sha256')!=approved['rules_sha256'] and not plan_recovery.allows(plan,journal)
-                    and not plan_recovery.allows_run10(plan,journal))
+                    and not plan_recovery.allows_run10(plan,journal)
+                    and not run15_recovery.allows(plan,journal))
                     or not e.same(plan.get('policy'),engine_policy) or plan.get('initial_scope_sha256')!=e.digest(initial_scope) or plan.get('retry_conflicts')!=retry_conflicts):e.fail('journal_busy')
             publication.check(plan['publication']);ids=[r['note_id'] for r in plan['records']]
         else:ids=pending(publication,state,engine_policy,initial_scope,retry_conflicts,reviewed_png)

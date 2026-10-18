@@ -7,6 +7,7 @@ observed page is never ownership adoption. Every operation below is a preview.
 from copy import deepcopy
 import get_notion_list_semantics as list_semantics
 import hashlib
+import ipaddress
 import json
 import re
 from pathlib import PurePosixPath
@@ -249,13 +250,59 @@ def block(kind, payload, children=None):
     return {'type': kind, 'payload': normalize_payload(kind, payload), 'children': children or []}
 
 
+def comparison_http_empty_path(url):
+    """Comparison-only HTTP(S) empty-path rule, preserving every other byte.
+
+    RFC 9110 4.2.3 and RFC 3986 6.2.3 permit an empty HTTP(S) path to
+    compare as '/'. This deliberately does NOT normalize scheme/host case,
+    ports, percent encodings, query/fragment delimiters or any nonempty path.
+    Only a conservative legal ASCII absolute-URI subset without userinfo is
+    eligible; malformed/unsupported values remain exact, never repaired.
+    """
+    if not isinstance(url, str) or not url.isascii(): return url
+    atom = r"(?:[A-Za-z0-9._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})"
+    match = re.fullmatch(r"(?P<scheme>https?)://(?P<authority>[^/?#]+)(?P<path>/)?"
+                         + r"(?P<suffix>(?:\?" + atom + r"*)?(?:#" + atom + r"*)?)", url, re.IGNORECASE)
+    if match is None or match['path'] is not None: return url
+    authority = match['authority']
+    if '@' in authority: return url
+    if authority.startswith('['):
+        host = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::([0-9]+))?", authority)
+        if host is None: return url
+        try: ipaddress.IPv6Address(host[1])
+        except ValueError: return url
+    else:
+        regname = r"(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+"
+        host = re.fullmatch(r"(" + regname + r")(?::([0-9]+))?", authority)
+        if host is None: return url
+    # A port must be an actual bounded TCP port; leave empty/invalid ports exact.
+    if host[2] is not None and (len(host[2]) > 5 or int(host[2]) > 65535): return url
+    at = len(match['scheme']) + 3 + len(authority)
+    return url[:at] + '/' + url[at:]
+
+
+def _comparison_payload(kind, payload):
+    value = normalize_payload(kind, payload)
+    def rich(runs):
+        for run in runs:
+            link = run['text']['link']
+            if link is not None: link['url'] = comparison_http_empty_path(link['url'])
+        # Link normalization can make adjacent equally styled chunks identical.
+        return normalize_rich(runs)
+    for key in ('rich_text', 'caption'):
+        if key in value: value[key] = rich(value[key])
+    if 'cells' in value: value['cells'] = [rich(cell) for cell in value['cells']]
+    return value
+
+
 def comparison_semantics(rows, previous_type=list_semantics.UNKNOWN):
     """Compare semantic trees using the same payload normalization as readback.
 
     Compaction retains original rich-text runs, while wire encoding and native
     readback merge adjacent runs with identical annotations and links. Normalize
     only copies for comparison; approved plans, requests and receipt node hashes
-    are never rewritten. Root/child boundaries and ordering remain exact.
+    are never rewritten. HTTP(S) empty paths compare as '/' only in these
+    copies. Root/child boundaries and ordering remain exact.
     """
     def walk(items, depth):
         if not isinstance(items, list) or depth > 32:
@@ -265,7 +312,7 @@ def comparison_semantics(rows, previous_type=list_semantics.UNKNOWN):
             if not isinstance(row, dict) or set(row) != {'type', 'payload', 'children'}:
                 stop('incomplete_target_read')
             result.append({'type': row['type'],
-                'payload': normalize_payload(row['type'], row['payload']),
+                'payload': _comparison_payload(row['type'], row['payload']),
                 'children': walk(row['children'], depth + 1)})
         return result
     return list_semantics.defaults(walk(rows, 0), previous_type)

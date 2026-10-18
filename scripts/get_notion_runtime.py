@@ -23,6 +23,7 @@ import get_notion_writer_guard as old_writers
 import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
 import get_notion_plan_recovery as plan_recovery
+import get_notion_run15_recovery as run15_recovery
 import get_notion_png_recovery as png_recovery
 import get_notion_png_loader as png_loader
 import get_notion_png_runtime as png_runtime
@@ -434,8 +435,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             loaded_assets=None
             png_transition=None
             preload_state=current;preload_sha=sha
-            if present and found.get('recovery_anchor')==png_recovery.TAG:
-                png_transition=png_recovery.transition_outer(current,sha,public_policy['get_policy_sha256'])
+            if present and found.get('recovery_anchor') in (png_recovery.TAG,run15_recovery.TAG):
+                bridge=run15_recovery if found['recovery_anchor']==run15_recovery.TAG else png_recovery
+                png_transition=bridge.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=png_transition;preload_sha=outbox.digest(png_transition)
             if tip is not None and preload_state['engine_state']['journal'] is None:
                 origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
@@ -467,7 +469,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:
                     store=ReadOnlyStore(candidate);current,sha=store.read()
-            if present and found.get('recovery_anchor')==png_recovery.TAG:
+            if present and found.get('recovery_anchor') in (png_recovery.TAG,run15_recovery.TAG):
                 candidate=png_transition
                 if candidate is None:fail('notion_state_anchor')
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
@@ -504,6 +506,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             elif old_journal is not None and plan_recovery.allows_run10(old_journal['plan'],old_journal):
                 safe['resumed_prior_plan_sha256']=plan_recovery.RUN10_PLAN
                 safe['resumed_prior_rules_sha256']=plan_recovery.RUN10_ENGINE_RULES
+            elif old_journal is not None and run15_recovery.allows(old_journal['plan'],old_journal):
+                safe['resumed_prior_plan_sha256']=run15_recovery.PLAN_SHA
+                safe['resumed_prior_rules_sha256']=run15_recovery.ENGINE_RULES
             return safe
     except Exception as exc:
         reason=str(exc);reason=reason if reason in ERRORS else 'notion_failed'
