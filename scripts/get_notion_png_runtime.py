@@ -18,6 +18,7 @@ import get_notion_png_store as storage
 import get_notion_png_upload as upload
 import get_notion_png_transport as multipart
 import get_notion_uploaded_png as image
+import get_notion_png_expired_recovery as expired_recovery
 
 CONTRACT='get-notion-three-png-runtime-1'
 REASONS=frozenset(e.REASONS)|{'asset_evidence_invalid','asset_current_changed','asset_reference_changed','asset_receipt_invalid','png_upload_unverified','upload_expired_or_near_expiry','upload_unusable','create_uncertain_no_retry','send_uncertain_read_only','request_uncertain','request_not_dispatched','permission_denied','durability_unconfirmed'}
@@ -86,6 +87,24 @@ class Session:
                 try:title=json.loads(titles[0])
                 except ValueError:title=titles[0]
                 if not isinstance(title,str) or not title or len(title)>2000:fail('request_budget')
+                properties={'笔记 ID':{'type':'rich_text','rich_text':[e.p.text_run(ident)]},
+                    self.policy['title_property']:{'type':'title','title':[e.p.text_run(title)]}}
+                if expired_recovery.only_note_id(state) is not None:
+                    recovery=state['png_assets']['expired_recovery']
+                    old=storage.receipt_for(recovery['old_slot'])
+                    comparison=deepcopy(rendered)
+                    def bind_comparison(nodes):
+                        for node in nodes:
+                            if node['type']=='image':
+                                payload=node['payload']
+                                if payload.get('kind')!='notion_png_preflight' or any(payload.get(k)!=old[k] for k in ('sha256','byte_count','mime')):fail('asset_receipt_invalid')
+                                node['payload']=image.semantic(old,payload['caption'])
+                            bind_comparison(node['children'])
+                    bind_comparison(comparison)
+                    expired_recovery.check_preflight(state,ident,comparison,source,properties)
+                    # Discard the comparison copy. The actual preflight blocks
+                    # remain unwritable and never contain the expired handle.
+
                 # Every target must still be a uniquely missing new page.
                 snapshot=api.read_note(ident);view=e.target(snapshot,ident,self.policy['data_source_id'])
                 if view is not None:fail('missing_block_ownership')

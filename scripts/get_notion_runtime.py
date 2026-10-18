@@ -24,6 +24,9 @@ import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
+import get_notion_run16_recovery as run16_recovery
+import get_notion_png_expired_recovery as expired_recovery
+import get_notion_png_transport as png_transport
 import get_notion_png_recovery as png_recovery
 import get_notion_png_loader as png_loader
 import get_notion_png_runtime as png_runtime
@@ -46,7 +49,7 @@ MAX_RUN_RECORDS=10
 STAGES={'input','policy','writers','clone','journal','source','initial','queue','execute','final'}
 ERRORS=set(png_runtime.REASONS)|{'notion_activation_pending','notion_context','notion_scope','notion_state_anchor','notion_source_changed','notion_initial_source','notion_schema','notion_marker','notion_failed','png_anchor_pending','notion_journal_busy','writer_guard_permission','writer_guard_quota','writer_gate_unknown','journal_provenance_missing','asset_permission_denied','permission_denied'}
 
-ERRORS.update({'approval_missing','asset_changed','asset_not_committed','asset_type','invalid_binding','invalid_identity','invalid_route','journal_invalid','png_loader_anchor','png_loader_blob','png_loader_delta','png_loader_local_changed','png_loader_manifest','png_loader_partial_clone','png_loader_source_changed','png_loader_unrequested_blob','read_budget','request_budget','request_mismatch','response_invalid','unreviewed_asset','upload_identity_changed','upload_metadata_changed','write_not_authorized','write_not_authorized_or_already_attempted','writes_disabled','wrong_destination'})
+ERRORS.update({'png_expired_evidence_invalid','png_expired_missing_unverified','png_expired_status_unverified','png_expired_prestate_changed','png_expired_policy_unchanged','png_expired_plan_scope','png_expired_record_invalid','png_expired_old_upload_reused','png_expired_transition_changed','png_expired_record_changed','approval_missing','asset_changed','asset_not_committed','asset_type','invalid_binding','invalid_identity','invalid_route','journal_invalid','png_loader_anchor','png_loader_blob','png_loader_delta','png_loader_local_changed','png_loader_manifest','png_loader_partial_clone','png_loader_source_changed','png_loader_unrequested_blob','read_budget','request_budget','request_mismatch','response_invalid','unreviewed_asset','upload_identity_changed','upload_metadata_changed','write_not_authorized','write_not_authorized_or_already_attempted','writes_disabled','wrong_destination'})
 
 
 def fail(code):raise ValueError(code) from None
@@ -161,10 +164,38 @@ def png_batch_ids(state):
     pending=state['engine_state']['journal']
     if pending is not None:return list(pending['plan']['publication']['records'])
     if state.get('last_enqueued_publication')!=state.get('observed_publication_tip'):return []
+    only=expired_recovery.only_note_id(state)
+    if only is not None:return [only]
     order=state['rotation_order']
     if not order:return []
     commit=state['pending_by_id'][order[0]]['commit']
     return [i for i in order if state['pending_by_id'][i]['commit']==commit][:MAX_RUN_RECORDS]
+
+
+def observe_expired_png(current, loaded, publication, request, writers_guard):
+    """Fresh readonly evidence for one fixed transition; no mutable-state trust."""
+    if outbox.digest(current)!=expired_recovery.STATE_SHA:fail('notion_state_anchor')
+    journal=current['engine_state']['journal'];ident=journal['plan']['records'][1]['note_id']
+    slot=current['png_assets']['uploads'][ident];binding=slot['plan']['binding']
+    publication.check(publication.descriptor)
+    if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):fail('writer_gate_unknown')
+    if loaded.before_write() is not True:fail('asset_changed')
+    data=publication.read(ident)
+    reference=png_loader.evidence.exact_reference(data,ident)
+    resolved=loaded.evidence.resolve(ident,data,reference,current_commit=loaded.snapshot_head)
+    raw=loaded.evidence.read_asset(resolved,current_commit=loaded.snapshot_head)
+    inner=png_store.UploadStore(ReadOnlyStore(current),ident,slot['plan_sha256'],allow_persist=False)
+    read=png_transport.Transport(request,slot['plan'],slot['plan_sha256'],raw,inner,allow_writes=False)
+    status,value=read(png_upload.spec('GET','/file_uploads/'+slot['state']['upload_id']))
+    if status!=200:fail('png_expired_status_unverified')
+    api=transport.API(request,binding['data_source_id'],[ident],data_source_pin=transport.native.DATA_SOURCE_PIN,database_pin=transport.native.DATABASE_PIN)
+    snapshot=api.read_note(ident)
+    result={'upload_response':value,'query_note_id':ident,'data_source_id':binding['data_source_id'],'snapshot':snapshot}
+    expired_recovery.proof(slot,result)
+    publication.check(publication.descriptor)
+    if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):fail('writer_gate_unknown')
+    if loaded.before_write() is not True:fail('asset_changed')
+    return result
 
 
 def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,previous,loaded_assets=None):
@@ -439,6 +470,12 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 bridge=run15_recovery if found['recovery_anchor']==run15_recovery.TAG else png_recovery
                 png_transition=bridge.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=png_transition;preload_sha=outbox.digest(png_transition)
+            expired_transition=present and found.get('recovery_anchor')==run16_recovery.TAG
+            if expired_transition:
+                if sha!=expired_recovery.STATE_SHA or sha!=outbox.digest(current):fail('notion_state_anchor')
+                preload_state=deepcopy(current)
+                preload_state['policy_sha256']=public_policy['get_policy_sha256']
+                preload_sha=outbox.digest(preload_state)
             if tip is not None and preload_state['engine_state']['journal'] is None:
                 origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
                 preview_chain=source_loader.load_confirmed_chain(local,remote,token,root,tip,origin,preload_state['last_enqueued_publication'] or origin,public_policy['get_policy_sha256'])
@@ -457,7 +494,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     desc=pending['plan']['publication']
                     row={k:desc[k] for k in ('commit','parent')}|{'receipt_sha256':desc['outbox_receipt_sha256']}
                 else:
-                    first=preload_state['pending_by_id'][preload_state['rotation_order'][0]]
+                    first=preload_state['pending_by_id'][batch[0]]
                     row={k:first[k] for k in ('commit','parent','receipt_sha256')}
                 source_loader.load_queue_publication(local,remote,token,root,row,preload_state['policy_sha256'])
                 before_pub=outbox.QueuePublication(local.vault,preload_state,preload_sha,resume=pending is not None,max_records=MAX_RUN_RECORDS)
@@ -474,6 +511,14 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 if candidate is None:fail('notion_state_anchor')
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
+            if expired_transition:
+                if loaded_assets is None:fail('png_anchor_pending')
+                observe=lambda:observe_expired_png(current,loaded_assets,before_pub,request,guarded_writers)
+                if apply:
+                    current,sha=durable.compare_and_set_png_expired(sha,public_policy['get_policy_sha256'],observe)
+                else:
+                    candidate=expired_recovery.transition(current,new_policy_sha256=public_policy['get_policy_sha256'],evidence=observe())
+                    store=ReadOnlyStore(candidate);current,sha=store.read()
             stage='source'
             if tip is not None:
                 chain_origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
@@ -498,7 +543,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             safe=safe_result(result)
             safe.update(journal_commits=durable.commits_attempted,source_parent=parent,
                 notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
-            if old_journal is not None and plan_recovery.allows(old_journal['plan'],old_journal):
+            if expired_transition:
+                safe['replaced_prior_plan_sha256']=expired_recovery.PLAN_SHA
+                safe['replacement_generation']=1
+            elif old_journal is not None and plan_recovery.allows(old_journal['plan'],old_journal):
                 # Current code/controller/policy remain the actual new values
                 # in every checkpoint; this identifies the unchanged prior plan.
                 safe['isolated_prior_plan_sha256' if result.get('quarantine_candidates') else 'resumed_prior_plan_sha256']=plan_recovery.OLD_PLAN

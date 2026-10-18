@@ -185,7 +185,7 @@ class NoopRecoveryAPI(RecoveryAPI):
         self.runs = [row]
         self.records = {row['id']: public.record(row, code_sha=self.old['code_sha'],
             rules_sha256=self.old['rules_sha256'], policy_sha256=self.old['get_policy_sha256'],
-            observed_main_commit='58d3eb9c10c306605d2713afcf0968a4bc439aa9',
+            observed_main_commit='f9ad7c0b66d8b50553e69b1aa3d85d0afc9180ea',
             receipt_commit=recovery.ORIGINAL_RECEIPT_COMMIT,
             receipt_sha256=recovery.ORIGINAL_RECEIPT_SHA256,
             main_updated=False, cas_attempts=0)}
@@ -207,31 +207,31 @@ class ConfirmedNoopBridgeTests(unittest.TestCase):
         api = NoopRecoveryAPI(current_policy())
         self.assertEqual(api.records[recovery.NOOP_RUN_ID]['record_sha256'], recovery.NOOP_RECORD_SHA256)
 
-    def test_retained_run15_attempt_metadata_and_marker_match_fixed_bridge(self):
+    def test_retained_run16_attempt_metadata_and_marker_match_fixed_bridge(self):
         policy = current_policy(); api = NoopRecoveryAPI(policy)
         row = api.runs[0]
-        row.update(created_at='2026-10-17T18:31:00Z', updated_at='2026-10-17T18:55:19Z',
+        row.update(created_at='2026-10-18T01:36:38Z', updated_at='2026-10-18T01:54:34Z',
                    event='workflow_dispatch', status='completed', conclusion='success')
-        api.log_overrides[recovery.NOOP_JOB_ID] = (b'2026-10-17T18:42:42.9987070Z '
+        api.log_overrides[recovery.NOOP_JOB_ID] = (b'2026-10-18T01:49:42.0428225Z '
             + p.MARKER.encode() + a.encoded(api.records[row['id']]))
         result = p.discover(api, policy)
         self.assertEqual((result['run_id'], result['run_attempt'], result['job_id']),
-                         (39058433489, 1, 117471110813))
-        self.assertEqual(result['record_sha256'], '22041ff25d642a6526e80d1064dddf50c392ef4435289128c915f392f54a7ad3')
+                         (39087117510, 1, 117555904912))
+        self.assertEqual(result['record_sha256'], '94063b329d55b60524d676ddba1d426eb0c14f493baf1a9d6fa72c7bd6ecce2d')
         self.assertEqual(result['receipt_sequence'], 1)
         self.assertEqual(result['anchor'], {'commit': recovery.ORIGINAL_RECEIPT_COMMIT,
                                           'receipt_sha256': recovery.ORIGINAL_RECEIPT_SHA256})
 
-    def test_fixed_run15_metadata_and_replaced_run13_cannot_choose_policy(self):
+    def test_fixed_run16_metadata_and_replaced_run15_cannot_choose_policy(self):
         self.assertEqual((recovery.NOOP_RUN_ID, recovery.NOOP_RUN_ATTEMPT, recovery.NOOP_JOB_ID),
-                         (39058433489, 1, 117471110813))
-        self.assertEqual(recovery.NOOP_CONTROLLER_SHA, '1a9c013c1928caa3a2f1dde6e8295dd3a8d53f23')
-        self.assertEqual(recovery.noop_public_policy()['code_sha'], '086fc1425a95f7bce6df55b3e36aa449f679a316')
-        self.assertEqual(recovery.NOOP_PUBLIC_POLICY_SHA256, 'd5dee1f47ffbe9ff65acd346480947f41edbe7cca68b3d017b11cbbce38b58c8')
+                         (39087117510, 1, 117555904912))
+        self.assertEqual(recovery.NOOP_CONTROLLER_SHA, '07650fabcd856c9dbd04c1b6158c4154de5383d9')
+        self.assertEqual(recovery.noop_public_policy()['code_sha'], '54977fd93e0f4130dc24dd2083ec2e80e089dbd9')
+        self.assertEqual(recovery.NOOP_PUBLIC_POLICY_SHA256, 'c34865c7c37859dd9410e5c265c8a41c6c5798709e3df492cd172f9931495a0a')
         policy = current_policy()
         row = NoopRecoveryAPI(policy).runs[0]
         self.assertTrue(recovery.candidate_policy(policy, row)[1])
-        for changes in ({'id':39052510643, 'head_sha':'4361f151af7c4206f526e7510e9d24b12f88551f', 'event':'schedule'},
+        for changes in ({'id':39058433489, 'head_sha':'1a9c013c1928caa3a2f1dde6e8295dd3a8d53f23', 'event':'workflow_dispatch'},
                         {'event':'schedule'}, {'event':'push'}):
             self.assertEqual(recovery.candidate_policy(policy, {**row, **changes}), (policy, False))
 
@@ -246,7 +246,7 @@ class ConfirmedNoopBridgeTests(unittest.TestCase):
         api.json = foreign_bytes
         with self.assertRaises(p.ProvenanceFailure): p.discover(api, policy)
 
-    def test_in_progress_run15_cannot_be_used_before_terminal_success(self):
+    def test_in_progress_run16_cannot_be_used_before_terminal_success(self):
         policy = current_policy()
         for changes in ({'status':'in_progress', 'conclusion':None}, {'conclusion':'failure'}, {'conclusion':'cancelled'}):
             api = NoopRecoveryAPI(policy, **changes)

@@ -175,6 +175,11 @@ class QueuePublication:
             if resume:fail('outbox_state_invalid')
             order=state['rotation_order']
             if not order:fail('outbox_empty')
+            import get_notion_png_expired_recovery as expired
+            selected=expired.only_note_id(state)
+            if selected is not None:
+                if selected not in state['pending_by_id']:fail('outbox_source_invalid')
+                order=[selected]
             first=state['pending_by_id'][order[0]];row={k:first[k] for k in ('commit','parent','receipt_sha256')}
             wanted=[i for i in order if state['pending_by_id'][i]['commit']==row['commit']][:max_records]
         receipt,actual=verified_publication(self.repo,row,state['policy_sha256'])

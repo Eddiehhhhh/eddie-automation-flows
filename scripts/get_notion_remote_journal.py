@@ -407,7 +407,19 @@ class RemoteJournal:
         finally:
             self.lock.release()
 
-    def _compare_and_set(self, expected_sha, value, *, png_reset_ticket=None, typed_evidence=None):
+    def compare_and_set_png_expired(self, expected_sha, new_policy_sha256, observe):
+        """One fixed run16 transition, fresh read evidence inside the CAS lock."""
+        if not self.lock.acquire(blocking=False):
+            raise JournalFailure('journal_busy', stage='locked')
+        try:
+            if not callable(observe):
+                raise JournalFailure('state_changed', stage='anchor')
+            return self._compare_and_set(expected_sha, None,
+                png_expired=(new_policy_sha256, observe))
+        finally:
+            self.lock.release()
+
+    def _compare_and_set(self, expected_sha, value, *, png_reset_ticket=None, typed_evidence=None, png_expired=None):
         # Every CAS attempt consumes the old ticket, including a no-op/failure.
         self._png_not_dispatched = None
         self._ready()
@@ -416,13 +428,25 @@ class RemoteJournal:
         attempted = False
         try:
             checked(expected_sha, 64)
+            if png_expired is not None:
+                import get_notion_png_expired_recovery as expired
+                parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
+                if expected_sha != digest or digest != expired.STATE_SHA:
+                    raise JournalFailure('state_changed', stage='anchor')
+                policy, observe = png_expired
+                fresh_evidence = observe()
+                self._head(parent)
+                value = expired.transition(old_value, new_policy_sha256=policy, evidence=fresh_evidence)
             data = codec.encoded(value)
             if len(data) > MAX_STATE:
                 raise JournalFailure('request_budget', stage='budget')
             codec.check_state(value)
-            parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
+            if png_expired is None:
+                parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
             engine.plan_recovery.preserve_holds(old_value['engine_state'],value['engine_state'])
-            if png_reset_ticket is None:
+            if png_expired is not None:
+                expired.validate_transition(old_value, value, new_policy_sha256=policy, evidence=fresh_evidence)
+            elif png_reset_ticket is None:
                 codec.png_store.preserve(old_value,value)
             else:
                 codec.png_store.check_not_dispatched(png_reset_ticket,old_value,value,typed_evidence)
@@ -461,18 +485,28 @@ class RemoteJournal:
                 self.sleep(2 ** attempt)
             receipt, observed_value = self._verify(commit, parent, tree_oid, wanted, data)
             result = self._confirm(receipt, observed_value)
-            if png_reset_ticket is None:
+            if png_reset_ticket is None and png_expired is None:
                 self._png_not_dispatched = codec.png_store.not_dispatched_ticket(old_value,observed_value)
             return result
         except Exception as exc:
             # Callback/readback failures may follow a committed journal. Preserve
             # only verified candidate metadata; block all subsequent API eligibility.
+            expired_reason = None
+            if png_expired is not None and isinstance(exc, ValueError):
+                code = str(exc)
+                if code in ('permission_denied', 'request_budget', 'response_invalid',
+                        'png_expired_status_unverified', 'png_expired_missing_unverified',
+                        'png_expired_evidence_invalid', 'png_expired_prestate_changed',
+                        'png_expired_policy_unchanged', 'png_expired_plan_scope'):
+                    expired_reason = code
             unknown = attempted or self.confirm_entered
             if unknown:
                 self.poisoned = True
-                raise JournalFailure(stage=self.stage, unknown=True,
+                raise JournalFailure(expired_reason or 'journal_failed', stage=self.stage, unknown=True,
                                      recovery=self.recovery) from None
             if isinstance(exc, JournalFailure): raise
+            if expired_reason is not None:
+                raise JournalFailure(expired_reason, stage=self.stage) from None
             reason = str(exc) if isinstance(exc, engine.Blocked) and str(exc) in (
                 'state_invalid', 'state_changed', 'request_budget') else ('request_budget' if isinstance(exc, codec.Blocked) and str(exc) == 'outbox_budget' else 'journal_failed')
             raise JournalFailure(reason, stage=self.stage) from None

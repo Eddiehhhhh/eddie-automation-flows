@@ -14,6 +14,7 @@ import get_publication_provenance as provenance
 import get_recurring_controller as controller
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
+import get_notion_run16_recovery as run16_recovery
 import get_notion_png_recovery as png_recovery
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '
@@ -525,6 +526,12 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(run15_recovery.RUN,run15_recovery.ATTEMPT)):
                     result=run15_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
+                    match_candidate(result,row)
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(run16_recovery.RUN,run16_recovery.ATTEMPT)):
+                    result=run16_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
                     match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}

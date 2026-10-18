@@ -112,7 +112,7 @@ def check_attachment(value, ident, assets, engine):
 
 def check_container(value, engine):
     try:
-        keys(value, {'contract', 'evidence_anchor', 'evidence_sha256', 'uploads', 'attachments'})
+        keys(value, {'contract', 'evidence_anchor', 'evidence_sha256', 'uploads', 'attachments'} | ({'expired_recovery'} if 'expired_recovery' in value else set()))
         if value['contract'] != CONTRACT: fail('png_state_invalid')
         check_anchor(value['evidence_anchor'], value['evidence_sha256'])
         uploads = value['uploads']; attachments = value['attachments']
@@ -137,6 +137,8 @@ def check_container(value, engine):
             pages.add(row['page_id']); blocks.add(row['block_id'])
         if any(ident in engine['receipts'] and ident not in attachments for ident in uploads):
             fail('png_attachment_missing')
+        import get_notion_png_expired_recovery as expired
+        expired.check_record(value, engine)
         if len(encoded(value)) > MAX_BYTES: fail('png_state_budget')
         return value
     except Blocked: raise
@@ -177,6 +179,8 @@ def add_upload(outer, plan, approved_plan_sha):
 
 def preserve(before, after):
     """Durable anti-rearm/rebind guard, shared by both adapters and Git CAS."""
+    import get_notion_png_expired_recovery as expired
+    expired.preserve(before, after)
     old = before.get('png_assets'); new = after.get('png_assets')
     if new is None:
         if old is not None: fail('png_state_regressed')
