@@ -17,6 +17,7 @@ import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
+import get_notion_run28_recovery as run28_recovery
 import get_notion_png_recovery as png_recovery
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '
@@ -554,6 +555,12 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(run18_recovery.RUN,run18_recovery.ATTEMPT)):
                     result=run18_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
+                    match_candidate(result,row)
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(run28_recovery.RUN,run28_recovery.ATTEMPT)):
+                    result=run28_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
                     match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}

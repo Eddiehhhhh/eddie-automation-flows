@@ -27,6 +27,10 @@ KINDS = frozenset(('paragraph', 'heading_1', 'heading_2', 'heading_3', 'heading_
 TEXT_KINDS = KINDS - {'divider', 'image', 'table', 'table_row'}
 ANNOTATIONS = {'bold': False, 'italic': False, 'strikethrough': False,
                'underline': False, 'code': False, 'color': 'default'}
+# Get category badges are visible literals, not reference-link labels. Keep
+# this grammar bounded: generic bracket syntax still needs a real parser.
+LITERAL_BADGE = r'[\U0001f300-\U0001faff] [\u3400-\u4dbf\u4e00-\u9fff]{1,16}'
+LITERAL_BRACKET = r'\[(?:[0-9]{2}:[0-5][0-9]:[0-5][0-9]|' + LITERAL_BADGE + r')\]'
 
 
 class Blocked(ValueError):
@@ -104,7 +108,7 @@ def rich_text(value):
         if '![' in text or re.search(r'(?<!\w)_|_(?!\w)|__|~~|<', text):
             stop('unsupported_source_format')
         return text
-    token = re.compile(r'(\\[\\`*\[\]()~]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\)|\[(?:[0-9]{2}:[0-5][0-9]:[0-5][0-9]|📄 工作)\])')
+    token = re.compile(r'(\\[\\`*\[\]()~]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\)|' + LITERAL_BRACKET + r')')
     cursor = 0
     for match in token.finditer(value):
         plain = value[cursor:match.start()]
@@ -118,10 +122,11 @@ def rich_text(value):
             out.append(text_run(part[1:]))
         elif part.startswith('`'):
             out.append(text_run(part[1:-1], code=True))
-        elif re.fullmatch(r'\[(?:[0-9]{2}:[0-5][0-9]:[0-5][0-9]|📄 工作)\]', part):
+        elif re.fullmatch(LITERAL_BRACKET, part):
             # Explicit source literals, never reference definitions/links. A
             # real inline link wins the token alternative before this branch.
-            if value[match.end():].lstrip(' \t').startswith(('[', '(', ':')):
+            if ((match.start() and value[match.start() - 1] == '!')
+                    or value[match.end():].lstrip(' \t\r\n').startswith(('[', '(', ':'))):
                 stop('unsupported_source_format')
             out.append(text_run(part))
         elif part.startswith('**'):
@@ -224,13 +229,14 @@ def normalize_payload(kind, payload):
             stop('incomplete_target_read')
         value['cells'] = [normalize_rich(cell) for cell in value['cells']]
     elif kind == 'image':
+        import get_notion_png_upload as png_upload
         # Collector must resolve the persistent upload identity against an
         # independently confirmed asset binding. Signed URLs are never identity.
         if value.get('kind') == 'notion_png_preflight':
-            if set(value) != {'kind','sha256','byte_count','mime','caption'} or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= 512000 or value['mime'] != 'image/png':
+            if set(value) != {'kind','sha256','byte_count','mime','caption'} or not png_upload.valid_semantic_size(value['sha256'], value['byte_count']) or value['mime'] != 'image/png':
                 stop('missing_asset')
         elif value.get('kind') == 'notion_uploaded_png':
-            if set(value) != {'kind','upload_id','sha256','byte_count','mime','caption'} or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= 512000 or value['mime'] != 'image/png':
+            if set(value) != {'kind','upload_id','sha256','byte_count','mime','caption'} or not png_upload.valid_semantic_size(value['sha256'], value['byte_count']) or value['mime'] != 'image/png':
                 stop('missing_asset')
             value['upload_id'] = notion_id(value['upload_id'])
         elif value.get('kind') == 'notion_existing_image_block':
@@ -385,6 +391,35 @@ def compact_paragraph_pairs(blocks):
     return (output, merged) if len(output) <= limit else (deepcopy(blocks), 0)
 
 
+def ordinary_prose_indent(line):
+    """Recognize up to three prose spaces without stripping any source text.
+
+    Indented block syntax and four-space code remain outside this subset.
+    The caller must also establish that this is not a list/quote continuation.
+    """
+    match = re.fullmatch(r' {1,3}(\S.*)', line)
+    if match is None:
+        return False
+    value = match[1]
+    return not (re.match(r'^(?:#|>|[-+*](?:[ \t]|$)|[0-9]+[.)][ \t]|\||```|~~~|!\[|<)', value)
+                or re.fullmatch(r'[-*_=]+', value))
+
+
+def paragraph_interrupt(line):
+    """Only a start-at-one ordered marker interrupts an open paragraph.
+
+    A numeric-dot phrase otherwise stays in that same paragraph, including its
+    marker and whitespace. At a block boundary the existing list parser still
+    requires representable numbering. This does not relax list starts/resets.
+    """
+    if ordinary_prose_indent(line):
+        return False
+    ordered = re.match(r'^([0-9]+)\. ', line)
+    if ordered and (len(ordered[1]) > 9 or ordered[1].lstrip('0') != '1'):
+        return False
+    return re.match(r'^(?:#|>|[-+*] |[0-9]+\. |\||```|!\[|<| |\t)', line) is not None
+
+
 def render_markdown(data, ident, assets, source_path, content_tree, *, preserved_image=None,reviewed_png=None):
     """Native preview subset. Unsupported input is blocked, never flattened."""
     if preserved_image is not None:
@@ -404,7 +439,8 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
             'sha256':native_binding['content_sha256'],'preserved_block_id':native_binding['block_id'],
             'page_id':native_binding['page_id'],'projection_sha256':projected['projection_sha256']}
         return rendered,{'preserved_existing_image':binding},warnings+['existing_image_block_preserved']
-    lines = source_body(data, ident).splitlines()
+    from get_notion_credential_projection import render_body
+    lines = render_body(data, ident, source_body(data, ident)).splitlines()
     output = []; warnings = []; used = {}; index = 0
     def bound_image(reference, caption=''):
         if reviewed_png is not None and ':' in reference:
@@ -549,10 +585,15 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
             output.append(block(kind, payload, children)); index = following; continue
         if line.startswith('> '):
             output.append(block('quote', {'rich_text': rich_text(line[2:])})); index += 1; continue
-        if line.startswith(('<', ' ', '\t', '#', '![', '![[', '~~~')):
+        prose_indent = ordinary_prose_indent(line)
+        if prose_indent and output and output[-1]['type'] in ('bulleted_list_item', 'numbered_list_item', 'to_do', 'quote'):
+            # These spaces could belong to the previous container. Unsupported
+            # lazy/nested continuations must not become new root paragraphs.
+            stop('unsupported_source_format')
+        if line.startswith(('<', ' ', '\t', '#', '![', '![[', '~~~')) and not prose_indent:
             stop('unsupported_source_format')
         paragraph = [line]; index += 1
-        while index < len(lines) and lines[index].strip() and not re.match(r'^(?:#|>|[-+*] |[0-9]+\. |\||```|!\[|<| |\t)', lines[index]):
+        while index < len(lines) and lines[index].strip() and not paragraph_interrupt(lines[index]):
             if re.fullmatch(r'-{3,}|={3,}', lines[index]):
                 stop('unsupported_source_format')
             if lines[index] in ('___', '***'):

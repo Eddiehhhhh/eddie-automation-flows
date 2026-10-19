@@ -32,6 +32,7 @@ class Session:
         self.policy=pipeline.policy(approved_policy,expected_policy_sha256)
         if not self.policy['allow_create'] or not self.policy['format_accepted']:fail('approval_missing')
         if apply and (not self.policy['allow_apply'] or self.policy['plan_authorization']!='standing_bounded'):fail('approval_missing')
+        self.asset_key=storage.asset_key(evidence.descriptor)
         self.evidence=evidence;self.publication=publication;self.store=store;self.request=request;self.current=current_commit
         self.asset_guard=asset_guard;self.writers_guard=writers_guard;self.apply=apply;self.now=now
         self.ready={};self.blocked={};self.finished=False;self.upload_round_attempted=False
@@ -41,7 +42,7 @@ class Session:
     def read(self):
         state,sha=self.store.read();outbox.check_state(state)
         if outbox.digest(state)!=sha:fail('state_changed')
-        assets=state.get('png_assets')
+        assets=state.get(self.asset_key)
         if assets is not None and (assets['evidence_sha256']!=self.evidence.evidence_sha256 or not e.same(assets['evidence_anchor'],self.evidence.descriptor)):fail('asset_receipt_invalid')
         return state,sha
 
@@ -66,7 +67,7 @@ class Session:
         if state['engine_state']['journal'] is not None:fail('journal_busy')
         self.fresh_guard()
         preview=image.Resolver(self.evidence,{},current_commit=self.current,preview=True)
-        ids=[i for i in sorted(self.publication.descriptor['records']) if upload.sha(i.encode()) in upload.PINS]
+        ids=[i for i in sorted(self.publication.descriptor['records']) if upload.sha(i.encode()) in upload.pins_for_manifest(self.evidence.descriptor['manifest_path'])]
         if len(ids)>3:fail('request_budget')
         api=live.API(self.request,self.policy['data_source_id'],ids,data_source_pin=self.policy['data_source_pin'],database_pin=self.policy['database_pin']) if ids else None
         for ident in ids:
@@ -80,7 +81,6 @@ class Session:
                 if pending is None or any(pending[k]!=v for k,v in {'commit':self.publication.descriptor['commit'],'path':source['path'],'blob':source['blob'],'sha256':source['sha256']}.items()):fail('source_changed')
                 plan,raw=self._binding(ident,data)
                 rendered,bindings,warnings=e.p.render_markdown(data,ident,{},source['path'],self.publication.descriptor['content_tree'],reviewed_png=preview)
-                counts=image.preflight_blocks(rendered)
                 self.publication.check_assets({b['path']:b['git_blob'] for b in bindings.values()})
                 header=data.decode().split('\n---\n',1)[0];titles=[x[7:] for x in header.splitlines() if x.startswith('title: ')]
                 if len(titles)!=1:fail('source_invalid')
@@ -89,6 +89,7 @@ class Session:
                 if not isinstance(title,str) or not title or len(title)>2000:fail('request_budget')
                 properties={'笔记 ID':{'type':'rich_text','rich_text':[e.p.text_run(ident)]},
                     self.policy['title_property']:{'type':'title','title':[e.p.text_run(title)]}}
+                counts=image.preflight_blocks(rendered,properties=properties,data_source=self.policy['data_source_id'])
                 if expired_recovery.only_note_id(state) is not None:
                     recovery=state['png_assets']['expired_recovery']
                     old=storage.receipt_for(recovery['old_slot'])
@@ -125,7 +126,7 @@ class Session:
         return {'contract':CONTRACT,'selected':len(self.ready)+len(self.blocked),'upload_candidates':len(self.ready),'blocked':len(self.blocked),'reason_counts':dict(Counter(self.blocked.values())),'upload_bytes':sum(len(v['data']) for v in self.ready.values()),'remote_writes':0,'journal_writes':0,'prepared_only':True}
 
     def _kernel(self,ident,plan,raw,*,allow):
-        slot=storage.UploadStore(self.store,ident,upload.digest(plan),allow_persist=allow)
+        slot=storage.UploadStore(self.store,ident,upload.digest(plan),allow_persist=allow,asset_key=self.asset_key)
         network=multipart.Transport(self.request,plan,upload.digest(plan),raw,slot,allow_writes=allow,now=self.now,before_write=self.fresh_guard if allow else None)
         return upload.Upload(plan,upload.digest(plan),raw,slot,network,allow_writes=allow,now=self.now) if self.now is not None else upload.Upload(plan,upload.digest(plan),raw,slot,network,allow_writes=allow)
 
@@ -137,7 +138,7 @@ class Session:
         self.fresh_guard();state,sha=self.read()
         if state['engine_state']['journal'] is not None:fail('journal_busy')
         wanted=storage.initialize(state,self.evidence.descriptor,self.evidence.evidence_sha256)
-        for ident,row in self.ready.items():wanted=storage.add_upload(wanted,row['plan'],upload.digest(row['plan']))
+        for ident,row in self.ready.items():wanted=storage.add_upload(wanted,row['plan'],upload.digest(row['plan']),asset_key=self.asset_key)
         if not e.same(wanted,state):state,sha=outbox.confirmed_compare_and_set(self.store,sha,wanted)
         for ident,row in self.ready.items():
             kernel=self._kernel(ident,row['plan'],row['data'],allow=True)
@@ -148,11 +149,11 @@ class Session:
                 if outcome.get('phase')=='uploaded_verified':break
             else:fail('png_upload_unverified')
         state,_=self.read()
-        return image.Resolver(self.evidence,storage.upload_receipts(state),current_commit=self.current)
+        return image.Resolver(self.evidence,storage.upload_receipts(state,asset_key=self.asset_key),current_commit=self.current)
 
     def verify_unattached(self):
         """Fresh saved-ID GET before page writes; attached joins stay stable."""
-        self.fresh_guard();state,_=self.read();assets=state.get('png_assets',{})
+        self.fresh_guard();state,_=self.read();assets=state.get(self.asset_key,{})
         selected=set(self.publication.descriptor['records'])
         journal=state['engine_state']['journal']
         if journal is not None:
@@ -161,7 +162,7 @@ class Session:
             index=journal['index'];rows=plan['records'];operation=journal['operation']
             selected=set()
             if operation is not None:
-                valid_phases={'create':{'prepared','in_flight','acknowledged'},'append':{'prepared','in_flight','acknowledged'},'archive':{'prepared','in_flight'},'cleanup':{'verified'}}
+                valid_phases={'create_batches':{'prepared','in_flight','acknowledged','verified'},'create':{'prepared','in_flight','acknowledged'},'append':{'prepared','in_flight','acknowledged'},'archive':{'prepared','in_flight'},'cleanup':{'verified'}}
                 if operation.get('kind') not in valid_phases or operation.get('phase') not in valid_phases[operation['kind']] or index>=len(rows):fail('state_invalid')
             if index<len(rows):
                 row=rows[index];ident=row['note_id']
@@ -171,7 +172,23 @@ class Session:
                 # Do not let a later, unattached upload block this readback.
                 acknowledged=(operation is not None and operation['kind']=='create'
                     and operation['phase']=='acknowledged' and operation.get('response') is not None)
-                if acknowledged:
+                if operation is not None and operation.get('kind')=='create_batches':
+                    e.create_batches.validate_operation(operation,row)
+                    # Once the image-bearing batch might have reached the known
+                    # page, verify native bytes through SnapshotAdapter instead
+                    # of demanding that an already attached handle stay alive.
+                    image_roots=[n for n,root in enumerate(row['rendered'])
+                        if any(node['type']=='image' for node in image._walk([root]))]
+                    if len(image_roots)!=1:fail('asset_receipt_invalid')
+                    image_batch=next((n for n,b in enumerate(row['create_batches']['batches'])
+                        if b['start']<=image_roots[0]<b['end']),None)
+                    if image_batch is None:fail('state_invalid')
+                    current_batch=operation['batch_index']
+                    attached_possible=(operation['page_id'] is not None and
+                        (current_batch>image_batch or current_batch==image_batch
+                         and operation['phase'] in ('in_flight','acknowledged','verified')))
+                    if not attached_possible:selected={ident}
+                elif acknowledged:
                     if row['action']!='create':fail('state_invalid')
                     e.p.notion_id(operation['response'])
                 else:selected={ident}

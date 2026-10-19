@@ -18,6 +18,8 @@ import get_notion_sink_plan as p
 CONTRACT = 'get-notion-three-png-evidence-1'
 PREFIX = '.sync/get-notion/assets/'
 MANIFEST_PATH = PREFIX + 'reviewed-png-manifest-v1.json'
+SEQ2_MANIFEST_PATH = PREFIX + 'reviewed-png-manifest-v2.json'
+MANIFEST_PATHS = frozenset((MANIFEST_PATH, SEQ2_MANIFEST_PATH))
 MAX_MANIFEST = 32 * 1024
 MAX_PNG = 5 * 1024 * 1024
 MAX_TOTAL = 15 * 1024 * 1024
@@ -132,7 +134,7 @@ class AssetEvidence:
                 fail('asset_evidence_anchor')
             for key in ('publication_commit', 'asset_commit', 'manifest_blob'): hash_value(anchor[key], 40)
             hash_value(anchor['manifest_sha256'], 64)
-            if anchor['manifest_path'] != MANIFEST_PATH: fail('asset_evidence_anchor')
+            if anchor['manifest_path'] not in MANIFEST_PATHS: fail('asset_evidence_anchor')
             if (not isinstance(publication_descriptor, dict)
                     or publication_descriptor.get('repository') != p.REPOSITORY
                     or publication_descriptor.get('commit') != anchor['publication_commit']
@@ -143,14 +145,15 @@ class AssetEvidence:
                 fail('asset_source_changed')
             self._anchor = deepcopy(anchor); self._evidence_sha = expected_anchor_sha
             self._publication = deepcopy(publication_descriptor)
+            manifest_path = anchor['manifest_path']
             commit = anchor['asset_commit']
             parents = reader.local.run('rev-list', '--parents', '-n', '1', commit).decode().split()
             if len(parents) != 2 or parents[0] != commit: fail('asset_evidence_delta')
             parent = parents[1]
             reader.local.run('merge-base', '--is-ancestor', anchor['publication_commit'], parent)
             before = reader.tree(parent); after = reader.tree(commit)
-            if after.get(MANIFEST_PATH) != ('100644', 'blob', anchor['manifest_blob']): fail('asset_evidence_anchor')
-            raw = reader.read(commit, MANIFEST_PATH, MAX_MANIFEST)
+            if after.get(manifest_path) != ('100644', 'blob', anchor['manifest_blob']): fail('asset_evidence_anchor')
+            raw = reader.read(commit, manifest_path, MAX_MANIFEST)
             if p.git_blob(raw) != anchor['manifest_blob'] or digest(raw) != anchor['manifest_sha256']:
                 fail('asset_evidence_anchor')
             manifest = strict_json(raw)
@@ -187,7 +190,7 @@ class AssetEvidence:
                 total += asset['bytes']
                 if total > MAX_TOTAL: fail('asset_evidence_budget')
                 if after.get(asset['path']) != ('100644', 'blob', asset['blob']): fail('asset_evidence_delta')
-            wanted = paths | {MANIFEST_PATH}
+            wanted = paths | {manifest_path}
             changed = {path for path in set(before) | set(after) if before.get(path) != after.get(path)}
             if changed != wanted or any(path in before for path in wanted): fail('asset_evidence_delta')
             if reader.source_get_tree(parent) != reader.source_get_tree(commit): fail('asset_evidence_delta')
@@ -217,7 +220,7 @@ class AssetEvidence:
                 fail('asset_current_changed')
             self.reader.local.run('merge-base', '--is-ancestor', self._anchor['asset_commit'], current_commit)
             tree = self.reader.tree(current_commit)
-            exact = {MANIFEST_PATH: self._anchor['manifest_blob'], **self.asset_tree}
+            exact = {self._anchor['manifest_path']: self._anchor['manifest_blob'], **self.asset_tree}
             exact.update({row['source']['path']: row['source']['blob'] for row in self._records.values()})
             if any(tree.get(path) != ('100644', 'blob', blob) for path, blob in exact.items()): fail('asset_current_changed')
             return True

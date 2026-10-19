@@ -1,0 +1,707 @@
+{
+  "provenance": "Recorded public run listing fields. Runs29/28/27 use freshly verified public metadata; earlierrows use existing public replay corpus. No private data or synthetic run included.",
+  "source_sha256": {
+    "old_run_corpus": "e2b074e247d08e3f55c986d967dfd0a780b886eb3297642721377b697b5f8bcf",
+    "run27": "c8a45f3f53dd8a9798831c637bb3f0113257fbac78195965e5883080fda18089",
+    "run28": "12cd8ba30c27fd9469ffc512c88be5678cb5b40a63b385bfe5adfe7ab4da9661",
+    "run29": "02393b37d9d128a0b35a14eb2612f89e4c144545a3d3519e739dc9c16da7589c"
+  },
+  "workflow_runs": [
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-19T15:37:45Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "30ba7b80903574f73ccfa493ff16ab6ff4ce44b9",
+      "id": 39279452717,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 29,
+      "status": "completed",
+      "updated_at": "2026-10-19T16:04:57Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-19T15:18:24Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "30ba7b80903574f73ccfa493ff16ab6ff4ce44b9",
+      "id": 39276816133,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 28,
+      "status": "completed",
+      "updated_at": "2026-10-19T16:06:19Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-19T14:55:02Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "30ba7b80903574f73ccfa493ff16ab6ff4ce44b9",
+      "id": 39273266609,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 27,
+      "status": "completed",
+      "updated_at": "2026-10-19T15:16:07Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-19T13:54:00Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "397c0d6bade8b28519ddd8dad702e79f30616c65",
+      "id": 39264115533,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 26,
+      "status": "completed",
+      "updated_at": "2026-10-19T14:09:41Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-19T07:47:58Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "8a8b3aaef5df6c2ddcbb15df9993d9aa2b8e2947",
+      "id": 39218317722,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 25,
+      "status": "completed",
+      "updated_at": "2026-10-19T07:52:26Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-19T01:19:49Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "8a8b3aaef5df6c2ddcbb15df9993d9aa2b8e2947",
+      "id": 39184858046,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 24,
+      "status": "completed",
+      "updated_at": "2026-10-19T01:24:19Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-18T23:14:02Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "8a8b3aaef5df6c2ddcbb15df9993d9aa2b8e2947",
+      "id": 39175640054,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 23,
+      "status": "completed",
+      "updated_at": "2026-10-18T23:18:21Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-18T20:44:58Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "8a8b3aaef5df6c2ddcbb15df9993d9aa2b8e2947",
+      "id": 39164720693,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 22,
+      "status": "completed",
+      "updated_at": "2026-10-18T20:49:42Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-18T17:24:03Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "8a8b3aaef5df6c2ddcbb15df9993d9aa2b8e2947",
+      "id": 39149406266,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 21,
+      "status": "completed",
+      "updated_at": "2026-10-18T17:28:17Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-18T13:18:57Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "8a8b3aaef5df6c2ddcbb15df9993d9aa2b8e2947",
+      "id": 39130999844,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 20,
+      "status": "completed",
+      "updated_at": "2026-10-18T13:23:17Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-18T08:51:52Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "8a8b3aaef5df6c2ddcbb15df9993d9aa2b8e2947",
+      "id": 39113089986,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 19,
+      "status": "completed",
+      "updated_at": "2026-10-18T08:57:10Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-18T03:20:18Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "e2d09ed2755ceb4d5326c1f76777b95e9a55d115",
+      "id": 39093261469,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 18,
+      "status": "completed",
+      "updated_at": "2026-10-18T03:37:39Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-18T02:51:42Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "e2d09ed2755ceb4d5326c1f76777b95e9a55d115",
+      "id": 39091574943,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 17,
+      "status": "completed",
+      "updated_at": "2026-10-18T03:16:19Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-18T01:36:38Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "07650fabcd856c9dbd04c1b6158c4154de5383d9",
+      "id": 39087117510,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 16,
+      "status": "completed",
+      "updated_at": "2026-10-18T01:54:34Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T18:31:00Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "1a9c013c1928caa3a2f1dde6e8295dd3a8d53f23",
+      "id": 39058433489,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 15,
+      "status": "completed",
+      "updated_at": "2026-10-17T18:55:19Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-17T18:09:27Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "788df5418b4400be4641f3a6f099e63ac347ab4b",
+      "id": 39056859670,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 14,
+      "status": "completed",
+      "updated_at": "2026-10-17T18:13:25Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T17:09:24Z",
+      "event": "schedule",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "4361f151af7c4206f526e7510e9d24b12f88551f",
+      "id": 39052510643,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 13,
+      "status": "completed",
+      "updated_at": "2026-10-17T17:25:25Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T13:14:04Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "9427709125b2c0c6da3bd952fe7d22d0213caa29",
+      "id": 39035716777,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 12,
+      "status": "completed",
+      "updated_at": "2026-10-17T13:30:46Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T12:53:03Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "9427709125b2c0c6da3bd952fe7d22d0213caa29",
+      "id": 39034298462,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 11,
+      "status": "completed",
+      "updated_at": "2026-10-17T13:11:32Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T12:08:42Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "f3fc06fe86f6da4dd52863f76837781260f5513d",
+      "id": 39031368105,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 10,
+      "status": "completed",
+      "updated_at": "2026-10-17T12:29:13Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T11:53:13Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "f3fc06fe86f6da4dd52863f76837781260f5513d",
+      "id": 39030392075,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 9,
+      "status": "completed",
+      "updated_at": "2026-10-17T12:05:24Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T10:52:26Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "b257083bcc811f17804be95bbf6b206488ffd4cf",
+      "id": 39026550645,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 8,
+      "status": "completed",
+      "updated_at": "2026-10-17T11:08:50Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T10:16:25Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "b257083bcc811f17804be95bbf6b206488ffd4cf",
+      "id": 39024268181,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 7,
+      "status": "completed",
+      "updated_at": "2026-10-17T10:45:05Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T10:03:04Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "b257083bcc811f17804be95bbf6b206488ffd4cf",
+      "id": 39023423724,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 6,
+      "status": "completed",
+      "updated_at": "2026-10-17T10:15:19Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-17T09:09:42Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "94578b66b77fde7e9945013b9d48666b81122e52",
+      "id": 39020064441,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 5,
+      "status": "completed",
+      "updated_at": "2026-10-17T09:14:35Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T08:29:45Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "94578b66b77fde7e9945013b9d48666b81122e52",
+      "id": 39017569036,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 4,
+      "status": "completed",
+      "updated_at": "2026-10-17T09:04:48Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "success",
+      "created_at": "2026-10-17T08:16:50Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "94578b66b77fde7e9945013b9d48666b81122e52",
+      "id": 39016766636,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 3,
+      "status": "completed",
+      "updated_at": "2026-10-17T08:28:20Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-17T03:38:15Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "67d1f13832d25adc1106765b24e78abc7365b8cf",
+      "id": 38999547568,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 2,
+      "status": "completed",
+      "updated_at": "2026-10-17T03:41:59Z",
+      "workflow_id": 387242896
+    },
+    {
+      "conclusion": "failure",
+      "created_at": "2026-10-17T00:20:44Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "head_sha": "178387a7a68c13664827de3675aebdc96c6119ea",
+      "id": 38985936436,
+      "path": ".github/workflows/get-canonical.yml",
+      "repository": {
+        "full_name": "Eddiehhhhh/eddie-automation-flows",
+        "id": 1270807355,
+        "private": false
+      },
+      "run_attempt": 1,
+      "run_number": 1,
+      "status": "completed",
+      "updated_at": "2026-10-17T00:24:41Z",
+      "workflow_id": 387242896
+    }
+  ]
+}

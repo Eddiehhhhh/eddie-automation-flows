@@ -6,8 +6,8 @@ import get_notion_runtime as r
 class Tests(unittest.TestCase):
  def setUp(self):
   self.ident='123';self.pub=NS(descriptor={'records':{'123':{'sha256':'a'*64}},'commit':'a'*40})
-  self.state={'engine_state':{'journal':None}};self.store=Mock();self.store.read.return_value=(self.state,'fresh-sha')
-  self.loaded=NS(evidence=object(),snapshot_head='fixed-head',before_write=lambda:True)
+  self.state={'engine_state':{'journal':None},'rotation_order':['123'],'pending_by_id':{'123':{'commit':'a'*40}}};self.store=Mock();self.store.read.return_value=(self.state,'fresh-sha')
+  self.loaded=NS(evidence=NS(descriptor={'manifest_path':r.png_upload.LEGACY_MANIFEST}),snapshot_head='fixed-head',before_write=lambda:True)
   self.session=Mock();self.session.prepare.return_value={'prepared_only':True,'selected':3,'upload_candidates':2,'blocked':1,'upload_bytes':10,'remote_writes':0,'journal_writes':0}
   self.session.advance_uploads.return_value=object()
   self.stack=__import__('contextlib').ExitStack();self.addCleanup(self.stack.close)

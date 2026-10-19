@@ -15,6 +15,7 @@ EVIDENCE_CONTRACT = 'get-notion-three-png-evidence-1'
 MAX_BYTES = 32 * 1024
 MAX_UPLOADS = 3
 PREFIX = '.sync/get-notion/assets/'
+ASSET_KEYS = ('png_assets', 'png_assets_seq2')
 ATTACHMENT_KEYS = {'note_id', 'page_id', 'block_id', 'upload_id', 'receipt_sha256',
     'asset_path', 'git_blob', 'sha256', 'byte_count', 'mime', 'readback_verified',
     'source_commit', 'md_blob', 'md_sha256', 'reference_sha256', 'evidence_sha256',
@@ -32,13 +33,47 @@ def keys(value, wanted):
 
 def same(a, b): return encoded(a) == encoded(b)
 
+def asset_key(anchor):
+    if not isinstance(anchor, dict): fail('png_evidence_invalid')
+    path = anchor.get('manifest_path')
+    if path == upload.LEGACY_MANIFEST: return 'png_assets'
+    if path == upload.SEQ2_MANIFEST: return 'png_assets_seq2'
+    fail('png_evidence_invalid')
+
+
+def checked_key(key):
+    if key not in ASSET_KEYS: fail('png_evidence_invalid')
+    return key
+
+
+def check_outer_assets(outer):
+    seen = {name: set() for name in ('note_id', 'upload_id', 'page_id', 'block_id')}
+    for key in ASSET_KEYS:
+        if key not in outer: continue
+        assets = outer[key]
+        check_container(assets, outer['engine_state'])
+        if asset_key(assets['evidence_anchor']) != key: fail('png_evidence_invalid')
+        if key != 'png_assets' and 'expired_recovery' in assets: fail('png_state_invalid')
+        for ident, row in assets['uploads'].items():
+            if ident in seen['note_id']: fail('png_state_invalid')
+            seen['note_id'].add(ident)
+            uid = row['state']['upload_id']
+            if uid is not None:
+                if uid in seen['upload_id']: fail('png_state_invalid')
+                seen['upload_id'].add(uid)
+        for row in assets['attachments'].values():
+            for field in ('page_id', 'block_id'):
+                if row[field] in seen[field]: fail('png_attachment_invalid')
+                seen[field].add(row[field])
+
+
 def check_anchor(anchor, approved_sha):
     keys(anchor, {'contract', 'repository', 'publication_commit', 'asset_commit',
                   'manifest_path', 'manifest_blob', 'manifest_sha256'})
     upload.valid_hash(approved_sha)
     if (digest(anchor) != approved_sha or anchor['contract'] != EVIDENCE_CONTRACT
             or anchor['repository'] != p.REPOSITORY
-            or anchor['manifest_path'] != PREFIX + 'reviewed-png-manifest-v1.json'):
+            or anchor['manifest_path'] not in (upload.LEGACY_MANIFEST, upload.SEQ2_MANIFEST)):
         fail('png_evidence_invalid')
     for key in ('publication_commit', 'asset_commit', 'manifest_blob'):
         upload.valid_hash(anchor[key], 40)
@@ -55,9 +90,9 @@ def check_plan(plan, approved_sha, anchor):
     keys(b, {'note_id', 'md_sha256', 'asset_path', 'git_blob', 'sha256', 'bytes',
              'mime', 'data_source_id', 'source_commit', 'reference_sha256'})
     p.note_id(b['note_id'])
-    pin = upload.PINS.get(upload.sha(b['note_id'].encode()))
+    pin = upload.pins_for_manifest(anchor['manifest_path']).get(upload.sha(b['note_id'].encode()))
     if pin is None or any(b.get(k) != v for k, v in pin.items()): fail('png_plan_changed')
-    if (type(b['bytes']) is not int or not 0 < b['bytes'] <= 512000
+    if (type(b['bytes']) is not int or not 0 < b['bytes'] <= upload.byte_limit(upload.sha(b['note_id'].encode()))
             or b['mime'] != 'image/png' or b['asset_path'] != PREFIX + b['sha256'] + '.png'
             or b['source_commit'] != anchor['publication_commit']
             or upload.uuid(b['data_source_id']) != b['data_source_id']
@@ -67,7 +102,7 @@ def check_plan(plan, approved_sha, anchor):
     upload.valid_hash(b['git_blob'], 40)
     upload.valid_hash(b['source_commit'], 40)
     upload.valid_hash(plan['multipart_body_sha256'])
-    tree = {PREFIX + row['sha256'] + '.png': row['git_blob'] for row in upload.PINS.values()}
+    tree = {PREFIX + row['sha256'] + '.png': row['git_blob'] for row in upload.pins_for_manifest(anchor['manifest_path']).values()}
     if (plan['contract'] != 'three-png-upload-1' or plan['version'] != upload.VERSION
             or plan['filename'] != 'get-' + b['sha256'] + '.png'
             or plan['asset_tree_sha256'] != digest(tree)):
@@ -149,30 +184,39 @@ def initialize(outer, evidence_anchor, approved_evidence_sha):
     """Pure explicit opt-in; never rewrites an old envelope on ordinary reads."""
     import get_notion_outbox as outbox
     outbox.check_state(outer); check_anchor(evidence_anchor, approved_evidence_sha)
-    if 'png_assets' in outer:
-        assets = outer['png_assets']
+    key = asset_key(evidence_anchor)
+    if key in outer:
+        assets = outer[key]
         if not same(assets['evidence_anchor'], evidence_anchor) or assets['evidence_sha256'] != approved_evidence_sha:
             fail('png_evidence_invalid')
         return deepcopy(outer)
     result = deepcopy(outer)
-    result['png_assets'] = {'contract': CONTRACT, 'evidence_anchor': deepcopy(evidence_anchor),
+    result[key] = {'contract': CONTRACT, 'evidence_anchor': deepcopy(evidence_anchor),
         'evidence_sha256': approved_evidence_sha, 'uploads': {}, 'attachments': {}}
     outbox.check_state(result)
     return result
 
 
-def add_upload(outer, plan, approved_plan_sha):
+def add_upload(outer, plan, approved_plan_sha, *, asset_key=None):
     import get_notion_outbox as outbox
     outbox.check_state(outer)
-    if 'png_assets' not in outer: fail('png_not_initialized')
-    assets = outer['png_assets']; check_plan(plan, approved_plan_sha, assets['evidence_anchor'])
+    if asset_key is None:
+        binding = plan.get('binding', {}) if isinstance(plan, dict) else {}
+        eligible = [key for key in ASSET_KEYS if key in outer
+                    and outer[key]['evidence_anchor']['publication_commit'] == binding.get('source_commit')
+                    and upload.sha(str(binding.get('note_id')).encode()) in upload.pins_for_manifest(outer[key]['evidence_anchor']['manifest_path'])]
+        if len(eligible) != 1: fail('png_not_initialized')
+        asset_key = eligible[0]
+    key = checked_key(asset_key)
+    if key not in outer: fail('png_not_initialized')
+    assets = outer[key]; check_plan(plan, approved_plan_sha, assets['evidence_anchor'])
     ident = plan['binding']['note_id']; result = deepcopy(outer)
     row = {'plan': deepcopy(plan), 'plan_sha256': approved_plan_sha, 'state': upload.initial_state(plan)}
     prior = assets['uploads'].get(ident)
     if prior is not None:
         if prior['plan_sha256'] != approved_plan_sha or not same(prior['plan'], plan): fail('png_plan_changed')
         return result
-    result['png_assets']['uploads'][ident] = row
+    result[key]['uploads'][ident] = row
     outbox.check_state(result); preserve(outer, result)
     return result
 
@@ -181,7 +225,13 @@ def preserve(before, after):
     """Durable anti-rearm/rebind guard, shared by both adapters and Git CAS."""
     import get_notion_png_expired_recovery as expired
     expired.preserve(before, after)
-    old = before.get('png_assets'); new = after.get('png_assets')
+    for key in ASSET_KEYS:
+        _preserve_container(before, after, key)
+    check_outer_assets(after)
+
+
+def _preserve_container(before, after, key):
+    old = before.get(key); new = after.get(key)
     if new is None:
         if old is not None: fail('png_state_regressed')
         return
@@ -224,49 +274,50 @@ def preserve(before, after):
 
 
 def join_engine(outer_before, outer_after, candidates):
-    """Validate and join fresh byte-readback candidates before the engine CAS."""
-    assets = outer_after.get('png_assets')
+    """Join one selected cohort's byte-readback candidates in the engine CAS."""
     if not isinstance(candidates, dict) or len(candidates) > MAX_UPLOADS: fail('png_attachment_invalid')
-    if assets is None:
-        if candidates: fail('png_not_initialized')
-        return
     before = outer_before['engine_state']['receipts']; after = outer_after['engine_state']['receipts']
-    changed = {ident for ident in assets['uploads'] if ident in after and not same(before.get(ident), after[ident])}
-    if set(candidates) - changed: fail('png_attachment_invalid')
-    for ident in changed:
-        candidate = candidates.get(ident, assets['attachments'].get(ident))
-        if candidate is None: fail('png_attachment_missing')
-        check_attachment(candidate, ident, assets, outer_after['engine_state'])
-        pending = outer_before['pending_by_id'].get(ident)
-        if pending is not None and any(pending[k] != candidate[v] for k, v in
-                (('commit', 'source_commit'), ('blob', 'md_blob'), ('sha256', 'md_sha256'))):
-            fail('png_attachment_invalid')
-        assets['attachments'][ident] = deepcopy(candidate)
+    changed_all = set()
+    for key in ASSET_KEYS:
+        assets = outer_after.get(key)
+        if assets is None: continue
+        changed = {ident for ident in assets['uploads'] if ident in after and not same(before.get(ident), after[ident])}
+        changed_all.update(changed)
+        for ident in changed:
+            candidate = candidates.get(ident, assets['attachments'].get(ident))
+            if candidate is None: fail('png_attachment_missing')
+            check_attachment(candidate, ident, assets, outer_after['engine_state'])
+            pending = outer_before['pending_by_id'].get(ident)
+            if pending is not None and any(pending[k] != candidate[v] for k, v in
+                    (('commit', 'source_commit'), ('blob', 'md_blob'), ('sha256', 'md_sha256'))):
+                fail('png_attachment_invalid')
+            assets['attachments'][ident] = deepcopy(candidate)
+    if set(candidates) - changed_all: fail('png_attachment_invalid')
     preserve(outer_before, outer_after)
 
 
 def not_dispatched_ticket(before, after):
     """Only called AFTER an exact ordinary forward CAS was fully confirmed."""
-    if 'png_assets' not in before or 'png_assets' not in after: return None
     changed = []
-    for ident, row in before['png_assets']['uploads'].items():
-        nxt = after['png_assets']['uploads'].get(ident)
-        if nxt is not None and not same(row['state'], nxt['state']): changed.append(ident)
+    for key in ASSET_KEYS:
+        if key not in before or key not in after: continue
+        for ident, row in before[key]['uploads'].items():
+            nxt = after[key]['uploads'].get(ident)
+            if nxt is not None and not same(row['state'], nxt['state']): changed.append((key, ident))
     if len(changed) != 1: return None
-    ident = changed[0]
-    old = before['png_assets']['uploads'][ident]['state']
-    new = after['png_assets']['uploads'][ident]['state']
+    key, ident = changed[0]
+    old = before[key]['uploads'][ident]['state']; new = after[key]['uploads'][ident]['state']
     if (old['phase'], new['phase']) not in (('prepared', 'create_in_flight'),
             ('upload_id_saved', 'send_in_flight')) or 'write_http' in old or 'write_http' in new:
         return None
-    restored = deepcopy(after)
-    restored['png_assets']['uploads'][ident]['state'] = deepcopy(old)
+    restored = deepcopy(after); restored[key]['uploads'][ident]['state'] = deepcopy(old)
     if not same(restored, before): return None
-    # Normal preserve remains strict and is never asked to authorize rollback.
     preserve(before, after)
-    return {'note_id': ident, 'before_sha256': digest(before), 'after_sha256': digest(after),
-        'before_state': deepcopy(old), 'after_state': deepcopy(new),
-        'request_sha256': new['request_sha256']}
+    ticket = {'note_id': ident, 'before_sha256': digest(before), 'after_sha256': digest(after),
+        'before_state': deepcopy(old), 'after_state': deepcopy(new), 'request_sha256': new['request_sha256']}
+    # Keep historical ticket shape unchanged; an extension is explicitly scoped.
+    if key != 'png_assets': ticket['asset_key'] = key
+    return ticket
 
 
 def check_not_dispatched(ticket, current, restored, typed_evidence):
@@ -277,20 +328,20 @@ def check_not_dispatched(ticket, current, restored, typed_evidence):
             or digest(current) != ticket.get('after_sha256')
             or digest(restored) != ticket.get('before_sha256')):
         fail('png_not_dispatched_invalid')
-    ident = ticket['note_id']
-    if (not same(current['png_assets']['uploads'][ident]['state'], ticket['after_state'])
-            or not same(restored['png_assets']['uploads'][ident]['state'], ticket['before_state'])
+    ident = ticket['note_id']; key = checked_key(ticket.get('asset_key', 'png_assets'))
+    if (not same(current[key]['uploads'][ident]['state'], ticket['after_state'])
+            or not same(restored[key]['uploads'][ident]['state'], ticket['before_state'])
             or not same(not_dispatched_ticket(restored, current), ticket)):
         fail('png_not_dispatched_invalid')
 
 
 
-def upload_receipts(outer):
+def upload_receipts(outer, *, asset_key='png_assets'):
     """Read-only input for Resolver, from the externally verified outer state."""
     import get_notion_outbox as outbox
     outbox.check_state(outer)
     result = {}
-    for ident, row in outer.get('png_assets', {}).get('uploads', {}).items():
+    for ident, row in outer.get(checked_key(asset_key), {}).get('uploads', {}).items():
         if row['state']['phase'] == 'uploaded_verified':
             receipt = receipt_for(row)
             result[ident] = {'receipt': receipt, 'sha256': digest(receipt)}
@@ -299,10 +350,11 @@ def upload_receipts(outer):
 
 class UploadStore:
     """Per-upload kernel adapter, keeping the exact outer CAS version alive."""
-    def __init__(self, store, note_id, approved_plan_sha, *, allow_persist=False):
+    def __init__(self, store, note_id, approved_plan_sha, *, allow_persist=False, asset_key='png_assets'):
         if type(allow_persist) is not bool: fail('png_persist_disabled')
         p.note_id(note_id); upload.valid_hash(approved_plan_sha)
         self.store = store; self.note_id = note_id; self.plan_sha = approved_plan_sha
+        self.asset_key = checked_key(asset_key)
         self.allow_persist = allow_persist; self.outer = None; self.version = None
         self._not_dispatched = None
 
@@ -310,7 +362,7 @@ class UploadStore:
         import get_notion_outbox as outbox
         value, version = self.store.read(); outbox.check_state(value)
         if digest(value) != version: fail('png_durability_unconfirmed')
-        row = value.get('png_assets', {}).get('uploads', {}).get(self.note_id)
+        row = value.get(self.asset_key, {}).get('uploads', {}).get(self.note_id)
         if row is None or row['plan_sha256'] != self.plan_sha: fail('png_plan_changed')
         if self._not_dispatched is not None and version != self._not_dispatched['after_sha256']:
             self._not_dispatched = None
@@ -322,11 +374,11 @@ class UploadStore:
         self._not_dispatched = None
         if not self.allow_persist: fail('png_persist_disabled')
         if self.outer is None: fail('png_state_changed')
-        row = self.outer['png_assets']['uploads'][self.note_id]
+        row = self.outer[self.asset_key]['uploads'][self.note_id]
         if digest(row['state']) != expected_sha: fail('png_state_changed')
         upload.check_state(value, row['plan'])
         result = deepcopy(self.outer)
-        result['png_assets']['uploads'][self.note_id]['state'] = deepcopy(value)
+        result[self.asset_key]['uploads'][self.note_id]['state'] = deepcopy(value)
         outbox.check_state(result); preserve(self.outer, result)
         observed, version = outbox.confirmed_compare_and_set(self.store, self.version, result)
         ticket = not_dispatched_ticket(self.outer, observed)
@@ -345,7 +397,7 @@ class UploadStore:
         current, version = self.store.read(); outbox.check_state(current)
         if version != digest(current): fail('png_durability_unconfirmed')
         restored = deepcopy(current)
-        restored['png_assets']['uploads'][self.note_id]['state'] = deepcopy(before_full_state)
+        restored[self.asset_key]['uploads'][self.note_id]['state'] = deepcopy(before_full_state)
         outbox.check_state(restored)
         check_not_dispatched(ticket, current, restored, typed_evidence)
         observed, new_version = reset(version, restored, typed_evidence)

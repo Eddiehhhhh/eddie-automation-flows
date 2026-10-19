@@ -28,7 +28,7 @@ def receipt(value,expected_sha):
         keys={'upload_id','plan_sha256','source_binding','content_length','content_type',
               'native_bytes_verified','binding_sha256','kind','sha256','byte_count','mime'}
         if not isinstance(value,dict) or set(value)!=keys or upload.digest(value)!=expected_sha:fail('asset_receipt_invalid')
-        b=value['source_binding'];ident=b['note_id'];pin=upload.PINS.get(upload.sha(ident.encode()))
+        b=value['source_binding'];ident=b['note_id'];pin=upload.reviewed_pin(upload.sha(ident.encode()))
         if pin is None or any(b.get(k)!=v for k,v in pin.items()):fail('asset_receipt_invalid')
         if set(b)!={'note_id','md_sha256','asset_path','git_blob','sha256','bytes','mime','data_source_id','source_commit','reference_sha256'}:fail('asset_receipt_invalid')
         if upload.digest(b)!=value['binding_sha256'] or upload.sha(upload.uuid(b['data_source_id']).encode())!=upload.DESTINATION_PIN:fail('asset_receipt_invalid')
@@ -37,7 +37,7 @@ def receipt(value,expected_sha):
         if value['kind']!=KIND or value['native_bytes_verified'] is not False:fail('asset_receipt_invalid')
         if value['mime']!=value['content_type'] or value['mime']!=b['mime'] or value['mime']!='image/png':fail('asset_receipt_invalid')
         if any(type(value[k]) is not int or value[k]!=b['bytes'] for k in ('byte_count','content_length')):fail('asset_receipt_invalid')
-        if value['sha256']!=b['sha256'] or not 0<b['bytes']<=MAX_BYTES:fail('asset_receipt_invalid')
+        if value['sha256']!=b['sha256'] or not 0<b['bytes']<=upload.byte_limit(upload.sha(ident.encode())):fail('asset_receipt_invalid')
         if upload.uuid(value['upload_id'])!=value['upload_id']:fail('asset_receipt_invalid')
         return deepcopy(value)
     except Blocked:raise
@@ -56,7 +56,8 @@ class Resolver:
         for ident,row in receipts.items():
             if not isinstance(row,dict) or set(row)!={'receipt','sha256'}:fail('asset_receipt_invalid')
             value=receipt(row['receipt'],row['sha256'])
-            if value['source_binding']['note_id']!=ident:fail('asset_receipt_invalid')
+            if (value['source_binding']['note_id']!=ident or ident not in evidence._records
+                    or upload.sha(ident.encode()) not in upload.pins_for_manifest(evidence.descriptor['manifest_path'])):fail('asset_receipt_invalid')
             self.receipts[ident]=(value,row['sha256'])
     def bound(self,ident,data,reference,caption):
         bound=self.evidence.resolve(ident,data,reference,current_commit=self.current_commit())
@@ -90,7 +91,7 @@ class Resolver:
         return {v['upload_id']:{'sha256':v['sha256'],'byte_count':v['byte_count'],'mime':v['mime']}
                 for v,_ in self.receipts.values()}
 
-def preflight_blocks(blocks):
+def preflight_blocks(blocks, *, properties=None, data_source=None):
     """Check the actual structure and conservative size before uploading bytes."""
     import get_notion_executor as engine
     import get_notion_live_transport as live
@@ -108,7 +109,12 @@ def preflight_blocks(blocks):
             walk(row['children'])
     walk(rows)
     if images!=1:fail('asset_image_count')
-    request=engine.request_blocks(rows);live.wire_blocks(request,None)
+    if properties is None:
+        request=engine.request_blocks(rows);live.wire_blocks(request,None)
+    else:
+        # Conservative image placeholder overhead in EVERY immutable batch,
+        # with actual properties and parent before any upload creation.
+        engine.create_batches.prepare(rows,properties,data_source)
     return {'images':images,'root_blocks':len(blocks),'total_blocks':sum(1 for _ in _walk(blocks)),
             'write_ready':False}
 
@@ -130,8 +136,8 @@ class AssetGet:
             with self.opener.open(urllib.request.Request(url,method='GET'),timeout=min(15,120-self.elapsed)) as response:
                 if response.status in (401,403):denied=True;fail('asset_permission_denied')
                 if response.status!=200:fail('asset_http_failed')
-                data=response.read(min(MAX_BYTES+1,8*1024*1024-self.response_bytes+1));self.response_bytes+=len(data)
-            if len(data)>MAX_BYTES or self.response_bytes>8*1024*1024:fail('asset_download_budget')
+                data=response.read(min(upload.maximum_read_bytes()+1,8*1024*1024-self.response_bytes+1));self.response_bytes+=len(data)
+            if (len(data)>MAX_BYTES and not upload.reviewed_oversize(data)) or self.response_bytes>8*1024*1024:fail('asset_download_budget')
             return data
         except urllib.error.HTTPError as exc:
             denied=exc.code in (401,403);exc.close()
@@ -240,7 +246,9 @@ class SnapshotAdapter:
         if not isinstance(outer,dict) or p.digest(outer)!=version:fail('asset_receipt_invalid')
         state=outer.get('engine_state');engine.check_state(state)
         page=p.notion_id(snapshot.get('page_id'))
-        old=state['receipts'].get(ident);attachment=outer.get('png_assets',{}).get('attachments',{}).get(ident)
+        import get_notion_png_store as storage
+        key=storage.asset_key(self.resolver.evidence.descriptor)
+        old=state['receipts'].get(ident);attachment=outer.get(key,{}).get('attachments',{}).get(ident)
         mode=None
         if isinstance(old,dict) and isinstance(attachment,dict):
             if (old.get('page_id')!=page or old.get('source_commit')!=source['source_commit']
@@ -253,12 +261,25 @@ class SnapshotAdapter:
             plan=journal['plan'];index=journal['index'];operation=journal['operation']
             if not 0<=index<len(plan['records']) or not isinstance(operation,dict):fail('asset_receipt_invalid')
             row=plan['records'][index]
-            if (row.get('note_id')!=ident or row.get('action')!='create' or operation.get('kind')!='create'
-                    or operation.get('phase')!='acknowledged' or operation.get('response')!=page
+            if (row.get('note_id')!=ident or row.get('action')!='create'
                     or plan['publication']['commit']!=source['source_commit']
                     or row['source']['sha256']!=source['md_sha256']
                     or row.get('uploaded_pngs',{}).get(value['upload_id'])!=self.resolver.handles()[value['upload_id']]):fail('asset_receipt_invalid')
-            mode='acknowledged'
+            if operation.get('kind')=='create_batches':
+                engine.create_batches.validate_operation(operation,row)
+                if (operation['page_id']!=page
+                        or not (operation['batches'][0]['response']==page
+                            or operation['batches'][0]['response'] is None and 'recovery_sha256' in operation['batches'][0])
+                        or operation['batches'][0]['phase'] not in ('acknowledged','verified')):fail('asset_receipt_invalid')
+                # Earlier complete prefixes can precede the image. The executor
+                # still verifies their exact planned prefix and every old ID.
+                if not any(r.get('type')=='image' for r in snapshot.get('recursive_blocks',[])):
+                    return snapshot
+                mode='batched'
+            else:
+                if (operation.get('kind')!='create' or operation.get('phase')!='acknowledged'
+                        or operation.get('response')!=page):fail('asset_receipt_invalid')
+                mode='acknowledged'
         try:result=bind_snapshot(snapshot,ident,value,sha,request=self.request,asset_get=self.asset_get)
         except Exception as exc:
             self.png_downloads+=getattr(exc,'asset_downloads',0);raise

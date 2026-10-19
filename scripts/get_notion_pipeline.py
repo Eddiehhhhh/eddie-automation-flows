@@ -41,7 +41,7 @@ def pending(publication,state,engine_policy,initial_scope,retry,reviewed_png=Non
         prior=state['receipts'].get(ident,{})
         if prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit']:continue
         prior=state['failures'].get(ident,{})
-        if not retry and prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit'] and prior.get('policy_sha256')==key and not (reviewed_png is not None and reviewed_png.may_retry(ident,source,prior)):continue
+        if not retry and prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit'] and prior.get('policy_sha256')==key and not (reviewed_png is not None and reviewed_png.may_retry(ident,source,prior)) and not e.content_scope.retry_reviewed_failure(ident,source,prior):continue
         if e.content_scope.reason(ident,publication.read(ident)):continue
         result.append(ident)
     return result[:e.MAX_RECORDS]
@@ -60,6 +60,35 @@ def wire_allowlist(plan,api):
             keys.add(t.fingerprint('PATCH','/blocks/'+t.native.uuid(row['page_id'])+'/children',body))
             for ident in row['old_roots']:keys.add(t.fingerprint('PATCH','/blocks/'+t.native.uuid(ident),{'archived':True}))
     return frozenset(keys)
+
+
+def batch_authorizer(plan,api,request,store):
+    """Grant only the durable current range's exact newly-known page/anchor.
+
+    Page and root IDs do not exist at initial plan approval. This capability
+    derives the exact request from that same immutable approved source plan
+    and its durable execution progress, never from arbitrary caller payloads.
+    """
+    def authorize(row,operation,wire):
+        if not isinstance(request,t.Transport) or not isinstance(api,t.API):e.fail('approval_missing')
+        state,version=store.read();e.check_state(state)
+        journal=state['journal']
+        if (e.digest(state)!=version or journal is None or journal['plan_sha256']!=e.digest(plan)
+                or journal['plan']!=plan or journal['index']>=len(plan['records'])
+                or not e.same(plan['records'][journal['index']],row)
+                or not e.same(journal['operation'],operation)
+                or operation.get('kind')!='create_batches' or operation.get('phase')!='in_flight'):
+            e.fail('approval_missing')
+        e.create_batches.validate_operation(operation,row)
+        index=operation['batch_index']
+        after=operation['batches'][index-1]['roots'][-1] if index else None
+        expected,_=e.create_batches.request(row,api.source,index,operation['page_id'],after)
+        if not e.same(wire,expected):e.fail('approval_missing')
+        key=t.fingerprint(expected['method'],expected['path'],expected['body'])
+        if key in api.attempted or key in request.attempted:e.fail('approval_missing')
+        api.approved=frozenset(set(api.approved)|{key})
+        request.approved=frozenset(set(request.approved)|{key})
+    return authorize
 
 
 def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply=False,writers_guard,initial_scope=None,retry_conflicts=False,approved_plan_sha256=None,create_recovery=None,approved_recovery_sha=None,empty_plan_settle=None,snapshot_adapter=None,reviewed_png=None):
@@ -86,7 +115,7 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
         journal=state['journal'];prior_attempt=False
         if journal is not None:
             operation=journal.get('operation')
-            prior_attempt=bool(journal.get('index')) or bool(operation and (operation.get('kind') in ('archive','cleanup') or operation.get('phase')!='prepared'))
+            prior_attempt=bool(journal.get('index')) or e.operation_has_effects(operation)
             plan=deepcopy(journal['plan'])
             if ((plan.get('rules_sha256')!=approved['rules_sha256'] and not plan_recovery.allows(plan,journal)
                     and not plan_recovery.allows_run10(plan,journal)
@@ -116,7 +145,7 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             # already policy-bound, source-bound plan has been fully validated.
             if not isinstance(request,t.Transport):e.fail('approval_missing')
             request.approved=allowed
-        result=e.execute(plan,e.digest(plan),publication,api,store,expected_store_sha=sha,writers_guard=writers_guard,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha)
+        result=e.execute(plan,e.digest(plan),publication,api,store,expected_store_sha=sha,writers_guard=writers_guard,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,authorize_batch=batch_authorizer(plan,api,request,store) if api is not None else None)
         safe=e.public_report(result)
         if not plan['records'] and safe.get('status') in ('verified','partial') and 'outbox_receipt_sha256' in plan['publication']:
             stage='queue_settle'

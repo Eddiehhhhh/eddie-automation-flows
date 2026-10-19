@@ -26,6 +26,7 @@ import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
+import get_notion_run28_recovery as run28_recovery
 import get_notion_png_expired_recovery as expired_recovery
 import get_notion_png_transport as png_transport
 import get_notion_png_recovery as png_recovery
@@ -38,6 +39,11 @@ import get_notion_uploaded_png as png_image
 # Deployment anchors are code-reviewed constants, never workflow inputs.
 PNG_ASSET_ANCHOR={'asset_commit': '58d3eb9c10c306605d2713afcf0968a4bc439aa9', 'contract': 'get-notion-three-png-evidence-1', 'manifest_blob': '57250bae9887e3e64dc7e5b45aa013547f51956a', 'manifest_path': '.sync/get-notion/assets/reviewed-png-manifest-v1.json', 'manifest_sha256': '0ae8131c866db9ebeb320f4d657ca40384755e5d7a38f69bf33fbad9cb7fe288', 'publication_commit': 'a37cc108096210d0fb9847609e906ca22c88acf4', 'repository': 'Eddiehhhhh/eddie-llm-wiki'}
 PNG_ASSET_ANCHOR_SHA256='a8137204a877ea80202dfb0f4d88e667a5d2ca17c9893e9c192da75c141a980c'
+PNG_SEQ2_PUBLICATION='1678207017f96eb8022b4f4fb540b08d8654fb38'
+# Populated only after an independently reviewed append-only private asset
+# commit. Local downloads cannot activate uploads or manufacture an anchor.
+PNG_SEQ2_ASSET_ANCHOR={'asset_commit': '74ceb48920230b8b0ba0ec72325cdb4292b5cbe8', 'contract': 'get-notion-three-png-evidence-1', 'manifest_blob': 'b4f54a6bc963df36c9f99b9f3338a277725e7b14', 'manifest_path': '.sync/get-notion/assets/reviewed-png-manifest-v2.json', 'manifest_sha256': '2b0e9279111e93b201fe97a1b885688d168b56a57e65b957adbcbaeb3fb3e357', 'publication_commit': '1678207017f96eb8022b4f4fb540b08d8654fb38', 'repository': 'Eddiehhhhh/eddie-llm-wiki'}
+PNG_SEQ2_ASSET_ANCHOR_SHA256='35632db7839482bbf400891152aade9c79956dc981a5cfe8c15a67d48000bd2d'
 import get_confirmed_source as source_loader
 import get_recurring_entry as entry
 import get_recurring_runtime as recurring
@@ -66,7 +72,8 @@ def scope_for(public_policy):
     return {'contract':CONTRACT,'public_policy_sha256':a.sha(a.encoded(public_policy)),
         'rules_sha256':public_policy['rules_sha256'],'repository':r.REPOSITORY,
         'journal_path':outbox.STATE_PATH,'max_notes':MAX_RUN_RECORDS,'allow_create':True,
-        'allow_archive_owned_roots':True,'property_updates':False,'uploads':'three-reviewed-png-single-part','png_asset_anchor_sha256':PNG_ASSET_ANCHOR_SHA256,
+        'allow_archive_owned_roots':True,'property_updates':False,'uploads':'two-fixed-three-png-cohorts-single-part','png_asset_anchor_sha256':PNG_ASSET_ANCHOR_SHA256,
+        'png_seq2_asset_anchor_sha256':PNG_SEQ2_ASSET_ANCHOR_SHA256,
         'data_source_pin':transport.native.DATA_SOURCE_PIN,'database_pin':transport.native.DATABASE_PIN,
         'initial_proof_sha256':ro.HISTORICAL_TEMPLATE['proof_sha256'],
         'initial_image_proof_sha256':preserved_image.TEMPLATE['proof_sha256'],
@@ -157,8 +164,34 @@ def initial_done(state):
 
 
 def png_selected(descriptor):
-    if PNG_ASSET_ANCHOR is not None and descriptor.get('commit')!=PNG_ASSET_ANCHOR.get('publication_commit'):return False
-    return any((pin:=png_upload.PINS.get(png_upload.sha(i.encode()))) is not None and row.get('sha256')==pin.get('md_sha256') for i,row in descriptor.get('records',{}).items())
+    commit=descriptor.get('commit')
+    if commit==PNG_SEQ2_PUBLICATION:pins=png_upload.SEQ2_PINS
+    elif PNG_ASSET_ANCHOR is None or commit==PNG_ASSET_ANCHOR.get('publication_commit'):pins=png_upload.PINS
+    else:return False
+    return any((pin:=pins.get(png_upload.sha(i.encode()))) is not None and row.get('sha256')==pin.get('md_sha256') for i,row in descriptor.get('records',{}).items())
+
+
+def png_anchor(descriptor):
+    if descriptor.get('commit')==PNG_SEQ2_PUBLICATION:
+        anchor,sha=PNG_SEQ2_ASSET_ANCHOR,PNG_SEQ2_ASSET_ANCHOR_SHA256
+    elif PNG_ASSET_ANCHOR is not None and descriptor.get('commit')==PNG_ASSET_ANCHOR.get('publication_commit'):
+        anchor,sha=PNG_ASSET_ANCHOR,PNG_ASSET_ANCHOR_SHA256
+    else:fail('png_anchor_pending')
+    if anchor is None or sha is None or anchor.get('publication_commit')!=descriptor.get('commit'):
+        fail('png_anchor_pending')
+    return anchor,sha
+
+
+def queue_limit(state):
+    # Do not upload three long-page images ahead of their page transactions.
+    # This exact source cohort progresses one page at a time; old queue and
+    # active immutable journal selection retain their existing semantics.
+    order=state['rotation_order']
+    if (state['engine_state']['journal'] is None and order
+            and expired_recovery.only_note_id(state) is None
+            and state['pending_by_id'][order[0]]['commit']==PNG_SEQ2_PUBLICATION):
+        return 1
+    return MAX_RUN_RECORDS
 
 
 def png_batch_ids(state):
@@ -170,7 +203,7 @@ def png_batch_ids(state):
     order=state['rotation_order']
     if not order:return []
     commit=state['pending_by_id'][order[0]]['commit']
-    return [i for i in order if state['pending_by_id'][i]['commit']==commit][:MAX_RUN_RECORDS]
+    return [i for i in order if state['pending_by_id'][i]['commit']==commit][:queue_limit(state)]
 
 
 def observe_expired_png(current, loaded, publication, request, writers_guard):
@@ -203,23 +236,24 @@ def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,wri
     state,sha=store.read()
     selected=png_selected(pub.descriptor)
     if not selected:return pub,None,previous,None,writers_guard,None
-    if PNG_ASSET_ANCHOR is None or PNG_ASSET_ANCHOR_SHA256 is None:fail('png_anchor_pending')
-    loaded=loaded_assets or png_loader.load(local,remote,pub.descriptor,PNG_ASSET_ANCHOR,PNG_ASSET_ANCHOR_SHA256,policy_hash)
+    anchor,anchor_sha=png_anchor(pub.descriptor)
+    loaded=loaded_assets or png_loader.load(local,remote,pub.descriptor,anchor,anchor_sha,policy_hash)
+    asset_key=png_store.asset_key(loaded.evidence.descriptor)
     session=png_runtime.Session(loaded.evidence,pub,store,request,policy,e.digest(policy),
         current_commit=lambda:loaded.snapshot_head,asset_guard=loaded.before_write,writers_guard=writers_guard,apply=apply)
     resumed=state['engine_state']['journal'] is not None
     if resumed:
         # Never recreate uploads/pages for an acknowledged or uncertain journal.
-        resolver=png_image.Resolver(loaded.evidence,png_store.upload_receipts(state),current_commit=lambda:loaded.snapshot_head)
+        resolver=png_image.Resolver(loaded.evidence,png_store.upload_receipts(state,asset_key=asset_key),current_commit=lambda:loaded.snapshot_head)
         preparation=None
     else:
         preparation=session.prepare()
         if preparation.get('upload_candidates',0)>2:fail('notion_scope')
         if not apply:return pub,None,previous,None,writers_guard,preparation
-        resolver=session.advance_uploads() if preparation['upload_candidates'] else png_image.Resolver(loaded.evidence,png_store.upload_receipts(state),current_commit=lambda:loaded.snapshot_head)
+        resolver=session.advance_uploads() if preparation['upload_candidates'] else png_image.Resolver(loaded.evidence,png_store.upload_receipts(state,asset_key=asset_key),current_commit=lambda:loaded.snapshot_head)
         state,sha=store.read()
         # Upload CAS changes the outer hash; the original queue descriptor is stale.
-        pub=outbox.QueuePublication(local.vault,state,sha,max_records=MAX_RUN_RECORDS)
+        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state))
         session.publication=pub
     image_adapter=png_image.SnapshotAdapter(resolver,store.read,request=request,asset_get=png_image.AssetGet(),previous=previous)
     def candidates(old,new):
@@ -301,7 +335,7 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
             return {'status':'queue_empty','queued':0,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         first=state['pending_by_id'][state['rotation_order'][0]]
         source_loader.load_queue_publication(local,remote,token,root,{k:first[k] for k in ('commit','parent','receipt_sha256')},policy_hash)
-        pub=outbox.QueuePublication(local.vault,state,sha,max_records=MAX_RUN_RECORDS);scope={}
+        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state));scope={}
         receipts=state['engine_state']['receipts']
         if receipts:ds=next(iter(receipts.values()))['data_source_id']
         else:ds=next(iter(transport.native.collect(request)['snapshots'].values()))['parent_data_source']
@@ -462,7 +496,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
                 fail('notion_state_anchor')
             old_journal=current['engine_state']['journal']
-            prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and (old_journal['operation'].get('phase')!='prepared' or old_journal['operation'].get('kind') in ('cleanup','archive'))))
+            prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
             store=durable if apply else ReadOnlyStore(current)
             loaded_assets=None
             png_transition=None
@@ -472,8 +506,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 png_transition=bridge.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=png_transition;preload_sha=outbox.digest(png_transition)
             confirmed_transition=None
-            if present and found.get('recovery_anchor')==run18_recovery.TAG:
-                confirmed_transition=run18_recovery.transition_outer(current,sha,public_policy['get_policy_sha256'])
+            if present and found.get('recovery_anchor') in (run18_recovery.TAG,run28_recovery.TAG):
+                recovery_module=run28_recovery if found['recovery_anchor']==run28_recovery.TAG else run18_recovery
+                confirmed_transition=recovery_module.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=confirmed_transition;preload_sha=outbox.digest(preload_state)
             expired_transition=present and found.get('recovery_anchor')==run16_recovery.TAG
             if expired_transition:
@@ -491,7 +526,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             batch_descriptor=pending_plan['plan']['publication'] if pending_plan is not None else {'commit':preload_state['pending_by_id'][batch[0]]['commit'] if batch else None,'records':{i:preload_state['pending_by_id'][i] for i in batch}}
             png_pending=png_selected(batch_descriptor)
             if png_pending:
-                if PNG_ASSET_ANCHOR is None or PNG_ASSET_ANCHOR_SHA256 is None:fail('png_anchor_pending')
+                selected_anchor,selected_anchor_sha=png_anchor(batch_descriptor)
                 # Hydrate immutable source/asset evidence before our FIRST CAS.
                 # The trusted transition candidate selects the current policy bridge.
                 pending=preload_state['engine_state']['journal']
@@ -502,8 +537,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     first=preload_state['pending_by_id'][batch[0]]
                     row={k:first[k] for k in ('commit','parent','receipt_sha256')}
                 source_loader.load_queue_publication(local,remote,token,root,row,preload_state['policy_sha256'])
-                before_pub=outbox.QueuePublication(local.vault,preload_state,preload_sha,resume=pending is not None,max_records=MAX_RUN_RECORDS)
-                loaded_assets=png_loader.load(local,remote,before_pub.descriptor,PNG_ASSET_ANCHOR,PNG_ASSET_ANCHOR_SHA256,preload_state['policy_sha256'])
+                before_pub=outbox.QueuePublication(local.vault,preload_state,preload_sha,resume=pending is not None,max_records=queue_limit(preload_state))
+                loaded_assets=png_loader.load(local,remote,before_pub.descriptor,selected_anchor,selected_anchor_sha,preload_state['policy_sha256'])
             if present and found.get('recovery_anchor')=='exact_run10_acknowledged_create_v1':
                 if not plan_recovery.validate_run10_state(current,sha):fail('notion_state_anchor')
                 candidate=plan_recovery.transition_run10_outer(current,sha,public_policy['get_policy_sha256'])

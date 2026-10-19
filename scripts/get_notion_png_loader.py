@@ -50,7 +50,7 @@ class LoadedAssets:
         evidence.hash_value(expected_anchor_sha, 64)
         if (evidence.digest(anchor) != expected_anchor_sha or anchor['contract'] != evidence.CONTRACT
                 or anchor['repository'] != evidence.p.REPOSITORY
-                or anchor['manifest_path'] != evidence.MANIFEST_PATH): fail('png_loader_anchor')
+                or anchor['manifest_path'] not in evidence.MANIFEST_PATHS): fail('png_loader_anchor')
         for key in ('publication_commit', 'asset_commit', 'manifest_blob'): evidence.hash_value(anchor[key], 40)
         evidence.hash_value(anchor['manifest_sha256'], 64)
         if (not isinstance(publication, dict) or publication.get('commit') != anchor['publication_commit']
@@ -58,6 +58,7 @@ class LoadedAssets:
         if (local.run('config', '--get', 'remote.origin.partialclonefilter').strip() != b'blob:none'
                 or local.run('config', '--get', 'remote.origin.promisor').strip() != b'true'):
             fail('png_loader_partial_clone')
+        manifest_path = anchor['manifest_path']
         self.local = local; self.remote = remote; self.anchor = deepcopy(anchor)
         self._layout = layout(local)
         self.snapshot_head = m.a.checked(local.run('rev-parse', m.r.MAIN_REF).decode().strip(), 40)
@@ -71,9 +72,9 @@ class LoadedAssets:
         self.loader.ancestry(anchor['asset_commit'], head)
         _, before = self._tree(parent); _, after = self._tree(anchor['asset_commit'])
         _, source = self._tree(anchor['publication_commit'])
-        if after.get(evidence.MANIFEST_PATH) != ('100644', 'blob', anchor['manifest_blob']):
+        if after.get(manifest_path) != ('100644', 'blob', anchor['manifest_blob']):
             fail('png_loader_anchor')
-        raw = self._blob(anchor['asset_commit'], evidence.MANIFEST_PATH, evidence.MAX_MANIFEST)
+        raw = self._blob(anchor['asset_commit'], manifest_path, evidence.MAX_MANIFEST)
         if evidence.digest(raw) != anchor['manifest_sha256']: fail('png_loader_anchor')
         manifest = evidence.strict_json(raw)
         evidence.keys(manifest, ('contract', 'repository', 'publication_commit', 'records'))
@@ -83,8 +84,8 @@ class LoadedAssets:
             fail('png_loader_manifest')
         # Preflight all sizes/path/OID membership and the entire append-only
         # delta BEFORE any of the six note/image bodies is requested.
-        selected = {(anchor['asset_commit'], evidence.MANIFEST_PATH): evidence.MAX_MANIFEST}
-        exact = {evidence.MANIFEST_PATH: anchor['manifest_blob']}; assets = set(); notes = set(); total = 0
+        selected = {(anchor['asset_commit'], manifest_path): evidence.MAX_MANIFEST}
+        exact = {manifest_path: anchor['manifest_blob']}; assets = set(); notes = set(); total = 0
         for ident, row in manifest['records'].items():
             evidence.p.note_id(ident); evidence.keys(row, ('source', 'reference_sha256', 'asset'))
             evidence.keys(row['source'], ('path', 'blob', 'sha256'))
@@ -108,7 +109,7 @@ class LoadedAssets:
             selected[(anchor['publication_commit'], path)] = evidence.p.MAX_NOTE
             selected[(anchor['asset_commit'], asset['path'])] = asset['bytes']
         changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
-        if (total > evidence.MAX_TOTAL or changed != assets | {evidence.MANIFEST_PATH}
+        if (total > evidence.MAX_TOTAL or changed != assets | {manifest_path}
                 or any(p in before for p in changed)
                 or self.loader.reader.source_get_tree(parent) != self.loader.reader.source_get_tree(anchor['asset_commit'])):
             fail('png_loader_delta')

@@ -21,7 +21,9 @@ class Tests(unittest.TestCase):
   s.write=lambda path,data:original_write(r.entry.r.GET+'/'+r.entry.a.STATE if path=='Raw/03 Get/03 State/legacy.json' else path,data)
   self.ids=[source.N(i) for i in range(3)];self.images={i:png(k+2,2) for k,i in enumerate(self.ids)}
   self.urls={i:'https://get-notes.umiwi.com/synthetic-'+str(k)+'.png?fixture=x' for k,i in enumerate(self.ids)}
-  s.publication({i:'![Caption]('+self.urls[i]+')\n\n'+('---\n\n'*110 if k==2 else 'Ordinary body') for k,i in enumerate(self.ids)});state=s.ingest();desc=s.pub().descriptor
+  # Separate roots can now be batched; keep the capacity fixture unsplittable.
+  oversized='| Synthetic column |\n| --- |\n'+''.join('| Synthetic row %03d |\n'%n for n in range(110))
+  s.publication({i:'![Caption]('+self.urls[i]+')\n\n'+(oversized if k==2 else 'Ordinary body') for k,i in enumerate(self.ids)});state=s.ingest();desc=s.pub().descriptor
   records={}
   for i in self.ids:
    data=self.images[i];sha=e.digest(data);w,h=ev.png_shape(data);path=ev.PREFIX+sha+'.png';s.write(path,data)

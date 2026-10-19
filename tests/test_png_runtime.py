@@ -18,14 +18,14 @@ class Tests(Base):
   self.assertEqual(self.outer.read(),before);self.assertFalse(self.transport.attempted)
   with self.assertRaisesRegex(ValueError,'approval_missing'):session.advance_uploads()
   self.assertEqual(self.outer.read(),before)
- def test_full_shape_capacity_stops_note_before_target_read_and_upload(self):
+ def test_full_unsplittable_shape_stops_note_before_target_read_and_upload(self):
   original=e.p.render_markdown;calls=0
   def render(*args,**kw):
    nonlocal calls
    out=original(*args,**kw);calls+=1
    if calls==1:
     rows,bindings,warnings=out
-    rows.extend([e.p.block('paragraph',{'rich_text':[e.p.text_run('ordinary')]}) for _ in range(101)])
+    rows.append(e.p.block('quote',{'rich_text':[]},[e.p.block('paragraph',{'rich_text':[e.p.text_run('ordinary')]}) for _ in range(100)]))
    return out
   with patch.object(e.p,'render_markdown',side_effect=render):report=self.session().prepare()
   self.assertEqual(report['upload_candidates'],2,report);self.assertEqual(report['reason_counts'],{'request_budget':1})

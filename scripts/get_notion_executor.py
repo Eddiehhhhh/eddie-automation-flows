@@ -23,6 +23,7 @@ import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_live_transport as transport
 import get_notion_content_scope as content_scope
+import get_notion_create_batches as create_batches
 
 CONTRACT = 'get-notion-journal-engine-1'
 STATE_PATH = '.sync/get-notion/state.json'
@@ -35,7 +36,7 @@ REASONS = frozenset(('source_changed', 'source_invalid', 'state_changed', 'state
     'missing_target', 'missing_block_ownership', 'human_edit_conflict', 'wrong_parent',
     'unsupported_source_format', 'missing_asset', 'asset_write_contract_missing',
     'archive_not_approved', 'create_not_approved', 'format_not_approved', 'writer_gate_unknown',
-    'request_budget', 'request_not_dispatched', 'journal_failed', 'journal_busy', 'uncertain_append', 'uncertain_create',
+    'request_budget', 'request_not_dispatched', 'batch_boundary_yield', 'journal_failed', 'journal_busy', 'uncertain_append', 'uncertain_create',
     'uncertain_archive', 'readback_mismatch', 'transport_read_failed', 'transport_write_uncertain',
     'recovery_not_approved', 'unsupported_prepend', 'unresolved_operation', 'privacy_scope_required', 'content_review_required', 'empty_source', 'prior_denial', 'other'))
 
@@ -63,6 +64,13 @@ def same(left, right):
 
 def initial_state():
     return {'contract': CONTRACT, 'receipts': {}, 'failures': {}, 'journal': None}
+
+
+def operation_has_effects(operation):
+    """Prepared next ranges do not erase earlier page-creation effects."""
+    return bool(operation and (operation.get('kind') in ('cleanup','archive')
+        or operation.get('phase')!='prepared'
+        or operation.get('kind')=='create_batches' and operation.get('batch_index',0)>0))
 
 
 def rules_sha256():
@@ -124,6 +132,12 @@ def check_state(value):
         journal=value['journal']
         if journal is not None:
             if not isinstance(journal,dict) or set(journal)!={'plan_sha256','plan','index','operation'} or not isinstance(journal['plan'],dict) or digest(journal['plan'])!=journal['plan_sha256'] or type(journal['index']) is not int or not 0<=journal['index']<=len(journal['plan'].get('records',[])) or (journal['operation'] is not None and not isinstance(journal['operation'],dict)):fail('state_invalid')
+            operation=journal['operation']
+            if operation is not None and operation.get('kind')=='create_batches':
+                if journal['index']>=len(journal['plan']['records']):fail('state_invalid')
+                row=journal['plan']['records'][journal['index']]
+                if row.get('action')!='create' or 'create_batches' not in row:fail('state_invalid')
+                create_batches.validate_operation(operation,row)
         if len(encoded(value)) > MAX_STATE: fail('request_budget')
         return value
     except Blocked: raise
@@ -421,7 +435,7 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         prior = state['receipts'].get(ident,{})
         if prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit']: continue
         failed = state['failures'].get(ident,{})
-        if not retry_conflicts and failed.get('md_blob')==source['blob'] and failed.get('source_commit')==publication.descriptor['commit'] and failed.get('policy_sha256')==policy_sha and not (reviewed_png is not None and reviewed_png.may_retry(ident,source,failed)):
+        if not retry_conflicts and failed.get('md_blob')==source['blob'] and failed.get('source_commit')==publication.descriptor['commit'] and failed.get('policy_sha256')==policy_sha and not (reviewed_png is not None and reviewed_png.may_retry(ident,source,failed)) and not content_scope.retry_reviewed_failure(ident,source,failed):
             skipped_conflicts.append(ident);continue
         pending.append(ident)
     ids = pending[:MAX_RECORDS]
@@ -457,7 +471,14 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                 props = {policy['id_property']: {'type':'rich_text','rich_text':[p.text_run(ident)]},
                          policy['title_property']: {'type':'title','title':[p.text_run(title)]}}
                 if len(title) > 2000: fail('request_budget')
-                row.update(action='create', properties=props, request_blocks=request_blocks(rendered))
+                row.update(action='create', properties=props)
+                try:row['request_blocks']=request_blocks(rendered)
+                except Blocked as exc:
+                    if str(exc)!='request_budget':raise
+                    batches=create_batches.prepare(rendered,props,data_source,row.get('uploaded_pngs'))
+                    if len(batches['batches'])<2:raise
+                    row['create_batches']=batches
+                    row['request_blocks']=request_blocks(rendered[:batches['batches'][0]['end']])
             else:
                 prior = state['receipts'].get(ident)
                 if prior is None and ident in initial_scope:
@@ -505,10 +526,19 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         except Exception:
             row.update(action='blocked', reason='source_invalid')
         records.append(row)
+    # A long new page keeps one immutable plan in flight across bounded runs.
+    # Render/validate the whole candidate set first; deferred records are not
+    # failures and remain in the queue for the next normal planning cycle.
+    long_pages=[r for r in records if r['action']=='create' and 'create_batches' in r]
+    deferred=pending[MAX_RECORDS:]
+    if long_pages:
+        chosen=long_pages[0]
+        deferred=[r['note_id'] for r in records if r is not chosen]+deferred
+        records=[chosen]
     return {'contract':CONTRACT, 'publication':deepcopy(publication.descriptor),
         'state_sha256':expected_state_sha, 'rules_sha256':rules_sha256(),
         'policy':deepcopy(policy), 'policy_sha256':policy_sha, 'initial_scope_sha256':digest(initial_scope), 'retry_conflicts':retry_conflicts,
-        'records':records, 'deferred_ids':pending[MAX_RECORDS:], 'skipped_conflicts':skipped_conflicts,
+        'records':records, 'deferred_ids':deferred, 'skipped_conflicts':skipped_conflicts,
         'state_only':not publication.descriptor['changed_content_ids'],
         'source_mode':'initial_review' if publication.descriptor['initial_cohort'] else 'changed_content'}
 
@@ -566,7 +596,7 @@ def created(snapshot, row, data_source, expected_page):
     return view['order']
 
 
-def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_sha, writers_guard, create_recovery=None, approved_recovery_sha=None):
+def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_sha, writers_guard, create_recovery=None, approved_recovery_sha=None, authorize_batch=None):
     """Execute only injected methods: read_note, append_blocks, archive_block,
     create_page. There is NO real network adapter in this module.
 
@@ -639,6 +669,25 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 counts['blocked'] += 1; journal['index'] += 1
                 version = store.compare_and_set(version, value); continue
             publication.check_assets(row.get('source_assets',{}))
+            if row['action']=='create' and 'create_batches' in row:
+                version,snapshot=create_batches.execute_row(row,plan,approved_plan_sha,publication,api,store,
+                    value,version,counts,writers_guard,authorize_batch=authorize_batch,
+                    create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha)
+                if snapshot is None:
+                    counts['deferred']+=1
+                    operation=journal['operation']
+                    prior_verified=any(x['phase']=='verified' for x in operation['batches'])
+                    return {'status':'partial','reason':'batch_boundary_yield',**counts,
+                        'state_sha256':version,'external_write_attempts':counts['write_calls'],
+                        'write_state':'confirmed' if prior_verified else 'not_attempted'}
+                view=target(snapshot,ident,data_source)
+                publication.check(plan['publication'])
+                value['receipts'][ident]=receipt(snapshot,ident,data_source,view['order'],plan['publication'],
+                    row['source'],row.get('preserved_asset_bindings'))
+                value['receipts'][ident]['creation_plan_sha256']=approved_plan_sha
+                value['failures'].pop(ident,None)
+                counts['created']+=1;journal.update(index=journal['index']+1,operation=None)
+                version=store.compare_and_set(version,value);continue
             operation = journal['operation']
             if operation is None:
                 snapshot = read_target(api, ident, data_source)

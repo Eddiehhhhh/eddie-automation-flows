@@ -40,9 +40,9 @@ def anchor(value):
 
 def check_state(value):
     try:
-        if not isinstance(value,dict) or set(value) not in (set(initial_state()), set(initial_state()) | {'png_assets'}) or value['contract']!=CONTRACT:fail('outbox_state_invalid')
+        if not isinstance(value,dict) or not set(initial_state()) <= set(value) <= set(initial_state()) | set(png_store.ASSET_KEYS) or value['contract']!=CONTRACT:fail('outbox_state_invalid')
         e.check_state(value['engine_state'])
-        if 'png_assets' in value: png_store.check_container(value['png_assets'], value['engine_state'])
+        png_store.check_outer_assets(value)
         pending=value['pending_by_id'];order=value['rotation_order'];origin=value['origin'];cursor=value['last_enqueued_publication'];tip=value['observed_publication_tip']
         if not isinstance(pending,dict) or not isinstance(order,list) or len(pending)>MAX_RECORDS or len(order)!=len(pending) or any(not isinstance(i,str) for i in order) or len(set(order))!=len(order) or set(order)!=set(pending):fail('outbox_state_invalid')
         if origin is None:

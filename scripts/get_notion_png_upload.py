@@ -4,6 +4,40 @@ from copy import deepcopy
 from datetime import datetime,timezone
 
 PINS={'0e87dbd889487eaf29ff47adc50125a0cc6f49a2061ae0fc1bd2e5988b5b4864': {'md_sha256': '128d84c953d6b6e4c2240cc01db9d850eb1cda5ecd7b4c85251a223cdfaa7df9', 'sha256': 'b43953d8f2b3c78ffc0a181e545346703ea32bf51ecaae081baa2a542b89214d', 'bytes': 417721, 'git_blob': '5b80bb06fd39b15e6184cb8039841de27aca86bd', 'reference_sha256': '588033b593b509b56132ffed84c7062fea1ee7b9408ec4a385cd74c0ac091fda'}, '354c5d96894ba079c0a94dd4cc61e12f2340b749094ea68250506a6b1b19d97c': {'md_sha256': 'cf987551267546994e6aa21c50dbfe192651c60aff0fd4f4280d8fb0348c7c3f', 'sha256': '4552480f92e44c5e35d89522706b8deabea163bf3966dfdeaebc4925d6053b82', 'bytes': 487462, 'git_blob': 'd50ac69e1f7d084f1dc289d091306b573f767f75', 'reference_sha256': 'f5e0da7572cba4622d04334c89da4a73c7b878e3f3b56bfc06a8aef19ac2389e'}, '269fb4d4c6c4e8009b59b192ccb52d9ceb7af5bc9a82078dcb64d3214e81231d': {'md_sha256': 'ac5dcc72aa989a63a7c10bdcf7fadf1f1b0136dbadadcbacba503dbe99533d80', 'sha256': '390233be68581debd6aeb41b143d9fbc9d6d93fb0958556413b23bbffcf4ce3c', 'bytes': 373174, 'git_blob': '5e7d271f73c5b77378d9abb1dbafdac1d0a1e203', 'reference_sha256': '377b1538140a207c54a98aedd33eb098fb2a2b0d8224bb9086e0835339ac209a'}}
+# Separate exact reviewed cohort. Legacy PINS and its plan tree stay unchanged.
+SEQ2_PINS = {
+ 'a7cc541c4f351e7d8c93cb478ce27a4fce6d77760e567359c4644da674103ce9': {'md_sha256':'c2dc7f7ea6cee459fd1ccdbf7e359252ace45b5c211f315c6d625f6987fced84','sha256':'75d5c6e06a9100c97eb97cdb10ae6beff6d2edd18fd9a3aeba09c6d66b244b27','bytes':504807,'git_blob':'a980ddc6132bc02a1c97a44c6c4218bd33e2f376','reference_sha256':'f2440ea47be33b266b6c9fb2842f96d6a314156be6bf91a15e7b09e555041574'},
+ '71792a29a0805cdf36ddce70f401faeb69401f13292412527559a004d58a82f3': {'md_sha256':'4903796f8fb086ea752eebcc33ca4e6dcd37201548bd59d2ac49ad798d752a17','sha256':'bd6db798565cba5b1ebf37e63c693ef08fa71513e0ba817a1273cd6ea9156f91','bytes':513575,'git_blob':'a61496479fd905f74e88574b450ca587c32c3165','reference_sha256':'5f678db96fe3757760cc23f3567d81af10f6afa7777b3feb67ff58f95828a2b8'},
+ '40d214afe1c64848f2a40e93c25ca58079c34a20c4aa17f389c2967ad60744e8': {'md_sha256':'f021ae16a264b1e609ec77506e4bcf8e1ef50fbf0cf67d5b27df1a7a59db0895','sha256':'80fccfe791e995bacb87b2a0fa27dad96c0c1c9bf0c1e7a9f24163f13554b656','bytes':372085,'git_blob':'42010e557e20fb937f712dc16ce61a86e763504e','reference_sha256':'0ff2408d12b53a8222f38b903c6046615a30afc2cca0c10b25e87717ef761ffd'},
+}
+LEGACY_MANIFEST = '.sync/get-notion/assets/reviewed-png-manifest-v1.json'
+SEQ2_MANIFEST = '.sync/get-notion/assets/reviewed-png-manifest-v2.json'
+
+def pins_for_manifest(path):
+ if path == LEGACY_MANIFEST:return PINS
+ if path == SEQ2_MANIFEST:return SEQ2_PINS
+ fail('unreviewed_asset')
+
+def reviewed_pin(note_sha):
+ if note_sha in PINS and note_sha in SEQ2_PINS:fail('invalid_binding')
+ return PINS.get(note_sha,SEQ2_PINS.get(note_sha))
+
+def byte_limit(note_sha):
+ # The sole above-legacy-cap allowance belongs to an exact reviewed new pin.
+ pin=SEQ2_PINS.get(note_sha)
+ return max(512000,pin['bytes']) if pin is not None else 512000
+
+def valid_semantic_size(content_sha,byte_count):
+ if type(byte_count) is not int or byte_count<=0:return False
+ return byte_count<=512000 or any(p['bytes']==byte_count and p['sha256']==content_sha for p in SEQ2_PINS.values())
+
+def maximum_read_bytes():
+ return max([512000]+[p['bytes'] for p in SEQ2_PINS.values()])
+
+def reviewed_oversize(data):
+ return any(p['bytes']==len(data) and p['sha256']==sha(data)
+            for p in SEQ2_PINS.values() if p['bytes']>512000)
+
 VERSION='2025-09-03'
 DESTINATION_PIN='897387f98ed5772d2ad8dafbbec06b7d3064685bef078f1afa3b6314493f8d4b'
 class Blocked(ValueError):pass
@@ -34,7 +68,7 @@ def binding_schema(binding,data):
   if not isinstance(b['note_id'],str) or not re.fullmatch('[0-9]+',b['note_id']):fail('invalid_binding')
   for k in ('md_sha256','sha256','reference_sha256'):valid_hash(b[k])
   for k in ('git_blob','source_commit'):valid_hash(b[k],40)
-  pin=PINS.get(sha(b['note_id'].encode()))
+  pin=reviewed_pin(sha(b['note_id'].encode()))
   if pin is None or any(b[k]!=pin[k] for k in pin):fail('unreviewed_asset')
   if sha(uuid(b['data_source_id']).encode())!=DESTINATION_PIN:fail('wrong_destination')
   if type(b['bytes']) is not int or b['mime']!='image/png' or not isinstance(data,bytes) or len(data)!=b['bytes'] or sha(data)!=b['sha256']:fail('asset_changed')
