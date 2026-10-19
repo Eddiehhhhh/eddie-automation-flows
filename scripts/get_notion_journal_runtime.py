@@ -7,6 +7,7 @@ not proof of platform log retention: absent/mismatched provenance fails closed.
 from copy import deepcopy
 from pathlib import Path
 import re
+from datetime import timedelta
 
 import get_notion_outbox as codec
 import get_notion_remote_journal as journal
@@ -15,6 +16,7 @@ import get_recurring_controller as controller
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run16_recovery as run16_recovery
+import get_notion_run18_recovery as run18_recovery
 import get_notion_png_recovery as png_recovery
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '
@@ -258,7 +260,12 @@ def _latest_run(run, policy):
 
 
 def _same_run(older, newer, *, cross_endpoint=False):
-    keys = ('id', 'workflow_id', 'path', 'head_sha', 'head_branch', 'event', 'created_at')
+    keys = ('id', 'workflow_id', 'path', 'head_sha', 'head_branch', 'event')
+    # Exact-attempt and latest/list endpoints differ by at most one second.
+    # Same-endpoint observations retain exact created_at comparison.
+    skew = provenance.timestamp(newer['created_at']) - provenance.timestamp(older['created_at'])
+    if (not cross_endpoint and skew != timedelta(0)) or (cross_endpoint and not -timedelta(seconds=1) <= skew <= timedelta(0)):
+        fail('journal_provenance_changed')
     if (any(older.get(key) != newer.get(key) for key in keys)
             or newer['run_attempt'] < older['run_attempt']
             or (not cross_endpoint and provenance.timestamp(newer['updated_at']) < provenance.timestamp(older['updated_at']))):
@@ -397,7 +404,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
 class _ReadBudget:
     """One injected identity/transport; never retry or substitute another client."""
     def __init__(self, client):
-        self.client = client; self.requests = 0; self.bytes = 0; self.controllers = {}
+        self.client = client; self.requests = 0; self.bytes = 0; self.controllers = {}; self.repository = None
 
     def call(self, kind, value):
         if self.requests >= 40: fail('journal_provenance_budget')
@@ -412,13 +419,18 @@ class _ReadBudget:
         return answer
 
     def json(self, value):
-        # A controller's contents at an exact immutable commit may be reused
-        # within this discovery only. Mutable runs/jobs/repo reads stay fresh.
+        # One repository identity observation per discovery, validated by the
+        # caller before any candidate. Every run/attempt also independently
+        # carries the same repository IDs/publicness. No cache survives a run.
+        if value == '' and self.repository is not None:
+            return deepcopy(self.repository)
+        # Immutable controller bytes may be reused; runs/jobs remain fresh.
         immutable = isinstance(value, str) and re.fullmatch(
             r'/contents/\.github/workflows/[a-z0-9][a-z0-9_-]{0,100}\.ya?ml\?ref=[a-f0-9]{40}', value)
         if immutable and value in self.controllers: return deepcopy(self.controllers[value])
         answer = self.call('json', value)
         if immutable: self.controllers[value] = deepcopy(answer)
+        if value == '': self.repository = deepcopy(answer)
         return answer
     def logs(self, value): return self.call('logs', value)
 
@@ -447,17 +459,20 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
         workflow = bounded.json('/actions/workflows/' + str(policy['workflow_id']))
         if (not isinstance(workflow, dict) or workflow.get('id') != policy['workflow_id']
                 or workflow.get('path') != policy['workflow_path']): fail('journal_provenance_workflow')
-        # Five listed runs plus the explicit current run; only its current attempt is excluded.
-        listing = bounded.json('/actions/workflows/' + str(policy['workflow_id'])
-            + '/runs?per_page=5&page=1')
-        rows = listing.get('workflow_runs') if isinstance(listing, dict) else None
-        if (not isinstance(rows, list) or len(rows) > 5 or type(listing.get('total_count')) is not int
-                or listing['total_count'] < len(rows)): fail('journal_provenance_runs')
+        # Bounded listing; failed runs remain candidates because a failed
+        # Notion attempt can contain acknowledged durable writes.
         candidates = []; seen = set(); latest = {}; attempt_candidates=set()
-        for row in rows:
-            row = _latest_run(row, policy)
-            if row['id'] in latest: fail('journal_provenance_changed')
-            latest[row['id']] = row
+        for page in range(1, 4):
+            listing = bounded.json('/actions/workflows/' + str(policy['workflow_id'])
+                + '/runs?per_page=30&page=' + str(page))
+            rows = listing.get('workflow_runs') if isinstance(listing, dict) else None
+            if (not isinstance(rows, list) or len(rows) > 30 or type(listing.get('total_count')) is not int
+                    or listing['total_count'] < len(rows)): fail('journal_provenance_runs')
+            for row in rows:
+                row = _latest_run(row, policy)
+                if row['id'] in latest: fail('journal_provenance_changed')
+                latest[row['id']] = row
+            if len(rows) < 30: break
         if exclude_run_id is not None:
             current = _latest_run(bounded.json('/actions/runs/' + str(exclude_run_id)), policy)
             if current['id'] != exclude_run_id or current['run_attempt'] != exclude_run_attempt:
@@ -485,7 +500,8 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
             binding=provenance.run_binding(row)
             if (row['id'],row['run_attempt']) in attempt_candidates:
                 if result['run_binding']!=binding:fail('journal_provenance_changed')
-            elif provenance.run_semantic_binding(result['run_binding'])!=provenance.run_semantic_binding(row):
+            elif (provenance.run_semantic_binding(result['run_binding'])!=provenance.run_semantic_binding(row)
+                    or not timedelta(0) <= provenance.timestamp(result['run_binding']['created_at']) - provenance.timestamp(row['created_at']) <= timedelta(seconds=1)):
                 fail('journal_provenance_changed')
             # Only listing/alias observations bound the mutable latest clock.
             now=result.get('latest_binding')
@@ -535,6 +551,18 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(run18_recovery.RUN,run18_recovery.ATTEMPT)):
+                    result=run18_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
+                    match_candidate(result,row)
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                # A mismatched controller or an exactly validated skipped
+                # Notion step cannot provide this policy's checkpoint. Do not
+                # spend the four log-proof slots on these negative candidates.
+                # The shared 40 physical-read / byte budgets still bound cost.
+                if str(exc) in ('journal_provenance_other_controller', 'journal_provenance_no_checkpoint'):
+                    checked -= 1
                 if str(exc) not in ('journal_provenance_missing', 'journal_provenance_no_checkpoint',
                                    'journal_provenance_other_controller'):
                     raise

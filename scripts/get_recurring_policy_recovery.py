@@ -48,6 +48,19 @@ NOOP_CONTROLLER_SHA = '07650fabcd856c9dbd04c1b6158c4154de5383d9'
 NOOP_RECORD_SHA256 = '94063b329d55b60524d676ddba1d426eb0c14f493baf1a9d6fa72c7bd6ecce2d'
 
 
+# Exact successful canonical publication from the first scheduled-anchor repair.
+SEQUENCE_TWO_RECORD = {'cas_attempts': 1, 'code_sha': '661cc247c6895f0155c9026b9cc7594dd4e60ee6', 'contract': 'get-canonical-publication-anchor-1', 'controller_sha': '397c0d6bade8b28519ddd8dad702e79f30616c65', 'main_updated': True, 'observed_main_commit': '1678207017f96eb8022b4f4fb540b08d8654fb38', 'policy_sha256': 'ff6a5639a337eccde35957d05d05a6c18f9c4168acc51557313271b7e9acb80d', 'readback_verified': True, 'receipt_commit': '1678207017f96eb8022b4f4fb540b08d8654fb38', 'receipt_sequence': 2, 'receipt_sha256': '56ec351baa67ef704d827b545c416633303d15b97fde14be2c139970ea411b91', 'record_sha256': 'd1ec657795827b0372d1b75583a8c6067a6b5fd5deec42d946a61ef894566b95', 'rules_sha256': 'ed8b4df53329adfb5b64df61737ff6eef45f2d7ca6c3a9110f9bc02e24b34288', 'run_attempt': 1, 'run_id': 39264115533, 'status': 'canonical_publication_verified'}
+SEQUENCE_TWO_JOB = 118099113768
+_SEQUENCE_TWO_POLICY = {'code_sha': '661cc247c6895f0155c9026b9cc7594dd4e60ee6', 'contract': 'get-public-actions-provenance-policy-1', 'controller_template_sha256': '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2', 'get_policy_sha256': 'ff6a5639a337eccde35957d05d05a6c18f9c4168acc51557313271b7e9acb80d', 'head_branch': 'main', 'job_name': 'canonical-get', 'publication_step_name': 'Emit verified canonical publication anchor', 'repository': 'Eddiehhhhh/eddie-automation-flows', 'repository_id': 1270807355, 'rules_sha256': 'ed8b4df53329adfb5b64df61737ff6eef45f2d7ca6c3a9110f9bc02e24b34288', 'workflow_id': 387242896, 'workflow_path': '.github/workflows/get-canonical.yml'}
+SEQUENCE_TWO_PUBLIC_SHA256 = '7bcb42c2f4e33413e6954e0c326a9c846efd2b419b89a0606b109a8b19a50a63'
+
+def sequence_two_policy():
+    from get_recurring_entry import a
+    if a.sha(a.encoded(_SEQUENCE_TWO_POLICY)) != SEQUENCE_TWO_PUBLIC_SHA256:
+        raise ValueError('recovery_policy_changed')
+    return deepcopy(_SEQUENCE_TWO_POLICY)
+
+
 def old_public_policy():
     """Immutable externally approved old P, also used by the exact Notion repair."""
     from get_recurring_entry import a
@@ -72,6 +85,12 @@ def current_get_policy():
 
 def accepts_receipt(commit, receipt_sha256, value, requested_policy):
     """No arbitrary old receipt, policy choice, reverse migration or relabeling."""
+    if (commit == SEQUENCE_TWO_RECORD['receipt_commit']
+            and receipt_sha256 == SEQUENCE_TWO_RECORD['receipt_sha256']
+            and type(value.get('sequence')) is int and value['sequence'] == 2
+            and value.get('policy_sha256') == sequence_two_policy()['get_policy_sha256']
+            and requested_policy == current_get_policy()):
+        return True
     return (commit == ORIGINAL_RECEIPT_COMMIT
             and receipt_sha256 == ORIGINAL_RECEIPT_SHA256
             and type(value.get('sequence')) is int and value['sequence'] == 1
@@ -89,6 +108,9 @@ def candidate_policy(policy, run):
         old = noop_public_policy()
         run_id, attempt, controller = NOOP_RUN_ID, NOOP_RUN_ATTEMPT, NOOP_CONTROLLER_SHA
         event = 'workflow_dispatch'
+    if run.get('id') == SEQUENCE_TWO_RECORD['run_id']:
+        old = sequence_two_policy()
+        run_id, attempt, controller = (SEQUENCE_TWO_RECORD[k] for k in ('run_id','run_attempt','controller_sha'))
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
     if (all(policy.get(k) == old[k] for k in stable)
             and policy.get('code_sha') != old['code_sha']
@@ -104,6 +126,10 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id):
     from get_publication_provenance import fail
+    if record['run_id'] == SEQUENCE_TWO_RECORD['run_id']:
+        if job_id != SEQUENCE_TWO_JOB or record != SEQUENCE_TWO_RECORD:
+            fail('provenance_record')
+        return
     if record['run_id'] == NOOP_RUN_ID:
         expected_job, expected_record, updated = NOOP_JOB_ID, NOOP_RECORD_SHA256, False
         expected_attempt = NOOP_RUN_ATTEMPT

@@ -22,7 +22,7 @@ class AttemptsAPI:
         self.called.append(path)
         if path in self.overrides:
             value=self.overrides[path];return value() if callable(value) else deepcopy(value)
-        if '/runs?per_page=5' in path:
+        if '/runs?per_page=30' in path:
             rows=[deepcopy(api.row) for api in self.latest.values()]
             return {'total_count':len(rows),'workflow_runs':rows}
         if path.startswith('/actions/runs/'):

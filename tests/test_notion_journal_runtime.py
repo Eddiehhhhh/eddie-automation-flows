@@ -382,7 +382,7 @@ class MultiAPI:
         self.apis = {api.row['id']: api for api in apis}; self.called = []
     def json(self, path):
         self.called.append(path)
-        if '/runs?per_page=5' in path:
+        if '/runs?per_page=30' in path:
             return {'total_count': len(self.apis), 'workflow_runs': [deepcopy(a.row) for a in self.apis.values()]}
         if path.startswith('/actions/runs/'):
             return self.apis[int(path.split('/')[3])].json(path)
@@ -448,8 +448,8 @@ class DiscoveryTests(unittest.TestCase):
                 approved_public_policy_sha256=o.digest(self.policy), notion_policy_sha256='d' * 64)
     def test_injected_read_budget_stops_after_40_without_retry(self):
         api = MultiAPI([self.api()]); bounded = rt._ReadBudget(api)
-        for _ in range(40): bounded.json('')
-        with self.assertRaisesRegex(rt.CheckpointFailure, '^journal_provenance_budget$'): bounded.json('')
+        for _ in range(40): bounded.json('/actions/runs/1001')
+        with self.assertRaisesRegex(rt.CheckpointFailure, '^journal_provenance_budget$'): bounded.json('/actions/runs/1001')
         self.assertEqual(len(api.called), 40)
 
 

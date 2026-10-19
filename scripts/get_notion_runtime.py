@@ -25,6 +25,7 @@ import get_notion_journal_runtime as checkpoints
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run16_recovery as run16_recovery
+import get_notion_run18_recovery as run18_recovery
 import get_notion_png_expired_recovery as expired_recovery
 import get_notion_png_transport as png_transport
 import get_notion_png_recovery as png_recovery
@@ -470,6 +471,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 bridge=run15_recovery if found['recovery_anchor']==run15_recovery.TAG else png_recovery
                 png_transition=bridge.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=png_transition;preload_sha=outbox.digest(png_transition)
+            confirmed_transition=None
+            if present and found.get('recovery_anchor')==run18_recovery.TAG:
+                confirmed_transition=run18_recovery.transition_outer(current,sha,public_policy['get_policy_sha256'])
+                preload_state=confirmed_transition;preload_sha=outbox.digest(preload_state)
             expired_transition=present and found.get('recovery_anchor')==run16_recovery.TAG
             if expired_transition:
                 if sha!=expired_recovery.STATE_SHA or sha!=outbox.digest(current):fail('notion_state_anchor')
@@ -511,6 +516,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 if candidate is None:fail('notion_state_anchor')
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
+            if confirmed_transition is not None:
+                if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,confirmed_transition)
+                else:store=ReadOnlyStore(confirmed_transition);current,sha=store.read()
             if expired_transition:
                 if loaded_assets is None:fail('png_anchor_pending')
                 observe=lambda:observe_expired_png(current,loaded_assets,before_pub,request,guarded_writers)
