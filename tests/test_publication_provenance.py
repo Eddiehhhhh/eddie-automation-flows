@@ -358,7 +358,7 @@ class EndpointClockTests(unittest.TestCase):
         before = run(); after = {**before, 'updated_at': '2026-10-17T17:25:26Z'}
         self.assertNotEqual(p.run_binding(before), p.run_binding(after))
         self.assertEqual(p.run_semantic_binding(before), p.run_semantic_binding(after))
-        self.assertEqual(set(p.run_semantic_binding(before)), set(p.run_binding(before)) - {'updated_at'})
+        self.assertEqual(set(p.run_semantic_binding(before)), set(p.run_binding(before)) - {'created_at', 'updated_at'})
         self.assertIn('updated_at', before)
 
     def test_observed_one_second_endpoint_difference_preserves_confirmed_anchor(self):

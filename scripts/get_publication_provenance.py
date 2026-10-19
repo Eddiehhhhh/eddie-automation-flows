@@ -373,7 +373,7 @@ def check_run(run, policy):
 def run_identity(run):
     # Attempt status/times may advance, but a rerun cannot change its origin C.
     return {k: run.get(k) for k in ('id', 'workflow_id', 'path', 'head_sha',
-                                   'head_branch', 'event', 'created_at')}
+                                   'head_branch', 'event')}
 
 
 def run_binding(run):
@@ -382,10 +382,11 @@ def run_binding(run):
 
 
 def run_semantic_binding(run):
-    # List/latest and exact-attempt endpoints have distinct updated_at clocks.
-    # Compare every other binding field across endpoints; same-endpoint rereads
+    # List/latest and exact-attempt endpoints have distinct timestamp clocks.
+    # created_at is separately bounded to the observed one-second endpoint skew.
+    # Compare all other binding fields across endpoints; same-endpoint rereads
     # must still use run_binding, including updated_at, without any tolerance.
-    return {k: v for k, v in run_binding(run).items() if k != 'updated_at'}
+    return {k: v for k, v in run_binding(run).items() if k not in ('created_at', 'updated_at')}
 
 
 def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None):
@@ -399,6 +400,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     attempt_path = root + '/attempts/' + str(attempt)
     run = check_run_identity(client.json(attempt_path), policy)
     if (run['run_attempt'] != attempt or run_identity(run) != run_identity(listed)
+            or not timedelta(0) <= timestamp(run['created_at']) - timestamp(listed['created_at']) <= timedelta(seconds=1)
             or attempt == listed['run_attempt'] and run_semantic_binding(run) != run_semantic_binding(listed)):
         fail('provenance_run_changed')
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
@@ -459,6 +461,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         fail('provenance_run_changed')
     current = check_run_identity(client.json(root), policy)
     if (run_identity(current) != run_identity(run)
+            or current['created_at'] != listed['created_at']
             or current['run_attempt'] < listed['run_attempt']
             or timestamp(current['updated_at']) < timestamp(listed['updated_at'])
             or current['run_attempt'] == attempt and run_semantic_binding(current) != run_semantic_binding(run)):
@@ -472,7 +475,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
 
 
 def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
-    """At most four original attempts; stale/out-of-window anchors fail Get gate."""
+    """At most four eligible original attempts; bounded listed negative runs are skipped."""
     if (exclude_run_id is None) != (exclude_run_attempt is None):
         fail('provenance_exclusion')
     if exclude_run_id is not None:
@@ -504,6 +507,12 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
     listed.sort(key=lambda x: (timestamp(x['updated_at']), x['id']), reverse=True)
     found = []; checked = 0; verified_controllers = set()
     for run in listed:
+        # A first attempt listed as terminal failure cannot contain a successful
+        # publication. This is negative selection only, never anchor evidence.
+        # Reruns remain eligible: an earlier successful attempt must not vanish.
+        if (run['run_attempt'] == 1 and run.get('status') == 'completed'
+                and run.get('conclusion') in ('failure', 'cancelled', 'timed_out', 'skipped', 'action_required', 'neutral', 'stale')):
+            continue
         # Read attempts in descending order, never fabricate an older success
         # from latest metadata. Failed/nonpublication attempts consume the same
         # four-candidate bound. A verified publication ends this run's search.
