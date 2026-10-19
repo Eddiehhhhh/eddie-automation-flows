@@ -77,7 +77,7 @@ class Pins(unittest.TestCase):
         seen=[]
         def exhaust(bounded,*args):
             seen.append(bounded)
-            for _ in range(40):bounded.json('')
+            for _ in range(40):bounded.json('/actions/runs/1001')
         with patch.object(r,'RUN10_RUN',1001),patch.object(r,'recover_run10_checkpoint',side_effect=exhaust),self.assertRaisesRegex(c.CheckpointFailure,'journal_provenance_budget'):
             c.discover_anchor(api,**args)
         self.assertEqual(seen[0].requests,40);self.assertIs(seen[0].client,api)

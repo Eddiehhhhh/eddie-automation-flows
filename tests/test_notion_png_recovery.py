@@ -42,7 +42,7 @@ class Public:
         if path in (root,root+'/attempts/1'):return deepcopy(self.run)
         if path==root+'/attempts/1/jobs?per_page=100&page=1':return {'total_count':1,'jobs':[deepcopy(self.job)]}
         if path=='/actions/workflows/'+str(policy['workflow_id']):return {'id':policy['workflow_id'],'path':policy['workflow_path']}
-        if path=='/actions/workflows/'+str(policy['workflow_id'])+'/runs?per_page=5&page=1':return {'total_count':1,'workflow_runs':[deepcopy(self.run)]}
+        if path=='/actions/workflows/'+str(policy['workflow_id'])+'/runs?per_page=30&page=1':return {'total_count':1,'workflow_runs':[deepcopy(self.run)]}
         if path=='/contents/'+policy['workflow_path']+'?ref='+self.run['head_sha']:
             raw=c.controller.expected_bytes(policy,scheduled=self.scheduled)
             return {'type':'file','path':policy['workflow_path'],'encoding':'base64','size':len(raw),'sha':c.journal.retention.oid(raw),'content':base64.b64encode(raw).decode()}
