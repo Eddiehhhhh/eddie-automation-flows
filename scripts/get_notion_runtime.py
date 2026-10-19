@@ -27,6 +27,7 @@ import get_notion_run15_recovery as run15_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
+import get_notion_run32_recovery as run32_recovery
 import get_notion_png_expired_recovery as expired_recovery
 import get_notion_png_transport as png_transport
 import get_notion_png_recovery as png_recovery
@@ -506,8 +507,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 png_transition=bridge.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=png_transition;preload_sha=outbox.digest(png_transition)
             confirmed_transition=None
-            if present and found.get('recovery_anchor') in (run18_recovery.TAG,run28_recovery.TAG):
-                recovery_module=run28_recovery if found['recovery_anchor']==run28_recovery.TAG else run18_recovery
+            if present and found.get('recovery_anchor') in (run18_recovery.TAG,run28_recovery.TAG,run32_recovery.TAG):
+                recovery_module={module.TAG:module for module in (run18_recovery,run28_recovery,run32_recovery)}[found['recovery_anchor']]
                 confirmed_transition=recovery_module.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=confirmed_transition;preload_sha=outbox.digest(preload_state)
             expired_transition=present and found.get('recovery_anchor')==run16_recovery.TAG

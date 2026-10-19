@@ -1,0 +1,247 @@
+{
+  "attempt": {
+    "conclusion": "success",
+    "created_at": "2026-10-19T18:23:16Z",
+    "event": "workflow_dispatch",
+    "head_branch": "main",
+    "head_repository": {
+      "full_name": "Eddiehhhhh/eddie-automation-flows",
+      "id": 1270807355,
+      "private": false
+    },
+    "head_sha": "a18096387e8c7d62f77e0fb9e51d2f83d7356edb",
+    "id": 39302062156,
+    "path": ".github/workflows/get-canonical.yml",
+    "repository": {
+      "full_name": "Eddiehhhhh/eddie-automation-flows",
+      "id": 1270807355,
+      "private": false
+    },
+    "run_attempt": 1,
+    "run_number": 32,
+    "status": "completed",
+    "updated_at": "2026-10-19T18:38:39Z",
+    "workflow_id": 387242896
+  },
+  "jobs": {
+    "jobs": [
+      {
+        "completed_at": "2026-10-19T18:38:38Z",
+        "conclusion": "success",
+        "head_sha": "a18096387e8c7d62f77e0fb9e51d2f83d7356edb",
+        "id": 118229528448,
+        "name": "canonical-get",
+        "run_attempt": 1,
+        "run_id": 39302062156,
+        "started_at": "2026-10-19T18:23:20Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completed_at": "2026-10-19T18:23:21Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "started_at": "2026-10-19T18:23:21Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:23:22Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "number": 2,
+            "started_at": "2026-10-19T18:23:21Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:23:22Z",
+            "conclusion": "success",
+            "name": "Run actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "number": 3,
+            "started_at": "2026-10-19T18:23:22Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:23:22Z",
+            "conclusion": "success",
+            "name": "Verify pinned reviewed runtime",
+            "number": 4,
+            "started_at": "2026-10-19T18:23:22Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:23:22Z",
+            "conclusion": "success",
+            "name": "Prepare reviewed public policy",
+            "number": 5,
+            "started_at": "2026-10-19T18:23:22Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:35:02Z",
+            "conclusion": "success",
+            "name": "Emit verified canonical publication anchor",
+            "number": 6,
+            "started_at": "2026-10-19T18:23:22Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:38:36Z",
+            "conclusion": "success",
+            "name": "Sync confirmed Get content to Notion",
+            "number": 7,
+            "started_at": "2026-10-19T18:35:02Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:38:36Z",
+            "conclusion": "success",
+            "name": "Post Run actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "number": 13,
+            "started_at": "2026-10-19T18:38:36Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:38:36Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "number": 14,
+            "started_at": "2026-10-19T18:38:36Z",
+            "status": "completed"
+          },
+          {
+            "completed_at": "2026-10-19T18:38:36Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 15,
+            "started_at": "2026-10-19T18:38:36Z",
+            "status": "completed"
+          }
+        ]
+      }
+    ],
+    "total_count": 1
+  },
+  "marker_lines": [
+    "2026-10-19T18:35:00.7574484Z GET_CANONICAL_PUBLICATION_V1 {\"cas_attempts\":0,\"code_sha\":\"8fc30465a467437f35eb83fee483b549ed8dbc3d\",\"contract\":\"get-canonical-publication-anchor-1\",\"controller_sha\":\"a18096387e8c7d62f77e0fb9e51d2f83d7356edb\",\"main_updated\":false,\"observed_main_commit\":\"579b23ff45731eb4988dbc31458cd553d9682c61\",\"policy_sha256\":\"c1856af75550501eb9460d53d08e900a1d3e8f2922a7a3062520f7dbfaae6c59\",\"readback_verified\":true,\"receipt_commit\":\"1678207017f96eb8022b4f4fb540b08d8654fb38\",\"receipt_sequence\":2,\"receipt_sha256\":\"56ec351baa67ef704d827b545c416633303d15b97fde14be2c139970ea411b91\",\"record_sha256\":\"4dd55a68df978be244c2a453e5c63f37946dff43ea516af5b3e9370ba941be91\",\"rules_sha256\":\"94ccc816957eb16fa2b5aa5fdb06c55acaf5304bf9ebb2e0c8be02ef3dc42bfd\",\"run_attempt\":1,\"run_id\":39302062156,\"status\":\"canonical_publication_verified\"}",
+    "2026-10-19T18:37:56.6908715Z GET_NOTION_JOURNAL_V1 {\"cas_attempts\":1,\"code_sha\":\"8fc30465a467437f35eb83fee483b549ed8dbc3d\",\"commit\":\"e0a0cea90c97c323960d06611c9971be589ae904\",\"contract\":\"get-notion-journal-checkpoint-1\",\"controller_sha\":\"a18096387e8c7d62f77e0fb9e51d2f83d7356edb\",\"notion_policy_sha256\":\"d73ae0c6e75380b07505ec1a3a3ad0d13e0a85b6f1f8713310e183aa1d5656cc\",\"parent_commit\":\"579b23ff45731eb4988dbc31458cd553d9682c61\",\"previous_record_sha256\":null,\"public_policy_sha256\":\"34af7ef86c2a016a87d18906181eeb493241d679aa5849af183250a8df232c6e\",\"readback_verified\":true,\"record_sha256\":\"8a6ada827ba7ce06ff25a28f6945b7800e50b67556b995978de0dcb6d7c5d8e2\",\"rules_sha256\":\"94ccc816957eb16fa2b5aa5fdb06c55acaf5304bf9ebb2e0c8be02ef3dc42bfd\",\"run_attempt\":1,\"run_id\":39302062156,\"sequence\":1,\"state_blob\":\"ecc06529d92796bb0d4bfec1f965852202941ae2\",\"state_bytes\":746708,\"state_sha256\":\"649b6bc4dbfd34007f256826bca0baebff6c388bbfc2a9da71888e5940bc4dc7\",\"status\":\"journal_readback_verified\",\"tree\":\"acc0725fcfd179c52e19b2a22713274c1f2438cb\"}",
+    "2026-10-19T18:38:12.3081380Z GET_NOTION_JOURNAL_V1 {\"cas_attempts\":1,\"code_sha\":\"8fc30465a467437f35eb83fee483b549ed8dbc3d\",\"commit\":\"45178f56f0d1d1f97d23d355875af0c0be833d3d\",\"contract\":\"get-notion-journal-checkpoint-1\",\"controller_sha\":\"a18096387e8c7d62f77e0fb9e51d2f83d7356edb\",\"notion_policy_sha256\":\"d73ae0c6e75380b07505ec1a3a3ad0d13e0a85b6f1f8713310e183aa1d5656cc\",\"parent_commit\":\"e0a0cea90c97c323960d06611c9971be589ae904\",\"previous_record_sha256\":\"8a6ada827ba7ce06ff25a28f6945b7800e50b67556b995978de0dcb6d7c5d8e2\",\"public_policy_sha256\":\"34af7ef86c2a016a87d18906181eeb493241d679aa5849af183250a8df232c6e\",\"readback_verified\":true,\"record_sha256\":\"10d7f05ab14411d80c2c65bea7126cf1a27c9f18037ba2454f67c43e718196b8\",\"rules_sha256\":\"94ccc816957eb16fa2b5aa5fdb06c55acaf5304bf9ebb2e0c8be02ef3dc42bfd\",\"run_attempt\":1,\"run_id\":39302062156,\"sequence\":2,\"state_blob\":\"df45022d4c5a75db2a8e0ddf9684c1fc33665fa6\",\"state_bytes\":113301,\"state_sha256\":\"2ed534aa7813fdd473cff25decf88365ed2e746c5730266926d088761f7970b1\",\"status\":\"journal_readback_verified\",\"tree\":\"f499ef94ccd73dff7b80a09ee2e06e8b0241ce7d\"}",
+    "2026-10-19T18:38:34.0320706Z GET_NOTION_JOURNAL_V1 {\"cas_attempts\":0,\"code_sha\":\"8fc30465a467437f35eb83fee483b549ed8dbc3d\",\"commit\":\"45178f56f0d1d1f97d23d355875af0c0be833d3d\",\"contract\":\"get-notion-journal-checkpoint-1\",\"controller_sha\":\"a18096387e8c7d62f77e0fb9e51d2f83d7356edb\",\"notion_policy_sha256\":\"d73ae0c6e75380b07505ec1a3a3ad0d13e0a85b6f1f8713310e183aa1d5656cc\",\"parent_commit\":null,\"previous_record_sha256\":\"10d7f05ab14411d80c2c65bea7126cf1a27c9f18037ba2454f67c43e718196b8\",\"public_policy_sha256\":\"34af7ef86c2a016a87d18906181eeb493241d679aa5849af183250a8df232c6e\",\"readback_verified\":true,\"record_sha256\":\"24ed72fdc9f06f4aae762632ebe9c35f5f8e9c12743d417f28a39880837e0ce2\",\"rules_sha256\":\"94ccc816957eb16fa2b5aa5fdb06c55acaf5304bf9ebb2e0c8be02ef3dc42bfd\",\"run_attempt\":1,\"run_id\":39302062156,\"sequence\":3,\"state_blob\":\"df45022d4c5a75db2a8e0ddf9684c1fc33665fa6\",\"state_bytes\":113301,\"state_sha256\":\"2ed534aa7813fdd473cff25decf88365ed2e746c5730266926d088761f7970b1\",\"status\":\"journal_readback_verified\",\"tree\":\"f499ef94ccd73dff7b80a09ee2e06e8b0241ce7d\"}"
+  ],
+  "provenance": {
+    "description": "Recorded public run #32 run/attempt/jobs and complete hash-only marker chain; no private state content.",
+    "run_url": "https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/39302062156"
+  },
+  "public_source_sha256": {
+    "full_job_logs": "0b716d007815429e836978629bfde2b5da9f782a8e10c979aece90f743190d1f",
+    "run_fixture": "15962de33dd4472ddaa18ad6d545973843687510a6b0b0a44d3089d2125eae18"
+  },
+  "run": {
+    "conclusion": "success",
+    "created_at": "2026-10-19T18:23:16Z",
+    "event": "workflow_dispatch",
+    "head_branch": "main",
+    "head_repository": {
+      "full_name": "Eddiehhhhh/eddie-automation-flows",
+      "id": 1270807355,
+      "private": false
+    },
+    "head_sha": "a18096387e8c7d62f77e0fb9e51d2f83d7356edb",
+    "id": 39302062156,
+    "path": ".github/workflows/get-canonical.yml",
+    "repository": {
+      "full_name": "Eddiehhhhh/eddie-automation-flows",
+      "id": 1270807355,
+      "private": false
+    },
+    "run_attempt": 1,
+    "run_number": 32,
+    "status": "completed",
+    "updated_at": "2026-10-19T18:38:39Z",
+    "workflow_id": 387242896
+  },
+  "verified_proof": {
+    "anchor": {
+      "commit": "45178f56f0d1d1f97d23d355875af0c0be833d3d",
+      "state_blob": "df45022d4c5a75db2a8e0ddf9684c1fc33665fa6",
+      "state_sha256": "2ed534aa7813fdd473cff25decf88365ed2e746c5730266926d088761f7970b1"
+    },
+    "checkpoint": {
+      "cas_attempts": 0,
+      "code_sha": "8fc30465a467437f35eb83fee483b549ed8dbc3d",
+      "commit": "45178f56f0d1d1f97d23d355875af0c0be833d3d",
+      "contract": "get-notion-journal-checkpoint-1",
+      "controller_sha": "a18096387e8c7d62f77e0fb9e51d2f83d7356edb",
+      "notion_policy_sha256": "d73ae0c6e75380b07505ec1a3a3ad0d13e0a85b6f1f8713310e183aa1d5656cc",
+      "parent_commit": null,
+      "previous_record_sha256": "10d7f05ab14411d80c2c65bea7126cf1a27c9f18037ba2454f67c43e718196b8",
+      "public_policy_sha256": "34af7ef86c2a016a87d18906181eeb493241d679aa5849af183250a8df232c6e",
+      "readback_verified": true,
+      "record_sha256": "24ed72fdc9f06f4aae762632ebe9c35f5f8e9c12743d417f28a39880837e0ce2",
+      "rules_sha256": "94ccc816957eb16fa2b5aa5fdb06c55acaf5304bf9ebb2e0c8be02ef3dc42bfd",
+      "run_attempt": 1,
+      "run_id": 39302062156,
+      "sequence": 3,
+      "state_blob": "df45022d4c5a75db2a8e0ddf9684c1fc33665fa6",
+      "state_bytes": 113301,
+      "state_sha256": "2ed534aa7813fdd473cff25decf88365ed2e746c5730266926d088761f7970b1",
+      "status": "journal_readback_verified",
+      "tree": "f499ef94ccd73dff7b80a09ee2e06e8b0241ce7d"
+    },
+    "checkpoint_count": 3,
+    "completed_at": "2026-10-19T18:38:38Z",
+    "credentials_created": 0,
+    "get_run_success_claim": false,
+    "get_step_record": {
+      "cas_attempts": 0,
+      "code_sha": "8fc30465a467437f35eb83fee483b549ed8dbc3d",
+      "contract": "get-canonical-publication-anchor-1",
+      "controller_sha": "a18096387e8c7d62f77e0fb9e51d2f83d7356edb",
+      "main_updated": false,
+      "observed_main_commit": "579b23ff45731eb4988dbc31458cd553d9682c61",
+      "policy_sha256": "c1856af75550501eb9460d53d08e900a1d3e8f2922a7a3062520f7dbfaae6c59",
+      "readback_verified": true,
+      "receipt_commit": "1678207017f96eb8022b4f4fb540b08d8654fb38",
+      "receipt_sequence": 2,
+      "receipt_sha256": "56ec351baa67ef704d827b545c416633303d15b97fde14be2c139970ea411b91",
+      "record_sha256": "4dd55a68df978be244c2a453e5c63f37946dff43ea516af5b3e9370ba941be91",
+      "rules_sha256": "94ccc816957eb16fa2b5aa5fdb06c55acaf5304bf9ebb2e0c8be02ef3dc42bfd",
+      "run_attempt": 1,
+      "run_id": 39302062156,
+      "status": "canonical_publication_verified"
+    },
+    "job_id": 118229528448,
+    "latest_attempt": 1,
+    "latest_binding": {
+      "conclusion": "success",
+      "created_at": "2026-10-19T18:23:16Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_sha": "a18096387e8c7d62f77e0fb9e51d2f83d7356edb",
+      "id": 39302062156,
+      "path": ".github/workflows/get-canonical.yml",
+      "run_attempt": 1,
+      "status": "completed",
+      "updated_at": "2026-10-19T18:38:39Z",
+      "workflow_id": 387242896
+    },
+    "new_permissions": 0,
+    "private_readback_required": true,
+    "run_attempt": 1,
+    "run_binding": {
+      "conclusion": "success",
+      "created_at": "2026-10-19T18:23:16Z",
+      "event": "workflow_dispatch",
+      "head_branch": "main",
+      "head_sha": "a18096387e8c7d62f77e0fb9e51d2f83d7356edb",
+      "id": 39302062156,
+      "path": ".github/workflows/get-canonical.yml",
+      "run_attempt": 1,
+      "status": "completed",
+      "updated_at": "2026-10-19T18:38:39Z",
+      "workflow_id": 387242896
+    },
+    "run_id": 39302062156,
+    "status": "journal_provenance_verified",
+    "transport": "caller_injected"
+  }
+}

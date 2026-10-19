@@ -6,6 +6,7 @@ unchanged; all normal parent, complete-delta and ownership checks still run.
 New receipts and public records always carry the executing runtime's policy.
 """
 from copy import deepcopy
+import get_notion_run32_recovery as run32_recovery
 
 OLD_PUBLIC_POLICY_SHA256 = 'bd9828bdba1f61b2c02a23c9ff59ada81d039df25a0d296344e48b6a00745ac7'
 _OLD_PUBLIC_POLICY = {
@@ -78,6 +79,14 @@ def noop_public_policy():
     return deepcopy(_NOOP_PUBLIC_POLICY)
 
 
+def run32_public_policy():
+    """Exact completed #32 no-op; the original #26 receipt stays unchanged."""
+    from get_recurring_entry import a
+    if a.sha(a.encoded(run32_recovery.PUBLIC_POLICY)) != run32_recovery.PUBLIC_SHA:
+        raise ValueError('recovery_policy_changed')
+    return deepcopy(run32_recovery.PUBLIC_POLICY)
+
+
 def current_get_policy():
     import get_recurring_entry as entry
     return entry.policy_sha256(entry.rules_sha256(), entry.BOOTSTRAP)
@@ -99,7 +108,7 @@ def accepts_receipt(commit, receipt_sha256, value, requested_policy):
 
 
 def candidate_policy(policy, run):
-    """Only either exact successful predecessor can use its old policy proof."""
+    """Only the fixed reviewed predecessors can use their exact old policy proof."""
     import get_recurring_entry as entry
     old = old_public_policy()
     run_id, attempt, controller = ORIGINAL_RUN_ID, ORIGINAL_RUN_ATTEMPT, ORIGINAL_CONTROLLER_SHA
@@ -111,6 +120,9 @@ def candidate_policy(policy, run):
     if run.get('id') == SEQUENCE_TWO_RECORD['run_id']:
         old = sequence_two_policy()
         run_id, attempt, controller = (SEQUENCE_TWO_RECORD[k] for k in ('run_id','run_attempt','controller_sha'))
+    if run.get('id') == run32_recovery.RUN:
+        old = run32_public_policy()
+        run_id, attempt, controller = (run32_recovery.GET_RECORD[k] for k in ('run_id','run_attempt','controller_sha'))
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
     if (all(policy.get(k) == old[k] for k in stable)
             and policy.get('code_sha') != old['code_sha']
@@ -126,6 +138,10 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id):
     from get_publication_provenance import fail
+    if record['run_id'] == run32_recovery.RUN:
+        if job_id != run32_recovery.JOB or record != run32_recovery.GET_RECORD:
+            fail('provenance_record')
+        return
     if record['run_id'] == SEQUENCE_TWO_RECORD['run_id']:
         if job_id != SEQUENCE_TWO_JOB or record != SEQUENCE_TWO_RECORD:
             fail('provenance_record')

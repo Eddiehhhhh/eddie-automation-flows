@@ -125,14 +125,16 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
         else:ids=pending(publication,state,engine_policy,initial_scope,retry_conflicts,reviewed_png)
         stage='native_read';snapshots={}
         api=t.API(request,approved['data_source_id'],ids,data_source_pin=approved['data_source_pin'],database_pin=approved['database_pin'],snapshot_adapter=snapshot_adapter,uploaded_pngs=reviewed_png.handles() if reviewed_png is not None else None) if ids else None
-        for ident in ids:snapshots[ident]=api.read_note(ident)
         if journal is None:
+            # Only preparation consumes these snapshots. A saved immutable plan
+            # resumes through the executor's fresh guarded pre/post/final reads.
+            for ident in ids:snapshots[ident]=api.read_note(ident)
             stage='prepare';plan=e.prepare(publication,state,sha,snapshots,engine_policy,initial_scope=initial_scope,expected_scope_sha=approved['initial_scope_sha256'],retry_conflicts=retry_conflicts,preserved_images=getattr(snapshot_adapter,'bindings',{}),reviewed_png=reviewed_png)
         if apply and approved_plan_sha256 is not None and e.digest(plan)!=approved_plan_sha256:e.fail('approval_missing')
         stage='final_guard';publication.check(plan['publication'])
         if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
         counts=Counter(r['action'] for r in plan['records']);reasons=Counter(r['reason'] for r in plan['records'] if r['action']=='blocked')
-        report={'contract':CONTRACT,'status':'prepared','source_mode':plan['source_mode'],'plan_sha256':e.digest(plan),'journal_sha256':sha,'selected':len(plan['records']),'deferred':len(plan['deferred_ids']),'retained_conflicts':len(plan['skipped_conflicts']),'actions':dict(counts),'reason_counts':dict(reasons),'native_notes_read':len(ids),'get_requests':0,'asset_downloads':getattr(snapshot_adapter,'downloads',0),'external_write_attempts':None if prior_attempt else 0,'write_state':'unknown' if prior_attempt else 'not_attempted','prior_journal_effects':'unresolved' if prior_attempt else 'none','complete_library_claimed':False}
+        report={'contract':CONTRACT,'status':'prepared','source_mode':plan['source_mode'],'plan_sha256':e.digest(plan),'journal_sha256':sha,'selected':len(plan['records']),'deferred':len(plan['deferred_ids']),'retained_conflicts':len(plan['skipped_conflicts']),'actions':dict(counts),'reason_counts':dict(reasons),'native_notes_read':len(snapshots),'get_requests':0,'asset_downloads':getattr(snapshot_adapter,'downloads',0),'external_write_attempts':None if prior_attempt else 0,'write_state':'unknown' if prior_attempt else 'not_attempted','prior_journal_effects':'unresolved' if prior_attempt else 'none','complete_library_claimed':False}
         report['paragraph_compaction_notes']=sum('paragraph_boundaries_compacted' in row.get('warnings',[]) for row in plan['records'])
         if snapshot_adapter is not None:
             report['image_binding']=snapshot_adapter.report()

@@ -83,7 +83,16 @@ and records neither a failure nor a completed receipt. A next prepared range
 known to be unsent may be removed to return to that verified boundary. The
 initial unsent create can also yield. The final ownership readback can yield
 after the last verified batch and finish read-only on the next invocation.
+Completion-only admission reserves exactly one complete page read (including
+fresh native PNG byte verification), no Notion content write, and the two durable
+receipt/journal-clear saves. Its PNG, request, response, time and journal-byte
+reserves reflect that narrower work; all hard ceilings remain unchanged.
 Resumption uses the original plan, not a fresh create plan or broader retry.
+The pipeline therefore skips only the unused planning snapshot when a saved
+immutable plan exists. The executor still performs every fresh pre-write,
+post-write, uncertain-outcome and final full read, with the same source,
+writer, duplicate-ID, native-byte and ownership guards. The public
+`native_notes_read` count describes planning snapshots and is zero on resume.
 
 ## Local validation
 
@@ -92,7 +101,8 @@ All new fixtures are synthetic. No external API calls are made.
 ```sh
 PYTHONPATH=scripts:tests python -m unittest \
   test_notion_create_batches test_notion_executor test_notion_pipeline \
-  test_notion_not_dispatched test_notion_prepare_reporting test_notion_outbox
+  test_notion_not_dispatched test_notion_prepare_reporting test_notion_outbox \
+  test_notion_resume_efficiency test_png_create_batches
 ```
 
 Coverage includes a 268-root/271-node image/list page, a 2,000-root page,

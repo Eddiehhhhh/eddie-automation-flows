@@ -18,6 +18,7 @@ MAX_TOTAL_BLOCKS = 3200
 MAX_PLANNED_REQUESTS = 1500
 MAX_CHECKPOINT_BYTES = 192 * 1024 * 1024
 CHECKPOINT_RESERVE = 6
+COMPLETION_CHECKPOINT_RESERVE = 2
 # A checkpoint can require remote Git validation. Reserve six checkpoints,
 # both complete reads and a margin before beginning another external write.
 CHECKPOINT_SECONDS = 30
@@ -251,17 +252,27 @@ def checkpoint_bound(value, row, store=None):
     return CHECKPOINT_RESERVE * checkpoint_size(value, row, store)
 
 
-def resources(api, store, value, row, index):
-    """Can safely BEGIN one more batch; ceilings are never increased here."""
+def resources(api, store, value, row, index, *, completion=False):
+    """Reserve a batch, or only final read/receipt/clear; retain all hard caps."""
     e = engine()
     size = checkpoint_size(value, row, store)
     if size > e.MAX_STATE:
         e.fail('request_budget')
     spec = row['create_batches']['batches'][index]
-    reads = read_requests(row['rendered'][:spec['start']]) + read_requests(row['rendered'][:spec['end']])
+    if completion:
+        operation = (value.get('journal') or {}).get('operation')
+        validate_operation(operation, row)
+        if (index != len(row['create_batches']['batches']) - 1
+                or operation['batch_index'] != index or operation['phase'] != 'verified'):
+            e.fail('state_invalid')
+    checkpoints = COMPLETION_CHECKPOINT_RESERVE if completion else CHECKPOINT_RESERVE
+    # A completed prefix needs no pre-write read, create guard or write request.
+    reads = read_requests(row['rendered'][:spec['end']])
+    if not completion:
+        reads += read_requests(row['rendered'][:spec['start']])
     def images(items):
         return sum((r['type'] == 'image') + images(r['children']) for r in items)
-    before_images = images(row['rendered'][:spec['start']])
+    before_images = 0 if completion else images(row['rendered'][:spec['start']])
     after_images = images(row['rendered'][:spec['end']])
     bindings = before_images + after_images
     getter = getattr(getattr(api, 'snapshot_adapter', None), 'asset_get', None)
@@ -277,12 +288,13 @@ def resources(api, store, value, row, index):
     reads += 4 * bindings
     request_api = getattr(api, 'request', None)
     if isinstance(request_api, transport.Transport):
-        required = SAFETY_SECONDS + CHECKPOINT_RESERVE * CHECKPOINT_SECONDS + .4 * (reads + 3)
+        requests = reads + (0 if completion else 3)
+        required = SAFETY_SECONDS + checkpoints * CHECKPOINT_SECONDS + .4 * requests
         # Native response envelopes are larger than semantic blocks. This is
         # admission headroom, not a replacement for the transport's hard cap.
         prefix = row['rendered'][:spec['end']]
-        read_bytes = 3 * (len(e.encoded(prefix)) + node_count(prefix) * 1024) + 512 * 1024
-        if (request_api.attempts + reads + 3 > 2000
+        read_bytes = (1 if completion else 3) * (len(e.encoded(prefix)) + node_count(prefix) * 1024) + 512 * 1024
+        if (request_api.attempts + requests > 2000
                 or request_api.clock() + required >= request_api.deadline
                 or request_api.bytes + read_bytes > transport.ro.MAX_HTTP_BYTES):
             return False
@@ -291,8 +303,8 @@ def resources(api, store, value, row, index):
     current = store
     for _ in range(5):
         if all(hasattr(current, key) for key in ('commits_attempted', 'max_commits', 'new_blob_bytes', 'max_batch_bytes')):
-            if (current.commits_attempted + CHECKPOINT_RESERVE > current.max_commits
-                    or current.new_blob_bytes + CHECKPOINT_RESERVE * size > current.max_batch_bytes):
+            if (current.commits_attempted + checkpoints > current.max_commits
+                    or current.new_blob_bytes + checkpoints * size > current.max_batch_bytes):
                 return False
             break
         current = getattr(current, 'store', None)
@@ -382,7 +394,7 @@ def execute_row(row, plan, approved_plan_sha, publication, api, store, value, ve
             if index == len(row['create_batches']['batches']) - 1:
                 # Completion itself needs one final fresh whole-page read. It
                 # may resume in a fresh bounded invocation without any write.
-                if not resources(api, store, value, row, index):
+                if not resources(api, store, value, row, index, completion=True):
                     return version, None
                 snapshot = e.read_target(api, ident, data_source)
                 verify_prefix(snapshot, row, data_source, operation, index)

@@ -147,7 +147,13 @@ class Tests(unittest.TestCase):
         # generic pipeline is given the exact recovery. This is an intentional
         # hold, not supported automatic PNG recovery or permission to recreate.
         direct=fixture.run_it(apply=True,create_recovery=recovery,approved_recovery_sha=e.digest(recovery))
-        self.assertEqual(direct['status'],'failed');self.assertEqual(fixture.outer.value,before)
+        # The omitted planning read was unused; the same adapter refusal now
+        # occurs in the executor's required fresh uncertain-outcome read.
+        self.assertEqual(direct['status'],'executed')
+        self.assertEqual(direct['execution']['status'],'blocked')
+        self.assertEqual(direct['execution']['reason'],'transport_read_failed')
+        self.assertEqual(direct['external_write_attempts'],0)
+        self.assertEqual(fixture.outer.value,before)
         self.assertEqual([c for c in fixture.api.calls if c[0]=='create'],[('create',)])
         self.assertEqual([c for c in fixture.api.calls if c[0]=='append'],[])
         after=fixture.outer.value
