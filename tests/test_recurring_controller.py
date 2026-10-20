@@ -228,11 +228,14 @@ class ControllerTests(unittest.TestCase):
         self.assertIn(b'--publication-file "$RUNNER_TEMP/get-canonical-publication.txt"', raw)
         self.assertEqual(raw.count(b'python scripts/get_notion_runtime.py'), 1)
 
-    def test_four_candidates_plus_current_validation_fit_shared_request_budget(self):
-        # Per candidate: attempt, workflow bytes, jobs, log redirect+download,
-        # rerun recheck = six. Initial current metadata+workflow = two; discovery
-        # repo+workflow+three pages = five. 2 + 5 + 4*6 = 31 <= hard 32.
+    def test_four_same_controller_candidates_fit_shared_request_budget(self):
+        # Current metadata+controller = two; repo+workflow+three pages = five.
+        # Each candidate: attempt, jobs, log redirect+download, original-attempt
+        # reread and latest-run reread = six. Reuse only verified immutable
+        # controller bytes from current verification: 2 + 5 + 4*6 = 31.
+        # Distinct controllers can exceed 32 and must still fail closed.
         self.assertEqual(p.MAX_CANDIDATES, 4)
+        self.assertEqual(p.MAX_REQUESTS, 32)
         self.assertLessEqual(2 + 2 + p.MAX_RUN_PAGES + 6 * p.MAX_CANDIDATES, p.MAX_REQUESTS)
         # Existing anonymous old-writer gate makes twelve requests twice.
         self.assertLessEqual(p.MAX_REQUESTS + 24, 60)

@@ -7,6 +7,7 @@ New receipts and public records always carry the executing runtime's policy.
 """
 from copy import deepcopy
 import get_notion_run32_recovery as run32_recovery
+import get_notion_run53_recovery as run53_recovery
 
 OLD_PUBLIC_POLICY_SHA256 = 'bd9828bdba1f61b2c02a23c9ff59ada81d039df25a0d296344e48b6a00745ac7'
 _OLD_PUBLIC_POLICY = {
@@ -123,8 +124,16 @@ def candidate_policy(policy, run):
     if run.get('id') == run32_recovery.RUN:
         old = run32_public_policy()
         run_id, attempt, controller = (run32_recovery.GET_RECORD[k] for k in ('run_id','run_attempt','controller_sha'))
-    stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
-    if (all(policy.get(k) == old[k] for k in stable)
+    if run53_recovery.ACTIVATED and run.get('id') == run53_recovery.RUN:
+        old = deepcopy(run53_recovery.PUBLIC_POLICY)
+        run_id, attempt, controller = (run53_recovery.GET_RECORD[k] for k in ('run_id','run_attempt','controller_sha'))
+        event = run53_recovery.ATTEMPT_CLOCK['event']
+    from get_recurring_controller import template_sha256
+    stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256', 'controller_template_sha256'}
+    template_ok = (policy.get('controller_template_sha256') == old['controller_template_sha256']
+        or (policy.get('controller_template_sha256') == template_sha256()
+            and old['controller_template_sha256'] == '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2'))
+    if (template_ok and all(policy.get(k) == old[k] for k in stable)
             and policy.get('code_sha') != old['code_sha']
             and policy.get('rules_sha256') == entry.rules_sha256()
             and policy.get('get_policy_sha256') == current_get_policy()
@@ -138,6 +147,10 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id):
     from get_publication_provenance import fail
+    if record['run_id'] == run53_recovery.RUN:
+        if not run53_recovery.ACTIVATED or job_id != run53_recovery.JOB or record != run53_recovery.GET_RECORD:
+            fail('provenance_record')
+        return
     if record['run_id'] == run32_recovery.RUN:
         if job_id != run32_recovery.JOB or record != run32_recovery.GET_RECORD:
             fail('provenance_record')

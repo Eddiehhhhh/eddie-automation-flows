@@ -15,6 +15,7 @@ import get_publication_provenance as provenance
 import get_recurring_controller as controller
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
+import get_notion_run53_recovery as run53_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
@@ -266,13 +267,15 @@ def _same_run(older, newer, *, cross_endpoint=False):
     # Exact-attempt and latest/list endpoints differ by at most one second.
     # Same-endpoint observations retain exact created_at comparison.
     skew = provenance.timestamp(newer['created_at']) - provenance.timestamp(older['created_at'])
-    if (not cross_endpoint and skew != timedelta(0)) or (cross_endpoint and not -timedelta(seconds=1) <= skew <= timedelta(0)):
+    witness = run53_recovery.clock_witness(older, newer) if cross_endpoint else None
+    if ((not cross_endpoint and skew != timedelta(0))
+            or (cross_endpoint and not -timedelta(seconds=1) <= skew <= timedelta(0) and witness is None)):
         fail('journal_provenance_changed')
     if (any(older.get(key) != newer.get(key) for key in keys)
             or newer['run_attempt'] < older['run_attempt']
             or (not cross_endpoint and provenance.timestamp(newer['updated_at']) < provenance.timestamp(older['updated_at']))):
         fail('journal_provenance_changed')
-
+    return witness
 
 
 def _interval(step, job):
@@ -324,7 +327,7 @@ def _records(raw, expected, notion_interval, get_interval, policy, run):
 
 
 def recover_anchor(client, *, run_id, run_attempt, public_policy,
-                   approved_public_policy_sha256, notion_policy_sha256):
+                   approved_public_policy_sha256, notion_policy_sha256, require_success=False):
     """Authenticate one original terminal Actions attempt, even if Notion failed.
 
     This never qualifies a failed run as Get success. It separately requires a
@@ -332,6 +335,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
     requires RemoteJournal's private commit/tree/blob readback before use.
     """
     try:
+        if type(require_success) is not bool: fail('journal_provenance_run')
         policy = provenance.validate_policy(public_policy, approved_public_policy_sha256)
         provenance.positive(run_id); provenance.positive(run_attempt)
         journal.checked(notion_policy_sha256, 64)
@@ -341,6 +345,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
         root = '/actions/runs/' + str(run_id)
         run = _terminal_run(client.json(root + '/attempts/' + str(run_attempt)), policy)
         if run['id'] != run_id or run['run_attempt'] != run_attempt: fail('journal_provenance_run')
+        if require_success and run['conclusion'] != 'success': fail('journal_provenance_run')
         controller.verify_remote(client, run['head_sha'], policy, event=run['event'])
         reviewed = controller.expected_bytes(policy)
         if (reviewed.count(('      - name: ' + NOTION_STEP).encode()) != 1
@@ -359,6 +364,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
                 or not provenance.timestamp(run['created_at']) <= provenance.timestamp(job.get('started_at'))
                     <= provenance.timestamp(job.get('completed_at')) <= provenance.timestamp(run['updated_at'])):
             fail('journal_provenance_job')
+        if require_success and job.get('conclusion') != 'success': fail('journal_provenance_job')
         steps = job.get('steps')
         if not isinstance(steps, list) or len(steps) > 100: fail('journal_provenance_steps')
         def selected(name):
@@ -371,6 +377,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
         if (get_step.get('conclusion') != 'success'
                 or notion_step.get('conclusion') not in ('success', 'failure', 'cancelled', 'timed_out')
                 or get_step['number'] >= notion_step['number']): fail('journal_provenance_steps')
+        if require_success and notion_step.get('conclusion') != 'success': fail('journal_provenance_steps')
         get_times = _interval(get_step, job); notion_times = _interval(notion_step, job)
         if get_times[1] > notion_times[0]: fail('journal_provenance_time')
         expected = context({'run_id': run_id, 'run_attempt': run_attempt,
@@ -382,7 +389,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
         original = _terminal_run(client.json(root + '/attempts/' + str(run_attempt)), policy)
         if provenance.run_binding(original) != provenance.run_binding(run): fail('journal_provenance_changed')
         current = _latest_run(client.json(root), policy)
-        _same_run(run, current, cross_endpoint=True)
+        clock_witness = _same_run(run, current, cross_endpoint=True)
         if current['run_attempt'] == run_attempt and provenance.run_semantic_binding(current) != provenance.run_semantic_binding(run):
             fail('journal_provenance_changed')
         final = records[-1]
@@ -393,6 +400,8 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'get_step_record': get_record, 'get_run_success_claim': False,
             'run_binding': provenance.run_binding(run), 'latest_binding':provenance.run_binding(current), 'latest_attempt': current['run_attempt'],
             'completed_at': job['completed_at'],
+            **({'clock_witness': clock_witness} if clock_witness is not None else {}),
+            **({'job_sha256': codec.digest(job)} if require_success else {}),
             'private_readback_required': True, 'credentials_created': 0,
             'transport': 'caller_injected', 'new_permissions': 0}
     except CheckpointFailure: raise
@@ -503,7 +512,9 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
             if (row['id'],row['run_attempt']) in attempt_candidates:
                 if result['run_binding']!=binding:fail('journal_provenance_changed')
             elif (provenance.run_semantic_binding(result['run_binding'])!=provenance.run_semantic_binding(row)
-                    or not timedelta(0) <= provenance.timestamp(result['run_binding']['created_at']) - provenance.timestamp(row['created_at']) <= timedelta(seconds=1)):
+                    or (not timedelta(0) <= provenance.timestamp(result['run_binding']['created_at']) - provenance.timestamp(row['created_at']) <= timedelta(seconds=1)
+                        and not (result.get('clock_witness') is not None
+                            and result['clock_witness'] == run53_recovery.clock_witness(result['run_binding'], row)))):
                 fail('journal_provenance_changed')
             # Only listing/alias observations bound the mutable latest clock.
             now=result.get('latest_binding')
@@ -568,6 +579,12 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(run32_recovery.RUN,run32_recovery.ATTEMPT)):
                     result=run32_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
+                    match_candidate(result,row)
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(run53_recovery.RUN,run53_recovery.ATTEMPT)):
+                    result=run53_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
                     match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}

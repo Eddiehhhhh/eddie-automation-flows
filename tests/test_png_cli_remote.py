@@ -13,7 +13,20 @@ import test_notion_png_loader as lf
 import test_notion_executor as ef
 from test_notion_png_evidence import png
 from test_png_pipeline import Transport
-from test_executor_live_adapter import DB
+from test_executor_live_adapter import DB, OfficialFixture
+from test_notion_properties import schema as metadata_schema
+
+class MetadataFixture(OfficialFixture):
+ """The canonical-create fixture has the four existing typed columns.
+
+ Source fixtures remain unchanged: missing metadata must stay held, not invented.
+ """
+ def __call__(self,method,path,body=None):
+  value=super().__call__(method,path,body)
+  if method=='GET' and path=='/data_sources/'+ef.DS:
+   value['properties'].update(metadata_schema())
+  return value
+
 class Tests(unittest.TestCase):
  def setUp(self):
   self.src=source.Tests();self.src.setUp();self.addCleanup(self.src.doCleanups);s=self.src
@@ -44,6 +57,7 @@ class Tests(unittest.TestCase):
   original_collect=r.transport.native.collect
   self.stack.enter_context(patch.object(r.transport.native,'collect',side_effect=lambda request,**kw:original_collect(request,**kw) if kw else {'snapshots':{'x':{'parent_data_source':ef.DS}}}))
   self.api=ef.API(o.EngineStore(self.outer));self.request=Transport(self.api,self.images[self.ids[0]])
+  self.request.native=MetadataFixture(self.api)
   self.writers={'fresh_readback_verified':True,'writers':{n:{'disabled':True,'active_runs':0} for n in ('getnote-to-notion','notion-to-getnote')}}
   self.uploads={};owner=self
   class Reply:
@@ -89,12 +103,33 @@ class Tests(unittest.TestCase):
    result=r.dispatch(self.local,self.lr,None,self.src.root,self.outer,self.request,tip=self.src.last,policy_hash=source.P,apply=True,writers_guard=lambda:deepcopy(self.writers),loaded_assets=loaded)
   self.assertEqual(result['execution']['created'],2,result);self.assertEqual(len(self.uploads),2)
   state,sha=self.outer.read();self.assertEqual(len(state['png_assets']['attachments']),2);self.assertEqual(len(state['pending_by_id']),1)
+  self.assertEqual(result['execution']['status'],'partial',result)
+  for ident in self.ids[:2]:
+   self.assertFalse(set(metadata_schema()) & set(self.api.pages[ident]['properties_raw']))
+   metadata=state['engine_state']['property_receipts'][ident]
+   self.assertEqual(set(metadata['held']),set(metadata_schema()))
+   self.assertFalse(metadata['managed'])
   posts=len(self.request.attempted);cas=len(self.rf.calls);anchor=deepcopy(self.outer.anchor)
   self.rf.root=self.rf.clone('fresh-capacity');self.local=r.r.LocalGit(self.rf.root);self.rf.load(self.rf.head());self.outer=self.rf.store(anchor);self.api.store=o.EngineStore(self.outer)
   loaded=self.preload()
   result=r.dispatch(self.local,self.lr,None,self.src.root,self.outer,self.request,tip=self.src.last,policy_hash=source.P,apply=True,writers_guard=lambda:deepcopy(self.writers),loaded_assets=loaded)
   safe=r.safe_result(result)
   self.assertEqual(safe['png']['reason_counts'],{'request_budget':1},safe);self.assertEqual(len(self.request.attempted),posts);self.assertEqual(r.exit_status(safe),0,safe)
+ def test_missing_metadata_schema_never_posts_pages_and_preserves_upload_handles(self):
+  self.request.native=OfficialFixture(self.api)
+  loaded=self.preload()
+  result=r.dispatch(self.local,self.lr,None,self.src.root,self.outer,self.request,tip=self.src.last,policy_hash=source.P,apply=True,writers_guard=lambda:deepcopy(self.writers),loaded_assets=loaded)
+  self.assertEqual(result['status'],'failed',result);self.assertEqual(result['reason'],'property_schema_changed',result)
+  self.assertFalse([row for row in self.request.calls if row==('POST','/pages')])
+  self.assertFalse(self.api.pages)
+  state,sha=self.outer.read();self.assertEqual(len(self.uploads),2)
+  slots=state['png_assets']['uploads']
+  self.assertEqual({slot['state']['upload_id'] for slot in slots.values()},set(self.uploads))
+  self.assertTrue(all(slot['state']['phase']=='uploaded_verified' for slot in slots.values()))
+  self.assertIsNone(state['engine_state']['journal'])
+  # The real remote journal, rather than an in-memory-only cache, owns handles.
+  persisted=json.loads(remote.run(self.rf.bare,'show',self.rf.head()+':'+o.STATE_PATH))
+  self.assertEqual(persisted['png_assets']['uploads'],slots)
  def test_whole_run_three_policy_bridge_real_migration_cas(self):
   import io,base64,tempfile
   import test_notion_journal_runtime as jf

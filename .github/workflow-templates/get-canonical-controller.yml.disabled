@@ -8,6 +8,21 @@ on:
         type: boolean
         default: false
         required: true
+      notion_mode:
+        description: Canonical sync or separately registered bounded manual mode
+        type: choice
+        default: canonical
+        required: true
+        options:
+          - canonical
+          - historical-capture
+          - historical-apply
+          - property-apply
+      notion_input_sha256:
+        description: Registered private input digest; empty for canonical
+        type: string
+        default: ''
+        required: false
   schedule:
     - cron: '17 * * * *'
 permissions:
@@ -34,6 +49,12 @@ jobs:
         env:
           RUNTIME_SHA: '@@RUNTIME_SHA@@'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
+      - name: Validate bounded Notion route before Get
+        env:
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
+          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
+        run: python scripts/get_notion_controller_route.py --preflight
       - name: Prepare reviewed public policy
         env:
           POLICY_B64: '@@POLICY_B64@@'
@@ -74,11 +95,22 @@ jobs:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_SHA256: '@@POLICY_SHA256@@'
-        run: >-
-          python scripts/get_notion_runtime.py
-          --policy "$RUNNER_TEMP/get-recurring-public-policy.json"
-          --approved-policy-sha256 "$POLICY_SHA256"
-          --publication-file "$RUNNER_TEMP/get-canonical-publication.txt"
-          --apply --scope-from-policy
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
+          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
+        run: |
+          if test "$NOTION_MODE" = canonical; then
+            python scripts/get_notion_runtime.py \
+              --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
+              --approved-policy-sha256 "$POLICY_SHA256" \
+              --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
+              --apply --scope-from-policy
+          else
+            python scripts/get_notion_controller_route.py \
+              --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
+              --approved-policy-sha256 "$POLICY_SHA256" \
+              --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
+              --apply --scope-from-policy
+          fi
 # The same job has independent Get and Notion failure reporting. A Notion partial
 # outcome must not erase the successful Get step or its confirmed receipt marker.

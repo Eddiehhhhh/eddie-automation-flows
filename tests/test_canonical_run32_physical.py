@@ -16,7 +16,7 @@ class Tests(unittest.TestCase):
     def test_current_order_composed_manual_and_scheduled_http_replay(self):
         for trigger in ('manual','schedule'):
             result=replay.replay(trigger)
-            self.assertEqual(result['physical_requests'],19)
+            self.assertEqual(result['physical_requests'],17)
             self.assertEqual(result['max_physical_requests'],32)
             self.assertEqual(result['candidate_attempts_checked'],4)
             self.assertEqual(result['publication_records_verified'],1)

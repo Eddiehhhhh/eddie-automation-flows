@@ -1,0 +1,94 @@
+"""Archived controller template, inert bytes only; never execute this module data.
+
+Source: Eddiehhhhh/eddie-automation-flows at immutable runtime
+6ad627793c23e80ad2ca9568048eb4e595c881a0,
+.github/workflow-templates/get-canonical-controller.yml.disabled.
+Historical policies must render these original bytes, not the current template.
+The selector verifies the pinned SHA-256 before returning this data.
+"""
+
+SOURCE_RUNTIME_SHA = '6ad627793c23e80ad2ca9568048eb4e595c881a0'
+TEMPLATE_SHA256 = '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2'
+TEMPLATE_BYTES = b'''# Local deterministic template only. Publish only after final production approval.
+name: Canonical Get single writer
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply only under the separately approved recurring scope
+        type: boolean
+        default: false
+        required: true
+  schedule:
+    - cron: '17 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+jobs:
+  canonical-get:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: '@@RUNTIME_SHA@@'
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Verify pinned reviewed runtime
+        env:
+          RUNTIME_SHA: '@@RUNTIME_SHA@@'
+        run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
+      - name: Prepare reviewed public policy
+        env:
+          POLICY_B64: '@@POLICY_B64@@'
+          POLICY_SHA256: '@@POLICY_SHA256@@'
+        run: |
+          python - <<'PY'
+          import base64, hashlib, os
+          from pathlib import Path
+          value = base64.b64decode(os.environ['POLICY_B64'], validate=True)
+          assert hashlib.sha256(value).hexdigest() == os.environ['POLICY_SHA256']
+          path = Path(os.environ['RUNNER_TEMP']) / 'get-recurring-public-policy.json'
+          with path.open('xb') as stream:
+              stream.write(value)
+          PY
+      - name: Emit verified canonical publication anchor
+        id: get_sync
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          POLICY_SHA256: '@@POLICY_SHA256@@'
+          SCOPE_SHA256: '@@SCOPE_SHA256@@'
+        run: |
+          args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
+          if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
+          if test "$APPLY" = true; then
+            args+=(--apply --scope-from-policy --approved-scope-sha256 "$SCOPE_SHA256" --checkpoint "$RUNNER_TEMP/get-recurring-attempt.json" --publication-file "$RUNNER_TEMP/get-canonical-publication.txt")
+          fi
+          python scripts/get_recurring_runtime.py "${args[@]}"
+      - name: Sync confirmed Get content to Notion
+        id: notion_sync
+        if: ${{ steps.get_sync.outcome == 'success' && (github.event_name == 'schedule' || inputs.apply) }}
+        continue-on-error: true
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          POLICY_SHA256: '@@POLICY_SHA256@@'
+        run: >-
+          python scripts/get_notion_runtime.py
+          --policy "$RUNNER_TEMP/get-recurring-public-policy.json"
+          --approved-policy-sha256 "$POLICY_SHA256"
+          --publication-file "$RUNNER_TEMP/get-canonical-publication.txt"
+          --apply --scope-from-policy
+# The same job has independent Get and Notion failure reporting. A Notion partial
+# outcome must not erase the successful Get step or its confirmed receipt marker.
+'''

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import get_notion_executor as e
 import get_notion_historical as h
+import get_notion_properties_runtime as properties
 import get_private_preview_retention as remote_module
 from get_mirror_incremental_replay import strict_capture_json
 
@@ -16,22 +17,33 @@ INPUT_ANCHORS={}
 PREFIX='.sync/get-notion/historical-inputs/'
 
 
-def read(remote,expected):
+def anchor_for(expected):
+    """Pure registration check; no credentials, remote access or self-approval."""
     e.p.hex_hash(expected,64)
     anchor=INPUT_ANCHORS.get(expected)
     if not isinstance(anchor,dict) or set(anchor)!={'commit','blob','path','size'}:e.fail('approval_missing')
     e.p.hex_hash(anchor['commit'],40);e.p.hex_hash(anchor['blob'],40)
     if anchor['path']!=PREFIX+expected+'.json' or type(anchor['size']) is not int or not 0<anchor['size']<=256*1024:e.fail('approval_missing')
+    return dict(anchor)
+
+
+def read(remote,expected,*,contract=None):
+    anchor=anchor_for(expected)
+    if contract not in (None,h.CAPTURE_CONTRACT,h.CONTRACT,properties.tx.CONTRACT):e.fail('approval_missing')
     metadata=remote.metadata()
     if metadata.get('full_name')!=remote_module.REPOSITORY or metadata.get('private') is not True:e.fail('wrong_parent')
     tree=remote.tree_entries(remote.commit(anchor['commit'])['tree'],True)
     matches=[row for row in tree if row.get('path')==anchor['path']]
     if len(matches)!=1 or matches[0].get('mode')!='100644' or matches[0].get('type')!='blob' or matches[0].get('sha')!=anchor['blob']:e.fail('source_invalid')
     data=remote.blob(anchor['blob'],anchor['size'])
+    if len(data)!=anchor['size'] or e.p.git_blob(data)!=anchor['blob']:e.fail('source_invalid')
     value=strict_capture_json(data,256*1024)
     if e.encoded(value)!=data or e.digest(value)!=expected:e.fail('source_invalid')
+    if contract is not None and value.get('contract')!=contract:e.fail('approval_missing')
     if value.get('contract')==h.CAPTURE_CONTRACT:h.validate_capture(value,expected)
-    else:h.validate(value,expected)
+    elif value.get('contract')==h.CONTRACT:h.validate(value,expected)
+    elif value.get('contract')==properties.tx.CONTRACT:properties.authorize(value,expected,apply=False)
+    else:e.fail('approval_missing')
     return data
 
 

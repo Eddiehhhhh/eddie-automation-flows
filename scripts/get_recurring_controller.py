@@ -8,8 +8,10 @@ import argparse
 import base64
 import json
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 import get_recurring_entry as entry
+import get_recurring_controller_legacy as legacy
 from get_recurring_entry import a, m, r
 
 TEMPLATE = '.github/workflow-templates/get-canonical-controller.yml.disabled'
@@ -18,6 +20,10 @@ JOB_NAME = 'canonical-get'
 STEP_NAME = 'Emit verified canonical publication anchor'
 SCOPE_CONTRACT = 'get-recurring-production-scope-1'
 SCHEDULE_BLOCK = "  schedule:\n    - cron: '17 * * * *'\n"
+# Only fully verified immutable file bytes are retained, and only for the
+# lifetime of the built-in bounded public transport that obtained them.
+# Never cache run/attempt/job metadata, logs, or a policy/event trust decision.
+_VERIFIED_CONTROLLER_BYTES = WeakKeyDictionary()
 
 
 def template_bytes():
@@ -26,6 +32,21 @@ def template_bytes():
 
 def template_sha256():
     return a.sha(template_bytes())
+
+
+def policy_template_bytes(policy):
+    """Select only the exact current or pinned historical controller template."""
+    import get_publication_provenance as p
+    digest = policy.get('controller_template_sha256') if isinstance(policy, dict) else None
+    current = template_bytes()
+    if digest == a.sha(current):
+        return current
+    if digest == legacy.TEMPLATE_SHA256:
+        raw = legacy.TEMPLATE_BYTES
+        if not isinstance(raw, bytes) or len(raw) > MAX_CONTROLLER or a.sha(raw) != legacy.TEMPLATE_SHA256:
+            p.fail('provenance_controller_template')
+        return raw
+    p.fail('provenance_controller_policy')
 
 
 def scope_for(policy, policy_hash):
@@ -45,15 +66,16 @@ def render(policy, approved_policy_sha256, approved_scope_sha256, *, scheduled=T
     # shared provenance validator. This renderer allows only safe substitutions.
     import get_publication_provenance as p
     policy = p.validate_policy(policy, approved_policy_sha256)
-    if policy['controller_template_sha256'] != template_sha256() or policy['job_name'] != JOB_NAME or policy['publication_step_name'] != STEP_NAME:
+    if policy['job_name'] != JOB_NAME or policy['publication_step_name'] != STEP_NAME:
         p.fail('provenance_controller_policy')
+    template = policy_template_bytes(policy)
     if a.sha(a.encoded(scope_for(policy, approved_policy_sha256))) != a.checked(approved_scope_sha256, 64):
         p.fail('provenance_controller_policy')
     replacements = {'@@RUNTIME_SHA@@': a.checked(policy['code_sha'], 40),
                     '@@POLICY_B64@@': base64.b64encode(a.encoded(policy)).decode('ascii'),
                     '@@POLICY_SHA256@@': a.checked(approved_policy_sha256, 64),
                     '@@SCOPE_SHA256@@': approved_scope_sha256}
-    text = template_bytes().decode('utf-8')
+    text = template.decode('utf-8')
     if type(scheduled) is not bool or text.count(SCHEDULE_BLOCK) != 1:
         p.fail('provenance_controller_template')
     if not scheduled:
@@ -79,20 +101,33 @@ def verify_remote(client, controller_sha, policy, *, event='schedule'):
     if event not in ('schedule', 'workflow_dispatch'):
         p.fail('provenance_controller')
     a.checked(controller_sha, 40)
-    value = client.json('/contents/' + policy['workflow_path'] + '?ref=' + controller_sha)
-    if not isinstance(value, dict) or value.get('type') != 'file' or value.get('path') != policy['workflow_path'] or value.get('encoding') != 'base64' or type(value.get('size')) is not int or not 0 <= value['size'] <= MAX_CONTROLLER:
-        p.fail('provenance_controller')
-    try:
-        raw = base64.b64decode(value['content'].replace('\n', ''), validate=True)
-    except Exception:
-        p.fail('provenance_controller')
-    if len(raw) != value['size'] or r.oid(raw) != value.get('sha'):
-        p.fail('provenance_controller')
+    # Validate the caller's policy even on a cache hit. A cached blob is not
+    # cached approval and cannot bless a different policy or event.
+    scheduled = expected_bytes(policy)
+    cacheable = type(client) in (p.PublicGithub, p.AnonymousGithub)
+    key = (policy['workflow_path'], controller_sha)
+    cache = _VERIFIED_CONTROLLER_BYTES.get(client) if cacheable else None
+    raw = cache.get(key) if cache is not None else None
+    if raw is None:
+        value = client.json('/contents/' + policy['workflow_path'] + '?ref=' + controller_sha)
+        if not isinstance(value, dict) or value.get('type') != 'file' or value.get('path') != policy['workflow_path'] or value.get('encoding') != 'base64' or type(value.get('size')) is not int or not 0 <= value['size'] <= MAX_CONTROLLER:
+            p.fail('provenance_controller')
+        try:
+            raw = base64.b64decode(value['content'].replace('\n', ''), validate=True)
+        except Exception:
+            p.fail('provenance_controller')
+        if len(raw) != value['size'] or r.oid(raw) != value.get('sha'):
+            p.fail('provenance_controller')
     # Only these two reviewed renderings exist. Both use one A/policy/receipt
     # chain; the manual variant differs solely by removing the fixed cron block.
     # A schedule event can never borrow approval of the manual-only variant.
-    if raw != expected_bytes(policy) and (event != 'workflow_dispatch' or raw != expected_bytes(policy, scheduled=False)):
+    if raw != scheduled and (event != 'workflow_dispatch' or raw != expected_bytes(policy, scheduled=False)):
         p.fail('provenance_controller_mismatch')
+    if cacheable:
+        if cache is None:
+            cache = {}
+            _VERIFIED_CONTROLLER_BYTES[client] = cache
+        cache[key] = raw
     return controller_sha
 
 

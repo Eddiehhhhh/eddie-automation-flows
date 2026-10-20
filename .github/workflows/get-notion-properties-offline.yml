@@ -31,4 +31,4 @@ jobs:
       - name: Test mapping and durable transactions without credentials
         env:
           PYTHONPATH: scripts:tests
-        run: python -m unittest test_notion_full_migration test_notion_historical test_canonical_read_efficiency test_notion_properties test_notion_properties_runtime test_notion_creation_properties test_notion_runtime test_notion_executor test_notion_pipeline test_notion_outbox test_executor_live_adapter test_notion_not_dispatched test_notion_create_batches test_png_create_batches -v
+        run: python -m unittest test_notion_controller_route test_notion_full_migration test_notion_historical test_canonical_read_efficiency test_notion_properties test_notion_properties_runtime test_notion_creation_properties test_notion_runtime test_notion_executor test_notion_pipeline test_notion_outbox test_executor_live_adapter test_notion_not_dispatched test_notion_create_batches test_png_create_batches test_png_cli_remote -v

@@ -81,7 +81,8 @@ def validate_policy(value, expected_sha256):
     for key in ('job_name', 'publication_step_name'):
         if not isinstance(value[key], str) or not 1 <= len(value[key]) <= 160 or any(ord(c) < 32 for c in value[key]):
             fail('provenance_policy')
-    if value['controller_template_sha256'] != controller.template_sha256() or value['job_name'] != controller.JOB_NAME or value['publication_step_name'] != controller.STEP_NAME:
+    controller.policy_template_bytes(value)
+    if value['job_name'] != controller.JOB_NAME or value['publication_step_name'] != controller.STEP_NAME:
         fail('provenance_controller_policy')
     return deepcopy(value)
 
@@ -377,8 +378,13 @@ def run_identity(run):
 
 
 def run_binding(run):
-    return {k: run.get(k) for k in ('id', 'run_attempt', 'workflow_id', 'path', 'head_sha', 'head_branch',
+    result = {k: run.get(k) for k in ('id', 'run_attempt', 'workflow_id', 'path', 'head_sha', 'head_branch',
                                    'event', 'status', 'conclusion', 'created_at', 'updated_at')}
+    # Preserve the actual raw presence. Historical reduced bindings cannot
+    # infer a missing started clock and cannot qualify for an exact witness.
+    if 'run_started_at' in run:
+        result['run_started_at'] = run['run_started_at']
+    return result
 
 
 def run_semantic_binding(run):
@@ -399,8 +405,10 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     root = '/actions/runs/' + str(run_id)
     attempt_path = root + '/attempts/' + str(attempt)
     run = check_run_identity(client.json(attempt_path), policy)
+    clock_witness = recovery.run53_recovery.clock_witness(run, listed)
     if (run['run_attempt'] != attempt or run_identity(run) != run_identity(listed)
-            or not timedelta(0) <= timestamp(run['created_at']) - timestamp(listed['created_at']) <= timedelta(seconds=1)
+            or (not timedelta(0) <= timestamp(run['created_at']) - timestamp(listed['created_at']) <= timedelta(seconds=1)
+                and clock_witness is None)
             or attempt == listed['run_attempt'] and run_semantic_binding(run) != run_semantic_binding(listed)):
         fail('provenance_run_changed')
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
@@ -408,8 +416,9 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     candidate_policy, original_recovery = recovery.candidate_policy(policy, run)
     try:
         # One discovery may encounter the same immutable controller repeatedly.
-        # Deduplicate only after exact deterministic-byte verification; no cache
-        # survives this call or accepts a policy learned from a workflow.
+        # Deduplicate only after exact deterministic-byte verification. The
+        # client's immutable-byte cache may span calls; the policy/event key
+        # below also supports injected fixture clients without that cache.
         controller_key = (run['head_sha'], run['event'], a.sha(a.encoded(candidate_policy)))
         if verified_controllers is None or controller_key not in verified_controllers:
             controller.verify_remote(client, run['head_sha'], candidate_policy, event=run['event'])
@@ -460,6 +469,8 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     if run_binding(original) != run_binding(run):
         fail('provenance_run_changed')
     current = check_run_identity(client.json(root), policy)
+    if clock_witness is not None and recovery.run53_recovery.clock_witness(run, current) != clock_witness:
+        fail('provenance_run_changed')
     if (run_identity(current) != run_identity(run)
             or current['created_at'] != listed['created_at']
             or current['run_attempt'] < listed['run_attempt']
@@ -471,7 +482,8 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     return {'anchor': {'commit': record['receipt_commit'], 'receipt_sha256': record['receipt_sha256']},
             'receipt_sequence': record['receipt_sequence'], 'record_sha256': record['record_sha256'],
             'run_id': run_id, 'run_attempt': attempt, 'job_id': job['id'],
-            'completed_at': job['completed_at']}
+            'completed_at': job['completed_at'],
+            **({'clock_witness': clock_witness} if clock_witness is not None else {})}
 
 
 def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):

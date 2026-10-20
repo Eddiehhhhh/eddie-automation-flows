@@ -27,6 +27,7 @@ import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
+import get_notion_run53_recovery as run53_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
@@ -356,7 +357,8 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
     image_adapter=getattr(pub,'image_adapter',None) or preserved_image.Adapter(pub,request)
     policy=engine_policy(request,ds,scope,apply)
     create_scope=None
-    if e.creation_properties.eligible(pub):
+    if e.creation_properties.eligible(pub) and not (pending_journal is not None
+            and run53_recovery.allows(pending_journal['plan'], pending_journal)):
         create_scope=deepcopy(e.creation_properties.SCOPE)
         policy['property_create_scope_sha256']=e.digest(create_scope)
         if e.properties.REGISTRY in pub.descriptor['content_tree']:
@@ -456,6 +458,15 @@ def safe_result(value):
     return result
 
 
+def recovery_mode_guard(state, found, modes):
+    """An authenticated canonical continuation never doubles as another mode."""
+    pending = state['engine_state']['journal']
+    if (pending is not None and any(mode is not None for mode in modes)
+            and (found.get('recovery_anchor') == run53_recovery.TAG
+                or run53_recovery.allows(pending['plan'], pending))):
+        fail('notion_journal_busy')
+
+
 def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_policy=None,
         approved_public_policy_sha256=None,publication_bytes=None,execution=None,
         public_client=None,checkpoint_stream=None,work=None,create_recovery=None,approved_recovery_sha=None,
@@ -530,6 +541,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
                 fail('notion_state_anchor')
             old_journal=current['engine_state']['journal']
+            recovery_mode_guard(current, found if present else {}, modes)
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
             store=durable if apply else ReadOnlyStore(current)
             if property_manifest is not None:
@@ -575,8 +587,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 png_transition=bridge.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=png_transition;preload_sha=outbox.digest(png_transition)
             confirmed_transition=None
-            if present and found.get('recovery_anchor') in (run18_recovery.TAG,run28_recovery.TAG,run32_recovery.TAG):
-                recovery_module={module.TAG:module for module in (run18_recovery,run28_recovery,run32_recovery)}[found['recovery_anchor']]
+            if present and found.get('recovery_anchor') in (run18_recovery.TAG,run28_recovery.TAG,run32_recovery.TAG,run53_recovery.TAG):
+                recovery_module={module.TAG:module for module in (run18_recovery,run28_recovery,run32_recovery,run53_recovery)}[found['recovery_anchor']]
                 confirmed_transition=recovery_module.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=confirmed_transition;preload_sha=outbox.digest(preload_state)
             expired_transition=present and found.get('recovery_anchor')==run16_recovery.TAG
@@ -669,6 +681,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             elif old_journal is not None and run15_recovery.allows(old_journal['plan'],old_journal):
                 safe['resumed_prior_plan_sha256']=run15_recovery.PLAN_SHA
                 safe['resumed_prior_rules_sha256']=run15_recovery.ENGINE_RULES
+            elif old_journal is not None and run53_recovery.allows(old_journal['plan'],old_journal):
+                safe['resumed_prior_plan_sha256']=run53_recovery.PLAN_SHA
+                safe['resumed_prior_rules_sha256']=run53_recovery.ENGINE_RULES
             return safe
     except Exception as exc:
         reason=str(exc);reason=reason if reason in ERRORS else 'notion_failed'

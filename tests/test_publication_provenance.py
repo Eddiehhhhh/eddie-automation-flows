@@ -332,8 +332,13 @@ class AttemptRecoveryTests(unittest.TestCase):
         result = p.discover(client, policy(), exclude_run_id=2000, exclude_run_attempt=1)
         self.assertEqual(result['candidate_runs_checked'], 4)
         self.assertEqual(result['publication_records_verified'], 4)
-        self.assertEqual(client.requests, 32)
+        # Execution already verified these immutable controller bytes. Every
+        # mutable attempt/job/log/reread still consumes its physical request.
+        self.assertEqual(client.requests, 31)
         self.assertEqual(len([x for x in api.called if '/runs?per_page=' in x]), 3)
+        self.assertEqual(len([x for x in api.called if x.startswith('/contents/')]), 1)
+        client.json('')
+        self.assertEqual(client.requests, 32)
         with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_budget'):
             client.json('')
         self.assertEqual(client.requests, 32)

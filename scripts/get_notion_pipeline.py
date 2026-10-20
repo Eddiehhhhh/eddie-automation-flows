@@ -10,6 +10,7 @@ import get_notion_executor as e
 import get_notion_live_transport as t
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
+import get_notion_run53_recovery as run53_recovery
 from get_notion_preserved_image import IMAGE_FAILURES
 
 CONTRACT='get-notion-bounded-pipeline-1'
@@ -129,7 +130,8 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             plan=deepcopy(journal['plan'])
             if ((plan.get('rules_sha256')!=approved['rules_sha256'] and not plan_recovery.allows(plan,journal)
                     and not plan_recovery.allows_run10(plan,journal)
-                    and not run15_recovery.allows(plan,journal))
+                    and not run15_recovery.allows(plan,journal)
+                    and not run53_recovery.allows(plan,journal))
                     or plan.get('property_manifest_sha256') != approved.get('property_manifest_sha256')
                     or plan.get('property_create_scope_sha256') != approved.get('property_create_scope_sha256')
                     or plan.get('property_create_scope') != property_create_scope
