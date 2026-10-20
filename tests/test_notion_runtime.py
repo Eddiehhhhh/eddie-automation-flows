@@ -9,8 +9,16 @@ import get_notion_executor as e
 import test_confirmed_source as s
 import test_notion_outbox as f
 import test_notion_executor as ef
-from test_notion_pipeline import FixtureTransport
+from test_notion_pipeline import FixtureTransport as BaseFixtureTransport
 from test_executor_live_adapter import DB
+
+class FixtureTransport(BaseFixtureTransport):
+ def __call__(self,method,path,body=None):
+  result=super().__call__(method,path,body)
+  if path=='/data_sources/'+ef.DS:
+   from test_notion_properties import schema
+   result['properties'].update(schema())
+  return result
 
 class RuntimeTests(unittest.TestCase):
  def setUp(self):

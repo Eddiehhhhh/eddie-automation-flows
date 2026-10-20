@@ -19,8 +19,10 @@ REASONS=frozenset(e.REASONS)|frozenset(('policy_invalid','policy_changed','scope
 def policy(value,expected):
     keys={'contract','rules_sha256','data_source_id','data_source_pin','database_pin','title_property','allow_apply','allow_create','allow_archive','format_accepted','initial_scope_sha256','plan_authorization'}
     try:
-        if not isinstance(value,dict) or set(value)!=keys or value['contract']!=CONTRACT or e.digest(value)!=expected:e.fail('approval_missing')
+        if not isinstance(value,dict) or not keys <= set(value) <= keys | {'property_manifest_sha256', 'property_create_scope_sha256'} or value['contract']!=CONTRACT or e.digest(value)!=expected:e.fail('approval_missing')
         for key in ('rules_sha256','data_source_pin','database_pin'):e.p.hex_hash(value[key],64)
+        for optional in ('property_manifest_sha256','property_create_scope_sha256'):
+            if optional in value:e.p.hex_hash(value[optional],64)
         if value['initial_scope_sha256'] is not None:e.p.hex_hash(value['initial_scope_sha256'],64)
         if value['rules_sha256']!=e.rules_sha256():e.fail('rules_changed')
         if value['plan_authorization'] not in ('exact_plan','standing_bounded'):e.fail('approval_missing')
@@ -51,7 +53,11 @@ def wire_allowlist(plan,api):
     """Exactly the immutable reviewed plan's possible requests, no payload logs."""
     keys=set()
     for row in plan['records']:
-        if row['action']=='create':
+        if row.get('property_only'):
+            if row.get('property_patch'):
+                spec=e.property_transaction.wire(row)
+                keys.add(t.fingerprint(spec['method'],spec['path'],spec['body']))
+        elif row['action']=='create':
             body={'parent':{'type':'data_source_id','data_source_id':api.source},'properties':deepcopy(row['properties']),'children':t.wire_blocks(row['request_blocks'],None,uploaded_pngs=row.get('uploaded_pngs'))}
             keys.add(t.fingerprint('POST','/pages',body))
         elif row['action']=='update':
@@ -91,7 +97,7 @@ def batch_authorizer(plan,api,request,store):
     return authorize
 
 
-def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply=False,writers_guard,initial_scope=None,retry_conflicts=False,approved_plan_sha256=None,create_recovery=None,approved_recovery_sha=None,empty_plan_settle=None,snapshot_adapter=None,reviewed_png=None):
+def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply=False,writers_guard,initial_scope=None,retry_conflicts=False,approved_plan_sha256=None,create_recovery=None,approved_recovery_sha=None,empty_plan_settle=None,snapshot_adapter=None,reviewed_png=None,property_manifest=None,property_create_scope=None):
     stage='policy';attempted=False; prior_attempt=None
     try:
         if type(apply) is not bool or type(retry_conflicts) is not bool:e.fail('approval_missing')
@@ -99,6 +105,10 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             from get_notion_uploaded_png import Resolver
             if not isinstance(reviewed_png,Resolver) or reviewed_png.preview:e.fail('approval_missing')
         approved=policy(approved_policy,expected_policy_sha256)
+        if (e.digest(property_manifest) if property_manifest is not None else None) != approved.get('property_manifest_sha256'):e.fail('approval_missing')
+        if (e.digest(property_create_scope) if property_create_scope is not None else None) != approved.get('property_create_scope_sha256'):e.fail('approval_missing')
+        if property_create_scope is not None:e.creation_properties.validate(property_create_scope)
+        if property_manifest is not None and property_create_scope is not None:e.fail('approval_missing')
         if apply and not approved['allow_apply']:e.fail('approval_missing')
         if create_recovery is not None and (not isinstance(create_recovery,dict) or e.digest(create_recovery)!=approved_recovery_sha):e.fail('approval_missing')
         if approved_recovery_sha is not None:e.p.hex_hash(approved_recovery_sha,64)
@@ -120,6 +130,9 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             if ((plan.get('rules_sha256')!=approved['rules_sha256'] and not plan_recovery.allows(plan,journal)
                     and not plan_recovery.allows_run10(plan,journal)
                     and not run15_recovery.allows(plan,journal))
+                    or plan.get('property_manifest_sha256') != approved.get('property_manifest_sha256')
+                    or plan.get('property_create_scope_sha256') != approved.get('property_create_scope_sha256')
+                    or plan.get('property_create_scope') != property_create_scope
                     or not e.same(plan.get('policy'),engine_policy) or plan.get('initial_scope_sha256')!=e.digest(initial_scope) or plan.get('retry_conflicts')!=retry_conflicts):e.fail('journal_busy')
             publication.check(plan['publication']);ids=[r['note_id'] for r in plan['records']]
         else:ids=pending(publication,state,engine_policy,initial_scope,retry_conflicts,reviewed_png)
@@ -129,7 +142,7 @@ def run(publication,store,request,approved_policy,expected_policy_sha256,*,apply
             # Only preparation consumes these snapshots. A saved immutable plan
             # resumes through the executor's fresh guarded pre/post/final reads.
             for ident in ids:snapshots[ident]=api.read_note(ident)
-            stage='prepare';plan=e.prepare(publication,state,sha,snapshots,engine_policy,initial_scope=initial_scope,expected_scope_sha=approved['initial_scope_sha256'],retry_conflicts=retry_conflicts,preserved_images=getattr(snapshot_adapter,'bindings',{}),reviewed_png=reviewed_png)
+            stage='prepare';plan=e.prepare(publication,state,sha,snapshots,engine_policy,initial_scope=initial_scope,expected_scope_sha=approved['initial_scope_sha256'],retry_conflicts=retry_conflicts,preserved_images=getattr(snapshot_adapter,'bindings',{}),reviewed_png=reviewed_png,property_manifest=property_manifest,expected_property_manifest_sha256=approved.get('property_manifest_sha256'),property_schema=api.schema() if api is not None and (property_manifest is not None or property_create_scope is not None) else None,property_create_scope=property_create_scope)
         if apply and approved_plan_sha256 is not None and e.digest(plan)!=approved_plan_sha256:e.fail('approval_missing')
         stage='final_guard';publication.check(plan['publication'])
         if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
@@ -175,7 +188,7 @@ def public_report(value):
         actions=value['actions'];reasons=value['reason_counts']
         if not isinstance(actions,dict) or set(actions)-{'create','update','noop','blocked'} or any(type(n) is not int or not 0<=n<=50 for n in actions.values()) or sum(actions.values())!=value['selected']:return unknown
         if not isinstance(reasons,dict) or set(reasons)-e.REASONS or any(type(n) is not int or not 0<=n<=50 for n in reasons.values()) or sum(reasons.values())!=actions.get('blocked',0):return unknown
-        if value['source_mode'] not in ('initial_review','changed_content'):return unknown
+        if value['source_mode'] not in ('initial_review','changed_content','property_backfill','historical_cohort'):return unknown
         keep=('contract','status','source_mode','plan_sha256','journal_sha256','selected','deferred','retained_conflicts','actions','reason_counts','native_notes_read','get_requests','asset_downloads','external_write_attempts','write_state','prior_journal_effects','complete_library_claimed')
         clean={k:deepcopy(value[k]) for k in keep}
         compacted=value.get('paragraph_compaction_notes',0)

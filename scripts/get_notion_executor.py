@@ -24,6 +24,9 @@ import get_notion_run15_recovery as run15_recovery
 import get_notion_live_transport as transport
 import get_notion_content_scope as content_scope
 import get_notion_create_batches as create_batches
+import get_notion_properties as properties
+import get_notion_property_transaction as property_transaction
+import get_notion_creation_properties as creation_properties
 
 CONTRACT = 'get-notion-journal-engine-1'
 STATE_PATH = '.sync/get-notion/state.json'
@@ -38,7 +41,7 @@ REASONS = frozenset(('source_changed', 'source_invalid', 'state_changed', 'state
     'archive_not_approved', 'create_not_approved', 'format_not_approved', 'writer_gate_unknown',
     'request_budget', 'request_not_dispatched', 'batch_boundary_yield', 'journal_failed', 'journal_busy', 'uncertain_append', 'uncertain_create',
     'uncertain_archive', 'readback_mismatch', 'transport_read_failed', 'transport_write_uncertain',
-    'recovery_not_approved', 'unsupported_prepend', 'unresolved_operation', 'privacy_scope_required', 'content_review_required', 'empty_source', 'prior_denial', 'other'))
+    'recovery_not_approved', 'unsupported_prepend', 'unresolved_operation', 'privacy_scope_required', 'content_review_required', 'empty_source', 'prior_denial', 'uncertain_properties', 'other')) | properties.REASONS
 
 
 class Blocked(ValueError):
@@ -105,8 +108,12 @@ def check_preserved_bindings(bindings, *, page=None, managed=(), protected=None,
 
 def check_state(value):
     try:
-        if not isinstance(value, dict) or set(value) not in ({'contract', 'receipts', 'failures', 'journal'}, {'contract', 'receipts', 'failures', 'journal', 'unresolved_by_id'}) or value['contract'] != CONTRACT or not isinstance(value['receipts'], dict) or not isinstance(value['failures'], dict): fail('state_invalid')
+        if not isinstance(value, dict) or not {'contract', 'receipts', 'failures', 'journal'} <= set(value) <= {'contract', 'receipts', 'failures', 'journal', 'unresolved_by_id', 'property_receipts'} or value['contract'] != CONTRACT or not isinstance(value['receipts'], dict) or not isinstance(value['failures'], dict): fail('state_invalid')
         plan_recovery.validate_holds(value.get('unresolved_by_id',{}))
+        properties.check_receipts(value.get('property_receipts', {}))
+        for ident, metadata in value.get('property_receipts', {}).items():
+            body = value['receipts'].get(ident)
+            if not isinstance(body, dict) or any(body.get(key) != metadata[key] for key in ('page_id', 'data_source_id')): fail('state_invalid')
         if len(value['receipts'])>2500 or len(value['failures'])>2500: fail('request_budget')
         for ident,row in value['receipts'].items():
             p.note_id(ident)
@@ -405,7 +412,8 @@ def propose_initial_scope(publication, snapshots, data_source_id, previous_previ
 
 
 def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets=None,
-            initial_scope=None, expected_scope_sha=None, retry_conflicts=False, preserved_images=None,reviewed_png=None):
+            initial_scope=None, expected_scope_sha=None, retry_conflicts=False, preserved_images=None,reviewed_png=None,
+            property_manifest=None, expected_property_manifest_sha256=None, property_schema=None, property_create_scope=None):
     """Create an exact private approval plan; existing unowned pages block.
 
     An initial_scope is optional and must itself be externally approved and
@@ -427,6 +435,19 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
     publication.check(publication.descriptor)
     if type(retry_conflicts) is not bool: fail('approval_missing')
     policy_sha = digest({'policy':policy,'initial_scope':initial_scope})
+    metadata = None
+    if property_create_scope is not None:
+        creation_properties.validate(property_create_scope)
+        if property_manifest is not None or expected_property_manifest_sha256 is not None: fail('approval_missing')
+        if not creation_properties.eligible(publication): fail('approval_missing')
+        policy_sha = digest({'policy': policy, 'initial_scope': initial_scope, 'property_create_scope_sha256': digest(property_create_scope)})
+        if property_schema is not None:
+            metadata = creation_properties.context(publication, property_schema, property_create_scope)
+    if property_manifest is not None:
+        projection, times, selected = property_transaction.context(publication, property_schema, property_manifest, expected_property_manifest_sha256, policy)
+        metadata = (projection, times, selected, property_manifest)
+        policy_sha = digest({'policy': policy, 'initial_scope': initial_scope, 'property_manifest_sha256': expected_property_manifest_sha256})
+    elif property_create_scope is None and (expected_property_manifest_sha256 is not None or property_schema is not None): fail('approval_missing')
     pending = []; skipped_conflicts=[]
     for ident in sorted(publication.descriptor['records']):
         source = publication.descriptor['records'][ident]
@@ -471,8 +492,20 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                 props = {policy['id_property']: {'type':'rich_text','rich_text':[p.text_run(ident)]},
                          policy['title_property']: {'type':'title','title':[p.text_run(title)]}}
                 if len(title) > 2000: fail('request_budget')
+                if property_create_scope is not None and metadata is None: fail('property_schema_changed')
+                if metadata is not None:
+                    fields, held, schema_sha, bound_assets = property_transaction.creation_fields(publication, ident, data, metadata)
+                    if schema_sha is not None:
+                        props.update(fields)
+                        row.update(property_created=fields, held_fields=held, property_schema_sha256=schema_sha)
+                        row['source_assets'].update(bound_assets)
+                        publication.check_assets(row['source_assets'])
                 row.update(action='create', properties=props)
-                try:row['request_blocks']=request_blocks(rendered)
+                try:
+                    row['request_blocks']=request_blocks(rendered)
+                    envelope={'parent':{'type':'data_source_id','data_source_id':data_source},'properties':props,
+                        'children':transport.wire_blocks(row['request_blocks'],None,uploaded_pngs=row.get('uploaded_pngs'))}
+                    if len(encoded(envelope)) > MAX_REQUEST_BYTES: fail('request_budget')
                 except Blocked as exc:
                     if str(exc)!='request_budget':raise
                     batches=create_batches.prepare(rendered,props,data_source,row.get('uploaded_pngs'))
@@ -540,7 +573,9 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         'policy':deepcopy(policy), 'policy_sha256':policy_sha, 'initial_scope_sha256':digest(initial_scope), 'retry_conflicts':retry_conflicts,
         'records':records, 'deferred_ids':deferred, 'skipped_conflicts':skipped_conflicts,
         'state_only':not publication.descriptor['changed_content_ids'],
-        'source_mode':'initial_review' if publication.descriptor['initial_cohort'] else 'changed_content'}
+        'source_mode':'initial_review' if publication.descriptor['initial_cohort'] else 'changed_content',
+        **({'property_manifest_sha256': expected_property_manifest_sha256} if property_manifest is not None else {}),
+        **({'property_create_scope': deepcopy(property_create_scope), 'property_create_scope_sha256': digest(property_create_scope)} if property_create_scope is not None else {})}
 
 
 def read_target(api, ident, data_source):
@@ -591,7 +626,7 @@ def created(snapshot, row, data_source, expected_page):
         actual = view['properties'].get(key)
         kind = submitted['type']
         try:
-            if not isinstance(actual, dict) or actual.get('type') != kind or p.normalize_rich(actual.get(kind)) != p.normalize_rich(submitted[kind]): fail('readback_mismatch')
+            if not isinstance(actual, dict) or actual.get('type') != kind or properties.value(actual) != properties.value(submitted): fail('readback_mismatch')
         except Exception: fail('readback_mismatch')
     return view['order']
 
@@ -664,6 +699,9 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
             if row['action'] != 'blocked':
                 scope_reason=content_scope.reason(ident,publication.read(ident))
                 if scope_reason:fail(scope_reason)
+            if row.get('property_only'):
+                version = property_transaction.execute_row(row, plan, publication, api, store, value, version, counts, writers_guard)
+                continue
             if row['action'] == 'blocked':
                 value['failures'][ident]={'md_blob':row['source']['blob'],'source_commit':plan['publication']['commit'],'policy_sha256':plan['policy_sha256'],'reason':row['reason']}
                 counts['blocked'] += 1; journal['index'] += 1
@@ -685,6 +723,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 value['receipts'][ident]=receipt(snapshot,ident,data_source,view['order'],plan['publication'],
                     row['source'],row.get('preserved_asset_bindings'))
                 value['receipts'][ident]['creation_plan_sha256']=approved_plan_sha
+                property_transaction.record_creation(value, row, plan)
+                counts['retained_conflicts'] += bool(row.get('held_fields'))
                 value['failures'].pop(ident,None)
                 counts['created']+=1;journal.update(index=journal['index']+1,operation=None)
                 version=store.compare_and_set(version,value);continue
@@ -724,6 +764,11 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 # Recheck after checkpoint persistence, immediately before the
                 # external write; a writer may have activated during the CAS.
                 final_writer_guard()
+                if operation['kind'] == 'create':
+                    try: property_transaction.guard_creation_schema(row, api)
+                    except Exception:
+                        restore_prepared()
+                        raise
                 try:
                     counts['write_calls'] += 1
                     response = api.create_page(data_source, ident, row['properties'], row['request_blocks']) if operation['kind']=='create' else api.append_blocks(row['page_id'], row['request_blocks'], row['after_anchor'])
@@ -758,6 +803,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 publication.check(plan['publication'])
                 value['receipts'][ident] = receipt(snapshot, ident, data_source, managed, plan['publication'], row['source'],row.get('preserved_asset_bindings'))
                 value['receipts'][ident]['creation_plan_sha256']=approved_plan_sha
+                property_transaction.record_creation(value, row, plan)
+                counts['retained_conflicts'] += bool(row.get('held_fields'))
                 value['failures'].pop(ident,None)
                 counts['created'] += 1; journal.update(index=journal['index']+1, operation=None)
                 version = store.compare_and_set(version, value); continue

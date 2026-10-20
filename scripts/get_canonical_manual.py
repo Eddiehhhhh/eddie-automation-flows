@@ -216,7 +216,16 @@ def load_current(reader,remote,token,root,parent):
     selected={p:row for p,row in metadata.items() if n.is_markdown(p) or p in (prefix+a.STATE,prefix+n.STATE)}
     for p,row in selected.items():
         if row[:2]!=('100644','blob') or row[3]>(n.MAX_STATE if p in (prefix+a.STATE,prefix+n.STATE) else a.owned.MAX_NOTE):m.fail('manual_budget')
-    missing={p:row for p,row in selected.items() if reader.local.run('cat-file','--batch-check',data=(row[2]+'\n').encode()).endswith(b' missing\n')}
+    ids=list(dict.fromkeys(row[2] for row in selected.values()));missing_ids=set()
+    if ids:
+        probe=reader.local.command('cat-file','--batch-check=%(objectname) %(objecttype) %(objectsize)',data=('\n'.join(ids)+'\n').encode())
+        lines=probe.stdout.splitlines()
+        if probe.returncode or probe.stderr or len(lines)!=len(ids):m.fail('manual_readback')
+        sizes={row[2]:row[3] for row in selected.values()}
+        for blob,line in zip(ids,lines):
+            if line==(blob+' missing').encode():missing_ids.add(blob)
+            elif line!=(blob+' blob '+str(sizes[blob])).encode():m.fail('manual_readback')
+    missing={p:row for p,row in selected.items() if row[2] in missing_ids}
     for p,data in m.fetch_selected(remote,missing,token,root/'canonical-current').items():m.import_blob(reader.local,data,missing[p][2])
     return n.git_inventory(reader,parent)
 

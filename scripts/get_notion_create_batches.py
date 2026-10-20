@@ -440,6 +440,7 @@ def execute_row(row, plan, approved_plan_sha, publication, api, store, value, ve
             phase('in_flight')
             try:
                 guard()
+                if index == 0: e.property_transaction.guard_creation_schema(row, api)
                 if authorize_batch is not None:
                     authorize_batch(row, operation, wire)
             except Exception:

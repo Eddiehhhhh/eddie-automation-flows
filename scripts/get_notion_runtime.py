@@ -15,6 +15,9 @@ import tempfile
 
 import get_notion_executor as e
 import get_notion_outbox as outbox
+import get_notion_historical as historical
+import get_notion_historical_input as historical_input
+import get_notion_historical_runtime as historical_runtime
 import get_notion_pipeline as pipeline
 import get_notion_live_transport as transport
 import get_notion_readonly as ro
@@ -28,6 +31,7 @@ import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
 import get_notion_run32_recovery as run32_recovery
+import get_notion_properties_runtime as property_runtime
 import get_notion_png_expired_recovery as expired_recovery
 import get_notion_png_transport as png_transport
 import get_notion_png_recovery as png_recovery
@@ -57,8 +61,11 @@ MAX_RUN_RECORDS=10
 STAGES={'input','policy','writers','clone','journal','source','initial','queue','execute','final'}
 ERRORS=set(png_runtime.REASONS)|{'notion_activation_pending','notion_context','notion_scope','notion_state_anchor','notion_source_changed','notion_initial_source','notion_schema','notion_marker','notion_failed','png_anchor_pending','notion_journal_busy','writer_guard_permission','writer_guard_quota','writer_gate_unknown','journal_provenance_missing','asset_permission_denied','permission_denied'}
 
+ERRORS.update(e.properties.REASONS | {'journal_busy'})
 ERRORS.update({'png_expired_evidence_invalid','png_expired_missing_unverified','png_expired_status_unverified','png_expired_prestate_changed','png_expired_policy_unchanged','png_expired_plan_scope','png_expired_record_invalid','png_expired_old_upload_reused','png_expired_transition_changed','png_expired_record_changed','approval_missing','asset_changed','asset_not_committed','asset_type','invalid_binding','invalid_identity','invalid_route','journal_invalid','png_loader_anchor','png_loader_blob','png_loader_delta','png_loader_local_changed','png_loader_manifest','png_loader_partial_clone','png_loader_source_changed','png_loader_unrequested_blob','read_budget','request_budget','request_mismatch','response_invalid','unreviewed_asset','upload_identity_changed','upload_metadata_changed','write_not_authorized','write_not_authorized_or_already_attempted','writes_disabled','wrong_destination'})
 
+
+ERRORS.update(e.REASONS)
 
 def fail(code):raise ValueError(code) from None
 
@@ -73,7 +80,12 @@ def scope_for(public_policy):
     return {'contract':CONTRACT,'public_policy_sha256':a.sha(a.encoded(public_policy)),
         'rules_sha256':public_policy['rules_sha256'],'repository':r.REPOSITORY,
         'journal_path':outbox.STATE_PATH,'max_notes':MAX_RUN_RECORDS,'allow_create':True,
-        'allow_archive_owned_roots':True,'property_updates':False,'uploads':'two-fixed-three-png-cohorts-single-part','png_asset_anchor_sha256':PNG_ASSET_ANCHOR_SHA256,
+        'allow_archive_owned_roots':True,'property_updates':'exact-reviewed-manifest-v1',
+        'property_manifest_allowlist_sha256':e.digest(sorted(property_runtime.APPROVED_MANIFESTS)),
+        'historical_manifest_allowlist_sha256':e.digest(sorted(historical.APPROVED_MANIFESTS)),
+        'historical_capture_allowlist_sha256':e.digest(sorted(historical.APPROVED_CAPTURE_SCOPES)),
+        'historical_input_anchors_sha256':e.digest(historical_input.INPUT_ANCHORS),
+        'new_page_property_scope_sha256':e.digest(e.creation_properties.SCOPE),'uploads':'two-fixed-three-png-cohorts-single-part','png_asset_anchor_sha256':PNG_ASSET_ANCHOR_SHA256,
         'png_seq2_asset_anchor_sha256':PNG_SEQ2_ASSET_ANCHOR_SHA256,
         'data_source_pin':transport.native.DATA_SOURCE_PIN,'database_pin':transport.native.DATABASE_PIN,
         'initial_proof_sha256':ro.HISTORICAL_TEMPLATE['proof_sha256'],
@@ -300,6 +312,7 @@ def dispatch(*args,**kwargs):
 
 
 def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writers_guard,initial_factory=initial_inputs,create_recovery=None,approved_recovery_sha=None,loaded_assets=None):
+    property_runtime.check_dependency()
     state,sha=store.read();outbox.check_state(state)
     if sha!=outbox.digest(state):fail('notion_state_anchor')
     isolated=0
@@ -342,6 +355,12 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
         else:ds=next(iter(transport.native.collect(request)['snapshots'].values()))['parent_data_source']
     image_adapter=getattr(pub,'image_adapter',None) or preserved_image.Adapter(pub,request)
     policy=engine_policy(request,ds,scope,apply)
+    create_scope=None
+    if e.creation_properties.eligible(pub):
+        create_scope=deepcopy(e.creation_properties.SCOPE)
+        policy['property_create_scope_sha256']=e.digest(create_scope)
+        if e.properties.REGISTRY in pub.descriptor['content_tree']:
+            source_loader.Loader(local,remote,token,root,policy_hash).blob(pub.descriptor['commit'],e.properties.REGISTRY,16*1024*1024)
     upload_attempts_before=len(getattr(request,'attempted',set()))
     pub,png_resolver,image_adapter,attachment_provider,page_guard,png_preparation=png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,image_adapter,loaded_assets)
     if png_preparation is not None and not apply:
@@ -350,7 +369,7 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
     state,sha=store.read()
     adapter=outbox.EngineStore(store,attachment_provider=attachment_provider)
     def settle(plan,approved):return outbox.settle_empty_plan(store,sha,plan,approved)
-    result=pipeline.run(pub,adapter,request,policy,e.digest(policy),apply=apply,writers_guard=page_guard,initial_scope=scope,empty_plan_settle=settle,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,snapshot_adapter=image_adapter,reviewed_png=png_resolver)
+    result=pipeline.run(pub,adapter,request,policy,e.digest(policy),apply=apply,writers_guard=page_guard,initial_scope=scope,empty_plan_settle=settle,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,snapshot_adapter=image_adapter,reviewed_png=png_resolver,property_create_scope=create_scope)
     if png_resolver is not None and apply:
         result={**result,'png_upload_round':upload_attempts>0,'png_upload_attempts':upload_attempts,'png_preparation':png_preparation}
     final,final_sha=store.read()
@@ -439,11 +458,25 @@ def safe_result(value):
 
 def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_policy=None,
         approved_public_policy_sha256=None,publication_bytes=None,execution=None,
-        public_client=None,checkpoint_stream=None,work=None,create_recovery=None,approved_recovery_sha=None):
+        public_client=None,checkpoint_stream=None,work=None,create_recovery=None,approved_recovery_sha=None,
+        property_manifest=None,approved_property_manifest_sha256=None,
+        historical_manifest=None,approved_historical_manifest_sha256=None,
+        historical_capture=None,approved_historical_capture_sha256=None):
     """Real private read/CAS adapter. Default path cannot persist a journal."""
     stage='input';write_possible=False;prior_effects=None
     try:
         if type(apply) is not bool:fail('notion_scope')
+        modes=(property_manifest,historical_manifest,historical_capture)
+        if sum(mode is not None for mode in modes)>1 or any(mode is not None for mode in modes) and (create_recovery is not None or approved_recovery_sha is not None or public_policy is None):fail('notion_scope')
+        if historical_capture is not None:
+            historical.validate_capture(historical_capture,approved_historical_capture_sha256,apply=apply)
+        elif approved_historical_capture_sha256 is not None:fail('notion_scope')
+        if historical_manifest is not None:
+            historical.validate(historical_manifest,approved_historical_manifest_sha256,apply=apply)
+        elif approved_historical_manifest_sha256 is not None:fail('notion_scope')
+        if property_manifest is not None:
+            property_runtime.authorize(property_manifest,approved_property_manifest_sha256,apply=apply)
+        elif approved_property_manifest_sha256 is not None:fail('notion_scope')
         if apply and (not PRODUCTION_ACTIVATED or not recurring.PRODUCTION_ACTIVATED):fail('notion_activation_pending')
         if expected_parent is not None:a.checked(expected_parent,40)
         client=public_client if public_client is not None else provenance.AnonymousGithub()
@@ -499,6 +532,41 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             old_journal=current['engine_state']['journal']
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
             store=durable if apply else ReadOnlyStore(current)
+            if property_manifest is not None:
+                stage='execute';write_possible=apply
+                result=property_runtime.dispatch(local,remote,token,root,store,request,
+                    manifest=property_manifest,expected=approved_property_manifest_sha256,
+                    policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
+                source_guard()
+                if apply and durable.anchor['state_blob'] is not None:
+                    verified,verified_sha=durable.read()
+                    if durable.compare_and_set(verified_sha,verified)!=verified_sha:fail('notion_state_anchor')
+                safe=safe_result(result)
+                safe.update(journal_commits=durable.commits_attempted,source_parent=parent,
+                    notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
+                return safe
+            if historical_capture is not None:
+                stage='execute';write_possible=apply
+                result=historical_runtime.capture(local,remote,token,root,store,request,
+                    candidate=historical_capture,expected=approved_historical_capture_sha256,
+                    policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
+                source_guard()
+                result.update(journal_commits=durable.commits_attempted,source_parent=parent,
+                    notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
+                return result
+            if historical_manifest is not None:
+                stage='execute';write_possible=apply
+                result=historical_runtime.dispatch(local,remote,token,root,store,request,
+                    manifest=historical_manifest,expected=approved_historical_manifest_sha256,
+                    policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
+                source_guard()
+                if apply and durable.anchor['state_blob'] is not None:
+                    verified,verified_sha=durable.read()
+                    if durable.compare_and_set(verified_sha,verified)!=verified_sha:fail('notion_state_anchor')
+                safe=safe_result(result)
+                safe.update(journal_commits=durable.commits_attempted,source_parent=parent,
+                    notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
+                return safe
             loaded_assets=None
             png_transition=None
             preload_state=current;preload_sha=sha
@@ -614,13 +682,30 @@ def main(argv=None):
     parser.add_argument('--policy',type=Path);parser.add_argument('--approved-policy-sha256')
     parser.add_argument('--publication-file',type=Path);parser.add_argument('--expected-parent')
     parser.add_argument('--recovery',type=Path);parser.add_argument('--approved-recovery-sha256')
+    parser.add_argument('--property-manifest',type=Path);parser.add_argument('--approved-property-manifest-sha256')
+    parser.add_argument('--historical-manifest',type=Path);parser.add_argument('--approved-historical-manifest-sha256')
+    parser.add_argument('--historical-capture',type=Path);parser.add_argument('--approved-historical-capture-sha256')
     parser.add_argument('--apply',action='store_true');parser.add_argument('--scope-from-policy',action='store_true')
     args=parser.parse_args(argv)
     try:
         # Pending production activation is rejected before credential lookup.
         if args.apply and (not PRODUCTION_ACTIVATED or not recurring.PRODUCTION_ACTIVATED):fail('notion_activation_pending')
         if args.apply!=args.scope_from_policy or (not args.apply and args.publication_file):fail('notion_scope')
-        policy=None;execution=None;raw=None;recovery=None
+        policy=None;execution=None;raw=None;recovery=None;property_manifest=None;historical_manifest=None;historical_capture=None
+        modes=(args.property_manifest,args.historical_manifest,args.historical_capture)
+        if sum(mode is not None for mode in modes)>1 or any(mode is not None for mode in modes) and (args.recovery or args.approved_recovery_sha256 or not args.policy):fail('notion_scope')
+        if bool(args.historical_capture)!=bool(args.approved_historical_capture_sha256):fail('notion_scope')
+        if bool(args.historical_manifest)!=bool(args.approved_historical_manifest_sha256):fail('notion_scope')
+        if args.historical_capture:
+            historical_capture=m.strict_capture_json(a.bounded_file(args.historical_capture,256*1024),256*1024)
+            historical.validate_capture(historical_capture,args.approved_historical_capture_sha256,apply=args.apply)
+        if args.historical_manifest:
+            historical_manifest=m.strict_capture_json(a.bounded_file(args.historical_manifest,256*1024),256*1024)
+            historical.validate(historical_manifest,args.approved_historical_manifest_sha256,apply=args.apply)
+        if bool(args.property_manifest)!=bool(args.approved_property_manifest_sha256) or args.property_manifest and (args.recovery or not args.policy):fail('notion_scope')
+        if args.property_manifest:
+            property_manifest=m.strict_capture_json(a.bounded_file(args.property_manifest,256*1024),256*1024)
+            property_runtime.authorize(property_manifest,args.approved_property_manifest_sha256,apply=args.apply)
         if bool(args.recovery)!=bool(args.approved_recovery_sha256) or args.recovery and not args.apply:fail('notion_scope')
         if args.recovery:
             recovery=m.strict_capture_json(a.bounded_file(args.recovery,16384),16384)
@@ -638,7 +723,9 @@ def main(argv=None):
         guard=old_writers.WriterGuard(github_token)
         result=run(os.environ.get('PRIVATE_VAULT_TOKEN'),request,guard,expected_parent=args.expected_parent,
             apply=args.apply,public_policy=policy,approved_public_policy_sha256=args.approved_policy_sha256,
-            publication_bytes=raw,execution=execution,public_client=public_client,checkpoint_stream=sys.stdout if args.apply else None,create_recovery=recovery,approved_recovery_sha=args.approved_recovery_sha256)
+            publication_bytes=raw,execution=execution,public_client=public_client,checkpoint_stream=sys.stdout if args.apply else None,create_recovery=recovery,approved_recovery_sha=args.approved_recovery_sha256,property_manifest=property_manifest,approved_property_manifest_sha256=args.approved_property_manifest_sha256,
+            historical_manifest=historical_manifest,approved_historical_manifest_sha256=args.approved_historical_manifest_sha256,
+            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256)
     except Exception as exc:
         reason=str(exc);result={'contract':CONTRACT,'status':'failed','stage':'input','reason':reason if reason in ERRORS else 'notion_failed','write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
     print(json.dumps(result),flush=True)
@@ -647,6 +734,7 @@ def main(argv=None):
 
 def exit_status(result):
     if not isinstance(result,dict):return 1
+    if result.get('contract')=='get-notion-historical-capture-result-1' and result.get('status') in ('captured','prepared') and result.get('notion_write_attempts')==0:return 0
     if result.get('status') in ('prepared','queue_empty','queue_partial'):
         return 0 if result.get('write_state')=='not_attempted' else 1
     if result.get('status')=='executed':

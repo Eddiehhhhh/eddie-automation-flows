@@ -61,8 +61,9 @@ class OfflineGit:
         self.cache={}
     def tree(self,commit):
         checked(commit,40)
-        if self.local.run('cat-file','-t',commit).strip()!=b'commit':fail('adapter_anchor')
-        if commit not in self.cache:self.cache[commit]=self.local.tree(commit)
+        if commit not in self.cache:
+            if self.local.run('cat-file','-t',commit).strip()!=b'commit':fail('adapter_anchor')
+            self.cache[commit]=self.local.tree(commit)
         return self.cache[commit]
     def read(self,commit,path,maximum=MAX_TREE):
         row=self.tree(commit).get(path)
@@ -72,6 +73,50 @@ class OfflineGit:
         data=self.local.blob(row[2])
         if len(data)!=int(size) or retention.oid(data)!=row[2]:fail('adapter_blob_readback')
         return data
+    def read_many(self,commit,limits):
+        """Batch exact immutable paths; retain every size, mode and OID check.
+
+        No blob bytes or missing-object results survive this call. Preflight
+        sizes before content, then bound each batch by 64 objects / 8 MiB
+        (a single caller-authorized larger object is read alone).
+        """
+        tree=self.tree(commit);paths={};caps={}
+        for path,maximum in limits.items():
+            row=tree.get(path)
+            if not row or row[:2]!=('100644','blob'):fail('adapter_missing_blob')
+            blob=checked(row[2],40);paths[path]=blob
+            caps[blob]=min(maximum,caps.get(blob,maximum))
+        if not caps:return {}
+        ids=list(caps);request=('\n'.join(ids)+'\n').encode()
+        probe=self.local.command('cat-file','--batch-check=%(objectname) %(objecttype) %(objectsize)',data=request)
+        if probe.returncode or probe.stderr:fail('adapter_blob_readback')
+        rows=probe.stdout.splitlines();sizes={}
+        if len(rows)!=len(ids):fail('adapter_blob_readback')
+        for blob,row in zip(ids,rows):
+            parts=row.split()
+            if len(parts)!=3 or parts[:2]!=[blob.encode(),b'blob'] or not parts[2].isdigit():fail('adapter_blob_readback')
+            size=int(parts[2])
+            if size>caps[blob]:fail('adapter_blob_budget')
+            sizes[blob]=size
+        if sum(sizes[blob] for blob in paths.values())>MAX_TREE:fail('adapter_tree_budget')
+        values={};offset=0
+        while offset<len(ids):
+            batch=[];total=0
+            while offset<len(ids) and len(batch)<64:
+                blob=ids[offset]
+                if batch and total+sizes[blob]>MAX_STATE:break
+                batch.append(blob);total+=sizes[blob];offset+=1
+            result=self.local.command('cat-file','--batch',data=('\n'.join(batch)+'\n').encode())
+            if result.returncode or result.stderr:fail('adapter_blob_readback')
+            cursor=0
+            for blob in batch:
+                header=(blob+' blob '+str(sizes[blob])+'\n').encode();start=cursor+len(header);end=start+sizes[blob]
+                if result.stdout[cursor:start]!=header or result.stdout[end:end+1]!=b'\n':fail('adapter_blob_readback')
+                data=result.stdout[start:end]
+                if len(data)!=sizes[blob] or retention.oid(data)!=blob:fail('adapter_blob_readback')
+                values[blob]=data;cursor=end+1
+            if cursor!=len(result.stdout):fail('adapter_blob_readback')
+        return {path:values[blob] for path,blob in paths.items()}
     def source_get_tree(self,commit):
         self.tree(commit)
         return checked(self.local.run('rev-parse',commit+':'+retention.GET).decode().strip(),40)
@@ -85,8 +130,10 @@ class OfflineGit:
     def baseline(self,prior_commit,path,blob,digest):
         """Prove the baseline belonged to this path in pinned prior history."""
         full=retention.GET+'/'+path_ok(path);checked(blob,40);checked(digest,64)
-        commits=self.local.run('rev-list','--max-count=256',checked(prior_commit,40),'--',full).decode().splitlines()
-        for commit in [prior_commit]+commits:
+        def candidates():
+            yield checked(prior_commit,40)
+            yield from self.local.run('rev-list','--max-count=256',prior_commit,'--',full).decode().splitlines()
+        for commit in candidates():
             if self.tree(commit).get(full)==('100644','blob',blob):
                 probe=self.local.command('cat-file','--batch-check=%(objectname) %(objecttype) %(objectsize)',data=(blob+'\n').encode())
                 if probe.returncode or probe.stderr:fail('adapter_baseline_readback')
@@ -108,16 +155,18 @@ class CaptureEvidence:
         if encoded(self.census)!=census_bytes or encoded(self.ledger)!=ledger_bytes:fail('adapter_anchor')
         if repo.source_get_tree(self.census['source_commit'])!=self.census['get_tree']:fail('adapter_source_tree')
         self.records={}
+        receipts=repo.read_many(head,{capture.record_path(i):5*capture.MIB for i in self.ledger['records']})
         for ident in self.ledger['records']:
-            data=repo.read(head,capture.record_path(ident),5*capture.MIB)
+            data=receipts.pop(capture.record_path(ident))
             value=strict_capture_json(data,5*capture.MIB)
             if encoded(value)!=data:fail('adapter_receipt')
             self.records[ident]=value
         if capture.validate_ledger(self.census,self.ledger,self.records) or not self.ledger['finalized']:fail('adapter_incomplete_capture')
         capture.verify_scope_history(repo.local,head,self.census,self.ledger,repo)
         self.old={};self.initial={};self.conflicts={};self.source={}
+        old_notes=repo.read_many(self.census['source_commit'],{retention.GET+'/'+row['filePath']:owned.MAX_NOTE for row in self.census['eligible'].values()})
         for ident,mirror in self.census['eligible'].items():
-            old=repo.read(self.census['source_commit'],retention.GET+'/'+mirror['filePath'],owned.MAX_NOTE)
+            old=old_notes[retention.GET+'/'+mirror['filePath']]
             if retention.oid(old)!=mirror['gitBlob'] or sha(old)!=mirror['sha256']:fail('adapter_old_hash')
             self.old[ident]=old
             if ident not in self.records:

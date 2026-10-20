@@ -40,9 +40,11 @@ def anchor(value):
 
 def check_state(value):
     try:
-        if not isinstance(value,dict) or not set(initial_state()) <= set(value) <= set(initial_state()) | set(png_store.ASSET_KEYS) or value['contract']!=CONTRACT:fail('outbox_state_invalid')
+        if not isinstance(value,dict) or not set(initial_state()) <= set(value) <= set(initial_state()) | set(png_store.ASSET_KEYS) | {'historical_captures'} or value['contract']!=CONTRACT:fail('outbox_state_invalid')
         e.check_state(value['engine_state'])
         png_store.check_outer_assets(value)
+        import get_notion_historical as historical
+        historical.check_captures(value.get('historical_captures',{}))
         pending=value['pending_by_id'];order=value['rotation_order'];origin=value['origin'];cursor=value['last_enqueued_publication'];tip=value['observed_publication_tip']
         if not isinstance(pending,dict) or not isinstance(order,list) or len(pending)>MAX_RECORDS or len(order)!=len(pending) or any(not isinstance(i,str) for i in order) or len(set(order))!=len(order) or set(order)!=set(pending):fail('outbox_state_invalid')
         if origin is None:
@@ -235,7 +237,7 @@ class EngineStore:
         e.plan_recovery.preserve_holds(old,value)
         next_value['engine_state']=deepcopy(value)
         journal=value['journal'] or old['journal']
-        if journal is not None:
+        if journal is not None and not (journal['plan'].get('property_only') or journal['plan'].get('historical_only')):
             plan=journal['plan'];desc=plan['publication']
             if desc.get('initial_cohort') is None:
                 if not desc.get('outbox_receipt_sha256'):fail('outbox_source_invalid')

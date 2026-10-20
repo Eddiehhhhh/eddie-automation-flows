@@ -431,7 +431,7 @@ def json_header(data):
 
 def git_inventory(repo,parent):
     """Read every Markdown identity from one immutable tree, without assets."""
-    tree=repo.tree(parent);current={};total=0
+    tree=repo.tree(parent);selected={}
     for path,row in tree.items():
         if not path.startswith(legacy.retention.GET+'/'):continue
         legacy.retention.safe_path(path)
@@ -439,9 +439,12 @@ def git_inventory(repo,parent):
         rel=path[len(legacy.retention.GET)+1:]
         if is_markdown(rel) or rel in (STATE,legacy.STATE):
             maximum=MAX_STATE if rel in (STATE,legacy.STATE) else legacy.owned.MAX_NOTE
-            data=repo.read(parent,path,maximum);total+=len(data)
-            if total>legacy.MAX_TREE:fail('canonical_budget')
-            current[rel]=data
+            selected[path]=maximum
+    try:values=repo.read_many(parent,selected)
+    except raw.ParityFailure as exc:
+        if str(exc)=='adapter_tree_budget':fail('canonical_budget')
+        raise
+    current={path[len(legacy.retention.GET)+1:]:data for path,data in values.items()}
     inventory(current)
     return current
 

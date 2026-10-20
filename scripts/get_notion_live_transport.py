@@ -42,7 +42,7 @@ class Transport:
     def __call__(self,method,path,body=None):
         if not isinstance(path,str):fail('invalid_route')
         read=bool(ro.read_route(method,path))
-        write=(method=='POST' and path=='/pages') or (method=='PATCH' and re.fullmatch(r'/blocks/[a-f0-9]{32}(?:/children)?',path))
+        write=(method=='POST' and path=='/pages') or (method=='PATCH' and re.fullmatch(r'/blocks/[a-f0-9]{32}(?:/children)?',path)) or (method=='PATCH' and re.fullmatch(r'/pages/[a-f0-9]{32}',path) and isinstance(body,dict) and set(body)=={'properties'})
         if not read and not write:fail('invalid_route')
         key=fingerprint(method,path,body)
         if not read and (key not in self.approved or key in self.attempted):fail('write_not_authorized_or_already_attempted')
@@ -178,6 +178,7 @@ class API:
         parent=value.get('parent');props=value.get('properties')
         if not isinstance(parent,dict) or native.sha(native.uuid(parent.get('database_id')))!=self.db_pin:fail('wrong_database')
         if not isinstance(props,dict) or not isinstance(props.get('笔记 ID'),dict) or props['笔记 ID'].get('type')!='rich_text':fail('wrong_schema')
+        return deepcopy(props)
     def matches(self,ident):
         matches=[];cursor=None;seen=set()
         for _ in range(100):
@@ -252,3 +253,18 @@ class API:
         parent=value.get('parent')
         if not isinstance(parent,dict) or native.uuid(parent.get('data_source_id'))!=self.source:fail('write_uncertain')
         return native.uuid(value.get('id'))
+
+    def update_properties(self,page_id,properties):
+        import get_notion_properties as mapping
+        page=native.uuid(page_id)
+        if page not in self.known_pages:fail('unread_target')
+        if not isinstance(properties,dict) or not properties or set(properties)-set(mapping.FIELDS):fail('invalid_approval')
+        schema=mapping.schema_projection(self.schema())
+        for name,value in properties.items():
+            if value.get('type')!=mapping.FIELDS[name][1] or mapping.empty(value):fail('invalid_approval')
+            kind=value['type']
+            options=[value[kind]['name']] if kind=='select' else [x['name'] for x in value[kind]] if kind=='multi_select' else []
+            if any(option not in schema[name]['options'] for option in options):fail('wrong_schema')
+        result=self._write('PATCH','/pages/'+page,{'properties':deepcopy(properties)})
+        if result.get('object')!='page' or native.uuid(result.get('id'))!=page or native.uuid(result.get('parent',{}).get('data_source_id'))!=self.source or result.get('archived') is True or result.get('in_trash') is True:fail('write_uncertain')
+        return page

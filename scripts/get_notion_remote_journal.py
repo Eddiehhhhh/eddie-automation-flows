@@ -444,6 +444,8 @@ class RemoteJournal:
             if png_expired is None:
                 parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
             engine.plan_recovery.preserve_holds(old_value['engine_state'],value['engine_state'])
+            import get_notion_historical as historical
+            historical.preserve_captures(old_value,value)
             if png_expired is not None:
                 expired.validate_transition(old_value, value, new_policy_sha256=policy, evidence=fresh_evidence)
             elif png_reset_ticket is None:
