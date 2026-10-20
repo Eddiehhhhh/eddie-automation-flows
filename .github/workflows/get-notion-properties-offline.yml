@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install verified metadata parser
-        run: python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt
+        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
       - name: Test mapping and durable transactions without credentials
         env:
           PYTHONPATH: scripts:tests
