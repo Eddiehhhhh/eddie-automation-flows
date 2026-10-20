@@ -19,6 +19,7 @@ import build_observatory_frontend
 import iteration_closeout
 import iteration_incremental_audit
 import iteration_source_discovery
+from iteration_public_state import public_state
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -44,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--write-latest", action="store_true")
     parser.add_argument("--finalize", action="store_true", help="Write observatory closeout files after preflight")
-    parser.add_argument("--state-output", help="Optional JSON path for last-run state output")
+    parser.add_argument("--state-output", help="Optional JSON path for aggregate-only last-run state")
     args = parser.parse_args()
     if args.dry_run and (args.write_latest or args.finalize or args.state_output):
         parser.error("--dry-run cannot be combined with write options")
@@ -271,7 +272,7 @@ def main() -> int:
         if not state_path.is_absolute():
             state_path = ROOT / state_path
         summary["state_output_path"] = iteration_source_discovery.rel(state_path)
-        summary["state_output_changed"] = stable_write_json(state_path, summary)
+        summary["state_output_changed"] = stable_write_json(state_path, public_state(summary))
 
     if args.format == "markdown":
         print(render_markdown(summary), end="")
@@ -282,3 +283,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

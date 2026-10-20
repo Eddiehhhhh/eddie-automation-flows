@@ -16,6 +16,7 @@ from typing import Any, Iterable
 import build_observatory_frontend
 import iteration_incremental_audit
 import iteration_source_discovery
+from iteration_public_state import public_state
 import workspace_intake_report
 
 
@@ -129,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-days", type=int)
     parser.add_argument("--format", choices=["json", "markdown"], default="json")
     parser.add_argument("--write-latest", action="store_true")
-    parser.add_argument("--state-output")
+    parser.add_argument("--state-output", help="Optional JSON path for aggregate-only last-run state")
     return parser.parse_args()
 
 
@@ -1455,7 +1456,7 @@ def main() -> int:
         state_path = Path(args.state_output)
         if not state_path.is_absolute():
             state_path = ROOT / state_path
-        stable_write_json(state_path, summary)
+        stable_write_json(state_path, public_state(summary))
     if args.format == "markdown":
         print(render_markdown(summary), end="")
     else:
@@ -1465,3 +1466,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
