@@ -189,4 +189,65 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(out['link_differences']['affected_nodes'],1)
         self.assertEqual(out['link_differences']['affected_roots'],1)
 
+
+
+
+class TypedDateTests(unittest.TestCase):
+    fixture = Tests.fixture
+    run_d = Tests.run_d
+    def fixture_dates(self):
+        row,snap=self.fixture()
+        for name in ('Created','Updated'):
+            row['properties'][name]={'type':'date','date':{'start':'2031-02-04T05:06:37+09:00'}}
+            snap['properties_raw'][name]=deepcopy(row['properties'][name])
+        return row,snap
+    def dates(self,snap,start,end=None,zone=None):
+        for name in ('Created','Updated'):
+            snap['properties_raw'][name]['date']={'start':start,'end':end,'time_zone':zone}
+    def assert_safe(self,out):
+        raw=json.dumps(out)
+        for private in ('2031-02-04','2031-02-03','05:06','20:06','Created','Updated','PRIVATE',f.N,f.DS):
+            self.assertNotIn(private,raw)
+    def test_equal_instant_utc_and_server_nulls_are_accepted(self):
+        row,snap=self.fixture_dates();self.dates(snap,'2031-02-03T20:06:37.000Z')
+        out=self.run_d(row,snap);self.assertEqual(out['status'],'matched')
+        self.assertEqual(out['properties']['date_differences']['matched_different_representation'],2)
+        self.assert_safe(out)
+    def test_minute_floor_is_classified_but_never_accepted(self):
+        row,snap=self.fixture_dates();self.dates(snap,'2031-02-03T20:06:00.000Z')
+        before=e.encoded([row,snap]);out=self.run_d(row,snap)
+        self.assertTrue(out['semantics_equal']);self.assertFalse(out['created_accepts'])
+        self.assertEqual(out['status'],'mismatch');self.assertEqual(out['properties']['other_mismatched'],2)
+        self.assertEqual(out['properties']['date_differences']['observed_exact_minute_floor'],2)
+        self.assertEqual(e.encoded([row,snap]),before);self.assert_safe(out)
+    def test_changed_second_is_not_tolerated(self):
+        row,snap=self.fixture_dates();self.dates(snap,'2031-02-03T20:06:38Z')
+        out=self.run_d(row,snap);self.assertFalse(out['created_accepts'])
+        self.assertEqual(out['properties']['date_differences']['other_instant_difference'],2)
+    def test_non_null_end_and_zone_are_invalid(self):
+        for end,zone in [('2031-02-04T00:00:00Z',None),(None,'Asia/Shanghai')]:
+            row,snap=self.fixture_dates();self.dates(snap,'2031-02-03T20:06:37Z',end,zone)
+            out=self.run_d(row,snap);self.assertFalse(out['created_accepts'])
+            self.assertEqual(out['properties']['date_differences']['missing_or_invalid'],2)
+    def test_date_only_does_not_equal_datetime(self):
+        row,snap=self.fixture_dates();self.dates(snap,'2031-02-03')
+        out=self.run_d(row,snap);self.assertFalse(out['created_accepts'])
+        self.assertEqual(out['properties']['date_differences']['date_only_vs_datetime'],2)
+    def test_null_and_missing_dates_fail_closed(self):
+        row,snap=self.fixture_dates();snap['properties_raw']['Created']['date']=None
+        del snap['properties_raw']['Updated']
+        out=self.run_d(row,snap);self.assertFalse(out['created_accepts'])
+        self.assertEqual(out['properties']['date_differences']['null_mismatch'],1)
+        self.assertEqual(out['properties']['date_differences']['missing_or_invalid'],1)
+    def test_select_and_multi_select_use_production_values(self):
+        row,snap=self.fixture_dates()
+        row['properties']['Choice']={'type':'select','select':{'name':'Synthetic'}}
+        snap['properties_raw']['Choice']={'type':'select','select':{'name':'Synthetic','id':'server-id','color':'blue'}}
+        row['properties']['Tags']={'type':'multi_select','multi_select':[{'name':'Two'},{'name':'One'}]}
+        snap['properties_raw']['Tags']={'type':'multi_select','multi_select':[{'name':'One','color':'red'},{'name':'Two','id':'server'}]}
+        self.assertEqual(self.run_d(row,snap)['status'],'matched')
+    def test_unsupported_property_type_remains_blocked(self):
+        row,snap=self.fixture_dates();row['properties']['Bad']={'type':'number','number':1}
+        out=self.run_d(row,snap);self.assertEqual(out['status'],'blocked');self.assertEqual(out['reason'],'input_invalid')
+
 if __name__=='__main__':unittest.main()

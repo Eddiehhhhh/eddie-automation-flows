@@ -10,13 +10,13 @@ from pathlib import Path
 import subprocess
 import sys
 
-A='086fc1425a95f7bce6df55b3e36aa449f679a316'
-STATE_COMMIT='cd18cea23ef94cba570afd45c47ae16be8af6745'
-STATE_BLOB='045b41400e1b539fde0586248723ac8305dd0ab3'
-STATE_SHA='25a4ed324a22068d36234bafffcb7c1736a224592a1b0265be9352f1dd998ee0'
-STATE_BYTES=673850
-PLAN_SHA='a54e2736d552ce4fc4f14810bb052745dfc931468b7d06b6bc5608678bdf18b5'
-OP_SHA='03904ded8243ecfd65115107fcd22414a976e242a901a8b5566669c6f9a4680c'
+A='40b120de009b9e7cc68f7811614c77fe4e17d385'
+STATE_COMMIT='9ce4a19e7c44f7d1a938b9fc0add46b460ec84da'
+STATE_BLOB='a4e06fe9c2d0965b62318f0f73ae4f87af68fad2'
+STATE_SHA='3f20fb41b81896c51c4e76e4503d305e586774e23699a4055c69b66a9292922a'
+STATE_BYTES=1234228
+PLAN_SHA='863aa55bccdee516b92cc30bd0369b4e43e32e634200deffe64d6085b5830d0d'
+OP_SHA='68b2fb7529aa6a08dfca5865e210b62b404f2813a64ec6f7c3f0c2c69ae7f4d4'
 CONTRACT='get-saved-create-inspection-1'
 
 class Blocked(ValueError):pass
@@ -45,9 +45,17 @@ def inspect(remote, request, writer_guard, asset_get, diagnose):
         outbox.check_state(state)
         if outbox.encoded(state)!=raw:fail('state_changed')
         journal=state['engine_state']['journal'];op=journal['operation'];plan=journal['plan']
-        if journal['index']!=0 or op['kind']!='create' or op['phase']!='acknowledged' or e.digest(plan)!=PLAN_SHA or e.digest(op)!=OP_SHA:fail('operation_changed')
-        row=plan['records'][0];source=plan['policy']['data_source_id'];page=op['response']
-        rec=png_store.upload_receipts(state)[row['note_id']]
+        if (journal['index']!=0 or op['kind']!='create_batches' or op['phase']!='acknowledged'
+                or op.get('batch_index')!=0 or e.digest(plan)!=PLAN_SHA or e.digest(op)!=OP_SHA):fail('operation_changed')
+        row=plan['records'][0];source=plan['policy']['data_source_id'];page=op['page_id']
+        e.create_batches.validate_plan(row,source)
+        e.create_batches.validate_operation(op,row)
+        spec=row['create_batches']['batches'][0]
+        if op['batches'][0]['response']!=page:fail('operation_changed')
+        # The frozen plan pins 98 root subtrees / 100 recursive blocks.
+        # Inspect only the acknowledged prefix, not the unsent second batch.
+        prefix={**row,'rendered':row['rendered'][:spec['end']]}
+        rec=png_store.upload_receipts(state,asset_key='png_assets_seq2')[row['note_id']]
         stage='writers'
         if not e.p.writer_gate({'old_writer_evidence':writer_guard()}):fail('writer_gate_unknown')
         known={page}
@@ -77,11 +85,13 @@ def inspect(remote, request, writer_guard, asset_get, diagnose):
         stage='image_readback'
         bound=png.bind_snapshot(snapshot,row['note_id'],rec['receipt'],rec['sha256'],request=readonly,asset_get=asset_get)
         stage='compare'
-        result=diagnose(row,bound['snapshot'],page,source)
+        result=diagnose(prefix,bound['snapshot'],page,source)
         stage='final_guard'
         if m.guard(remote)!=STATE_COMMIT or not e.p.writer_gate({'old_writer_evidence':writer_guard()}):fail('state_changed')
         return {'contract':CONTRACT,'status':'inspected','state_sha256':STATE_SHA,'plan_sha256':PLAN_SHA,'operation_sha256':OP_SHA,
-                'remote_writes':0,'journal_writes':0,'asset_downloads':bound['asset_downloads'],'comparison':result}
+                'remote_writes':0,'journal_writes':0,'asset_downloads':bound['asset_downloads'],
+                'batch_index':0,'expected_prefix_roots':spec['end'],
+                'expected_prefix_blocks':spec['total_blocks'],'comparison':result}
     except Exception as exc:
         allowed={'state_changed','operation_changed','writer_gate_unknown','write_forbidden','read_scope_changed','saved_page_changed','permission_denied','asset_permission_denied','request_budget','response_budget','asset_download_budget','asset_bytes_mismatch','asset_page_changed','asset_block_changed'}
         return {'contract':CONTRACT,'status':'blocked','stage':stage,'reason':str(exc) if str(exc) in allowed else 'inspection_failed','remote_writes':0,'journal_writes':0}

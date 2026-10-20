@@ -20,8 +20,17 @@ import get_notion_live_transport as live
 class InspectionTests(unittest.TestCase):
     def fixture(self):
         note='1234567890123456789';source='1'*32;page='2'*32
-        plan={'policy':{'data_source_id':source},'records':[{'note_id':note}]}
-        op={'kind':'create','phase':'acknowledged','response':page}
+        blocks=[e.p.block('paragraph',{'rich_text':[e.p.text_run('Synthetic block')]}) for _ in range(182)]
+        blocks[0]['children']=[e.p.block('paragraph',{'rich_text':[e.p.text_run('Synthetic child')]}) for _ in range(2)]
+        row={'note_id':note,'action':'create','before_sha256':e.digest(None),
+             'rendered':blocks,'properties':{'笔记 ID':{'type':'rich_text','rich_text':[e.p.text_run(note)]}}}
+        row['create_batches']=e.create_batches.prepare(blocks,row['properties'],source)
+        row['request_blocks']=e.request_blocks(blocks[:row['create_batches']['batches'][0]['end']])
+        plan={'policy':{'data_source_id':source},'records':[row]}
+        op={'kind':'create_batches','phase':'acknowledged','batch_index':0,
+            'page_id':page,'properties_sha256':None,
+            'batches':[{'phase':'acknowledged','response':page,'roots':[],
+                        'blocks':[],'prefix_sha256':None}]}
         state={'engine_state':{'journal':{'index':0,'plan':plan,'operation':op}}}
         raw=json.dumps(state,sort_keys=True,separators=(',',':')).encode()
         class Remote:
@@ -139,5 +148,40 @@ class InspectionTests(unittest.TestCase):
             self.assertEqual(result['status'],'inspected');self.assertEqual(result['journal_writes'],0)
             self.assertEqual(result['remote_writes'],0);self.assertEqual(calls,[])
             self.assertEqual(guard.call_count,2)
+
+
+
+    def test_seq2_receipt_and_exact_prefix_forwarded(self):
+        with self.setup_case() as (stack,remote,guard,source,page,note):
+            api=stack.enter_context(patch.object(live,'API'));api.return_value.read_note.return_value={'page_id':page}
+            receipts=stack.enter_context(patch.object(store,'upload_receipts',return_value={note:{'receipt':{'synthetic':True},'sha256':'a'*64}}))
+            bound=stack.enter_context(patch.object(png,'bind_snapshot',return_value={'snapshot':{'page_id':page},'asset_downloads':2}))
+            captured=[]
+            def diagnose(row,snapshot,saved,ds):
+                captured.append((row,snapshot,saved,ds));return {'status':'matched'}
+            out=r.inspect(remote,lambda *a:{},lambda:{},lambda u:b'',diagnose)
+            self.assertEqual(out['status'],'inspected');self.assertEqual(out['expected_prefix_roots'],98)
+            self.assertEqual(out['expected_prefix_blocks'],100)
+            self.assertEqual(receipts.call_args.kwargs,{'asset_key':'png_assets_seq2'})
+            self.assertEqual(len(captured[0][0]['rendered']),98)
+            self.assertEqual(e.create_batches.node_count(captured[0][0]['rendered']),100)
+            self.assertEqual(captured[0][2:],(page,source))
+            self.assertEqual(bound.call_args.args[2],{'synthetic':True})
+            self.assertEqual(bound.call_args.args[3],'a'*64)
+            self.assertEqual(guard.call_count,2)
+    def test_binding_failure_cannot_become_comparison(self):
+        with self.setup_case() as (stack,remote,guard,source,page,note):
+            api=stack.enter_context(patch.object(live,'API'));api.return_value.read_note.return_value={'page_id':page}
+            stack.enter_context(patch.object(png,'bind_snapshot',side_effect=ValueError('asset_bytes_mismatch')))
+            compare=stack.enter_context(patch.object(e,'created'))
+            out,calls=self.run_case(remote)
+            self.assertEqual(out['reason'],'asset_bytes_mismatch');self.assertEqual(out['stage'],'image_readback')
+            compare.assert_not_called()
+    def test_saved_page_drift_blocks_before_binding(self):
+        with self.setup_case() as (stack,remote,guard,source,page,note):
+            api=stack.enter_context(patch.object(live,'API'));api.return_value.read_note.return_value={'page_id':'9'*32}
+            bind=stack.enter_context(patch.object(png,'bind_snapshot'))
+            out,calls=self.run_case(remote)
+            self.assertEqual(out['reason'],'saved_page_changed');bind.assert_not_called()
 
 if __name__=='__main__':unittest.main()

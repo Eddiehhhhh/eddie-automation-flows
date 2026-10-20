@@ -6,6 +6,7 @@ This module never grants ownership, changes a comparison, or authorizes retry.
 It performs no I/O and emits no identifiers, property names, URLs or text.
 """
 from collections import Counter
+from datetime import datetime
 import re
 from urllib.parse import urlsplit
 
@@ -188,6 +189,32 @@ def _link_differences(expected, actual):
     return report
 
 
+DATE_CATEGORIES = ('matched', 'matched_different_representation', 'missing_or_invalid',
+                   'null_mismatch', 'date_only_vs_datetime', 'observed_exact_minute_floor',
+                   'other_instant_difference')
+
+
+def _date_difference(submitted, observed):
+    """Fixed value-free observations; minute-floor classification NEVER accepts it."""
+    try:
+        left = engine.properties.value(submitted)
+        right = engine.properties.value(observed)
+        if right.get('type') != 'date': return 'missing_or_invalid'
+        if left == right:
+            return ('matched' if engine.same(submitted.get('date'), observed.get('date'))
+                    else 'matched_different_representation')
+        if left['date'] is None or right['date'] is None: return 'null_mismatch'
+        a, b = left['date']['start'], right['date']['start']
+        if ('T' in a) != ('T' in b): return 'date_only_vs_datetime'
+        if 'T' in a:
+            before, after = datetime.fromisoformat(a), datetime.fromisoformat(b)
+            if before != after and after == before.replace(second=0, microsecond=0):
+                return 'observed_exact_minute_floor'
+        return 'other_instant_difference'
+    except Exception:
+        return 'missing_or_invalid'
+
+
 def diagnose_created(row, normalized_snapshot, saved_page, data_source_id):
     """Return aggregate evidence only; this result cannot be used as a receipt.
 
@@ -202,8 +229,8 @@ def diagnose_created(row, normalized_snapshot, saved_page, data_source_id):
         if len(engine.encoded(row)) > MAX_BYTES or len(engine.encoded(normalized_snapshot)) > MAX_BYTES: return report
         if not isinstance(row.get('properties'), dict) or not 1 <= len(row['properties']) <= 20: return report
         for key, value in row['properties'].items():
-            if not isinstance(key, str) or not isinstance(value, dict) or value.get('type') not in ('title', 'rich_text'): return report
-            planner.normalize_rich(value.get(value['type']))
+            if not isinstance(key, str) or not isinstance(value, dict) or value.get('type') not in ('title', 'rich_text', 'date', 'select', 'multi_select'): return report
+            engine.properties.value(value)
         planner.note_id(row['note_id']); planner.notion_id(data_source_id)
         if planner.notion_id(saved_page) != saved_page: return report
         report['stage'] = 'expected_semantics'; report['reason'] = 'expected_invalid'
@@ -230,13 +257,15 @@ def diagnose_created(row, normalized_snapshot, saved_page, data_source_id):
         report['positional_exact_roots'] = sum(x == y for x,y in zip(ah,bh))
         report['stage'] = 'properties'; report['reason'] = 'properties_invalid'
         properties = {'submitted': len(row['properties']), 'matched': 0,
-                      'title_mismatched': 0, 'id_mismatched': 0, 'other_mismatched': 0}
+                      'title_mismatched': 0, 'id_mismatched': 0, 'other_mismatched': 0,
+                      'date_differences': {key: 0 for key in DATE_CATEGORIES}}
         for key, value in row['properties'].items():
             observed = view['properties'].get(key); kind = value['type']
             try:
                 same = (isinstance(observed, dict) and observed.get('type') == kind and
-                        engine.same(planner.normalize_rich(observed.get(kind)), planner.normalize_rich(value[kind])))
+                        engine.properties.value(observed) == engine.properties.value(value))
             except Exception: same = False
+            if kind == 'date': properties['date_differences'][_date_difference(value, observed)] += 1
             if same: properties['matched'] += 1
             else: properties['title_mismatched' if kind == 'title' else 'id_mismatched' if key == '笔记 ID' else 'other_mismatched'] += 1
         report['properties'] = properties
