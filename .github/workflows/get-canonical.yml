@@ -34,13 +34,11 @@ jobs:
   canonical-get:
     runs-on: ubuntu-latest
     timeout-minutes: 55
-    env:
-      GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: 'c3135ca1411f2a20e16b294f4a3209d73b626659'
+          ref: '334da578d6c5cd4e380859446d0f85c8ba92d7d0'
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -49,7 +47,7 @@ jobs:
         run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
       - name: Verify pinned reviewed runtime
         env:
-          RUNTIME_SHA: 'c3135ca1411f2a20e16b294f4a3209d73b626659'
+          RUNTIME_SHA: '334da578d6c5cd4e380859446d0f85c8ba92d7d0'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Validate bounded Notion route before Get
         env:
@@ -59,6 +57,7 @@ jobs:
         run: python scripts/get_notion_route_selection.py
       - name: Materialize verified private runtime data
         env:
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
           NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
@@ -66,14 +65,15 @@ jobs:
         run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
       - name: Validate complete private Notion route before Get
         env:
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
           NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
         run: python scripts/get_notion_controller_route.py --preflight
       - name: Prepare reviewed public policy
         env:
-          POLICY_B64: 'eyJjb2RlX3NoYSI6ImMzMTM1Y2ExNDExZjJhMjBlMTZiMjk0ZjRhMzIwOWQ3M2I2MjY2NTkiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI5N2ZiZjA5MGFjNjcwOTdhYTYwNmRlYTIyZmVmMzgzMTBiZWI4N2JiNzA3YjI2YTU3NGFmMzJlZDg3YzU1MjY1IiwiZ2V0X3BvbGljeV9zaGEyNTYiOiJmMTU0YzRiZTNmM2NkYmNiMWJkOWY0MWEwMzFmMmU4ODg3MGMyZTY0MWVhMjE4MDgwMDFhMGQ3ZmI4YTM2NDg3IiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6ImM4ZTU3NTIyNDA5YmViYTZiNTliYzg0YzY0ZTc0NzU1ZDVhMDNiZmUwNjcyYWViNmMxYTcwZTU3YzNkNjZhMGUiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
-          POLICY_SHA256: '862deb4a44736f7140e573ee16e6f180ca4c6bd06fc9f364c8f1385f79c810f8'
+          POLICY_B64: 'eyJjb2RlX3NoYSI6IjMzNGRhNTc4ZDZjNWNkNGUzODA4NTk0NDZkMGY4NWM4YmE5MmQ3ZDAiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiIxNzUyMDA1MjQzNTg5NTEzOGE2NTI5ZjNhODQ5NThkZGRiOGNjNTBiOWMyM2IwN2U2M2MxMmU1MmM4ZjhmMTc4IiwiZ2V0X3BvbGljeV9zaGEyNTYiOiJlYzMzYWJiZjU5MzNhMDE4YzFhZGRjNzMzOWM4MzFhN2Q1OWQyMDU2MTUxYjNhM2IwZDc0MzYxMDg1NzdmYjU1IiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6ImU1MTEwZjJlNTJkZTU5ODUyOTMyOGE1MzUwYzNmOTBjYjEyYTk1NTY0YjkzNGFlY2Y4NDQ5MTg3ZmNjMjVjZmEiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
+          POLICY_SHA256: 'c5bc86feee5b2ee82f3552ffec7fb622493dfd83e30486e3fd246bbd63ae9fc4'
         run: |
           python - <<'PY'
           import base64, hashlib, os
@@ -87,13 +87,14 @@ jobs:
       - name: Emit verified canonical publication anchor
         id: get_sync
         env:
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           GITHUB_TOKEN: ${{ github.token }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          POLICY_SHA256: '862deb4a44736f7140e573ee16e6f180ca4c6bd06fc9f364c8f1385f79c810f8'
-          SCOPE_SHA256: 'e1a633343eb47eee53a5a1281f3d45242740bcb87897d6100c2dacda6f796416'
+          POLICY_SHA256: 'c5bc86feee5b2ee82f3552ffec7fb622493dfd83e30486e3fd246bbd63ae9fc4'
+          SCOPE_SHA256: 'fb11bc52b9757e2ddaf0a577d4784c577a9cfd6f286c6e90f2cf506947c0e91f'
         run: |
           args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
           if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
@@ -106,10 +107,11 @@ jobs:
         if: ${{ steps.get_sync.outcome == 'success' && (github.event_name == 'schedule' || inputs.apply) }}
         continue-on-error: true
         env:
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          POLICY_SHA256: '862deb4a44736f7140e573ee16e6f180ca4c6bd06fc9f364c8f1385f79c810f8'
+          POLICY_SHA256: 'c5bc86feee5b2ee82f3552ffec7fb622493dfd83e30486e3fd246bbd63ae9fc4'
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
           NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
