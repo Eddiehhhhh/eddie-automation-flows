@@ -72,6 +72,17 @@ ERRORS.update({'png_expired_evidence_invalid','png_expired_missing_unverified','
 
 ERRORS.update(e.REASONS)
 
+# Fixed program diagnostics only; never raw exception text or private values.
+DIAGNOSTIC_ERRORS=frozenset(ERRORS | recurring.PUBLIC_ERROR_CODES | {'journal_loader_failed', 'journal_provenance_steps', 'missing_credentials', 'journal_provenance_failed', 'journal_checkpoint_write', 'unread_target', 'journal_loader_commit', 'private_proof_unverified', 'invalid_children', 'outbox_chain_incomplete', 'identity_query_invalid', 'source_content_budget', 'journal_provenance_changed', 'journal_loader_local_mutation', 'unsupported_code_color', 'permission_denied', 'invalid_blocks', 'journal_provenance_record', 'invalid_route', 'source_chain_invalid', 'source_publication_budget', 'journal_provenance_missing', 'journal_loader_cache', 'invalid_approval', 'outbox_source_invalid', 'outbox_state_changed', 'response_budget', 'journal_provenance_workflow', 'source_history_budget', 'asset_write_contract_missing', 'journal_loader_tree', 'journal_provenance_log', 'source_foreign_get_change', 'request_budget', 'journal_loader_unrequested_blob', 'source_chain_budget', 'journal_provenance_controller_step', 'wrong_note_identity', 'outbox_state_invalid', 'journal_provenance_context', 'journal_checkpoint_failed', 'outbox_empty', 'journal_provenance_no_checkpoint', 'duplicate_id', 'read_transport_failed', 'unsupported_source_format', 'journal_provenance_budget', 'outbox_duplicate_id', 'journal_checkpoint_locked', 'journal_checkpoint_budget', 'invalid_cohort', 'journal_loader_blob', 'journal_provenance_jobs', 'journal_checkpoint_receipt', 'journal_checkpoint_context', 'journal_loader_target', 'wrong_schema', 'malformed_payload', 'pagination_budget', 'journal_loader_budget', 'journal_provenance_other_controller', 'outbox_chain_invalid', 'outbox_budget', 'journal_provenance_repository', 'outbox_approval_invalid', 'journal_busy', 'invalid_table', 'outbox_journal_failed', 'unsupported_prepend', 'source_object_invalid', 'journal_provenance_time', 'source_blob_invalid', 'journal_provenance_runs', 'write_uncertain', 'journal_provenance_run', 'journal_provenance_job', 'incomplete_pagination', 'read_api_failed', 'wrong_parent', 'wrong_database', 'write_not_authorized_or_already_attempted'})
+
+def failure_diagnostic(exc):
+    reason=str(exc)
+    return {'reason':reason if reason in DIAGNOSTIC_ERRORS else 'notion_failed',
+        'failure_kind':('missing_key' if isinstance(exc,KeyError) else
+            'invalid_type' if isinstance(exc,TypeError) else
+            'invalid_value' if isinstance(exc,ValueError) else
+            'io_error' if isinstance(exc,OSError) else 'guard_or_runtime')}
+
 def fail(code):raise ValueError(code) from None
 
 
@@ -749,8 +760,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 safe['resumed_prior_rules_sha256']=run57_recovery.ENGINE_RULES
             return safe
     except Exception as exc:
-        reason=str(exc);reason=reason if reason in ERRORS else 'notion_failed'
-        return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,**safe_png_diagnostic(getattr(exc,'png_diagnostic',{})),
+        return {'contract':CONTRACT,'status':'failed','stage':stage,**failure_diagnostic(exc),**safe_png_diagnostic(getattr(exc,'png_diagnostic',{})),
             'write_state':'unknown' if write_possible or prior_effects is not False else 'not_attempted',
             'external_write_attempts':None if write_possible or prior_effects is not False else 0,'asset_downloads':getattr(exc,'asset_downloads',None) if type(getattr(exc,'asset_downloads',None)) is int and 0<=exc.asset_downloads<=200 else None,'complete_library_claimed':False}
 
@@ -807,9 +817,9 @@ def main(argv=None):
             historical_manifest=historical_manifest,approved_historical_manifest_sha256=args.approved_historical_manifest_sha256,
             historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True)
     except Exception as exc:
-        reason=str(exc);result={'contract':CONTRACT,'status':'failed','stage':'input','reason':reason if reason in ERRORS else 'notion_failed','write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
+        result={'contract':CONTRACT,'status':'failed','stage':'input',**failure_diagnostic(exc),'write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
     import get_private_runtime_report as report
-    print(json.dumps(report.public(result, ERRORS)),flush=True)
+    print(json.dumps(report.public(result, DIAGNOSTIC_ERRORS, allowed_stages=STAGES)),flush=True)
     return exit_status(result)
 
 

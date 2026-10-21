@@ -235,7 +235,7 @@ class CheckpointEmitter:
             fail('journal_checkpoint_failed')
 
 
-def _run_identity(run, policy):
+def _run_origin(run, policy):
     if not isinstance(run, dict): fail('journal_provenance_run')
     provenance.positive(run.get('id')); provenance.positive(run.get('run_attempt'))
     for key in ('repository', 'head_repository'):
@@ -244,14 +244,19 @@ def _run_identity(run, policy):
                 or repo.get('full_name') != provenance.REPOSITORY or repo.get('private') is not False):
             fail('journal_provenance_run')
     if (run.get('workflow_id') != policy['workflow_id'] or run.get('path') != policy['workflow_path']
-            or run.get('head_branch') != policy['head_branch']
-            or run.get('event') not in ('schedule', 'workflow_dispatch')):
+            or run.get('head_branch') != policy['head_branch']):
         fail('journal_provenance_run')
     journal.checked(run.get('head_sha'), 40)
     if provenance.timestamp(run['created_at']) > provenance.timestamp(run['updated_at']):
         fail('journal_provenance_time')
     return run
 
+
+def _run_identity(run, policy):
+    _run_origin(run, policy)
+    if run.get('event') not in ('schedule', 'workflow_dispatch'):
+        fail('journal_provenance_run')
+    return run
 
 def _terminal_run(run, policy):
     run = _run_identity(run, policy)
@@ -479,7 +484,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 or workflow.get('path') != policy['workflow_path']): fail('journal_provenance_workflow')
         # Bounded listing; failed runs remain candidates because a failed
         # Notion attempt can contain acknowledged durable writes.
-        candidates = []; seen = set(); latest = {}; attempt_candidates=set()
+        candidates = []; seen = set(); latest = {}; attempt_candidates=set(); listed_ids=set()
         for page in range(1, 4):
             listing = bounded.json('/actions/workflows/' + str(policy['workflow_id'])
                 + '/runs?per_page=30&page=' + str(page))
@@ -487,8 +492,23 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
             if (not isinstance(rows, list) or len(rows) > 30 or type(listing.get('total_count')) is not int
                     or listing['total_count'] < len(rows)): fail('journal_provenance_runs')
             for row in rows:
+                # A workflow-parse failure may be listed as a push. Only its
+                # first terminal failed attempt with authenticated zero jobs
+                # is negative evidence; failed Notion jobs remain candidates.
+                if not isinstance(row, dict): fail('journal_provenance_run')
+                ident=provenance.positive(row.get('id'))
+                if ident in listed_ids: fail('journal_provenance_changed')
+                listed_ids.add(ident)
+                if (row.get('event') == 'push' and type(row.get('run_attempt')) is int
+                        and row['run_attempt'] == 1 and row.get('status') == 'completed'
+                        and row.get('conclusion') == 'failure'):
+                    _run_origin(row, policy)
+                    empty=bounded.json('/actions/runs/'+str(ident)+'/attempts/1/jobs?per_page=100&page=1')
+                    if (not isinstance(empty,dict) or type(empty.get('total_count')) is not int
+                            or empty['total_count'] != 0 or empty.get('jobs') != []):
+                        fail('journal_provenance_jobs')
+                    continue
                 row = _latest_run(row, policy)
-                if row['id'] in latest: fail('journal_provenance_changed')
                 latest[row['id']] = row
             if len(rows) < 30: break
         if exclude_run_id is not None:
