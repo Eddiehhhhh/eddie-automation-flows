@@ -49,6 +49,13 @@ SOURCE_ERRORS = {'GetNote HTTP '+str(v): 'source_http_'+str(v) for v in (400,401
 SOURCE_ERRORS.update({'GetNote transport failed': 'source_transport_failed', 'GetNote redirect blocked': 'source_redirect_blocked', 'GetNote incomplete body': 'source_incomplete_body', 'Get response byte limit reached': 'source_response_budget'})
 
 
+# All values are program-defined fixed diagnostics, never exception arguments.
+PUBLIC_ERROR_CODES = frozenset(ERRORS | m.ERRORS | ENTRY_ERRORS | m.c.ERRORS | CORE_ERRORS | set(SOURCE_ERRORS.values()))
+
+def public_result(result):
+    import get_private_runtime_report as report
+    return report.public(result, PUBLIC_ERROR_CODES, allowed_stages=STAGES)
+
 def at_stage(stage, operation, *args, **kwargs):
     if stage not in STAGES:
         fail('runtime_failed')
@@ -331,8 +338,7 @@ def main(argv=None):
             writers_guard=writers_guard)
     except (Exception, SystemExit) as exc:
         result = failure(exc, attempt_started=attempt_started)
-    import get_private_runtime_report as report
-    print(json.dumps(report.public(result, ENTRY_ERRORS | frozenset(('runtime_activation_pending','runtime_failed')))), flush=True)
+    print(json.dumps(public_result(result)), flush=True)
     # No built-in Notion call/job; an independent sink must not turn a successful
     # Get job into failed provenance. Callback partials are explicitly nonfatal.
     return 0 if result.get('status') in ('recurring_candidate_verified', 'recurring_transaction_verified') and result.get('publication_output') != 'failed' else 1
