@@ -3,13 +3,14 @@
 No upload, writable image identity or source/state mutation. The exact source
 binding is independently fixed by the retained three-way historical proof.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from urllib.parse import urlsplit
 import get_notion_executor as e
 import get_notion_image_projection as projection
 
-TEMPLATE={'asset_blob': 'b79101f15a1e36730146b91f126c353f43ed4212', 'asset_bytes': 191784, 'asset_path_sha256': '8b92db0e5ce5d1ba4a9bec48afa4393f202e9d353ca6fb3772e4920aa59329de', 'asset_sha256': '6370d698c83f61c00bbfc4a75ed2fba67c40b4e517663e34ae3c7ffe72ec4558', 'candidate_roots': 19, 'candidate_semantic_sha256': '5168a8d1c99e32bf576d32254d6774c68865140253180e5629df9e00201b3b8b', 'contract': 'get-notion-preserved-image-text-proof-1', 'historical_evidence_sha256': '47e205a6ac771aa763943eab813d118b703ce4b20d9382cf306a4945cdf073f0', 'historical_readback_sha256': '42ad5a50314346707d85823c4f473a6eded0f5dc1b274a3e7e8de17699555ad0', 'image_line_sha256': 'a44edf755418393d301ed7ed42bd2cc60940ef0b79dad990bd40570cdc5a341c', 'note_id_sha256': '1b05800d685ea1add4c7e3abd6a1a5f471a87087dd55a6bfee612d9562280240', 'page_id_sha256': 'e5b9feb9ef5c24c9636bbaee769dcced53828c929615b7305c83ce6fb032246d', 'prepared_markdown_sha256': 'ce949cefd243c22c466b283ca591d34f8bab435748876e7e934ad5908a42e678', 'projection_sha256': 'fbdd6a775658ff52709cb825927ac6141ba2acccb148f8570e5f3fb050e957c4', 'proof_sha256': '63032a4a02c7de6930634255825c78e04f12de224d2ffa590b214ddee25d1e15', 'reference_sha256': '6bf6c4770b609f697ade26233e45cf096192b860b3761b6ce7a632f1b44350f0', 'source_binding_sha256': 'b2b1b0b3008aee968561b9ef6b16f8bc2fc28de430b42e28d1cc3985f2ec7c0e', 'source_blob': '941a7708dede1e0c89b213199bb3da9d5fe90e02', 'source_commit': 'cbcea1d0de84e106825146f39e1db726e06ace49', 'source_path_sha256': '9ec63e661cd848638bd8c687f7df2ddbc2591aff481477de14aa764976769177', 'source_sha256': '4ae07f389da46aae7085ce88c761e4007b8e7f9e60b605f6530648c61e4ca071', 'transform': 'single-bound-wiki-image-to-plain-paragraph-1', 'validation': 'prepared-readback-projected-logical-1'}
-TEMPLATE_SHA='d930fb19d085087187a1b11266552c92e716a5523c988f28f4a55b522e06c949'
+TEMPLATE = _private_bindings.value('get_notion_preserved_image', 'TEMPLATE')
+TEMPLATE_SHA = _private_bindings.value('get_notion_preserved_image', 'TEMPLATE_SHA')
 
 IMAGE_FAILURES=frozenset(('asset_source_changed','asset_target_changed','asset_bytes_mismatch','asset_host_unsupported','asset_source_type_unsupported','asset_download_budget','asset_byte_budget','asset_time_budget','asset_transport_failed','asset_http_failed','asset_caption_invalid','asset_caption_changed','asset_snapshot_invalid','asset_image_count','asset_parent_changed','asset_block_invalid','asset_block_changed','asset_page_changed','asset_media_mismatch','asset_changed','image_reference_changed','missing_asset','asset_binding_invalid'))
 

@@ -115,3 +115,5 @@ and resumed ownership without duplicate writes.
 PNG coverage also verifies that a lost first create response with an attached,
 expired image stays held without duplicate writes, including an explicit
 exact-page recovery attempt.
+
+The historical regression modules referenced here are retained in the private replay archive. They must be executed in an isolated private environment, not public CI. Public-tree tests exercise only synthetic or generic inputs.

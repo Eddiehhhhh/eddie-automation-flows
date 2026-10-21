@@ -1,4 +1,5 @@
 """Read-only binding of one previously verified image; no upload/write payloads."""
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 import time
 import urllib.request
@@ -8,8 +9,8 @@ import get_notion_native as n
 import get_notion_sink_plan as p
 import get_notion_image_projection as projection
 
-SOURCE_PIN='b2b1b0b3008aee968561b9ef6b16f8bc2fc28de430b42e28d1cc3985f2ec7c0e'
-PAGE_PIN='e5b9feb9ef5c24c9636bbaee769dcced53828c929615b7305c83ce6fb032246d'
+SOURCE_PIN = _private_bindings.value('get_notion_existing_image', 'SOURCE_PIN')
+PAGE_PIN = _private_bindings.value('get_notion_existing_image', 'PAGE_PIN')
 MAX_BYTES=191784
 # Exact second host observed in authenticated native image response in run 60.
 HOSTS=frozenset(('s3.us-west-2.amazonaws.com','prod-files-secure.s3.us-west-2.amazonaws.com'))

@@ -18,7 +18,8 @@ REGISTRY = 'Raw/03 Get/03 State/canonical-registry.json'
 REASONS = frozenset(('property_schema_changed', 'property_source_invalid',
     'property_timezone_required', 'property_timestamp_mismatch',
     'property_option_missing', 'property_manual_edit', 'property_unowned_value',
-    'property_source_empty', 'property_source_missing', 'property_budget', 'property_parser_unavailable'))
+    'property_source_empty', 'property_source_missing', 'property_budget', 'property_parser_unavailable',
+    'property_date_projection_invalid'))
 
 
 def fail(reason):
@@ -57,6 +58,11 @@ def source_fields(data, ident):
         if key not in {x[0] for x in FIELDS.values()}: continue
         try: result[key] = json.loads(raw)
         except ValueError:
+            # Legacy unquoted YAML flow tags use the same bounded decoder as
+            # quoted flow tags. Do not broaden any other metadata scalar.
+            if key == 'tags' and raw.startswith('[') and raw.endswith(']'):
+                result[key] = raw
+                continue
             # Old exporter emits plain ISO dates/scalars, never arbitrary YAML.
             if raw.startswith(('"', "'", '[', '{')): fail('property_source_invalid')
             result[key] = raw
@@ -112,6 +118,50 @@ def value(property_value):
     if kind in ('title', 'rich_text'):
         return {'type': kind, kind: p.normalize_rich(property_value.get(kind))}
     fail('property_schema_changed')
+
+
+DATE_WIRE_CONTRACT = 'get-notion-date-minute-wire-1'
+
+
+def _date_wire_projection(properties):
+    """A deliberate wire representation, not a tolerant readback comparator.
+
+    Source properties retain exact seconds. Date-only and null values remain
+    exact; non-null ranges/zones and naive timestamps are never repaired.
+    """
+    if not isinstance(properties, dict) or any(not isinstance(k, str) for k in properties):
+        fail('property_date_projection_invalid')
+    wire = deepcopy(properties); fields = []
+    for name, prop in properties.items():
+        normalized = value(prop)
+        if normalized['type'] != 'date' or normalized['date'] is None: continue
+        start = normalized['date']['start']
+        if 'T' not in start: continue
+        instant = datetime.fromisoformat(start)
+        wire[name]['date']['start'] = instant.replace(second=0, microsecond=0).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        fields.append(name)
+    return wire, sorted(fields)
+
+
+def date_wire_binding(properties):
+    """Create explicit metadata for a NEW approved plan; never edit its source."""
+    wire, fields = _date_wire_projection(properties)
+    if not fields: return None
+    return {'contract': DATE_WIRE_CONTRACT, 'fields': fields,
+            'source_sha256': p.digest(properties), 'wire_sha256': p.digest(wire)}
+
+
+def date_wire_properties(properties, binding=None):
+    """Unbound legacy values remain byte-exact; a bound mapping is deterministic."""
+    if binding is None: return deepcopy(properties)
+    try:
+        expected = date_wire_binding(properties)
+        if expected is None or not isinstance(binding, dict) or binding != expected:
+            fail('property_date_projection_invalid')
+        wire, _ = _date_wire_projection(properties)
+        return wire
+    except ValueError:
+        fail('property_date_projection_invalid')
 
 
 def empty(prop):

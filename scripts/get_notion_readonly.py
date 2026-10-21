@@ -4,6 +4,7 @@ Existing runtime secrets are consumed only by fixed-host read transports.
 All target blocks/source bodies stay in memory. There is no apply option,
 write endpoint, ref update, asset download, artifact or ownership adoption.
 """
+import get_private_runtime_bindings as _private_bindings
 import argparse
 from collections import Counter
 import json
@@ -42,8 +43,8 @@ PLAN_REASONS = {'uncommitted_source', 'dry_run_source', 'incomplete_source', 'id
     'format_not_accepted', 'writer_gate_unknown', 'authorization_missing', 'unsupported_source_format'}
 
 
-HISTORICAL_TEMPLATE = {'candidate_roots': 39, 'candidate_semantic_sha256': 'f7f250893e85c8df02549758e799c50ba616f53ae8dffee72283080aa90289f8', 'contract': 'get-notion-historical-semantic-proof-1', 'historical_evidence_sha256': '8abceda05bda7d36732629fa409eb284ee79ccb9e4b6c625795408fa447edef6', 'historical_readback_sha256': '81fd20fec7e0d15815079cdf4a5214f500823df1b31ba286b8d411388cd58659', 'note_id_sha256': '8754337352a6e2c3958dd5858fd8f8a1e7c87f6a5352439ad37330aecbdfc333', 'page_id_sha256': '92bbf878381321f99f36c6a89828c579f26d196df36292c7364c82f57294320c', 'prepared_markdown_sha256': '65c7e9a8d98639235d69530f5462ea9d2ee25407dae127af40d4f8bf20e2e1fa', 'proof_sha256': 'f3b616ec734324e785f4258482fb961ee937161316375ad8b28ea29c7d60f11e', 'source_blob': '445b1d2ae89689c76a6b0d5c7d7581cb57f29f82', 'source_commit': 'cbcea1d0de84e106825146f39e1db726e06ace49', 'source_path_sha256': '2556434993b07afe192608729cb60ebbc60e4139b622311134b8deb7ce17f7e3', 'source_sha256': '1af47de12fdf54ee69ca0f7628c68440e79b33fe7143fc453c578852b1fc38f5', 'transform': 'get-api-body-without-footer-native-h4-default-list-2', 'validation': 'prepared-readback-logical-1'}
-HISTORICAL_TEMPLATE_SHA = 'de1e76df86024d76814068a2783e0b8fa0e352d5db71611269f4bf6f3f634eb0'
+HISTORICAL_TEMPLATE = _private_bindings.value('get_notion_readonly', 'HISTORICAL_TEMPLATE')
+HISTORICAL_TEMPLATE_SHA = _private_bindings.value('get_notion_readonly', 'HISTORICAL_TEMPLATE_SHA')
 
 
 class ReadFailure(ValueError):

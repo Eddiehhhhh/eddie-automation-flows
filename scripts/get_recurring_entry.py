@@ -6,6 +6,7 @@ and receipt SHA-256 obtained from an independently verified publication result;
 computing that SHA from the supplied repository does not establish trust.
 Receipts are integrity/continuity records, not cryptographic authorship claims.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 import argparse
 import json
@@ -23,14 +24,7 @@ RECEIPT = '03 State/canonical-sync-receipt.json'
 FULL_RECEIPT = r.GET + '/' + RECEIPT
 MAX_RECEIPT = 512 * 1024
 MAX_INTERVENING = 1024
-BOOTSTRAP = {
-    'commit': '4368df6841d03b77872840b1b172cf86513a00f5',
-    'get_tree': '50c9e85af7c5f1fc0bd224cfa3d4a58ec93aad97',
-    'legacy_sha256': m.INITIAL_SHA,
-    'capture_anchor': deepcopy(m.ANCHOR),
-    'legacy_managed': 1152, 'legacy_conflicts': 771,
-    'legacy_pending': 9, 'existing_unmanaged': 972,
-}
+BOOTSTRAP = _private_bindings.value('get_recurring_entry', 'BOOTSTRAP')
 STATE_PATHS = {r.GET + '/' + a.STATE, r.GET + '/' + n.STATE}
 RECEIPT_KEYS = {
     'contract', 'policy_sha256', 'sequence', 'parent_commit',

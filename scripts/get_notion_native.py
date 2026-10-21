@@ -4,18 +4,16 @@ request(method, relative_path, json_payload_or_None) is injected by caller.
 Use Notion-Version 2025-09-03. Never log callback payloads/results/errors.
 Returned snapshots contain private content and MUST remain temporary in memory.
 """
+import get_private_runtime_bindings as _private_bindings
 import hashlib
 import json
 import re
 from copy import deepcopy
 from urllib.parse import urlencode
 
-PAGE_PINS = {
- 'e44c79c3b3c130ac2d64c512f8a716d4665ad1da3dcc4c23bfcf1dde6a614916': '1d47b4bddbaa40e9c8f5e03a541c50f1eae7039387bb54954dbdaf7dd8992bb0',
- 'cdd82f3f220aa4376f1e8429b572054d51a773b75cec1200b417989629063814': 'ac91e3a98aaa29c0ce002d3f24e55b6d5719209d1d1354f80b364d77c61c2d4d',
-}
-DATA_SOURCE_PIN = '897387f98ed5772d2ad8dafbbec06b7d3064685bef078f1afa3b6314493f8d4b'
-DATABASE_PIN = 'fda449570eb9b446150825c38098e6b8314bfd9f14ac2c24c819ca0f4d420cbd'
+PAGE_PINS = _private_bindings.value('get_notion_native', 'PAGE_PINS')
+DATA_SOURCE_PIN = _private_bindings.value('get_notion_native', 'DATA_SOURCE_PIN')
+DATABASE_PIN = _private_bindings.value('get_notion_native', 'DATABASE_PIN')
 MAX_PAGES = 100
 MAX_BLOCKS = 10000
 MAX_BYTES = 16 * 1024 * 1024

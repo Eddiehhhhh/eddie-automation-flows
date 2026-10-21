@@ -22,12 +22,15 @@ import get_legacy_adapter as git
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run53_recovery as run53_recovery
+import get_notion_run57_recovery as run57_recovery
 import get_notion_live_transport as transport
 import get_notion_content_scope as content_scope
 import get_notion_create_batches as create_batches
 import get_notion_properties as properties
 import get_notion_property_transaction as property_transaction
 import get_notion_creation_properties as creation_properties
+import get_notion_metadata_pending as metadata_pending
+import get_notion_incremental_properties as incremental_properties
 
 CONTRACT = 'get-notion-journal-engine-1'
 STATE_PATH = '.sync/get-notion/state.json'
@@ -42,7 +45,7 @@ REASONS = frozenset(('source_changed', 'source_invalid', 'state_changed', 'state
     'archive_not_approved', 'create_not_approved', 'format_not_approved', 'writer_gate_unknown',
     'request_budget', 'request_not_dispatched', 'batch_boundary_yield', 'journal_failed', 'journal_busy', 'uncertain_append', 'uncertain_create',
     'uncertain_archive', 'readback_mismatch', 'transport_read_failed', 'transport_write_uncertain',
-    'recovery_not_approved', 'unsupported_prepend', 'unresolved_operation', 'privacy_scope_required', 'content_review_required', 'empty_source', 'prior_denial', 'uncertain_properties', 'other')) | properties.REASONS
+    'source_state_hold_budget', 'recovery_not_approved', 'unsupported_prepend', 'unresolved_operation', 'privacy_scope_required', 'content_review_required', 'empty_source', 'prior_denial', 'uncertain_properties', 'other')) | properties.REASONS
 
 
 class Blocked(ValueError):
@@ -72,7 +75,7 @@ def initial_state():
 
 def operation_has_effects(operation):
     """Prepared next ranges do not erase earlier page-creation effects."""
-    return bool(operation and (operation.get('kind') in ('cleanup','archive')
+    return bool(operation and (operation.get('kind') in ('cleanup','archive',incremental_properties.KIND)
         or operation.get('phase')!='prepared'
         or operation.get('kind')=='create_batches' and operation.get('batch_index',0)>0))
 
@@ -109,9 +112,13 @@ def check_preserved_bindings(bindings, *, page=None, managed=(), protected=None,
 
 def check_state(value):
     try:
-        if not isinstance(value, dict) or not {'contract', 'receipts', 'failures', 'journal'} <= set(value) <= {'contract', 'receipts', 'failures', 'journal', 'unresolved_by_id', 'property_receipts'} or value['contract'] != CONTRACT or not isinstance(value['receipts'], dict) or not isinstance(value['failures'], dict): fail('state_invalid')
+        if not isinstance(value, dict) or not {'contract', 'receipts', 'failures', 'journal'} <= set(value) <= {'contract', 'receipts', 'failures', 'journal', 'unresolved_by_id', 'property_receipts', 'metadata_results'} or value['contract'] != CONTRACT or not isinstance(value['receipts'], dict) or not isinstance(value['failures'], dict): fail('state_invalid')
         plan_recovery.validate_holds(value.get('unresolved_by_id',{}))
         properties.check_receipts(value.get('property_receipts', {}))
+        metadata_pending.check_results(value.get('metadata_results', {}))
+        for ident, metadata in value.get('metadata_results', {}).items():
+            body = value['receipts'].get(ident)
+            if not isinstance(body, dict) or any(body.get(key) != metadata[key] for key in ('page_id', 'data_source_id')): fail('state_invalid')
         for ident, metadata in value.get('property_receipts', {}).items():
             body = value['receipts'].get(ident)
             if not isinstance(body, dict) or any(body.get(key) != metadata[key] for key in ('page_id', 'data_source_id')): fail('state_invalid')
@@ -141,6 +148,11 @@ def check_state(value):
         if journal is not None:
             if not isinstance(journal,dict) or set(journal)!={'plan_sha256','plan','index','operation'} or not isinstance(journal['plan'],dict) or digest(journal['plan'])!=journal['plan_sha256'] or type(journal['index']) is not int or not 0<=journal['index']<=len(journal['plan'].get('records',[])) or (journal['operation'] is not None and not isinstance(journal['operation'],dict)):fail('state_invalid')
             operation=journal['operation']
+            if incremental_properties.enabled(journal['plan']):
+                incremental_properties.check_plan(journal['plan'])
+            if operation is not None and operation.get('kind')==incremental_properties.KIND:
+                if journal['index']>=len(journal['plan']['records']):fail('state_invalid')
+                incremental_properties.validate_operation(operation,journal['plan']['records'][journal['index']],journal['plan'],value)
             if operation is not None and operation.get('kind')=='create_batches':
                 if journal['index']>=len(journal['plan']['records']):fail('state_invalid')
                 row=journal['plan']['records'][journal['index']]
@@ -414,7 +426,7 @@ def propose_initial_scope(publication, snapshots, data_source_id, previous_previ
 
 def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets=None,
             initial_scope=None, expected_scope_sha=None, retry_conflicts=False, preserved_images=None,reviewed_png=None,
-            property_manifest=None, expected_property_manifest_sha256=None, property_schema=None, property_create_scope=None):
+            property_manifest=None, expected_property_manifest_sha256=None, property_schema=None, property_create_scope=None, property_incremental_scope=None):
     """Create an exact private approval plan; existing unowned pages block.
 
     An initial_scope is optional and must itself be externally approved and
@@ -449,13 +461,18 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         metadata = (projection, times, selected, property_manifest)
         policy_sha = digest({'policy': policy, 'initial_scope': initial_scope, 'property_manifest_sha256': expected_property_manifest_sha256})
     elif property_create_scope is None and (expected_property_manifest_sha256 is not None or property_schema is not None): fail('approval_missing')
+    metadata_completion = metadata_pending.eligible(publication)
+    if property_incremental_scope is not None:
+        incremental_properties.validate_scope(property_incremental_scope)
+        if not metadata_completion or property_manifest is not None:fail('approval_missing')
+        policy_sha=digest({'base_policy_sha256':policy_sha,'property_incremental_scope_sha256':digest(property_incremental_scope)})
     pending = []; skipped_conflicts=[]
     for ident in sorted(publication.descriptor['records']):
         source = publication.descriptor['records'][ident]
         if plan_recovery.held(state,ident):
             skipped_conflicts.append(ident);continue
         prior = state['receipts'].get(ident,{})
-        if prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit']: continue
+        if not metadata_completion and prior.get('md_blob')==source['blob'] and prior.get('source_commit')==publication.descriptor['commit']: continue
         failed = state['failures'].get(ident,{})
         if not retry_conflicts and failed.get('md_blob')==source['blob'] and failed.get('source_commit')==publication.descriptor['commit'] and failed.get('policy_sha256')==policy_sha and not (reviewed_png is not None and reviewed_png.may_retry(ident,source,failed)) and not content_scope.retry_reviewed_failure(ident,source,failed):
             skipped_conflicts.append(ident);continue
@@ -469,12 +486,16 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
             data = publication.read(ident)
             scope_reason=content_scope.reason(ident,data)
             if scope_reason:fail(scope_reason)
+            if metadata_completion:
+                row['metadata_completion'] = metadata_pending.facet(publication, ident, data, policy, metadata, state, property_schema)
             snapshot = snapshots.get(ident); view = target(snapshot, ident, data_source)
             if plan_recovery.held(state,ident,view['page_id'] if view else None):fail('unresolved_operation')
             if preserved_images.get(ident) is not None and view is None:fail('missing_asset')
             rendered, bindings, warnings = p.render_markdown(data, ident, assets or {}, source['path'],
                 publication.descriptor['content_tree'],preserved_image=preserved_images.get(ident),reviewed_png=reviewed_png)
             row.update(rendered=rendered, before_sha256=digest(view), warnings=warnings, asset_bindings_sha256=digest(bindings), source_assets={v['path']:v['git_blob'] for v in bindings.values()})
+            if metadata_completion:
+                row['source_assets'].update(row['metadata_completion']['source_assets'])
             row['preserved_asset_bindings']=bindings if preserved_images.get(ident) is not None else {}
             if 'uploaded_png' in bindings:
                 row['uploaded_pngs']=reviewed_png.handles()
@@ -489,6 +510,9 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                 if len(titles) != 1: fail('source_invalid')
                 try: title = json.loads(titles[0])
                 except ValueError: title = titles[0]
+                if title=='' and isinstance(title,str) and property_manifest is not None and 'historical_manifest_sha256' in publication.descriptor:
+                    from get_notion_historical import creation_title
+                    title,row['title_source']=creation_title(publication,ident,data,property_manifest,expected_property_manifest_sha256)
                 if not isinstance(title, str) or not title: fail('source_invalid')
                 props = {policy['id_property']: {'type':'rich_text','rich_text':[p.text_run(ident)]},
                          policy['title_property']: {'type':'title','title':[p.text_run(title)]}}
@@ -502,14 +526,17 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
                         row['source_assets'].update(bound_assets)
                         publication.check_assets(row['source_assets'])
                 row.update(action='create', properties=props)
+                date_binding=properties.date_wire_binding(props)
+                if date_binding is not None:row['property_date_wire']=date_binding
+                wire_props=property_transaction.creation_wire_properties(row)
                 try:
                     row['request_blocks']=request_blocks(rendered)
-                    envelope={'parent':{'type':'data_source_id','data_source_id':data_source},'properties':props,
+                    envelope={'parent':{'type':'data_source_id','data_source_id':data_source},'properties':wire_props,
                         'children':transport.wire_blocks(row['request_blocks'],None,uploaded_pngs=row.get('uploaded_pngs'))}
                     if len(encoded(envelope)) > MAX_REQUEST_BYTES: fail('request_budget')
                 except Blocked as exc:
                     if str(exc)!='request_budget':raise
-                    batches=create_batches.prepare(rendered,props,data_source,row.get('uploaded_pngs'))
+                    batches=create_batches.prepare(rendered,wire_props,data_source,row.get('uploaded_pngs'))
                     if len(batches['batches'])<2:raise
                     row['create_batches']=batches
                     row['request_blocks']=request_blocks(rendered[:batches['batches'][0]['end']])
@@ -575,6 +602,8 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         'records':records, 'deferred_ids':deferred, 'skipped_conflicts':skipped_conflicts,
         'state_only':not publication.descriptor['changed_content_ids'],
         'source_mode':'initial_review' if publication.descriptor['initial_cohort'] else 'changed_content',
+        **({'metadata_completion_contract': metadata_pending.CONTRACT} if metadata_completion else {}),
+        **({'property_incremental_scope':deepcopy(property_incremental_scope),'property_incremental_scope_sha256':digest(property_incremental_scope)} if property_incremental_scope is not None else {}),
         **({'property_manifest_sha256': expected_property_manifest_sha256} if property_manifest is not None else {}),
         **({'property_create_scope': deepcopy(property_create_scope), 'property_create_scope_sha256': digest(property_create_scope)} if property_create_scope is not None else {})}
 
@@ -623,7 +652,8 @@ def append_previous_type(row):
 def created(snapshot, row, data_source, expected_page):
     view = target(snapshot, row['note_id'], data_source)
     if view is None or view['page_id'] != expected_page or not same(p.comparison_semantics(view['semantic'],None), p.comparison_semantics(row['rendered'],None)): fail('readback_mismatch')
-    for key, submitted in row['properties'].items():
+    expected_properties = property_transaction.creation_readback_properties(row, expected_page)
+    for key, submitted in expected_properties.items():
         actual = view['properties'].get(key)
         kind = submitted['type']
         try:
@@ -632,7 +662,7 @@ def created(snapshot, row, data_source, expected_page):
     return view['order']
 
 
-def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_sha, writers_guard, create_recovery=None, approved_recovery_sha=None, authorize_batch=None):
+def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_sha, writers_guard, create_recovery=None, approved_recovery_sha=None, authorize_batch=None, authorize_properties=None):
     """Execute only injected methods: read_note, append_blocks, archive_block,
     create_page. There is NO real network adapter in this module.
 
@@ -641,6 +671,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
     recovery approval; a matching current observation alone cannot adopt it.
     """
     counts = {'created':0,'updated':0,'noop':0,'blocked':0,'write_calls':0,'deferred':0,'retained_conflicts':0}
+    if metadata_pending.enabled(plan): counts.update(body_verified=0, metadata_pending=0)
+    if incremental_properties.enabled(plan):counts['properties_updated']=0
     reason = None; write_http_status=None
     def guard_writers():
         try: evidence = writers_guard()
@@ -650,7 +682,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
         if kind=='archive':return transport.fingerprint('PATCH','/blocks/'+root,{'archived':True})
         blocks=transport.wire_blocks(row['request_blocks'],None if kind=='create' else append_previous_type(row),uploaded_pngs=row.get('uploaded_pngs'))
         if kind=='create':
-            return transport.fingerprint('POST','/pages',{'parent':{'type':'data_source_id','data_source_id':data_source},'properties':row['properties'],'children':blocks})
+            return transport.fingerprint('POST','/pages',{'parent':{'type':'data_source_id','data_source_id':data_source},'properties':property_transaction.creation_wire_properties(row),'children':blocks})
         body={'children':blocks}
         if row['after_anchor'] is not None:body['after']=row['after_anchor']
         return transport.fingerprint('PATCH','/blocks/'+row['page_id']+'/children',body)
@@ -672,8 +704,20 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
             # No API method has been called since this in_flight checkpoint.
             restore_prepared()
             raise
+    def finish_body(snapshot=None):
+        nonlocal version
+        if incremental_properties.enabled(plan):
+            version=incremental_properties.finish(row,plan,publication,api,store,value,version,counts,
+                writers_guard,snapshot=snapshot,authorize=authorize_properties)
+        else:
+            metadata_pending.record(value,row,plan,snapshot,api,counts)
+            if row['action']=='create':counts['retained_conflicts']+=bool(row.get('held_fields'))
+        counts[{'create':'created','update':'updated','noop':'noop'}[row['action']]]+=1
+        journal.update(index=journal['index']+1,operation=None)
+        return store.compare_and_set(version,value)
     try:
         if not isinstance(plan, dict) or plan.get('contract') != CONTRACT or digest(plan) != approved_plan_sha: fail('approval_missing')
+        if incremental_properties.enabled(plan):incremental_properties.check_plan(plan)
         publication.check(plan['publication'])
         counts.update(deferred=len(plan['deferred_ids']),retained_conflicts=len(plan['skipped_conflicts']))
         value, version = store.read(); check_state(value)
@@ -682,11 +726,20 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 and not plan_recovery.allows(plan,value['journal'])
                 and not plan_recovery.allows_run10(plan,value['journal'])
                 and not run15_recovery.allows(plan,value['journal'])
-                and not run53_recovery.allows(plan,value['journal'])): fail('rules_changed')
+                and not run53_recovery.allows(plan,value['journal'])
+                and not run57_recovery.allows(plan,value['journal'])): fail('rules_changed')
         if not plan['records']:
             if plan['records'] or value['journal'] is not None or version != plan['state_sha256']: fail('state_changed')
             return {'status':'partial' if counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':0,'write_state':'not_attempted'}
         journal = value['journal']
+        if metadata_pending.enabled(plan) and journal is not None:
+            for completed_row in plan['records'][:journal['index']]:
+                outcome=value.get('metadata_results',{}).get(completed_row['note_id'],{})
+                if outcome.get('plan_sha256')==approved_plan_sha:
+                    if incremental_properties.enabled(plan):counts['properties_updated']+=bool(outcome.get('property_write_verified'))
+                    counts['body_verified']+=1
+                    counts['metadata_pending']+=bool(outcome['held'])
+                    counts['retained_conflicts']+=bool(outcome['held'])
         if journal is None:
             if version != plan['state_sha256']: fail('state_changed')
             journal = {'plan_sha256':approved_plan_sha,'plan':deepcopy(plan),'index':0,'operation':None}
@@ -709,6 +762,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 counts['blocked'] += 1; journal['index'] += 1
                 version = store.compare_and_set(version, value); continue
             publication.check_assets(row.get('source_assets',{}))
+            if journal['operation'] is not None and journal['operation'].get('kind')==incremental_properties.KIND:
+                version=finish_body();continue
             if row['action']=='create' and 'create_batches' in row:
                 version,snapshot=create_batches.execute_row(row,plan,approved_plan_sha,publication,api,store,
                     value,version,counts,writers_guard,authorize_batch=authorize_batch,
@@ -726,10 +781,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                     row['source'],row.get('preserved_asset_bindings'))
                 value['receipts'][ident]['creation_plan_sha256']=approved_plan_sha
                 property_transaction.record_creation(value, row, plan)
-                counts['retained_conflicts'] += bool(row.get('held_fields'))
                 value['failures'].pop(ident,None)
-                counts['created']+=1;journal.update(index=journal['index']+1,operation=None)
-                version=store.compare_and_set(version,value);continue
+                version=finish_body(snapshot);continue
             operation = journal['operation']
             if operation is None:
                 snapshot = read_target(api, ident, data_source)
@@ -738,8 +791,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                     value['receipts'][ident] = receipt(snapshot, ident, data_source, row['managed'], plan['publication'], row['source'],row.get('preserved_asset_bindings'))
                     if row.get('creation_plan_sha256'): value['receipts'][ident]['creation_plan_sha256']=row['creation_plan_sha256']
                     value['failures'].pop(ident,None)
-                    counts['noop'] += 1; journal['index'] += 1
-                    version = store.compare_and_set(version, value); continue
+                    version=finish_body(snapshot);continue
                 operation = {'kind':'create' if row['action']=='create' else 'append',
                     'phase':'prepared','before':snapshot,'response':None,'archive_index':0}
                 journal['operation'] = operation
@@ -773,7 +825,7 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                         raise
                 try:
                     counts['write_calls'] += 1
-                    response = api.create_page(data_source, ident, row['properties'], row['request_blocks']) if operation['kind']=='create' else api.append_blocks(row['page_id'], row['request_blocks'], row['after_anchor'])
+                    response = api.create_page(data_source, ident, property_transaction.creation_wire_properties(row), row['request_blocks']) if operation['kind']=='create' else api.append_blocks(row['page_id'], row['request_blocks'], row['after_anchor'])
                 except transport.NotDispatched as exc:
                     if exc.request_fingerprint!=request_fingerprint(operation['kind'],row,data_source):
                         fail('uncertain_create' if operation['kind']=='create' else 'uncertain_append')
@@ -806,10 +858,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 value['receipts'][ident] = receipt(snapshot, ident, data_source, managed, plan['publication'], row['source'],row.get('preserved_asset_bindings'))
                 value['receipts'][ident]['creation_plan_sha256']=approved_plan_sha
                 property_transaction.record_creation(value, row, plan)
-                counts['retained_conflicts'] += bool(row.get('held_fields'))
                 value['failures'].pop(ident,None)
-                counts['created'] += 1; journal.update(index=journal['index']+1, operation=None)
-                version = store.compare_and_set(version, value); continue
+                version=finish_body(snapshot);continue
             if operation['kind'] == 'append':
                 try:
                     roots, managed = appended(operation['before'], snapshot, row, data_source, operation.get('response'))
@@ -875,11 +925,10 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
             value['receipts'][ident] = receipt(final,ident,data_source,operation['managed'],plan['publication'],row['source'],row.get('preserved_asset_bindings'))
             if row.get('creation_plan_sha256'): value['receipts'][ident]['creation_plan_sha256']=row['creation_plan_sha256']
             value['failures'].pop(ident,None)
-            counts['updated'] += 1; journal.update(index=journal['index']+1,operation=None)
-            version = store.compare_and_set(version,value)
+            version=finish_body(final)
         value['journal'] = None
         version = store.compare_and_set(version,value)
-        return {'status':'partial' if counts['blocked'] or counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':counts['write_calls'],'write_state':'confirmed' if counts['created']+counts['updated'] else 'not_attempted'}
+        return {'status':'partial' if counts['blocked'] or counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':counts['write_calls'],'write_state':'confirmed' if counts['created']+counts['updated']+counts.get('properties_updated',0) else 'not_attempted'}
     except Blocked as exc: reason = str(exc)
     except Exception: reason = 'journal_failed'
     return {'status':'blocked','reason':reason,'write_http_status':write_http_status,**counts,'external_write_attempts':counts['write_calls'],'write_state':'uncertain' if reason.startswith('uncertain_') or counts['write_calls'] else 'unknown'}
@@ -896,5 +945,12 @@ def public_report(result):
     reason=result.get('reason')
     status=result.get('write_http_status')
     if status is not None and type(status) is int and 400<=status<=599:out['write_http_status']=status
+    if 'metadata_pending' in result or 'body_verified' in result:
+        for key in ('metadata_pending','body_verified'):
+            if type(result.get(key)) is not int or not 0 <= result[key] <= 10000: return out
+        out.update({key:result[key] for key in ('metadata_pending','body_verified')})
+    if 'properties_updated' in result:
+        if type(result['properties_updated']) is not int or not 0<=result['properties_updated']<=MAX_RECORDS:return out
+        out['properties_updated']=result['properties_updated']
     out['status'] = result['status']; out['reason'] = reason if reason is None or (isinstance(reason,str) and reason in REASONS) else 'other'
     return out

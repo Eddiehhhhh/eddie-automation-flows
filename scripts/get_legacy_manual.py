@@ -5,6 +5,7 @@ An apply invocation requires an external approved logical-payload hash. Only
 unrelated main changes can be rebased under that unchanged payload binding. State hashes are externally supplied trust inputs, never learned
 from state being validated. No credentials or private text enter public output.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from contextlib import contextmanager
 import argparse
@@ -22,9 +23,9 @@ import get_private_preview_retention as r
 from get_mirror_incremental_replay import strict_capture_json, raw_source_version
 
 CONTRACT='get-legacy-manual-transaction-1'
-CAPTURE='7f6966122e430a14d0268f93035a8fcf5d3d1d99'
-ANCHOR={'capture_commit':CAPTURE,'census_sha256':'da35f84480f45e5c9ce8f37fb980e3b6fb5d6ae7181514fb090e378337c2989c','ledger_sha256':'0fcf2dc608815b0b850411d3334d4878705b546aca64d1cd448913602c6eead9'}
-INITIAL_SHA='b55b4d236979ba4a15d3580950713944b0f13ce30c51bad5f11db1a25646a7d1'
+CAPTURE = _private_bindings.value('get_legacy_manual', 'CAPTURE')
+ANCHOR = _private_bindings.value('get_legacy_manual', 'ANCHOR')
+INITIAL_SHA = _private_bindings.value('get_legacy_manual', 'INITIAL_SHA')
 MAX_CHANGED_BYTES=64*c.MIB
 MAX_MANAGED=1152
 PROTECTED={**c.PROTECTED,c.REF:CAPTURE}

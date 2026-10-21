@@ -163,6 +163,7 @@ class Session:
             selected=set()
             if operation is not None:
                 valid_phases={'create_batches':{'prepared','in_flight','acknowledged','verified'},'create':{'prepared','in_flight','acknowledged'},'append':{'prepared','in_flight','acknowledged'},'archive':{'prepared','in_flight'},'cleanup':{'verified'}}
+                valid_phases[e.incremental_properties.KIND]=e.incremental_properties.PHASES
                 if operation.get('kind') not in valid_phases or operation.get('phase') not in valid_phases[operation['kind']] or index>=len(rows):fail('state_invalid')
             if index<len(rows):
                 row=rows[index];ident=row['note_id']
@@ -188,6 +189,8 @@ class Session:
                         (current_batch>image_batch or current_batch==image_batch
                          and operation['phase'] in ('in_flight','acknowledged','verified')))
                     if not attached_possible:selected={ident}
+                elif operation is not None and operation['kind']==e.incremental_properties.KIND:
+                    e.incremental_properties.validate_operation(operation,row,plan,state['engine_state'])
                 elif acknowledged:
                     if row['action']!='create':fail('state_invalid')
                     e.p.notion_id(operation['response'])

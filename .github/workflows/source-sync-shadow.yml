@@ -66,6 +66,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # Preserve the existing legacy manual implementation; migrate it separately.
+          ref: 40b120de009b9e7cc68f7811614c77fe4e17d385
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.11'
@@ -358,6 +360,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          ref: 40b120de009b9e7cc68f7811614c77fe4e17d385
           path: diagnostic-code
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -382,6 +385,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          ref: 40b120de009b9e7cc68f7811614c77fe4e17d385
           path: diagnostic-code
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

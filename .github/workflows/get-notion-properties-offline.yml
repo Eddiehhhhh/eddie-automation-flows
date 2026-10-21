@@ -3,6 +3,10 @@ on:
   pull_request:
     paths:
       - 'scripts/get_notion*.py'
+      - 'scripts/get_private*.py'
+      - 'scripts/get_public_release_guard.py'
+      - 'tests/test_private*.py'
+      - 'tests/test_public_release_guard.py'
       - 'scripts/get_legacy_adapter.py'
       - 'scripts/get_canonical_writer.py'
       - 'scripts/get_canonical_manual.py'
@@ -28,7 +32,9 @@ jobs:
           python-version: '3.11'
       - name: Install verified metadata parser
         run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
-      - name: Test mapping and durable transactions without credentials
+      # Full real-history transaction replay is retained privately and required
+      # separately before release. Never inject private capsules into public CI.
+      - name: Test synthetic privacy and loading boundary without credentials
         env:
           PYTHONPATH: scripts:tests
-        run: python -m unittest test_notion_controller_route test_notion_full_migration test_notion_historical test_canonical_read_efficiency test_notion_properties test_notion_properties_runtime test_notion_creation_properties test_notion_runtime test_notion_executor test_notion_pipeline test_notion_outbox test_executor_live_adapter test_notion_not_dispatched test_notion_create_batches test_png_create_batches test_png_cli_remote -v
+        run: python -m unittest test_private_runtime_bindings test_private_binding_materialization test_notion_route_selection test_private_proof test_private_runtime_report test_public_release_guard -v

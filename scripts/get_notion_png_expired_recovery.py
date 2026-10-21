@@ -4,21 +4,21 @@ The original complete journal remains at the immutable state commit/blob below.
 Only a fresh expired response AND complete exact-ID missing read permit generation
 one. An elapsed timestamp, null expiry, 404 or historical diagnosis is insufficient.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 import get_notion_png_upload as u
 
 CONTRACT='get-run16-second-png-expired-recovery-1'
-STATE_SHA='dca881ff71adbb73fede0c42ed9eb68d5a3447b64eef62710d149a797d9a3146'
-STATE_BYTES=688249
-STATE_COMMIT='427f68d9066ff0fa0cfe5e7aba5785115166f12f'
-STATE_BLOB='0b73977c64c1d75339706d5905afb481ab4e711f'
-PLAN_SHA='a54e2736d552ce4fc4f14810bb052745dfc931468b7d06b6bc5608678bdf18b5'
-OP_SHA='20e037804aacb0af3a48a16ec7544e6c560d22c7dd503440da8f510fc19ed2c9'
-JOURNAL_SHA='1b4cad5a7d9d8f0833c955e9e335e6028f791854941d3e9c6f3fef3a680eb35d'
-SLOT_SHA='b7ed0948cee5182596c6b55208ebc8128ae274739aefedb94789d17cc7fe209d'
-NOTE_SHA='c94333d6d358f1b6955cc0be47556c7d19f2316fb83767d60e3d5c84b21a6788'
-MISSING={'complete':True,'exact_id_matches':[],'identity_query_complete':True,
-         'native_blocks_available':True,'ownership_adopted':False}
+STATE_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'STATE_SHA')
+STATE_BYTES = _private_bindings.value('get_notion_png_expired_recovery', 'STATE_BYTES')
+STATE_COMMIT = _private_bindings.value('get_notion_png_expired_recovery', 'STATE_COMMIT')
+STATE_BLOB = _private_bindings.value('get_notion_png_expired_recovery', 'STATE_BLOB')
+PLAN_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'PLAN_SHA')
+OP_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'OP_SHA')
+JOURNAL_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'JOURNAL_SHA')
+SLOT_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'SLOT_SHA')
+NOTE_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'NOTE_SHA')
+MISSING = _private_bindings.value('get_notion_png_expired_recovery', 'MISSING')
 class Blocked(ValueError):pass
 def fail(code):raise Blocked(code) from None
 def same(a,b):return u.encoded(a)==u.encoded(b)
@@ -41,7 +41,7 @@ def proof(slot,evidence):
         'query_note_id':b['note_id'],'data_source_id':b['data_source_id'],'snapshot':deepcopy(MISSING)}
 
 ROW_KEYS=('note_id','action','source','properties','rendered','request_blocks','warnings','before_sha256','preserved_asset_bindings','source_assets')
-ROW_SEMANTICS_SHA='bd89cfc49a8f906af1b53c7802786c81ada804c1d855a5c6f1a2c8cee13d95a9'
+ROW_SEMANTICS_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'ROW_SEMANTICS_SHA')
 def normalized_blocks(items,upload_id):
     result=deepcopy(items)
     for node in result:
@@ -55,7 +55,7 @@ def row_semantics(row,upload_id):
     value={k:deepcopy(row[k]) for k in ROW_KEYS}
     for k in ('rendered','request_blocks'):value[k]=normalized_blocks(value[k],upload_id)
     return u.digest(value)
-PREFLIGHT_SHA='58317f93835d3344bd2a626d14ae4624661ecc6d8d372427c4464d40059011e3'
+PREFLIGHT_SHA = _private_bindings.value('get_notion_png_expired_recovery', 'PREFLIGHT_SHA')
 def preflight_sha(rendered,source,properties,upload_id):
     return u.digest({'rendered':normalized_blocks(rendered,upload_id),'source':source,'properties':properties})
 def check_preflight(state,ident,rendered,source,properties):

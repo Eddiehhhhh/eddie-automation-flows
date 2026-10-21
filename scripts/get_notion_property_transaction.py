@@ -112,13 +112,19 @@ def prepare(publication, state, expected_state_sha, snapshots, schema, manifest,
             for name, baseline in adoption['fields'].items():
                 if props.value(view['properties'].get(name)) != props.value(baseline): e.fail('human_edit_conflict')
                 managed_before[name] = props.value(baseline)
-        patch, managed, conflicts = props.three_way(desired, view['properties'], managed_before, fill_empty=True)
+        # Compare the explicit native precision, retaining exact source values
+        # in the immutable patch and binding its distinct wire representation.
+        projected = props.date_wire_properties(desired, props.date_wire_binding(desired))
+        wire_patch, managed, conflicts = props.three_way(projected, view['properties'], managed_before, fill_empty=True)
+        patch = {name: deepcopy(desired[name]) for name in wire_patch}
         held.update(conflicts)
         records.append({'note_id': ident, 'source': source_row, 'page_id': view['page_id'],
             'action': 'update' if patch else 'noop', 'reason': None, 'property_only': True,
             'before': deepcopy(snapshot), 'before_sha256': e.digest(view), 'property_patch': patch,
             'property_managed': managed, 'held_fields': held, 'property_schema_sha256': manifest['schema_sha256'],
             'source_assets': {} if manifest['registry'] is None else {props.REGISTRY: manifest['registry']['blob']}})
+        binding = props.date_wire_binding(patch)
+        if binding is not None: records[-1]['property_patch_date_wire'] = binding
     return {'contract': e.CONTRACT, 'publication': deepcopy(publication.descriptor),
         'state_sha256': expected_state_sha, 'rules_sha256': e.rules_sha256(), 'policy': deepcopy(policy),
         'policy_sha256': e.digest({'policy': policy, 'property_manifest_sha256': approved_manifest_sha256}),
@@ -127,12 +133,27 @@ def prepare(publication, state, expected_state_sha, snapshots, schema, manifest,
         'property_only': True, 'property_manifest': deepcopy(manifest), 'property_manifest_sha256': approved_manifest_sha256}
 
 
+def creation_wire_properties(row):
+    """Exact approved request values; old unbound plan requests stay unchanged."""
+    return props.date_wire_properties(row['properties'], row.get('property_date_wire'))
+
+
+def creation_readback_properties(row, expected_page):
+    """Only the exact activated legacy row/page bridge may differ from wire."""
+    legacy = engine().run57_recovery.creation_properties(row, expected_page)
+    return legacy if legacy is not None else creation_wire_properties(row)
+
+
+def patch_wire_properties(row):
+    return props.date_wire_properties(row['property_patch'], row.get('property_patch_date_wire'))
+
+
 def wire(row):
     e = engine()
     if not row.get('property_only') or not isinstance(row.get('property_patch'), dict) or set(row['property_patch']) - set(props.FIELDS): e.fail('approval_missing')
     for name, value in row['property_patch'].items():
         if value.get('type') != props.FIELDS[name][1] or props.empty(value): e.fail('approval_missing')
-    body = {'properties': deepcopy(row['property_patch'])}
+    body = {'properties': patch_wire_properties(row)}
     if len(e.encoded(body)) > 32 * 1024: e.fail('request_budget')
     return {'method': 'PATCH', 'path': '/pages/' + e.p.notion_id(row['page_id']), 'body': body}
 
@@ -144,9 +165,10 @@ def verify_after(before_snapshot, snapshot, row, data_source):
     for key in ('page_id', 'data_source_id', 'note_id', 'nodes', 'roots', 'order', 'semantic'):
         if not e.same(before[key], after[key]): e.fail('readback_mismatch')
     if set(before['properties']) != set(after['properties']): e.fail('readback_mismatch')
+    expected_patch = patch_wire_properties(row)
     for name, actual in after['properties'].items():
         if name in row['property_patch']:
-            try: matches = props.value(actual) == props.value(row['property_patch'][name])
+            try: matches = props.value(actual) == props.value(expected_patch[name])
             except ValueError: matches = False
             if not matches: e.fail('readback_mismatch')
         elif not e.same(actual, before['properties'][name]): e.fail('readback_mismatch')
@@ -189,7 +211,7 @@ def execute_row(row, plan, publication, api, store, value, version, counts, writ
                 raise
             try:
                 counts['write_calls'] += 1
-                response = api.update_properties(row['page_id'], row['property_patch'])
+                response = api.update_properties(row['page_id'], patch_wire_properties(row))
             except e.transport.NotDispatched as exc:
                 if exc.request_fingerprint != key: e.fail('uncertain_properties')
                 counts['write_calls'] -= 1
@@ -236,9 +258,13 @@ def record_creation(value, row, plan):
     e = engine()
     if 'property_created' not in row: return
     body_receipt = value['receipts'][row['note_id']]
+    native = creation_wire_properties(row)
+    if e.run57_recovery.allows(plan, value.get('journal')):
+        legacy = e.run57_recovery.creation_properties(row, body_receipt['page_id'])
+        if legacy is not None: native = legacy
     value.setdefault('property_receipts', {})[row['note_id']] = {'contract': props.CONTRACT,
         'page_id': body_receipt['page_id'], 'data_source_id': body_receipt['data_source_id'],
         'source_commit': plan['publication']['commit'], 'md_blob': row['source']['blob'],
         'manifest_sha256': plan.get('property_manifest_sha256') or plan['property_create_scope_sha256'],
-        'managed': {name: props.value(prop) for name, prop in row['property_created'].items()},
+        'managed': {name: props.value(native[name]) for name in row['property_created']},
         'held': deepcopy(row['held_fields']), 'readback_verified': True}

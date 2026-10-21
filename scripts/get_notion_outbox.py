@@ -40,8 +40,9 @@ def anchor(value):
 
 def check_state(value):
     try:
-        if not isinstance(value,dict) or not set(initial_state()) <= set(value) <= set(initial_state()) | set(png_store.ASSET_KEYS) | {'historical_captures'} or value['contract']!=CONTRACT:fail('outbox_state_invalid')
+        if not isinstance(value,dict) or not set(initial_state()) <= set(value) <= set(initial_state()) | set(png_store.ASSET_KEYS) | {'historical_captures', 'source_state_holds'} or value['contract']!=CONTRACT:fail('outbox_state_invalid')
         e.check_state(value['engine_state'])
+        e.metadata_pending.check_source_state_holds(value.get('source_state_holds', {}))
         png_store.check_outer_assets(value)
         import get_notion_historical as historical
         historical.check_captures(value.get('historical_captures',{}))
@@ -52,6 +53,9 @@ def check_state(value):
         else:
             anchor(origin);anchor(cursor);anchor(tip);p.hex_hash(value['policy_sha256'],64)
             if cursor['sequence']<origin['sequence'] or tip['sequence']<cursor['sequence'] or tip['sequence']==cursor['sequence'] and tip!=cursor:fail('outbox_state_invalid')
+        for event in value.get('source_state_holds', {}).values():
+            if origin is None or not origin['sequence'] < event['sequence'] <= cursor['sequence']:fail('outbox_state_invalid')
+            if event['sequence'] == cursor['sequence'] and any(event[k] != cursor[k] for k in ('commit','receipt_sha256')):fail('outbox_state_invalid')
         paths=set()
         for ident,row in pending.items():
             p.note_id(ident)
@@ -141,6 +145,7 @@ def enqueue(root,state,expected_state_sha,chain,expected_chain_sha):
     previous=value['last_enqueued_publication']
     for row in rows:
         receipt,records=verified_publication(reader,row,value['policy_sha256'],previous,budget)
+        e.metadata_pending.retain_source_state_signal(value,row,receipt)
         for ident,source in records.items():
             if ident not in value['pending_by_id']:value['rotation_order'].append(ident)
             value['pending_by_id'][ident]={**source,**row,'sequence':receipt['sequence']}
@@ -254,7 +259,7 @@ class EngineStore:
                 ident=row['note_id'];pending=next_value['pending_by_id'].get(ident);prior=value['receipts'].get(ident,{})
                 if pending is None:continue
                 if ident in next_value['rotation_order']:next_value['rotation_order'].remove(ident)
-                if prior.get('md_blob')==pending['blob'] and prior.get('source_commit')==pending['commit']:
+                if prior.get('md_blob')==pending['blob'] and prior.get('source_commit')==pending['commit'] and e.metadata_pending.complete(value,plan,row):
                     del next_value['pending_by_id'][ident]
                 else:next_value['rotation_order'].append(ident)
             # Same-source conflicts skipped by the engine are still pending;
@@ -281,7 +286,7 @@ def settle_empty_plan(store,expected_outer_sha,plan,approved_plan_sha):
     # such rows stuck forever just because prepare correctly skipped them.
     for ident,source in plan['publication']['records'].items():
         pending=updated['pending_by_id'].get(ident);prior=updated['engine_state']['receipts'].get(ident,{})
-        if pending is not None and pending['commit']==plan['publication']['commit'] and pending['blob']==source['blob'] and prior.get('source_commit')==pending['commit'] and prior.get('md_blob')==pending['blob']:
+        if not e.metadata_pending.enabled(plan) and pending is not None and pending['commit']==plan['publication']['commit'] and pending['blob']==source['blob'] and prior.get('source_commit')==pending['commit'] and prior.get('md_blob')==pending['blob']:
             del updated['pending_by_id'][ident];updated['rotation_order'].remove(ident)
     for ident in plan['skipped_conflicts']:
         if ident not in updated['pending_by_id']:fail('outbox_source_invalid')

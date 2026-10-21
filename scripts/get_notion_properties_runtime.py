@@ -5,6 +5,7 @@ controller, confirmed remote journal and single-writer guard. Approved manifest
 hashes must be added to the reviewed runtime release; CLI hashes alone grant no
 standing scope. Historical sources are never mislabeled as new publications.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from collections import Counter
 from pathlib import Path
@@ -19,7 +20,7 @@ import get_confirmed_source as source_loader
 
 # Hashes only. Actual manifests remain private. Empty means no apply activation.
 APPROVED_MANIFESTS = frozenset()
-DEPENDENCY_LOCK_SHA256 = 'b825b8d19ea389e3ae06d2a0c28fae62541b0a61e1cb68bb5b4a89e47d9ffdb0'
+DEPENDENCY_LOCK_SHA256 = _private_bindings.value('get_notion_properties_runtime', 'DEPENDENCY_LOCK_SHA256')
 
 
 def authorize(manifest, expected, *, apply):

@@ -4,6 +4,7 @@ Inputs are caller-supplied immutable publication, tree, and target readback
 evidence. External hashes in policy pin ownership receipts; hashing a newly
 observed page is never ownership adoption. Every operation below is a preview.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 import get_notion_list_semantics as list_semantics
 import hashlib
@@ -15,8 +16,8 @@ from pathlib import PurePosixPath
 CONTRACT = 'get-notion-read-only-plan-1'
 RENDERER = 'get-notion-native-subset-3'
 REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
-DATA_SOURCE_SHA256 = '00b4d82e612d3fa5dd16cec55f456a83190365f676c9fb163ff7d7989e8cb989'
-COHORT_SHA256 = '21f08b0c2d76f96c13a9e1b28bab48b6b9508e60927e864aa0332ce49d8d9f1e'
+DATA_SOURCE_SHA256 = _private_bindings.value('get_notion_sink_plan', 'DATA_SOURCE_SHA256')
+COHORT_SHA256 = _private_bindings.value('get_notion_sink_plan', 'COHORT_SHA256')
 MAX_NOTE = 1024 * 1024
 MAX_TARGET = 16 * 1024 * 1024
 MAX_ASSET = 16 * 1024 * 1024
@@ -139,7 +140,16 @@ def rich_text(value):
             if match.start() and value[match.start() - 1] == '!':
                 stop('unsupported_source_format')
             label, url = part[1:].split('](', 1)
-            run = text_run(plain_text(label))
+            if r'\_' in label:
+                # Decode only single underscore escapes in a plain link label.
+                # Validate the other segments, not the decoded literal, and
+                # never transform the destination or accept nested markup.
+                if re.search(r'\\(?!_)|[*`\[\]]', label):
+                    stop('unsupported_source_format')
+                label = '_'.join(plain_text(piece) for piece in label.split(r'\_'))
+            else:
+                label = plain_text(label)
+            run = text_run(label)
             run['text']['link'] = {'url': url[:-1]}
             out.append(run)
         cursor = match.end()
@@ -405,6 +415,16 @@ def ordinary_prose_indent(line):
                 or re.fullmatch(r'[-*_=]+', value))
 
 
+def literal_hashtag_prefix(line):
+    """Bounded root prose, not ATX: 1-6 hashes followed by non-whitespace.
+
+    CommonMark 0.31.2 section 4.2 requires a space, tab or end of line
+    after the opening ATX hashes. No indentation or empty heading is added.
+    Inline markup still passes through the unchanged rich-text grammar.
+    """
+    return re.match(r'^#{1,6}[^#\s]', line) is not None
+
+
 def paragraph_interrupt(line):
     """Only a start-at-one ordered marker interrupts an open paragraph.
 
@@ -412,7 +432,7 @@ def paragraph_interrupt(line):
     marker and whitespace. At a block boundary the existing list parser still
     requires representable numbering. This does not relax list starts/resets.
     """
-    if ordinary_prose_indent(line):
+    if ordinary_prose_indent(line) or literal_hashtag_prefix(line):
         return False
     ordered = re.match(r'^([0-9]+)\. ', line)
     if ordered and (len(ordered[1]) > 9 or ordered[1].lstrip('0') != '1'):
@@ -506,7 +526,7 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
 
     while index < len(lines):
         line = lines[index]
-        if line.startswith('>') and not line.startswith('> '):
+        if line.startswith('>') and line != '>' and not line.startswith('> '):
             stop('unsupported_source_format')
         if not line.strip():
             index += 1; continue
@@ -583,23 +603,50 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
                             stop('unsupported_source_format')
             if task: kind = 'to_do'; payload['checked'] = task[1].lower() == 'x'
             output.append(block(kind, payload, children)); index = following; continue
-        if line.startswith('> '):
+        if line == '>' or line.startswith('> '):
+            # A bare marker is an empty quote paragraph, not a blank line.
             output.append(block('quote', {'rich_text': rich_text(line[2:])})); index += 1; continue
         prose_indent = ordinary_prose_indent(line)
         if prose_indent and output and output[-1]['type'] in ('bulleted_list_item', 'numbered_list_item', 'to_do', 'quote'):
             # These spaces could belong to the previous container. Unsupported
             # lazy/nested continuations must not become new root paragraphs.
             stop('unsupported_source_format')
-        if line.startswith(('<', ' ', '\t', '#', '![', '![[', '~~~')) and not prose_indent:
+        if (line.startswith(('<', ' ', '\t', '#', '![', '![[', '~~~'))
+                and not prose_indent and not literal_hashtag_prefix(line)):
             stop('unsupported_source_format')
+        paragraph_start = index
         paragraph = [line]; index += 1
+        paragraph_kind = 'paragraph'
         while index < len(lines) and lines[index].strip() and not paragraph_interrupt(lines[index]):
             if re.fullmatch(r'-{3,}|={3,}', lines[index]):
-                stop('unsupported_source_format')
+                # Root-level Setext has priority over a thematic break only
+                # when it closes an ordinary open paragraph. Preserve the
+                # complete multiline inline content; never insert a blank,
+                # strip metadata text, or reinterpret a container as a title.
+                # Indentation, hard breaks and unimplemented block markers
+                # remain outside this deliberately narrow native subset.
+                if (any(part != part.strip() or part.endswith('\\')
+                        or re.match(r'^(?:[-+*](?:[ \t]|$)|[0-9]+[.)][ \t]|~~~)', part)
+                        or re.fullmatch(r'[-*_=]+', part)
+                        for part in paragraph)
+                        or (paragraph_start > 0 and lines[paragraph_start - 1].strip()
+                            and output and output[-1]['type'] in
+                            ('bulleted_list_item', 'numbered_list_item', 'to_do', 'quote'))):
+                    stop('unsupported_source_format')
+                paragraph_kind = 'heading_2' if lines[index][0] == '-' else 'heading_1'
+                index += 1
+                break
             if lines[index] in ('___', '***'):
                 break
             paragraph.append(lines[index]); index += 1
-        output.append(block('paragraph', {'rich_text': rich_text('\n'.join(paragraph))}))
+        if (any(literal_hashtag_prefix(part) for part in paragraph)
+                and paragraph_start > 0 and lines[paragraph_start - 1].strip()
+                and output and output[-1]['type'] in
+                ('bulleted_list_item', 'numbered_list_item', 'to_do', 'quote')):
+            # A new literal-hash line cannot turn an unsupported lazy
+            # container continuation into a separate root paragraph.
+            stop('unsupported_source_format')
+        output.append(block(paragraph_kind, {'rich_text': rich_text('\n'.join(paragraph))}))
     output, joined_pairs = compact_paragraph_pairs(output)
     if joined_pairs: warnings.append('paragraph_boundaries_compacted')
     if len(encoded(output)) > MAX_TARGET or len(output) > MAX_BLOCKS:

@@ -3,33 +3,34 @@
 All pins are independently observed public hashes or hash-only private state
 bindings. The private journal and page/content IDs are deliberately not included.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 
 # A separate independent review must activate this one-way deployment bridge.
 ACTIVATED = True
 TAG = 'exact_run53_verified_batch_resume_v1'
-RUN = 39378084527
-ATTEMPT = 2
-JOB = 118493764976
-JOB_SHA256 = '3095159913705f480221d54ef3c1fe2830bc85801f97838004978c0c4e5454c8'
-PUBLIC_POLICY = {'code_sha': '6ad627793c23e80ad2ca9568048eb4e595c881a0', 'contract': 'get-public-actions-provenance-policy-1', 'controller_template_sha256': '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2', 'get_policy_sha256': 'd0aa4217dd51e45eeb35534e166eabed54d00c2f3a0f4bead237a92e00f04978', 'head_branch': 'main', 'job_name': 'canonical-get', 'publication_step_name': 'Emit verified canonical publication anchor', 'repository': 'Eddiehhhhh/eddie-automation-flows', 'repository_id': 1270807355, 'rules_sha256': 'bd7e0653a0f78620eb78e3ef6a4216fc00aac3e82f4dee758e4923b5d84c1977', 'workflow_id': 387242896, 'workflow_path': '.github/workflows/get-canonical.yml'}
-PUBLIC_SHA = '8bb310898e2298fbec6952e19d8f6446635b92a979a8358172a92b416aca2984'
-NOTION_POLICY = '20e4c0491a361a6cb059d6382dea6cd2b63fafc9a551b75bc445cada08073b22'
-CHECKPOINT = {'cas_attempts': 0, 'code_sha': '6ad627793c23e80ad2ca9568048eb4e595c881a0', 'commit': 'a3433308257901ced493ea2e21fffa2dad6bdcb1', 'contract': 'get-notion-journal-checkpoint-1', 'controller_sha': 'ad4ae476594aed495bf82ae4776059c15cdf3b28', 'notion_policy_sha256': '20e4c0491a361a6cb059d6382dea6cd2b63fafc9a551b75bc445cada08073b22', 'parent_commit': None, 'previous_record_sha256': '08555bfb24f3f8f7fc65068ccfadd9c51711cddf3c9de45552c78934ec0b9a20', 'public_policy_sha256': '8bb310898e2298fbec6952e19d8f6446635b92a979a8358172a92b416aca2984', 'readback_verified': True, 'record_sha256': 'd0e7cb436508041e4bf268ac5cee8fac34b2c6b96c62c3ec1e1769f1fcd06798', 'rules_sha256': 'bd7e0653a0f78620eb78e3ef6a4216fc00aac3e82f4dee758e4923b5d84c1977', 'run_attempt': 2, 'run_id': 39378084527, 'sequence': 9, 'state_blob': '011b7b511785c999375895880eef98a7de88596c', 'state_bytes': 1989077, 'state_sha256': '7beba811fdd52d8f4e651eb8a5244e95f7147c0225700a9735ca14912a38b4b3', 'status': 'journal_readback_verified', 'tree': '1f2e3b065bb26e90486f712e3852fdea3eeda351'}
-GET_RECORD = {'cas_attempts': 0, 'code_sha': '6ad627793c23e80ad2ca9568048eb4e595c881a0', 'contract': 'get-canonical-publication-anchor-1', 'controller_sha': 'ad4ae476594aed495bf82ae4776059c15cdf3b28', 'main_updated': False, 'observed_main_commit': 'b0527f3acf9d1bed7962b9052bbbb340c9ec0031', 'policy_sha256': 'd0aa4217dd51e45eeb35534e166eabed54d00c2f3a0f4bead237a92e00f04978', 'readback_verified': True, 'receipt_commit': '1678207017f96eb8022b4f4fb540b08d8654fb38', 'receipt_sequence': 2, 'receipt_sha256': '56ec351baa67ef704d827b545c416633303d15b97fde14be2c139970ea411b91', 'record_sha256': '1010963f5e8040e292e184a7e565597560d9c538b999fb7d2fe57507580a8d45', 'rules_sha256': 'bd7e0653a0f78620eb78e3ef6a4216fc00aac3e82f4dee758e4923b5d84c1977', 'run_attempt': 2, 'run_id': 39378084527, 'status': 'canonical_publication_verified'}
-ANCHOR = {'commit': 'a3433308257901ced493ea2e21fffa2dad6bdcb1', 'state_blob': '011b7b511785c999375895880eef98a7de88596c', 'state_sha256': '7beba811fdd52d8f4e651eb8a5244e95f7147c0225700a9735ca14912a38b4b3'}
-STATE_BYTES = 1989077
-PLAN_SHA = '88374b0b1a612d3b99643644e4ccfbc6a1bf55a8d8f90cd7c792a95448a6740b'
-PLAN_BYTES = 1221505
-OP_SHA = 'a41c928106e5caff17350993db12585de0f9e51bf7294750b6e91e6e41be09fe'
-ENGINE_RULES = '0a01d0a9895b21c2be31066daa16890c1ad12bef9fbb60308c54df9d0ed6dd85'
-VERIFIED_BATCHES = 20
-TOTAL_BATCHES = 23
-PREFIX_SHA = 'b38a6c48f767d7bd12a609c4bee7a06cd9ae3c47c94073bceed7f57e8c0f99da'
-PAGE_SHA = '92b856d9319b79bae8851a3d0facebbd98853a3afafa0a7c9df92d282432d679'
-PROPERTIES_SHA = 'c196dafc936032fffa5a9c9aa27767574dffea79b6b3d71e3005cd407daf5d5c'
-ATTEMPT_CLOCK = {'id': 39378084527, 'run_attempt': 2, 'workflow_id': 387242896, 'path': '.github/workflows/get-canonical.yml', 'head_sha': 'ad4ae476594aed495bf82ae4776059c15cdf3b28', 'head_branch': 'main', 'event': 'schedule', 'status': 'completed', 'conclusion': 'success', 'created_at': '2026-10-20T06:45:28Z', 'updated_at': '2026-10-20T07:06:13Z', 'run_started_at': '2026-10-20T06:45:27Z'}
-ALIAS_CLOCK = {'id': 39378084527, 'run_attempt': 2, 'workflow_id': 387242896, 'path': '.github/workflows/get-canonical.yml', 'head_sha': 'ad4ae476594aed495bf82ae4776059c15cdf3b28', 'head_branch': 'main', 'event': 'schedule', 'status': 'completed', 'conclusion': 'success', 'created_at': '2026-10-20T06:02:04Z', 'updated_at': '2026-10-20T07:06:13Z', 'run_started_at': '2026-10-20T06:45:27Z'}
+RUN = _private_bindings.value('get_notion_run53_recovery', 'RUN')
+ATTEMPT = _private_bindings.value('get_notion_run53_recovery', 'ATTEMPT')
+JOB = _private_bindings.value('get_notion_run53_recovery', 'JOB')
+JOB_SHA256 = _private_bindings.value('get_notion_run53_recovery', 'JOB_SHA256')
+PUBLIC_POLICY = _private_bindings.value('get_notion_run53_recovery', 'PUBLIC_POLICY')
+PUBLIC_SHA = _private_bindings.value('get_notion_run53_recovery', 'PUBLIC_SHA')
+NOTION_POLICY = _private_bindings.value('get_notion_run53_recovery', 'NOTION_POLICY')
+CHECKPOINT = _private_bindings.value('get_notion_run53_recovery', 'CHECKPOINT')
+GET_RECORD = _private_bindings.value('get_notion_run53_recovery', 'GET_RECORD')
+ANCHOR = _private_bindings.value('get_notion_run53_recovery', 'ANCHOR')
+STATE_BYTES = _private_bindings.value('get_notion_run53_recovery', 'STATE_BYTES')
+PLAN_SHA = _private_bindings.value('get_notion_run53_recovery', 'PLAN_SHA')
+PLAN_BYTES = _private_bindings.value('get_notion_run53_recovery', 'PLAN_BYTES')
+OP_SHA = _private_bindings.value('get_notion_run53_recovery', 'OP_SHA')
+ENGINE_RULES = _private_bindings.value('get_notion_run53_recovery', 'ENGINE_RULES')
+VERIFIED_BATCHES = _private_bindings.value('get_notion_run53_recovery', 'VERIFIED_BATCHES')
+TOTAL_BATCHES = _private_bindings.value('get_notion_run53_recovery', 'TOTAL_BATCHES')
+PREFIX_SHA = _private_bindings.value('get_notion_run53_recovery', 'PREFIX_SHA')
+PAGE_SHA = _private_bindings.value('get_notion_run53_recovery', 'PAGE_SHA')
+PROPERTIES_SHA = _private_bindings.value('get_notion_run53_recovery', 'PROPERTIES_SHA')
+ATTEMPT_CLOCK = _private_bindings.value('get_notion_run53_recovery', 'ATTEMPT_CLOCK')
+ALIAS_CLOCK = _private_bindings.value('get_notion_run53_recovery', 'ALIAS_CLOCK')
 
 
 def clock_witness(attempt, alias):

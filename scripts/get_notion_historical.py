@@ -4,7 +4,10 @@ A historical selection is neither a Git delta nor a successful body receipt.
 Exact reviewed native placeholder leaves anchor additions and are retained. All blocks
 and properties remain protected; fresh full-page reads precede every write.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
+from pathlib import PurePosixPath
+import json
 import re
 import get_notion_executor as e
 
@@ -122,6 +125,80 @@ def target_pin(snapshot,ident,data_source):
     if len(placeholders)!=1: e.fail('missing_block_ownership')
     return {'page_id':view['page_id'],'snapshot_sha256':e.digest(snapshot),'placeholder_blocks':[{'id':i,'normalized_hash':e.p.block_hash(view['nodes'][i])} for i in placeholders]}
 
+def creation_ids(manifest):
+    return {ident for ident,row in manifest['records'].items() if row['mode']=='new_numeric'}
+
+
+def bind_creation_properties(manifest,property_manifest,expected_property_manifest_sha256):
+    """Bind only exact reviewed new rows; a nonempty subset is not sufficient."""
+    if property_manifest is None:
+        if expected_property_manifest_sha256 is not None:e.fail('approval_missing')
+        return
+    from get_notion_properties_runtime import authorize
+    authorize(property_manifest,expected_property_manifest_sha256,apply=False)
+    selected=creation_ids(manifest)
+    if (not selected or set(property_manifest['records'])!=selected
+            or property_manifest['source_commit']!=manifest['source_commit']
+            or property_manifest['data_source_id']!=manifest['data_source_id']
+            or property_manifest['registry'] is not None):e.fail('approval_missing')
+    for ident,binding in property_manifest['records'].items():
+        row=manifest['records'][ident]
+        if (set(binding)!={'path','blob','sha256','privacy_review_sha256'}
+                or any(binding[key]!=row[key] for key in ('path','blob','sha256'))
+                or binding['privacy_review_sha256']!=row['review']['review_evidence_sha256']):
+            e.fail('approval_missing')
+
+
+def require_creation_capture(captures,manifest,expected):
+    """Use existing durable native evidence; target:null is not absence proof."""
+    validate(manifest,expected);check_captures(captures)
+    matches=[saved for saved in captures.values() if saved['manifest']==manifest]
+    if len(matches)!=1:e.fail('approval_missing')
+    for ident in creation_ids(manifest):
+        snapshot=matches[0]['snapshots'][ident]
+        if not isinstance(snapshot,dict) or snapshot.get('native_blocks_available') is not True:e.fail('target_invalid')
+        if e.target(snapshot,ident,manifest['data_source_id']) is not None:
+            e.fail('duplicate_id')
+
+
+def creation_title(publication,ident,data,property_manifest,expected_property_manifest_sha256):
+    """Only exact-empty historical-new titles may use their reviewed filename."""
+    manifest=getattr(publication,'manifest',None)
+    expected=publication.descriptor.get('historical_manifest_sha256')
+    validate(manifest,expected)
+    bind_creation_properties(manifest,property_manifest,expected_property_manifest_sha256)
+    if property_manifest is None or ident not in creation_ids(manifest):e.fail('source_invalid')
+    source=manifest['records'][ident]
+    if (publication.descriptor['records'].get(ident)!={key:source[key] for key in ('path','blob','sha256')}
+            or e.digest(data)!=source['sha256'] or e.p.git_blob(data)!=source['blob']):e.fail('source_invalid')
+    header=data.decode('utf-8').split('\n---\n',1)[0]
+    titles=[line[7:] for line in header.splitlines() if line.startswith('title: ')]
+    try:empty=len(titles)==1 and json.loads(titles[0])==''
+    except (ValueError,TypeError):empty=False
+    if not empty:e.fail('source_invalid')
+    e.p.safe_path(source['path'])
+    name=PurePosixPath(source['path']).name
+    suffix='.markdown' if name.lower().endswith('.markdown') else '.md'
+    title=name[:-len(suffix)]
+    if not title or title!=title.strip() or re.search(r'[\x00-\x1f\x7f-\x9f]',title):e.fail('source_invalid')
+    if len(title)>2000:e.fail('request_budget')
+    return title,{'kind':'historical_source_filename','path':source['path'],
+                  'blob':source['blob'],'sha256':source['sha256']}
+
+def check_creation_titles(plan,publication,property_manifest,expected_property_manifest_sha256):
+    """Verify saved fallback provenance without replanning an in-flight write."""
+    for row in plan['records']:
+        if row['action']!='create':continue
+        data=publication.read(row['note_id'])
+        titles=[line[7:] for line in data.decode('utf-8').split('\n---\n',1)[0].splitlines() if line.startswith('title: ')]
+        try:empty=len(titles)==1 and json.loads(titles[0])==''
+        except (ValueError,TypeError):empty=False
+        if empty or 'title_source' in row:
+            title,source=creation_title(publication,row['note_id'],data,property_manifest,expected_property_manifest_sha256)
+            expected={'type':'title','title':[e.p.text_run(title)]}
+            if row.get('title_source')!=source or row.get('properties',{}).get(plan['policy']['title_property'])!=expected:
+                e.fail('journal_busy')
+
 
 def prepare(publication,state,sha,snapshots,policy,manifest,expected,*,
             property_manifest=None,expected_property_manifest_sha256=None,property_schema=None):
@@ -131,6 +208,7 @@ def prepare(publication,state,sha,snapshots,policy,manifest,expected,*,
     if e.digest(state)!=sha or state['journal'] is not None: e.fail('journal_busy')
     if len(set(state['receipts'])|set(manifest['records']))>MAX_LIBRARY: e.fail('request_budget')
     if policy['data_source_id']!=manifest['data_source_id']: e.fail('wrong_parent')
+    bind_creation_properties(manifest,property_manifest,expected_property_manifest_sha256)
     scopes={};early={}
     for ident,row in manifest['records'].items():
         try:
@@ -179,10 +257,11 @@ def prepare(publication,state,sha,snapshots,policy,manifest,expected,*,
             row.update(action='blocked',reason='unsupported_source_format')
     plan.update(historical_only=True,historical_manifest_sha256=expected,
                 historical_manifest=deepcopy(manifest),source_mode='historical_cohort')
+    if property_manifest is not None:plan['property_manifest']=deepcopy(property_manifest)
     return plan
 
 CAPTURE_CONTRACT='get-notion-historical-capture-1'
-APPROVED_CAPTURE_SCOPES=frozenset()
+APPROVED_CAPTURE_SCOPES = _private_bindings.value('get_notion_historical', 'APPROVED_CAPTURE_SCOPES')
 
 
 def validate_capture(candidate,expected,*,apply=False):
@@ -220,3 +299,68 @@ def check_captures(captures):
 def preserve_captures(old,new):
     for key,value in old.get('historical_captures',{}).items():
         if new.get('historical_captures',{}).get(key)!=value: e.fail('state_changed')
+
+
+def capture_members(expected):
+    """Resolve a reviewed selection, never derive approval from supplied bytes."""
+    e.p.hex_hash(expected, 64)
+    if expected in APPROVED_CAPTURE_SCOPES:
+        if expected in APPROVED_CAPTURE_GROUPS: e.fail('approval_missing')
+        return (expected,)
+    group = APPROVED_CAPTURE_GROUPS.get(expected)
+    if (not isinstance(group, dict)
+            or set(group) != {'contract', 'mode', 'members'}
+            or group['contract'] != CAPTURE_GROUP_CONTRACT
+            or group['mode'] != 'historical-capture' or e.digest(group) != expected):
+        e.fail('approval_missing')
+    members = group['members']
+    if (not isinstance(members, list) or not 1 <= len(members) <= MAX_CAPTURE_SCOPES
+            or any(not isinstance(member, str) for member in members)
+            or len(set(members)) != len(members)):
+        e.fail('approval_missing')
+    for member in members:
+        e.p.hex_hash(member, 64)
+        if member not in APPROVED_CAPTURE_SCOPES or member in APPROVED_CAPTURE_GROUPS:
+            e.fail('approval_missing')
+    return tuple(members)
+
+
+CAPTURE_GROUP_CONTRACT = "get-notion-historical-capture-group-1"
+CAPTURE_COLLECTION_CONTRACT = "get-notion-historical-capture-collection-1"
+MAX_CAPTURE_SCOPES = 3
+MAX_CAPTURE_RUN_RECORDS = 30
+# Exact reviewed members only. Group selection grants capture, never body apply.
+APPROVED_CAPTURE_GROUPS = _private_bindings.value('get_notion_historical', 'APPROVED_CAPTURE_GROUPS')
+
+
+APPLY_GROUP_CONTRACT = 'get-notion-historical-apply-group-1'
+APPLY_COLLECTION_CONTRACT = 'get-notion-historical-apply-collection-1'
+MAX_APPLY_SCOPES = 3
+MAX_APPLY_RUN_RECORDS = 30
+# Empty until exact captured manifests are separately reviewed and registered.
+# Capture approval and membership NEVER confer body-write authorization.
+APPROVED_APPLY_GROUPS = {}
+
+
+def apply_members(expected):
+    """Hash-only ordered selection; retain each original <=10-note approval."""
+    e.p.hex_hash(expected, 64)
+    if expected in APPROVED_MANIFESTS:
+        if expected in APPROVED_APPLY_GROUPS: e.fail('approval_missing')
+        return (expected,)
+    group = APPROVED_APPLY_GROUPS.get(expected)
+    if (not isinstance(group, dict)
+            or set(group) != {'contract', 'mode', 'members'}
+            or group['contract'] != APPLY_GROUP_CONTRACT
+            or group['mode'] != 'historical-apply' or e.digest(group) != expected):
+        e.fail('approval_missing')
+    members = group['members']
+    if (not isinstance(members, list) or not 1 <= len(members) <= MAX_APPLY_SCOPES
+            or any(not isinstance(member, str) for member in members)
+            or len(set(members)) != len(members)):
+        e.fail('approval_missing')
+    for member in members:
+        e.p.hex_hash(member, 64)
+        if member not in APPROVED_MANIFESTS or member in APPROVED_APPLY_GROUPS:
+            e.fail('approval_missing')
+    return tuple(members)

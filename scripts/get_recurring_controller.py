@@ -4,6 +4,7 @@ The literal template is part of A. C contains A's SHA and the externally approve
 policy, never C's own SHA. Provenance compares workflow bytes at run.head_sha
 against this deterministic rendering, rather than trusting a self-hash from C.
 """
+import get_private_runtime_bindings as _private_bindings
 import argparse
 import base64
 import json
@@ -34,6 +35,12 @@ def template_sha256():
     return a.sha(template_bytes())
 
 
+PRE_PRIVATE_TEMPLATE_SHA256 = '9555eb4a70a35381505a46d767aa17663489e4e4548c3803d8c16a2a90cfb4f9'
+
+def historical_template_digests():
+    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256)
+
+
 def policy_template_bytes(policy):
     """Select only the exact current or pinned historical controller template."""
     import get_publication_provenance as p
@@ -41,6 +48,11 @@ def policy_template_bytes(policy):
     current = template_bytes()
     if digest == a.sha(current):
         return current
+    if digest == PRE_PRIVATE_TEMPLATE_SHA256:
+        raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-pre-private.yml.disabled').read_bytes()
+        if not isinstance(raw, bytes) or len(raw) > MAX_CONTROLLER or a.sha(raw) != PRE_PRIVATE_TEMPLATE_SHA256:
+            p.fail('provenance_controller_template')
+        return raw
     if digest == legacy.TEMPLATE_SHA256:
         raw = legacy.TEMPLATE_BYTES
         if not isinstance(raw, bytes) or len(raw) > MAX_CONTROLLER or a.sha(raw) != legacy.TEMPLATE_SHA256:
@@ -58,7 +70,7 @@ def scope_for(policy, policy_hash):
             'permissions': 'existing-only',
             'notion_scope_contract': 'get-notion-standing-runtime-1', 'notion_batch_max': 50,
             'notion_journal_path': '.sync/get-notion/state.json',
-            'notion_initial_proof_sha256': 'f3b616ec734324e785f4258482fb961ee937161316375ad8b28ea29c7d60f11e'}
+            'notion_initial_proof_sha256': _private_bindings.value('get_recurring_controller', 'INITIAL_PROOF_SHA256')}
 
 
 def render(policy, approved_policy_sha256, approved_scope_sha256, *, scheduled=True):

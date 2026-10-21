@@ -51,7 +51,7 @@ def request(row, data_source, index, page_id=None, after=None):
     wire = transport.wire_blocks(blocks, previous, uploaded_pngs=row.get('uploaded_pngs'))
     if index == 0:
         body = {'parent': {'type': 'data_source_id', 'data_source_id': data_source},
-                'properties': deepcopy(row['properties']), 'children': wire}
+                'properties': e.property_transaction.creation_wire_properties(row), 'children': wire}
         method, path = 'POST', '/pages'
     else:
         body = {'children': wire, 'after': p.notion_id(after)}
@@ -125,7 +125,7 @@ def validate_plan(row, data_source):
     e = engine()
     if row.get('action') != 'create' or row.get('before_sha256') != e.digest(None):
         e.fail('state_invalid')
-    expected = prepare(row['rendered'], row['properties'], data_source, row.get('uploaded_pngs'))
+    expected = prepare(row['rendered'], e.property_transaction.creation_wire_properties(row), data_source, row.get('uploaded_pngs'))
     if not e.same(expected, row.get('create_batches')) or len(expected['batches']) < 2:
         e.fail('state_invalid')
     if not e.same(row.get('request_blocks'), e.request_blocks(row['rendered'][:expected['batches'][0]['end']])):
@@ -448,7 +448,7 @@ def execute_row(row, plan, approved_plan_sha, publication, api, store, value, ve
                 raise
             try:
                 counts['write_calls'] += 1
-                response = (api.create_page(data_source, ident, row['properties'], blocks) if index == 0
+                response = (api.create_page(data_source, ident, e.property_transaction.creation_wire_properties(row), blocks) if index == 0
                             else api.append_blocks(operation['page_id'], blocks, after))
             except transport.NotDispatched as exc:
                 if exc.request_fingerprint != key:

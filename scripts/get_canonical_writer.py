@@ -4,6 +4,7 @@ Legacy updates remain delegated to the reviewed span adapter. This module plans
 only absent/newly managed files, with immutable preview and external state
 anchors. Publication, schedules, assets and Notion are deliberately separate.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from pathlib import Path
 import json
@@ -22,9 +23,9 @@ MAX_EXISTING_OWNERS=5000
 MAX_NEW=50
 MAX_STATE=8*1024*1024
 MAX_OPAQUE=2*1024*1024
-PREVIEW='013328cc962d9921befb3e25710ba699dd7e46a9'
+PREVIEW = _private_bindings.value('get_canonical_writer', 'PREVIEW')
 PREVIEW_STATE='03 State/cloud-sync-state.json'
-PREVIEW_STATE_SHA='d05c1aa4773421d0d73a60a6d1cf430158440422a31d89c006accc524e600645'
+PREVIEW_STATE_SHA = _private_bindings.value('get_canonical_writer', 'PREVIEW_STATE_SHA')
 KNOWN={'id','note_id','title','content','note_type','source','created_at','updated_at','tags','topics',
  'is_child_note','parent_id','children_ids','share_id','ref_content','audio','web_page','audio_url',
  'audio_duration','audio_transcript','attachments','note_url'}

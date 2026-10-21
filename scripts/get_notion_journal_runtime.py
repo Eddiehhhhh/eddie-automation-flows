@@ -4,6 +4,7 @@ No credentials, HTTP implementation, remote writes or command-line entry.
 Transports are injected from the existing approved runtime. Flushing stdout is
 not proof of platform log retention: absent/mismatched provenance fails closed.
 """
+import get_private_proof as private_proof
 from copy import deepcopy
 from pathlib import Path
 import re
@@ -16,11 +17,13 @@ import get_recurring_controller as controller
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run53_recovery as run53_recovery
+import get_notion_run57_recovery as run57_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
 import get_notion_run32_recovery as run32_recovery
 import get_notion_png_recovery as png_recovery
+import get_notion_idle_recovery as idle_recovery
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '
 CONTRACT = 'get-notion-journal-checkpoint-1'
@@ -193,7 +196,9 @@ class CheckpointEmitter:
     verifies shape, writes one complete marker and flushes. It cannot promise
     that Actions will retain the log; future recovery must authenticate it.
     """
-    def __init__(self, stream, *, context):
+    def __init__(self, stream, *, context, compact=False):
+        if type(compact) is not bool: fail('journal_checkpoint_receipt')
+        self.compact = compact
         self.context = globals()['context'](context)
         self.stream = stream; self.sequence = 0; self.previous = None; self.failed = False
 
@@ -220,6 +225,7 @@ class CheckpointEmitter:
                     'state_sha256', 'state_bytes', 'cas_attempts', 'readback_verified')}}
             record['record_sha256'] = codec.digest(record)
             line = MARKER + codec.encoded(record).decode().rstrip('\n') + '\n'
+            if self.compact: line = private_proof.line('journal', record) + '\n'
             if self.stream.write(line) != len(line): fail('journal_checkpoint_write')
             self.stream.flush()
             self.sequence = record['sequence']; self.previous = record['record_sha256']
@@ -384,7 +390,8 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'code_sha': policy['code_sha'], 'controller_sha': run['head_sha'],
             'rules_sha256': policy['rules_sha256'], 'notion_policy_sha256': notion_policy_sha256,
             'public_policy_sha256': approved_public_policy_sha256})
-        records, get_record = _records(client.logs(job['id']), expected, notion_times, get_times, policy, run)
+        raw = private_proof.expand_for(client, client.logs(job['id']), policy=policy, run=run, notion_policy_sha256=notion_policy_sha256)
+        records, get_record = _records(raw, expected, notion_times, get_times, policy, run)
         # Re-read the exact original attempt, not just the mutable run alias.
         original = _terminal_run(client.json(root + '/attempts/' + str(run_attempt)), policy)
         if provenance.run_binding(original) != provenance.run_binding(run): fail('journal_provenance_changed')
@@ -532,6 +539,13 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     public_policy=policy, approved_public_policy_sha256=approved_public_policy_sha256,
                     notion_policy_sha256=notion_policy_sha256)
             except CheckpointFailure as exc:
+                if (str(exc) == 'journal_provenance_other_controller'
+                        and idle_recovery.can_recover(policy, row['id'], row['run_attempt'])):
+                    result = idle_recovery.recover_checkpoint(bounded, row['id'], row['run_attempt'],
+                        current_public_policy=policy)
+                    match_candidate(result, row)
+                    return {**result, 'candidate_runs_checked': checked, 'candidate_attempts_checked': checked,
+                        'provenance_reads': bounded.requests, 'provenance_bytes': bounded.bytes}
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(plan_recovery.OLD_RUN,plan_recovery.OLD_ATTEMPT)):
                     # One reviewed old transaction only; same bounded client,
@@ -585,6 +599,12 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 if (str(exc)=='journal_provenance_other_controller'
                         and (row['id'],row['run_attempt'])==(run53_recovery.RUN,run53_recovery.ATTEMPT)):
                     result=run53_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
+                    match_candidate(result,row)
+                    return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                        'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
+                if (str(exc)=='journal_provenance_other_controller'
+                        and (row['id'],row['run_attempt'])==(run57_recovery.RUN,run57_recovery.ATTEMPT)):
+                    result=run57_recovery.recover_checkpoint(bounded,row['id'],row['run_attempt'])
                     match_candidate(result,row)
                     return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
                         'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}

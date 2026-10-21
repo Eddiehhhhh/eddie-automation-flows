@@ -34,6 +34,8 @@ jobs:
   canonical-get:
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    env:
+      GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -50,6 +52,19 @@ jobs:
           RUNTIME_SHA: '@@RUNTIME_SHA@@'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Validate bounded Notion route before Get
+        env:
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
+          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
+        run: python scripts/get_notion_route_selection.py
+      - name: Materialize verified private runtime data
+        env:
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
+          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Validate complete private Notion route before Get
         env:
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}

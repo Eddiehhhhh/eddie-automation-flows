@@ -3,23 +3,24 @@
 Only a caller-authenticated durable journal may use allows(). Preparation never
 receives this exception. Saved page/upload handles and plan remain unchanged.
 """
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 import get_notion_sink_plan as p
 
 TAG = 'exact_run15_acknowledged_png_create_v1'
-RUN = 39058433489
-ATTEMPT = 1
-JOB = 117471110813
-PUBLIC_POLICY = {'code_sha': '086fc1425a95f7bce6df55b3e36aa449f679a316', 'contract': 'get-public-actions-provenance-policy-1', 'controller_template_sha256': '66207da3cafd49778570d32ca61c23bfa13d86a4cebd49fabccaebe952f855d2', 'get_policy_sha256': '4a3dd63ea5f98cd5f7845926a9d9f5285a474d9034751c886cebfd9e380932ec', 'head_branch': 'main', 'job_name': 'canonical-get', 'publication_step_name': 'Emit verified canonical publication anchor', 'repository': 'Eddiehhhhh/eddie-automation-flows', 'repository_id': 1270807355, 'rules_sha256': 'ed9c832a4498ae6f09c07091e8983a2c9738687a7eee717d9e83d1630c066ccb', 'workflow_id': 387242896, 'workflow_path': '.github/workflows/get-canonical.yml'}
-PUBLIC_SHA = 'd5dee1f47ffbe9ff65acd346480947f41edbe7cca68b3d017b11cbbce38b58c8'
-NOTION_POLICY = '6dd0c640b83fadca02b08a2a938ed5f76160f436443965ca760d087abf6995e2'
-CHECKPOINT = {'cas_attempts': 0, 'code_sha': '086fc1425a95f7bce6df55b3e36aa449f679a316', 'commit': 'cd18cea23ef94cba570afd45c47ae16be8af6745', 'contract': 'get-notion-journal-checkpoint-1', 'controller_sha': '1a9c013c1928caa3a2f1dde6e8295dd3a8d53f23', 'notion_policy_sha256': '6dd0c640b83fadca02b08a2a938ed5f76160f436443965ca760d087abf6995e2', 'parent_commit': None, 'previous_record_sha256': '26db23b571b5fadae05859b69c66af36ef74b369956a74b3c3c93ea654c8ac74', 'public_policy_sha256': 'd5dee1f47ffbe9ff65acd346480947f41edbe7cca68b3d017b11cbbce38b58c8', 'readback_verified': True, 'record_sha256': '2c7495c7fd2e3294ff48bd2df59050a02a83aceda723c199bc9fbc3350bfa318', 'rules_sha256': 'ed9c832a4498ae6f09c07091e8983a2c9738687a7eee717d9e83d1630c066ccb', 'run_attempt': 1, 'run_id': 39058433489, 'sequence': 15, 'state_blob': '045b41400e1b539fde0586248723ac8305dd0ab3', 'state_bytes': 673850, 'state_sha256': '25a4ed324a22068d36234bafffcb7c1736a224592a1b0265be9352f1dd998ee0', 'status': 'journal_readback_verified', 'tree': '6a8aad0fa379f1ca0caf7826c438d653ee4a1d8d'}
-GET_RECORD = {'cas_attempts': 0, 'code_sha': '086fc1425a95f7bce6df55b3e36aa449f679a316', 'contract': 'get-canonical-publication-anchor-1', 'controller_sha': '1a9c013c1928caa3a2f1dde6e8295dd3a8d53f23', 'main_updated': False, 'observed_main_commit': '58d3eb9c10c306605d2713afcf0968a4bc439aa9', 'policy_sha256': '4a3dd63ea5f98cd5f7845926a9d9f5285a474d9034751c886cebfd9e380932ec', 'readback_verified': True, 'receipt_commit': 'a37cc108096210d0fb9847609e906ca22c88acf4', 'receipt_sequence': 1, 'receipt_sha256': 'e49b99c42729ca079cdc04ed75145f39b12aad2d1a587dfcd0cafce9344f7293', 'record_sha256': '22041ff25d642a6526e80d1064dddf50c392ef4435289128c915f392f54a7ad3', 'rules_sha256': 'ed9c832a4498ae6f09c07091e8983a2c9738687a7eee717d9e83d1630c066ccb', 'run_attempt': 1, 'run_id': 39058433489, 'status': 'canonical_publication_verified'}
-ANCHOR = {'commit': 'cd18cea23ef94cba570afd45c47ae16be8af6745', 'state_blob': '045b41400e1b539fde0586248723ac8305dd0ab3', 'state_sha256': '25a4ed324a22068d36234bafffcb7c1736a224592a1b0265be9352f1dd998ee0'}
-STATE_BYTES = 673850
-PLAN_SHA = 'a54e2736d552ce4fc4f14810bb052745dfc931468b7d06b6bc5608678bdf18b5'
-OP_SHA = '03904ded8243ecfd65115107fcd22414a976e242a901a8b5566669c6f9a4680c'
-ENGINE_RULES = '8864f763427a4f9a4dad677c0ef55888e884e9f6a3d8b8b1772aa51a463549b7'
+RUN = _private_bindings.value('get_notion_run15_recovery', 'RUN')
+ATTEMPT = _private_bindings.value('get_notion_run15_recovery', 'ATTEMPT')
+JOB = _private_bindings.value('get_notion_run15_recovery', 'JOB')
+PUBLIC_POLICY = _private_bindings.value('get_notion_run15_recovery', 'PUBLIC_POLICY')
+PUBLIC_SHA = _private_bindings.value('get_notion_run15_recovery', 'PUBLIC_SHA')
+NOTION_POLICY = _private_bindings.value('get_notion_run15_recovery', 'NOTION_POLICY')
+CHECKPOINT = _private_bindings.value('get_notion_run15_recovery', 'CHECKPOINT')
+GET_RECORD = _private_bindings.value('get_notion_run15_recovery', 'GET_RECORD')
+ANCHOR = _private_bindings.value('get_notion_run15_recovery', 'ANCHOR')
+STATE_BYTES = _private_bindings.value('get_notion_run15_recovery', 'STATE_BYTES')
+PLAN_SHA = _private_bindings.value('get_notion_run15_recovery', 'PLAN_SHA')
+OP_SHA = _private_bindings.value('get_notion_run15_recovery', 'OP_SHA')
+ENGINE_RULES = _private_bindings.value('get_notion_run15_recovery', 'ENGINE_RULES')
 
 
 def allows(plan, journal):

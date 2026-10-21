@@ -4,6 +4,7 @@ One canonical engine and one shared CAS publisher. Existing private credentials
 are consumed only by CLI entry, never by public Actions provenance. No schedule
 is installed here. A separately reviewed production scope is required for apply.
 """
+import get_private_proof as private_proof
 import argparse
 import json
 import os
@@ -171,6 +172,8 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
         fail('runtime_scope')
     remote = remote if remote is not None else m.Remote(None, token)
     client = public_client if public_client is not None else provenance.AnonymousGithub()
+    if isinstance(client, provenance._PublicGithub):
+        client.private_proof_source = private_proof.PrivateRecords(remote)
     if apply:
         at_stage('execution_provenance', provenance.verify_execution, client, policy, run_context, trigger)
     parent = at_stage('remote_guard', m.guard, remote)
@@ -318,7 +321,8 @@ def main(argv=None):
         def emit(line):
             if args.publication_file:
                 write_publication_file(args.publication_file, line)
-            print(line, flush=True)
+            record = m.strict_capture_json(line[len(provenance.MARKER):].encode(), 8192)
+            print(private_proof.line('publication', record), flush=True)
         result = run(os.environ.get('PRIVATE_VAULT_TOKEN'), source, policy=policy,
             approved_policy_sha256=args.approved_policy_sha256, expected_parent=args.expected_parent,
             apply=args.apply, scope=scope, approved_scope_sha256=args.approved_scope_sha256,
@@ -327,7 +331,8 @@ def main(argv=None):
             writers_guard=writers_guard)
     except (Exception, SystemExit) as exc:
         result = failure(exc, attempt_started=attempt_started)
-    print(json.dumps(result), flush=True)
+    import get_private_runtime_report as report
+    print(json.dumps(report.public(result, ENTRY_ERRORS | frozenset(('runtime_activation_pending','runtime_failed')))), flush=True)
     # No built-in Notion call/job; an independent sink must not turn a successful
     # Get job into failed provenance. Callback partials are explicitly nonfatal.
     return 0 if result.get('status') in ('recurring_candidate_verified', 'recurring_transaction_verified') and result.get('publication_output') != 'failed' else 1

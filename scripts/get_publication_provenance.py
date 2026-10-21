@@ -5,6 +5,7 @@ inject its existing runtime token for this one fixed public API repository.
 No credential discovery/store, new permissions, private requests or writes.
 The caller pins one reviewed repository/workflow/code policy independently.
 """
+import get_private_proof as private_proof
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import argparse
@@ -320,6 +321,11 @@ def verified_prepare_only(raw, policy, run, job, emission):
     if len(reports) != 1:
         fail('provenance_prepare_only')
     value = reports[0]
+    import get_private_runtime_report as private_report
+    if isinstance(value, dict) and value.get('contract') == private_report.CONTRACT:
+        if value != private_report.PREPARE or policy['controller_template_sha256'] != controller.template_sha256():
+            fail('provenance_prepare_only')
+        return True
     fixed = {'status': 'recurring_candidate_verified', 'main_updated': False,
              'cas_attempts': 0, 'local_proposal_only': True, 'apply_ready': False,
              'schedule_enabled': False, 'asset_downloads': 0, 'notion_writes': 0,
@@ -454,6 +460,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     if completed > timestamp(run['updated_at']):
         fail('provenance_timestamp')
     raw = client.logs(job['id'])
+    raw = private_proof.expand_for(client, raw, policy=candidate_policy, run=run, kinds=('publication',))
     if verified_prepare_only(raw, candidate_policy, run, job, emission[0]):
         record = None
     else:
@@ -461,7 +468,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     if original_recovery:
         if record is None:
             fail('provenance_record')
-        recovery.verify_original_record(record, job['id'])
+        recovery.verify_original_record(record, job['id'], job=job, raw=raw, run=run)
     # Re-read the *original* attempt, then ensure latest is still the same run.
     # A failed/in-progress later rerun cannot erase this successful publication,
     # or inherit it: the record remains bound to the original attempt and job.
@@ -469,6 +476,10 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     if run_binding(original) != run_binding(run):
         fail('provenance_run_changed')
     current = check_run_identity(client.json(root), policy)
+    if (original_recovery and run_id == recovery.run57_recovery.RUN
+            and (run_binding(listed) != recovery.run57_recovery.RUN_BINDING
+                or run_binding(current) != recovery.run57_recovery.RUN_BINDING)):
+        fail('provenance_run_changed')
     if clock_witness is not None and recovery.run53_recovery.clock_witness(run, current) != clock_witness:
         fail('provenance_run_changed')
     if (run_identity(current) != run_identity(run)

@@ -29,8 +29,16 @@ def preflight(event, apply, mode, expected):
         return None
     if event != 'workflow_dispatch' or not apply:
         e.fail('approval_missing')
+    if mode == 'historical-capture':
+        for member in historical.capture_members(expected):
+            private_input.anchor_for(member)
+        return historical.CAPTURE_CONTRACT
+    if mode == 'historical-apply':
+        for member in historical.apply_members(expected):
+            private_input.anchor_for(member)
+            private_input.creation_property_for(member)
+        return historical.CONTRACT
     registrations = {
-        'historical-capture': historical.APPROVED_CAPTURE_SCOPES,
         'historical-apply': historical.APPROVED_MANIFESTS,
         'property-apply': properties.APPROVED_MANIFESTS,
     }
@@ -62,9 +70,12 @@ def dispatch(mode, expected, contract, args):
         e.fail('approval_missing')
     if not args.apply or not args.scope_from_policy:
         e.fail('approval_missing')
-    data = private_input.read(
-        private_input.remote_module.GitHubRemote(None, os.environ.get('PRIVATE_VAULT_TOKEN')),
-        expected, contract=contract)
+    remote = private_input.remote_module.GitHubRemote(None, os.environ.get('PRIVATE_VAULT_TOKEN'))
+    data = (private_input.read_capture_selection(remote, expected)
+            if mode == 'historical-capture'
+            else private_input.read_apply_selection(remote, expected)
+            if mode == 'historical-apply'
+            else private_input.read(remote, expected, contract=contract))
     flag = {'historical-capture': 'historical-capture',
             'historical-apply': 'historical-manifest',
             'property-apply': 'property-manifest'}[mode]

@@ -4,6 +4,8 @@ The active controller, source publication and journal each have separate
 external anchors. Native content remains private in memory/journal. A new
 runtime never trusts a current state merely because it can hash that state.
 """
+import get_private_proof as private_proof
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from collections import Counter
 import argparse
@@ -28,6 +30,8 @@ import get_notion_journal_runtime as checkpoints
 import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run53_recovery as run53_recovery
+import get_notion_run57_recovery as run57_recovery
+import get_notion_idle_recovery as idle_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
@@ -43,13 +47,13 @@ import get_notion_png_upload as png_upload
 import get_notion_uploaded_png as png_image
 
 # Deployment anchors are code-reviewed constants, never workflow inputs.
-PNG_ASSET_ANCHOR={'asset_commit': '58d3eb9c10c306605d2713afcf0968a4bc439aa9', 'contract': 'get-notion-three-png-evidence-1', 'manifest_blob': '57250bae9887e3e64dc7e5b45aa013547f51956a', 'manifest_path': '.sync/get-notion/assets/reviewed-png-manifest-v1.json', 'manifest_sha256': '0ae8131c866db9ebeb320f4d657ca40384755e5d7a38f69bf33fbad9cb7fe288', 'publication_commit': 'a37cc108096210d0fb9847609e906ca22c88acf4', 'repository': 'Eddiehhhhh/eddie-llm-wiki'}
-PNG_ASSET_ANCHOR_SHA256='a8137204a877ea80202dfb0f4d88e667a5d2ca17c9893e9c192da75c141a980c'
-PNG_SEQ2_PUBLICATION='1678207017f96eb8022b4f4fb540b08d8654fb38'
+PNG_ASSET_ANCHOR = _private_bindings.value('get_notion_runtime', 'PNG_ASSET_ANCHOR')
+PNG_ASSET_ANCHOR_SHA256 = _private_bindings.value('get_notion_runtime', 'PNG_ASSET_ANCHOR_SHA256')
+PNG_SEQ2_PUBLICATION = _private_bindings.value('get_notion_runtime', 'PNG_SEQ2_PUBLICATION')
 # Populated only after an independently reviewed append-only private asset
 # commit. Local downloads cannot activate uploads or manufacture an anchor.
-PNG_SEQ2_ASSET_ANCHOR={'asset_commit': '74ceb48920230b8b0ba0ec72325cdb4292b5cbe8', 'contract': 'get-notion-three-png-evidence-1', 'manifest_blob': 'b4f54a6bc963df36c9f99b9f3338a277725e7b14', 'manifest_path': '.sync/get-notion/assets/reviewed-png-manifest-v2.json', 'manifest_sha256': '2b0e9279111e93b201fe97a1b885688d168b56a57e65b957adbcbaeb3fb3e357', 'publication_commit': '1678207017f96eb8022b4f4fb540b08d8654fb38', 'repository': 'Eddiehhhhh/eddie-llm-wiki'}
-PNG_SEQ2_ASSET_ANCHOR_SHA256='35632db7839482bbf400891152aade9c79956dc981a5cfe8c15a67d48000bd2d'
+PNG_SEQ2_ASSET_ANCHOR = _private_bindings.value('get_notion_runtime', 'PNG_SEQ2_ASSET_ANCHOR')
+PNG_SEQ2_ASSET_ANCHOR_SHA256 = _private_bindings.value('get_notion_runtime', 'PNG_SEQ2_ASSET_ANCHOR_SHA256')
 import get_confirmed_source as source_loader
 import get_recurring_entry as entry
 import get_recurring_runtime as recurring
@@ -85,7 +89,14 @@ def scope_for(public_policy):
         'property_manifest_allowlist_sha256':e.digest(sorted(property_runtime.APPROVED_MANIFESTS)),
         'historical_manifest_allowlist_sha256':e.digest(sorted(historical.APPROVED_MANIFESTS)),
         'historical_capture_allowlist_sha256':e.digest(sorted(historical.APPROVED_CAPTURE_SCOPES)),
+        'historical_apply_groups_sha256':e.digest(historical.APPROVED_APPLY_GROUPS),
+        'historical_apply_max_scopes':historical.MAX_APPLY_SCOPES,
+        'historical_apply_group_max_notes':historical.MAX_APPLY_RUN_RECORDS,
+        'historical_capture_groups_sha256':e.digest(historical.APPROVED_CAPTURE_GROUPS),
+        'historical_capture_max_scopes':historical.MAX_CAPTURE_SCOPES,
+        'historical_capture_group_max_notes':historical.MAX_CAPTURE_RUN_RECORDS,
         'historical_input_anchors_sha256':e.digest(historical_input.INPUT_ANCHORS),
+        'incremental_property_scope_sha256':e.digest(e.incremental_properties.SCOPE),
         'new_page_property_scope_sha256':e.digest(e.creation_properties.SCOPE),'uploads':'two-fixed-three-png-cohorts-single-part','png_asset_anchor_sha256':PNG_ASSET_ANCHOR_SHA256,
         'png_seq2_asset_anchor_sha256':PNG_SEQ2_ASSET_ANCHOR_SHA256,
         'data_source_pin':transport.native.DATA_SOURCE_PIN,'database_pin':transport.native.DATABASE_PIN,
@@ -312,6 +323,13 @@ def dispatch(*args,**kwargs):
         raise
 
 
+def incremental_scope_for(publication, journal):
+    """Only fresh ordinary plans or a saved explicit incremental writer plan."""
+    if e.creation_properties.eligible(publication) and (journal is None or e.incremental_properties.enabled(journal['plan'])):
+        return deepcopy(e.incremental_properties.SCOPE)
+    return None
+
+
 def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writers_guard,initial_factory=initial_inputs,create_recovery=None,approved_recovery_sha=None,loaded_assets=None):
     property_runtime.check_dependency()
     state,sha=store.read();outbox.check_state(state)
@@ -347,7 +365,7 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
         if state['last_enqueued_publication']!=state['observed_publication_tip']:
             return {'status':'queue_partial','queued':len(state['pending_by_id']),'source_chain_complete':False,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         if not state['pending_by_id']:
-            return {'status':'queue_empty','queued':0,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
+            return {'status':'queue_partial' if state.get('source_state_holds') else 'queue_empty','source_state_unprojected_receipts':len(state.get('source_state_holds',{})),'queued':0,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         first=state['pending_by_id'][state['rotation_order'][0]]
         source_loader.load_queue_publication(local,remote,token,root,{k:first[k] for k in ('commit','parent','receipt_sha256')},policy_hash)
         pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state));scope={}
@@ -363,6 +381,9 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
         policy['property_create_scope_sha256']=e.digest(create_scope)
         if e.properties.REGISTRY in pub.descriptor['content_tree']:
             source_loader.Loader(local,remote,token,root,policy_hash).blob(pub.descriptor['commit'],e.properties.REGISTRY,16*1024*1024)
+    incremental_scope=incremental_scope_for(pub,pending_journal)
+    if incremental_scope is not None:
+        policy['property_incremental_scope_sha256']=e.digest(incremental_scope)
     upload_attempts_before=len(getattr(request,'attempted',set()))
     pub,png_resolver,image_adapter,attachment_provider,page_guard,png_preparation=png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,image_adapter,loaded_assets)
     if png_preparation is not None and not apply:
@@ -371,11 +392,11 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
     state,sha=store.read()
     adapter=outbox.EngineStore(store,attachment_provider=attachment_provider)
     def settle(plan,approved):return outbox.settle_empty_plan(store,sha,plan,approved)
-    result=pipeline.run(pub,adapter,request,policy,e.digest(policy),apply=apply,writers_guard=page_guard,initial_scope=scope,empty_plan_settle=settle,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,snapshot_adapter=image_adapter,reviewed_png=png_resolver,property_create_scope=create_scope)
+    result=pipeline.run(pub,adapter,request,policy,e.digest(policy),apply=apply,writers_guard=page_guard,initial_scope=scope,empty_plan_settle=settle,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,snapshot_adapter=image_adapter,reviewed_png=png_resolver,property_create_scope=create_scope,property_incremental_scope=incremental_scope)
     if png_resolver is not None and apply:
         result={**result,'png_upload_round':upload_attempts>0,'png_upload_attempts':upload_attempts,'png_preparation':png_preparation}
     final,final_sha=store.read()
-    return {**result,**counts,'queued':len(final['pending_by_id']),'outer_journal_sha256':final_sha,'source_chain_complete':final['last_enqueued_publication']==final['observed_publication_tip']}
+    return {**result,**counts,'source_state_unprojected_receipts':len(final.get('source_state_holds',{})),'queued':len(final['pending_by_id']),'outer_journal_sha256':final_sha,'source_chain_complete':final['last_enqueued_publication']==final['observed_publication_tip']}
 
 
 def _safe_result(value):
@@ -407,6 +428,10 @@ def _safe_result(value):
             base={k:value[k] for k in ('status','queued','source_chain_complete','journal_sha256','write_state','external_write_attempts')}
         except Exception:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
     if base.get('status')=='failed':return base
+    if 'source_state_unprojected_receipts' in value:
+        count=value['source_state_unprojected_receipts']
+        if type(count) is not int or not 0<=count<=e.metadata_pending.MAX_SOURCE_STATE_HOLDS:fail('notion_scope')
+        base['source_state_unprojected_receipts']=count
     for key,cap in (('initial_notes',2),('initial_range_candidates',2),('queued',2500)):
         if type(value.get(key)) is not int or not 0<=value[key]<=cap:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
         base[key]=value[key]
@@ -462,8 +487,9 @@ def recovery_mode_guard(state, found, modes):
     """An authenticated canonical continuation never doubles as another mode."""
     pending = state['engine_state']['journal']
     if (pending is not None and any(mode is not None for mode in modes)
-            and (found.get('recovery_anchor') == run53_recovery.TAG
-                or run53_recovery.allows(pending['plan'], pending))):
+            and (found.get('recovery_anchor') in (run53_recovery.TAG, run57_recovery.TAG)
+                or run53_recovery.allows(pending['plan'], pending)
+                or run57_recovery.allows(pending['plan'], pending))):
         fail('notion_journal_busy')
 
 
@@ -472,7 +498,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         public_client=None,checkpoint_stream=None,work=None,create_recovery=None,approved_recovery_sha=None,
         property_manifest=None,approved_property_manifest_sha256=None,
         historical_manifest=None,approved_historical_manifest_sha256=None,
-        historical_capture=None,approved_historical_capture_sha256=None):
+        historical_capture=None,approved_historical_capture_sha256=None,compact_proofs=False):
     """Real private read/CAS adapter. Default path cannot persist a journal."""
     stage='input';write_possible=False;prior_effects=None
     try:
@@ -480,10 +506,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         modes=(property_manifest,historical_manifest,historical_capture)
         if sum(mode is not None for mode in modes)>1 or any(mode is not None for mode in modes) and (create_recovery is not None or approved_recovery_sha is not None or public_policy is None):fail('notion_scope')
         if historical_capture is not None:
-            historical.validate_capture(historical_capture,approved_historical_capture_sha256,apply=apply)
+            historical_input.validate_capture_selection(historical_capture,approved_historical_capture_sha256,apply=apply)
         elif approved_historical_capture_sha256 is not None:fail('notion_scope')
         if historical_manifest is not None:
-            historical.validate(historical_manifest,approved_historical_manifest_sha256,apply=apply)
+            historical_input.validate_apply_selection(historical_manifest,approved_historical_manifest_sha256,apply=apply)
         elif approved_historical_manifest_sha256 is not None:fail('notion_scope')
         if property_manifest is not None:
             property_runtime.authorize(property_manifest,approved_property_manifest_sha256,apply=apply)
@@ -504,6 +530,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             tip={'commit':record['receipt_commit'],'receipt_sha256':record['receipt_sha256'],'sequence':record['receipt_sequence']}
         stage='writers';writers_guard()
         remote=m.Remote(None,token);parent=m.guard(remote)
+        if isinstance(client, provenance._PublicGithub):
+            client.private_proof_source=private_proof.PrivateRecords(remote)
         if expected_parent is not None and parent!=expected_parent:fail('notion_source_changed')
         initial_get_tree=remote.source_get_tree(parent)
         with tempfile.TemporaryDirectory(prefix='get-notion-runtime-',dir=work) as folder:
@@ -533,7 +561,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 anchor={'commit':entry.BOOTSTRAP['commit'],'state_blob':None,'state_sha256':outbox.digest(outbox.initial_state())}
             confirm=lambda receipt:False
             if apply:
-                confirm=checkpoints.CheckpointEmitter(checkpoint_stream,context={**execution,
+                confirm=checkpoints.CheckpointEmitter(checkpoint_stream,compact=compact_proofs,context={**execution,
                     'rules_sha256':public_policy['rules_sha256'],'notion_policy_sha256':e.digest(scope_for(public_policy)),
                     'public_policy_sha256':public_hash})
             durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=confirm)
@@ -544,6 +572,14 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             recovery_mode_guard(current, found if present else {}, modes)
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
             store=durable if apply else ReadOnlyStore(current)
+            # The separate authenticated idle predecessor bridge is deliberately
+            # before every mode return. It grants no pending-plan or input scope.
+            if present and found.get('recovery_anchor')==idle_recovery.TAG:
+                write_possible=apply
+                candidate=idle_recovery.transition_outer(current,sha,
+                    public_policy['get_policy_sha256'],proof=found)
+                if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                else:store=ReadOnlyStore(candidate);current,sha=store.read()
             if property_manifest is not None:
                 stage='execute';write_possible=apply
                 result=property_runtime.dispatch(local,remote,token,root,store,request,
@@ -559,15 +595,39 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 return safe
             if historical_capture is not None:
                 stage='execute';write_possible=apply
-                result=historical_runtime.capture(local,remote,token,root,store,request,
-                    candidate=historical_capture,expected=approved_historical_capture_sha256,
-                    policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
-                source_guard()
+                def capture_refresh():
+                    source_guard()
+                    if apply and durable.anchor['state_blob'] is not None:
+                        verified,verified_sha=durable.read()
+                        if verified['engine_state']['journal'] is not None:fail('journal_busy')
+                        if durable.compare_and_set(verified_sha,verified)!=verified_sha:fail('notion_state_anchor')
+                if historical_capture.get('contract')==historical.CAPTURE_COLLECTION_CONTRACT:
+                    result=historical_runtime.capture_group(local,remote,token,root,store,request,
+                        selection=historical_capture,expected=approved_historical_capture_sha256,
+                        policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,
+                        durable=durable,emitter=confirm,refresh=capture_refresh)
+                else:
+                    result=historical_runtime.capture(local,remote,token,root,store,request,
+                        candidate=historical_capture,expected=approved_historical_capture_sha256,
+                        policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
+                    capture_refresh()
                 result.update(journal_commits=durable.commits_attempted,source_parent=parent,
                     notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
                 return result
             if historical_manifest is not None:
                 stage='execute';write_possible=apply
+                if historical_manifest.get('contract')==historical.APPLY_COLLECTION_CONTRACT:
+                    def apply_refresh():
+                        source_guard()
+                        verified,verified_sha=durable.read()
+                        if verified['engine_state']['journal'] is not None:fail('journal_busy')
+                        if durable.compare_and_set(verified_sha,verified)!=verified_sha:fail('notion_state_anchor')
+                    result=historical_runtime.apply_group(local,remote,token,root,store,request,
+                        selection=historical_manifest,expected=approved_historical_manifest_sha256,
+                        policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,
+                        durable=durable,emitter=confirm,refresh=apply_refresh)
+                    result.update(source_parent=parent,production_activated=PRODUCTION_ACTIVATED)
+                    return result
                 result=historical_runtime.dispatch(local,remote,token,root,store,request,
                     manifest=historical_manifest,expected=approved_historical_manifest_sha256,
                     policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
@@ -587,8 +647,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 png_transition=bridge.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=png_transition;preload_sha=outbox.digest(png_transition)
             confirmed_transition=None
-            if present and found.get('recovery_anchor') in (run18_recovery.TAG,run28_recovery.TAG,run32_recovery.TAG,run53_recovery.TAG):
-                recovery_module={module.TAG:module for module in (run18_recovery,run28_recovery,run32_recovery,run53_recovery)}[found['recovery_anchor']]
+            if present and found.get('recovery_anchor') in (run18_recovery.TAG,run28_recovery.TAG,run32_recovery.TAG,run53_recovery.TAG,run57_recovery.TAG):
+                recovery_module={module.TAG:module for module in (run18_recovery,run28_recovery,run32_recovery,run53_recovery,run57_recovery)}[found['recovery_anchor']]
                 confirmed_transition=recovery_module.transition_outer(current,sha,public_policy['get_policy_sha256'])
                 preload_state=confirmed_transition;preload_sha=outbox.digest(preload_state)
             expired_transition=present and found.get('recovery_anchor')==run16_recovery.TAG
@@ -684,6 +744,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             elif old_journal is not None and run53_recovery.allows(old_journal['plan'],old_journal):
                 safe['resumed_prior_plan_sha256']=run53_recovery.PLAN_SHA
                 safe['resumed_prior_rules_sha256']=run53_recovery.ENGINE_RULES
+            elif old_journal is not None and run57_recovery.allows(old_journal['plan'],old_journal):
+                safe['resumed_prior_plan_sha256']=run57_recovery.PLAN_SHA
+                safe['resumed_prior_rules_sha256']=run57_recovery.ENGINE_RULES
             return safe
     except Exception as exc:
         reason=str(exc);reason=reason if reason in ERRORS else 'notion_failed'
@@ -712,11 +775,13 @@ def main(argv=None):
         if bool(args.historical_capture)!=bool(args.approved_historical_capture_sha256):fail('notion_scope')
         if bool(args.historical_manifest)!=bool(args.approved_historical_manifest_sha256):fail('notion_scope')
         if args.historical_capture:
-            historical_capture=m.strict_capture_json(a.bounded_file(args.historical_capture,256*1024),256*1024)
-            historical.validate_capture(historical_capture,args.approved_historical_capture_sha256,apply=args.apply)
+            capture_limit=historical.MAX_CAPTURE_SCOPES*256*1024+1024
+            historical_capture=m.strict_capture_json(a.bounded_file(args.historical_capture,capture_limit),capture_limit)
+            historical_input.validate_capture_selection(historical_capture,args.approved_historical_capture_sha256,apply=args.apply)
         if args.historical_manifest:
-            historical_manifest=m.strict_capture_json(a.bounded_file(args.historical_manifest,256*1024),256*1024)
-            historical.validate(historical_manifest,args.approved_historical_manifest_sha256,apply=args.apply)
+            apply_limit=historical.MAX_APPLY_SCOPES*256*1024+1024
+            historical_manifest=m.strict_capture_json(a.bounded_file(args.historical_manifest,apply_limit),apply_limit)
+            historical_input.validate_apply_selection(historical_manifest,args.approved_historical_manifest_sha256,apply=args.apply)
         if bool(args.property_manifest)!=bool(args.approved_property_manifest_sha256) or args.property_manifest and (args.recovery or not args.policy):fail('notion_scope')
         if args.property_manifest:
             property_manifest=m.strict_capture_json(a.bounded_file(args.property_manifest,256*1024),256*1024)
@@ -740,15 +805,32 @@ def main(argv=None):
             apply=args.apply,public_policy=policy,approved_public_policy_sha256=args.approved_policy_sha256,
             publication_bytes=raw,execution=execution,public_client=public_client,checkpoint_stream=sys.stdout if args.apply else None,create_recovery=recovery,approved_recovery_sha=args.approved_recovery_sha256,property_manifest=property_manifest,approved_property_manifest_sha256=args.approved_property_manifest_sha256,
             historical_manifest=historical_manifest,approved_historical_manifest_sha256=args.approved_historical_manifest_sha256,
-            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256)
+            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True)
     except Exception as exc:
         reason=str(exc);result={'contract':CONTRACT,'status':'failed','stage':'input','reason':reason if reason in ERRORS else 'notion_failed','write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
-    print(json.dumps(result),flush=True)
+    import get_private_runtime_report as report
+    print(json.dumps(report.public(result, ERRORS)),flush=True)
     return exit_status(result)
 
 
 def exit_status(result):
     if not isinstance(result,dict):return 1
+    if result.get('contract')==historical_runtime.APPLY_GROUP_RESULT_CONTRACT:
+        selected=result.get('scopes_selected')
+        return 0 if (result.get('status')=='applied' and type(selected) is int
+            and 1<=selected<=historical.MAX_APPLY_SCOPES
+            and result.get('scopes_completed')==selected and result.get('scopes_remaining')==0
+            and len(result.get('members',[]))==selected and result.get('reason') is None
+            and result.get('journal_write_state')=='confirmed'
+            and result.get('write_state') in ('confirmed','not_attempted')) else 1
+    if result.get('contract')==historical_runtime.GROUP_RESULT_CONTRACT:
+        selected=result.get('scopes_selected')
+        return 0 if (result.get('status')=='captured' and type(selected) is int
+            and 1<=selected<=historical.MAX_CAPTURE_SCOPES
+            and result.get('scopes_completed')==selected and result.get('scopes_remaining')==0
+            and len(result.get('members',[]))==selected and result.get('reason') is None
+            and result.get('journal_write_state')=='confirmed'
+            and result.get('notion_write_attempts')==0) else 1
     if result.get('contract')=='get-notion-historical-capture-result-1' and result.get('status') in ('captured','prepared') and result.get('notion_write_attempts')==0:return 0
     if result.get('status') in ('prepared','queue_empty','queue_partial'):
         return 0 if result.get('write_state')=='not_attempted' else 1
