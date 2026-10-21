@@ -354,7 +354,7 @@ def verified_prepare_only(raw, policy, run, job, emission):
     return True
 
 
-def check_run_identity(run, policy):
+def check_run_origin(run, policy):
     if not isinstance(run, dict):
         fail('provenance_run')
     positive(run.get('id')); positive(run.get('run_attempt'))
@@ -363,12 +363,16 @@ def check_run_identity(run, policy):
         fail('provenance_run')
     if run.get('workflow_id') != policy['workflow_id'] or run.get('path') != policy['workflow_path'] or run.get('head_branch') != policy['head_branch']:
         fail('provenance_run')
-    if run.get('event') not in ('workflow_dispatch', 'schedule'):
-        fail('provenance_run')
     a.checked(run.get('head_sha'), 40)
     timestamp(run.get('created_at')); timestamp(run.get('updated_at'))
     return run
 
+
+def check_run_identity(run, policy):
+    check_run_origin(run, policy)
+    if run.get('event') not in ('workflow_dispatch', 'schedule'):
+        fail('provenance_run')
+    return run
 
 def check_run(run, policy):
     check_run_identity(run, policy)
@@ -523,6 +527,16 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
                 fail('provenance_run_changed')
             seen.add(ident)
             if row.get('head_branch') != policy['head_branch']:
+                continue
+            # A failed first push attempt is not an eligible publication event.
+            # GitHub records workflow-parse failures this way even for a workflow
+            # whose only permitted triggers are dispatch/schedule. Authenticate
+            # its full origin/shape before negative selection; never use it as
+            # anchor evidence, and never hide reruns, unknown events or statuses.
+            if (row.get('event') == 'push' and type(row.get('run_attempt')) is int
+                    and row['run_attempt'] == 1 and row.get('status') == 'completed'
+                    and row.get('conclusion') == 'failure'):
+                check_run_origin(row, policy)
                 continue
             listed.append(check_run_identity(row, policy))
         if len(rows) < RUN_PAGE_SIZE:
