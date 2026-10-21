@@ -18,7 +18,7 @@ PLACEHOLDERS = frozenset(('（无文本内容）', '(无文本内容)'))
 REVIEW_KEYS = {'source_sha256', 'review_evidence_sha256', 'destination_data_source_id',
                'credential_free', 'transmission_approved', 'media_free'}
 # Exact hashes only; unreviewed CLI input cannot authorize any apply operation.
-APPROVED_MANIFESTS = frozenset()
+APPROVED_MANIFESTS = _private_bindings.value('get_notion_historical', 'APPROVED_MANIFESTS')
 
 
 def validate(manifest, expected, *, apply=False):
@@ -339,7 +339,7 @@ MAX_APPLY_SCOPES = 3
 MAX_APPLY_RUN_RECORDS = 30
 # Empty until exact captured manifests are separately reviewed and registered.
 # Capture approval and membership NEVER confer body-write authorization.
-APPROVED_APPLY_GROUPS = {}
+APPROVED_APPLY_GROUPS = _private_bindings.value('get_notion_historical', 'APPROVED_APPLY_GROUPS')
 
 
 def apply_members(expected):

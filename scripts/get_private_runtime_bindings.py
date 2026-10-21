@@ -14,7 +14,7 @@ import re
 import stat
 
 CONTRACT = 'get-private-runtime-bindings-1'
-TRUSTED_BUNDLE_SHA256 = '2655c8991bf295e49c85cc47d5e60050bf3d568d24fafc38d3b2fa87658e5c3e'
+TRUSTED_BUNDLE_SHA256 = '56cc8aa503ea46759cac608f11158df9b9e60bc9db15839024527bc7455c8aa5'
 MAX_BYTES = 1024 * 1024
 ENV_FILE = 'GET_PRIVATE_BINDINGS_FILE'
 _CACHE = None
@@ -115,7 +115,7 @@ def value(module, name):
     except Exception: fail()
 
 PRIVATE_REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
-PRIVATE_PATH = '.sync/get-notion/runtime-bindings-2655c8991bf295e49c85cc47d5e60050bf3d568d24fafc38d3b2fa87658e5c3e.json'
+PRIVATE_PATH = '.sync/get-notion/runtime-bindings-56cc8aa503ea46759cac608f11158df9b9e60bc9db15839024527bc7455c8aa5.json'
 
 def verified_private_blob(remote, commit):
     """Read only the fixed private destination; return PRIVATE evidence to caller.
