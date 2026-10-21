@@ -153,7 +153,7 @@ class PrivateRecords:
             if not isinstance(raw,bytes) or len(raw)!=size or oid(raw)!=blob:fail()
             self.blobs[key]=raw;self.bytes+=len(raw)
         return self.blobs[key]
-    def receipt_origins(self,index,blob,receipt):
+    def receipt_origins(self,index,blob,receipt,*,hints_only=False):
         parent=checked(receipt.get('parent_commit'),40);seen=set()
         # A private current-state reference is ONLY a search hint. Its target
         # still requires immutable object verification and the externally
@@ -170,6 +170,7 @@ class PrivateRecords:
                 node=self.read_node(candidate);row=node['objects'].get(PATHS['publication'])
                 if (node['parent']==parent and row is not None and row[0]==blob
                         and self.object(node,'publication') is not None):yield candidate
+        if hints_only:return
         for i in range(index,self.limit):
             node=self.node(i)
             if node is None:break
@@ -184,6 +185,26 @@ class PrivateRecords:
             checked_pointer(p);self.guard()
             context={'run_id':run['id'],'run_attempt':run['run_attempt'],'code_sha':policy['code_sha'],
                      'controller_sha':run['head_sha'],'rules_sha256':policy['rules_sha256']}
+            deferred=[]
+            def publication_match(node,raw,receipt,origins):
+                for origin in origins:
+                    if receipt.get('policy_sha256')!=policy['get_policy_sha256']:
+                      # Reuse the original exact predecessor bridge only after
+                      # authenticating the immutable receipt origin and bytes.
+                      # This authorizes receipt identity under the executing verifier,
+                      # not the historical wrapper policy. Preserve that policy
+                      # below and require its exact external full-record digest.
+                      import get_recurring_policy_recovery as recovery
+                      if not recovery.accepts_receipt(origin,sha(raw),receipt,recovery.current_get_policy()):continue
+                    for updated in (False,True):
+                      if updated and origin!=node['commit']:continue
+                      record={**context,'contract':'get-canonical-publication-anchor-1','status':'canonical_publication_verified',
+                          'policy_sha256':policy['get_policy_sha256'],'observed_main_commit':node['commit'],
+                          'receipt_commit':origin,'receipt_sha256':sha(raw),'receipt_sequence':receipt['sequence'],
+                          'main_updated':updated,'cas_attempts':int(updated),'readback_verified':True}
+                      record['record_sha256']=sha(public_encoded(record))
+                      if pointer('publication',record)==p:self.guard();return record
+                return None
             for i in range(self.limit):
                 node=self.node(i)
                 if node is None:break
@@ -207,16 +228,28 @@ class PrivateRecords:
                         if pointer('journal',record)==p:self.guard();return record
                 else:
                     raw=self.object(node,'publication');receipt=strict(raw,MAX_OBJECT,serializer=public_encoded)
-                    if receipt.get('sequence')!=p['sequence'] or receipt.get('policy_sha256')!=policy['get_policy_sha256']:continue
-                    for origin in self.receipt_origins(i,blob,receipt):
-                      for updated in (False,True):
-                        if updated and origin!=node['commit']:continue
-                        record={**context,'contract':'get-canonical-publication-anchor-1','status':'canonical_publication_verified',
-                            'policy_sha256':policy['get_policy_sha256'],'observed_main_commit':node['commit'],
-                            'receipt_commit':origin,'receipt_sha256':sha(raw),'receipt_sequence':receipt['sequence'],
-                            'main_updated':updated,'cas_attempts':int(updated),'readback_verified':True}
-                        record['record_sha256']=sha(public_encoded(record))
-                        if pointer('publication',record)==p:self.guard();return record
+                    if receipt.get('sequence')!=p['sequence']:continue
+                    hints=list(self.receipt_origins(i,blob,receipt,hints_only=True))
+                    if hints:
+                        # A validated locator is not authority. Try all actual
+                        # observed nodes against its full external digest first;
+                        # retain the original ancestor search as a fallback.
+                        deferred.append((node,i,blob,raw,receipt))
+                        origins=hints
+                    else:origins=self.receipt_origins(i,blob,receipt)
+                    matched=publication_match(node,raw,receipt,origins)
+                    if matched is not None:return matched
+                    if deferred and node['parent']==receipt.get('parent_commit'):
+                        # The original fallback stops at this exact origin.
+                        # Resolve deferred older-observation candidates before
+                        # reading any older/different receipt or unrelated node.
+                        for old,index,old_blob,old_raw,old_receipt in deferred:
+                            matched=publication_match(old,old_raw,old_receipt,self.receipt_origins(index,old_blob,old_receipt))
+                            if matched is not None:return matched
+                        deferred=[]
+            for node,index,blob,raw,receipt in deferred:
+                matched=publication_match(node,raw,receipt,self.receipt_origins(index,blob,receipt))
+                if matched is not None:return matched
             fail()
         except PrivateProofError:raise
         except Exception:fail()
