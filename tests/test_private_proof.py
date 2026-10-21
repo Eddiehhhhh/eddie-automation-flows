@@ -149,4 +149,3 @@ class Proof(unittest.TestCase):
         value=journal();value['state_sha256']='9'*64;value['record_sha256']='8'*64
         with self.assertRaises(p.PrivateProofError):self.resolve('journal',value)
 if __name__=='__main__':unittest.main()
-
