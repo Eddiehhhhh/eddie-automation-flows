@@ -405,7 +405,7 @@ def run_semantic_binding(run):
     return {k: v for k, v in run_binding(run).items() if k not in ('created_at', 'updated_at')}
 
 
-def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None):
+def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None, rejected_controllers=None):
     """Prove one original successful attempt, never a later attempt's result."""
     check_run_identity(listed, policy)
     run_id = positive(listed['id'])
@@ -436,6 +436,8 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
                 verified_controllers.add(controller_key)
     except ProvenanceFailure as exc:
         if str(exc) == 'provenance_controller_mismatch':
+            if rejected_controllers is not None:
+                rejected_controllers.add(controller_key)
             return None  # Historical other code is never an anchor.
         raise  # Missing/denied/malformed provenance remains fail-closed.
     result = client.json(root + '/attempts/' + str(attempt) + '/jobs?per_page=100&page=1')
@@ -542,7 +544,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
         if len(rows) < RUN_PAGE_SIZE:
             break
     listed.sort(key=lambda x: (timestamp(x['updated_at']), x['id']), reverse=True)
-    found = []; checked = 0; verified_controllers = set()
+    found = []; checked = 0; verified_controllers = set(); rejected_controllers = set()
     for run in listed:
         # A first attempt listed as terminal failure cannot contain a successful
         # publication. This is negative selection only, never anchor evidence.
@@ -556,11 +558,23 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
         for attempt in range(run['run_attempt'], 0, -1):
             if run['id'] == exclude_run_id and attempt == exclude_run_attempt:
                 continue
+            # Deduplicate only a controller mismatch actually verified earlier
+            # in this discovery. The immutable head/event/policy key proves the
+            # same first successful attempt cannot become an eligible anchor.
+            # Registered old policy keys differ; reruns/unknown states never skip.
+            if (type(run.get('run_attempt')) is int and run['run_attempt'] == 1
+                    and attempt == 1 and run.get('status') == 'completed'
+                    and run.get('conclusion') == 'success'):
+                selected_policy, _ = recovery.candidate_policy(policy, run)
+                negative_key = (run['head_sha'], run['event'], a.sha(a.encoded(selected_policy)))
+                if negative_key in rejected_controllers:
+                    continue
             if checked >= MAX_CANDIDATES:
                 break
             checked += 1
             value = verified_candidate(client, run, policy, run_attempt=attempt,
-                                       verified_controllers=verified_controllers)
+                                       verified_controllers=verified_controllers,
+                                       rejected_controllers=rejected_controllers)
             if value is not None:
                 found.append(value)
                 break
