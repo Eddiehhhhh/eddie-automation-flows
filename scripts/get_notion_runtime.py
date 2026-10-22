@@ -31,6 +31,7 @@ import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run53_recovery as run53_recovery
 import get_notion_run57_recovery as run57_recovery
+import get_notion_historical_active_recovery as historical_active
 import get_notion_idle_recovery as idle_recovery
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
@@ -607,6 +608,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 if busy is not None:return busy
             old_journal=current['engine_state']['journal']
             recovery_mode_guard(current, found if present else {}, modes)
+            historical_active.check_mode(current, found if present else {}, historical_manifest,
+                approved_historical_manifest_sha256, (property_manifest, historical_capture))
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
             store=durable if apply else ReadOnlyStore(current)
             # The separate authenticated idle predecessor bridge is deliberately
@@ -617,6 +620,18 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     public_policy['get_policy_sha256'],proof=found)
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
+            historical_bridge_loader=None
+            if present and found.get('recovery_anchor') == historical_active.TAG:
+                # Complete source/native read-only checks before the FIRST CAS.
+                bridge_materialized=historical_runtime.verify_active_transition(local, remote, token, root, current, sha, request,
+                    manifest=historical_manifest, expected=approved_historical_manifest_sha256,
+                    policy_hash=public_policy['get_policy_sha256'], writers_guard=guarded_writers)
+                historical_bridge_loader=bridge_materialized['loader']
+                candidate=historical_active.transition_outer(current,sha,
+                    public_policy['get_policy_sha256'],proof=found)
+                write_possible=apply
+                if apply: current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                else: store=ReadOnlyStore(candidate);current,sha=store.read()
             if property_manifest is not None:
                 stage='execute';write_possible=apply
                 result=property_runtime.dispatch(local,remote,token,root,store,request,
@@ -667,7 +682,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     return result
                 result=historical_runtime.dispatch(local,remote,token,root,store,request,
                     manifest=historical_manifest,expected=approved_historical_manifest_sha256,
-                    policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
+                    policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,
+                    loader=historical_bridge_loader)
                 source_guard()
                 if apply and durable.anchor['state_blob'] is not None:
                     verified,verified_sha=durable.read()
@@ -675,6 +691,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 safe=safe_result(result)
                 safe.update(journal_commits=durable.commits_attempted,source_parent=parent,
                     notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
+                if old_journal is not None and historical_active.allows(old_journal['plan'],old_journal):
+                    safe.update(resumed_prior_plan_sha256=old_journal['plan_sha256'],
+                        resumed_prior_rules_sha256=old_journal['plan']['rules_sha256'])
                 return safe
             loaded_assets=None
             png_transition=None

@@ -10,6 +10,7 @@ from copy import deepcopy
 import get_notion_run32_recovery as run32_recovery
 import get_notion_run53_recovery as run53_recovery
 import get_notion_run57_recovery as run57_recovery
+import get_notion_historical_active_recovery as historical_active
 import get_notion_idle_recovery as idle_recovery
 
 OLD_PUBLIC_POLICY_SHA256 = _private_bindings.value('get_recurring_policy_recovery', 'OLD_PUBLIC_POLICY_SHA256')
@@ -95,6 +96,8 @@ def accepts_receipt(commit, receipt_sha256, value, requested_policy):
 
 def candidate_policy(policy, run):
     """Only the fixed reviewed predecessors can use their exact old policy proof."""
+    selected, admitted = historical_active.candidate_policy(policy, run)
+    if admitted: return selected, admitted
     selected, admitted = idle_recovery.candidate_policy(policy, run)
     if admitted:
         return selected, admitted
@@ -139,6 +142,9 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id, *, job=None, raw=None, run=None):
     from get_publication_provenance import fail
+    if historical_active.registered_run(record['run_id']):
+        historical_active.verify_original_record(record, job_id, job=job, raw=raw, run=run)
+        return
     if idle_recovery.registered_run(record['run_id']):
         idle_recovery.verify_original_record(record, job_id, job=job)
         return

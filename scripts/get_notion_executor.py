@@ -23,6 +23,7 @@ import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run53_recovery as run53_recovery
 import get_notion_run57_recovery as run57_recovery
+import get_notion_historical_active_recovery as historical_active
 import get_notion_live_transport as transport
 import get_notion_content_scope as content_scope
 import get_notion_create_batches as create_batches
@@ -727,7 +728,8 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                 and not plan_recovery.allows_run10(plan,value['journal'])
                 and not run15_recovery.allows(plan,value['journal'])
                 and not run53_recovery.allows(plan,value['journal'])
-                and not run57_recovery.allows(plan,value['journal'])): fail('rules_changed')
+                and not run57_recovery.allows(plan,value['journal'])
+                and not historical_active.allows(plan,value['journal'])): fail('rules_changed')
         if not plan['records']:
             if plan['records'] or value['journal'] is not None or version != plan['state_sha256']: fail('state_changed')
             return {'status':'partial' if counts['retained_conflicts'] or counts['deferred'] else 'verified','reason':None,**counts,'state_sha256':version,'external_write_attempts':0,'write_state':'not_attempted'}

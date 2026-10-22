@@ -11,6 +11,7 @@ import get_notion_historical_input as private_input
 import get_notion_properties_runtime as properties
 import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
+import get_notion_historical_active_recovery as historical_active
 
 
 class API(transport.API):
@@ -51,6 +52,9 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
     if loader is None: loader=source_loader.Loader(local,remote,token,root,policy_hash)
     loader.commit(manifest['source_commit'])
     for row in manifest['records'].values(): loader.blob(manifest['source_commit'],row['path'],e.p.MAX_NOTE)
+    if active is not None and historical_active.allows(active['plan'], active):
+        head = source_loader.entry.a.checked(local.run('rev-parse', source_loader.entry.r.MAIN_REF).decode().strip(), 40)
+        loader.ancestry(manifest['source_commit'], head)
     publication=historical.Publication(local.vault,manifest,expected)
     api=API(request,manifest['data_source_id'],sorted(manifest['records']))
     from get_notion_runtime import schema
@@ -76,7 +80,7 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
                 if fresh!=prior:e.fail('human_edit_conflict')
     if active:
         plan=deepcopy(active['plan'])
-        if (plan['rules_sha256']!=e.rules_sha256() or plan['publication']!=publication.descriptor
+        if ((plan['rules_sha256']!=e.rules_sha256() and not historical_active.allows(plan, active)) or plan['publication']!=publication.descriptor
                 or plan['policy']!=policy or plan.get('historical_manifest')!=manifest
                 or plan.get('property_manifest_sha256')!=property_expected
                 or plan.get('property_manifest')!=property_manifest):e.fail('journal_busy')
@@ -111,6 +115,9 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
     result={**pipeline.public_report(report),'initial_notes':0,'initial_range_candidates':0,
             'queued':len(final['pending_by_id']),'outer_journal_sha256':final_sha,
             'source_chain_complete':final['last_enqueued_publication']==final['observed_publication_tip']}
+    if active is not None and historical_active.allows(active['plan'], active):
+        result.update(resumed_prior_plan_sha256=active['plan_sha256'],
+            resumed_prior_rules_sha256=active['plan']['rules_sha256'])
     if verify_reused:
         result['scope_confirmed']=(final['engine_state']['journal'] is None
             and body_receipts_match(final,manifest))
@@ -423,3 +430,36 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
         'write_state': 'unknown' if uncertain else 'confirmed' if request.attempted else 'not_attempted',
         'journal_write_state': 'unknown' if durable.poisoned or emitter.failed else 'confirmed',
         'complete_library_claimed': False, **capture_metrics(request, durable, emitter)}
+
+
+def verify_active_transition(local, remote, token, root, current, sha, request, *,
+                             manifest, expected, policy_hash, writers_guard):
+    """Exact active predecessor, original source ancestry and fresh native guard.
+
+    Read-only. No plan creation, state transition, transport approval or CAS.
+    The caller retains original provenance/lease and confirms the later CAS.
+    """
+    if not historical_active.initial_state_valid(current, sha): e.fail('state_changed')
+    active = current['engine_state']['journal']; plan = active['plan']
+    historical.validate(manifest, expected, apply=True)
+    if expected != plan['historical_manifest_sha256'] or manifest != plan['historical_manifest']: e.fail('approval_missing')
+    if historical.creation_ids(manifest) or plan.get('property_manifest') is not None: e.fail('approval_missing')
+    loader = source_loader.Loader(local, remote, token, root, policy_hash)
+    head = source_loader.entry.a.checked(local.run('rev-parse', source_loader.entry.r.MAIN_REF).decode().strip(), 40)
+    loader.ancestry(manifest['source_commit'], head)
+    for row in manifest['records'].values(): loader.blob(manifest['source_commit'], row['path'], e.p.MAX_NOTE)
+    publication = historical.Publication(local.vault, manifest, expected)
+    if publication.descriptor != plan['publication']: e.fail('source_changed')
+    api = API(request, manifest['data_source_id'], sorted(manifest['records']))
+    from get_notion_runtime import schema
+    policy = {'data_source_id': manifest['data_source_id'], 'id_property': '笔记 ID',
+        'title_property': schema(request, manifest['data_source_id']), 'allow_create': True,
+        'allow_archive': True, 'format_accepted': True, 'old_writer_evidence': writers_guard()}
+    if not e.p.writer_gate(policy) or policy != plan['policy']: e.fail('writer_gate_unknown')
+    row = plan['records'][active['index']]; operation = active['operation']
+    if operation['kind'] != 'cleanup' or operation['phase'] != 'verified' or row['old_roots']: e.fail('state_invalid')
+    snapshot = api.read_note(row['note_id'])
+    if e.target_sha(snapshot, row['note_id'], manifest['data_source_id']) != e.target_sha(operation['working'], row['note_id'], manifest['data_source_id']): e.fail('target_changed')
+    publication.check(plan['publication'])
+    if not e.p.writer_gate({'old_writer_evidence': writers_guard()}): e.fail('writer_gate_unknown')
+    return {'source_ancestry_verified': True, 'native_verified': True, 'external_writes': 0, 'loader': loader}

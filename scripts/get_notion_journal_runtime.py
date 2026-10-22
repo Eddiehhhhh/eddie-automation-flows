@@ -18,6 +18,7 @@ import get_notion_plan_recovery as plan_recovery
 import get_notion_run15_recovery as run15_recovery
 import get_notion_run53_recovery as run53_recovery
 import get_notion_run57_recovery as run57_recovery
+import get_notion_historical_active_recovery as historical_active
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
@@ -559,6 +560,13 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     public_policy=policy, approved_public_policy_sha256=approved_public_policy_sha256,
                     notion_policy_sha256=notion_policy_sha256)
             except CheckpointFailure as exc:
+                if (str(exc) == 'journal_provenance_other_controller'
+                        and historical_active.registered_run(row['id'], row['run_attempt'])
+                        and historical_active.candidate_policy(policy, row)[1]):
+                    result = historical_active.recover_checkpoint(bounded, row['id'], row['run_attempt'])
+                    match_candidate(result, row)
+                    return {**result, 'candidate_runs_checked': checked, 'candidate_attempts_checked': checked,
+                        'provenance_reads': bounded.requests, 'provenance_bytes': bounded.bytes}
                 if (str(exc) == 'journal_provenance_other_controller'
                         and idle_recovery.can_recover(policy, row['id'], row['run_attempt'])):
                     result = idle_recovery.recover_checkpoint(bounded, row['id'], row['run_attempt'],
