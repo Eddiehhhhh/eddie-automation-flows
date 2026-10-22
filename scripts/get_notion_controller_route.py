@@ -70,6 +70,12 @@ def dispatch(mode, expected, contract, args):
         e.fail('approval_missing')
     if not args.apply or not args.scope_from_policy:
         e.fail('approval_missing')
+    fixed = getattr(args, 'fixed_source', False)
+    if fixed:
+        if args.publication_file is not None or mode not in ('historical-capture', 'historical-apply'):
+            e.fail('approval_missing')
+    elif args.publication_file is None:
+        e.fail('approval_missing')
     remote = private_input.remote_module.GitHubRemote(None, os.environ.get('PRIVATE_VAULT_TOKEN'))
     data = (private_input.read_capture_selection(remote, expected)
             if mode == 'historical-capture'
@@ -92,7 +98,7 @@ def dispatch(mode, expected, contract, args):
         return runtime.main([
             '--policy', str(args.policy),
             '--approved-policy-sha256', args.approved_policy_sha256,
-            '--publication-file', str(args.publication_file),
+            *(['--fixed-source'] if fixed else ['--publication-file', str(args.publication_file)]),
             '--apply', '--scope-from-policy',
             '--' + flag, str(path), '--approved-' + flag + '-sha256', expected,
         ])
@@ -105,7 +111,9 @@ def main(argv=None):
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--policy', type=Path)
     parser.add_argument('--approved-policy-sha256')
-    parser.add_argument('--publication-file', type=Path)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument('--publication-file', type=Path)
+    source.add_argument('--fixed-source', action='store_true')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--scope-from-policy', action='store_true')
     args = parser.parse_args(argv)
@@ -113,11 +121,11 @@ def main(argv=None):
         mode, expected, contract = selection()
         if args.preflight:
             if (args.policy is not None or args.approved_policy_sha256 is not None
-                    or args.publication_file is not None or args.apply or args.scope_from_policy):
+                    or args.publication_file is not None or args.fixed_source or args.apply or args.scope_from_policy):
                 e.fail('approval_missing')
             print('notion_route_ready')
             return 0
-        if args.policy is None or args.publication_file is None:
+        if args.policy is None or (args.publication_file is None and not args.fixed_source):
             e.fail('approval_missing')
         e.p.hex_hash(args.approved_policy_sha256, 64)
         return dispatch(mode, expected, contract, args)

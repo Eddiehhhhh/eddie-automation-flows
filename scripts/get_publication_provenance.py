@@ -503,8 +503,10 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
             **({'clock_witness': clock_witness} if clock_witness is not None else {})}
 
 
-def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
-    """At most four eligible original attempts; bounded listed negative runs are skipped."""
+def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, reserve_next_run=False):
+    """Original four-candidate discovery; optional admission reserves one slot."""
+    if type(reserve_next_run) is not bool: fail('provenance_exclusion')
+    candidate_limit = MAX_CANDIDATES - int(reserve_next_run)
     if (exclude_run_id is None) != (exclude_run_attempt is None):
         fail('provenance_exclusion')
     if exclude_run_id is not None:
@@ -569,7 +571,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
                 negative_key = (run['head_sha'], run['event'], a.sha(a.encoded(selected_policy)))
                 if negative_key in rejected_controllers:
                     continue
-            if checked >= MAX_CANDIDATES:
+            if checked >= candidate_limit:
                 break
             checked += 1
             value = verified_candidate(client, run, policy, run_attempt=attempt,
@@ -578,7 +580,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None):
             if value is not None:
                 found.append(value)
                 break
-        if checked >= MAX_CANDIDATES:
+        if checked >= candidate_limit:
             break
     if not found:
         fail('provenance_no_verified_publication')

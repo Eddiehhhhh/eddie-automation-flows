@@ -4,6 +4,7 @@ The active controller, source publication and journal each have separate
 external anchors. Native content remains private in memory/journal. A new
 runtime never trusts a current state merely because it can hash that state.
 """
+import get_notion_fixed_source as fixed_auth
 import get_private_proof as private_proof
 import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
@@ -71,7 +72,7 @@ ERRORS.update(e.properties.REASONS | {'journal_busy'})
 ERRORS.update({'png_expired_evidence_invalid','png_expired_missing_unverified','png_expired_status_unverified','png_expired_prestate_changed','png_expired_policy_unchanged','png_expired_plan_scope','png_expired_record_invalid','png_expired_old_upload_reused','png_expired_transition_changed','png_expired_record_changed','approval_missing','asset_changed','asset_not_committed','asset_type','invalid_binding','invalid_identity','invalid_route','journal_invalid','png_loader_anchor','png_loader_blob','png_loader_delta','png_loader_local_changed','png_loader_manifest','png_loader_partial_clone','png_loader_source_changed','png_loader_unrequested_blob','read_budget','request_budget','request_mismatch','response_invalid','unreviewed_asset','upload_identity_changed','upload_metadata_changed','write_not_authorized','write_not_authorized_or_already_attempted','writes_disabled','wrong_destination'})
 
 
-ERRORS.update(e.REASONS)
+ERRORS.update(e.REASONS | {'fixed_source_capacity'})
 
 # Fixed program diagnostics only; never raw exception text or private values.
 DIAGNOSTIC_ERRORS=frozenset(ERRORS | recurring.PUBLIC_ERROR_CODES | {'notion_journal_mode_busy', 'journal_loader_failed', 'journal_provenance_steps', 'missing_credentials', 'journal_provenance_failed', 'journal_checkpoint_write', 'unread_target', 'journal_loader_commit', 'private_proof_unverified', 'invalid_children', 'outbox_chain_incomplete', 'identity_query_invalid', 'source_content_budget', 'journal_provenance_changed', 'journal_loader_local_mutation', 'unsupported_code_color', 'permission_denied', 'invalid_blocks', 'journal_provenance_record', 'invalid_route', 'source_chain_invalid', 'source_publication_budget', 'journal_provenance_missing', 'journal_loader_cache', 'invalid_approval', 'outbox_source_invalid', 'outbox_state_changed', 'response_budget', 'journal_provenance_workflow', 'source_history_budget', 'asset_write_contract_missing', 'journal_loader_tree', 'journal_provenance_log', 'source_foreign_get_change', 'request_budget', 'journal_loader_unrequested_blob', 'source_chain_budget', 'journal_provenance_controller_step', 'wrong_note_identity', 'outbox_state_invalid', 'journal_provenance_context', 'journal_checkpoint_failed', 'outbox_empty', 'journal_provenance_no_checkpoint', 'duplicate_id', 'read_transport_failed', 'unsupported_source_format', 'journal_provenance_budget', 'outbox_duplicate_id', 'journal_checkpoint_locked', 'journal_checkpoint_budget', 'invalid_cohort', 'journal_loader_blob', 'journal_provenance_jobs', 'journal_checkpoint_receipt', 'journal_checkpoint_context', 'journal_loader_target', 'wrong_schema', 'malformed_payload', 'pagination_budget', 'journal_loader_budget', 'journal_provenance_other_controller', 'outbox_chain_invalid', 'outbox_budget', 'journal_provenance_repository', 'outbox_approval_invalid', 'journal_busy', 'invalid_table', 'outbox_journal_failed', 'unsupported_prepend', 'source_object_invalid', 'journal_provenance_time', 'source_blob_invalid', 'journal_provenance_runs', 'write_uncertain', 'journal_provenance_run', 'journal_provenance_job', 'incomplete_pagination', 'read_api_failed', 'wrong_parent', 'wrong_database', 'write_not_authorized_or_already_attempted'})
@@ -537,11 +538,15 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         public_client=None,checkpoint_stream=None,work=None,create_recovery=None,approved_recovery_sha=None,
         property_manifest=None,approved_property_manifest_sha256=None,
         historical_manifest=None,approved_historical_manifest_sha256=None,
-        historical_capture=None,approved_historical_capture_sha256=None,compact_proofs=False):
+        historical_capture=None,approved_historical_capture_sha256=None,compact_proofs=False,fixed_source=False):
     """Real private read/CAS adapter. Default path cannot persist a journal."""
     stage='input';write_possible=False;prior_effects=None
     try:
         if type(apply) is not bool:fail('notion_scope')
+        fixed_selection = fixed_auth.admit(fixed_source, publication_bytes, apply=apply,
+            historical_manifest=historical_manifest, historical_capture=historical_capture,
+            manifest_sha=approved_historical_manifest_sha256, capture_sha=approved_historical_capture_sha256,
+            property_manifest=property_manifest, recovery=create_recovery)
         modes=(property_manifest,historical_manifest,historical_capture)
         if sum(mode is not None for mode in modes)>1 or any(mode is not None for mode in modes) and (create_recovery is not None or approved_recovery_sha is not None or public_policy is None):fail('notion_scope')
         if historical_capture is not None:
@@ -565,12 +570,16 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if execution is None or checkpoint_stream is None:fail('notion_context')
             recurring.context(public_policy,execution)
             provenance.verify_execution(client,public_policy,execution,'schedule' if os.environ.get('GITHUB_EVENT_NAME')=='schedule' else 'manual')
-            record=provenance.parse_record(publication_bytes,public_policy,{'id':execution['run_id'],'run_attempt':execution['run_attempt'],'head_sha':execution['controller_sha']})
-            tip={'commit':record['receipt_commit'],'receipt_sha256':record['receipt_sha256'],'sequence':record['receipt_sequence']}
+            if not fixed_source:
+                record=provenance.parse_record(publication_bytes,public_policy,{'id':execution['run_id'],'run_attempt':execution['run_attempt'],'head_sha':execution['controller_sha']})
+                tip={'commit':record['receipt_commit'],'receipt_sha256':record['receipt_sha256'],'sequence':record['receipt_sequence']}
         stage='writers';writers_guard()
         remote=m.Remote(None,token);parent=m.guard(remote)
         if isinstance(client, provenance._PublicGithub):
             client.private_proof_source=private_proof.PrivateRecords(remote)
+        if fixed_source:
+            stage='source'
+            fixed_auth.reserve_publication_slot(client, public_policy, execution)
         if expected_parent is not None and parent!=expected_parent:fail('notion_source_changed')
         initial_get_tree=remote.source_get_tree(parent)
         with tempfile.TemporaryDirectory(prefix='get-notion-runtime-',dir=work) as folder:
@@ -614,6 +623,17 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             recovery_mode_guard(current, found if present else {}, modes)
             historical_active.check_mode(current, found if present else {}, historical_manifest,
                 approved_historical_manifest_sha256, (property_manifest, historical_capture))
+            historical_bridge_loader=None
+            if fixed_source:
+                # No old active-plan bridge or journal-selected source fallback.
+                fixed_auth.check_state(current, found if present else {})
+                historical_bridge_loader=fixed_auth.verify_sources(local, remote, token, root, parent,
+                    fixed_selection, public_policy['get_policy_sha256'])
+                source_guard(parent); writers_guard()
+                fixed_auth.emit(checkpoint_stream, {**execution,
+                    'rules_sha256':public_policy['rules_sha256'],
+                    'notion_policy_sha256':e.digest(scope_for(public_policy)),
+                    'public_policy_sha256':public_hash}, fixed_selection)
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
             store=durable if apply else ReadOnlyStore(current)
             # The separate authenticated idle predecessor bridge is deliberately
@@ -624,7 +644,6 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     public_policy['get_policy_sha256'],proof=found)
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
-            historical_bridge_loader=None
             if present and found.get('recovery_anchor') == historical_active.TAG:
                 # Complete source/native read-only checks before the FIRST CAS.
                 bridge_materialized=historical_runtime.verify_active_transition(local, remote, token, root, current, sha, request,
@@ -661,11 +680,11 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     result=historical_runtime.capture_group(local,remote,token,root,store,request,
                         selection=historical_capture,expected=approved_historical_capture_sha256,
                         policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,
-                        durable=durable,emitter=confirm,refresh=capture_refresh)
+                        durable=durable,emitter=confirm,refresh=capture_refresh,loader=historical_bridge_loader)
                 else:
                     result=historical_runtime.capture(local,remote,token,root,store,request,
                         candidate=historical_capture,expected=approved_historical_capture_sha256,
-                        policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers)
+                        policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,loader=historical_bridge_loader)
                     capture_refresh()
                 result.update(journal_commits=durable.commits_attempted,source_parent=parent,
                     notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
@@ -681,7 +700,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     result=historical_runtime.apply_group(local,remote,token,root,store,request,
                         selection=historical_manifest,expected=approved_historical_manifest_sha256,
                         policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,
-                        durable=durable,emitter=confirm,refresh=apply_refresh)
+                        durable=durable,emitter=confirm,refresh=apply_refresh,loader=historical_bridge_loader)
                     result.update(source_parent=parent,production_activated=PRODUCTION_ACTIVATED)
                     return result
                 result=historical_runtime.dispatch(local,remote,token,root,store,request,
@@ -817,7 +836,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--policy',type=Path);parser.add_argument('--approved-policy-sha256')
-    parser.add_argument('--publication-file',type=Path);parser.add_argument('--expected-parent')
+    source=parser.add_mutually_exclusive_group()
+    source.add_argument('--publication-file',type=Path)
+    source.add_argument('--fixed-source',action='store_true')
+    parser.add_argument('--expected-parent')
     parser.add_argument('--recovery',type=Path);parser.add_argument('--approved-recovery-sha256')
     parser.add_argument('--property-manifest',type=Path);parser.add_argument('--approved-property-manifest-sha256')
     parser.add_argument('--historical-manifest',type=Path);parser.add_argument('--approved-historical-manifest-sha256')
@@ -827,7 +849,7 @@ def main(argv=None):
     try:
         # Pending production activation is rejected before credential lookup.
         if args.apply and (not PRODUCTION_ACTIVATED or not recurring.PRODUCTION_ACTIVATED):fail('notion_activation_pending')
-        if args.apply!=args.scope_from_policy or (not args.apply and args.publication_file):fail('notion_scope')
+        if args.apply!=args.scope_from_policy or (not args.apply and (args.publication_file or args.fixed_source)):fail('notion_scope')
         policy=None;execution=None;raw=None;recovery=None;property_manifest=None;historical_manifest=None;historical_capture=None
         modes=(args.property_manifest,args.historical_manifest,args.historical_capture)
         if sum(mode is not None for mode in modes)>1 or any(mode is not None for mode in modes) and (args.recovery or args.approved_recovery_sha256 or not args.policy):fail('notion_scope')
@@ -851,10 +873,10 @@ def main(argv=None):
             if e.digest(recovery)!=args.approved_recovery_sha256:fail('notion_scope')
         if args.policy:policy=m.strict_capture_json(a.bounded_file(args.policy,16384),16384)
         if args.apply:
-            if args.policy is None or args.publication_file is None:fail('notion_scope')
+            if args.policy is None or (args.publication_file is None and not args.fixed_source):fail('notion_scope')
             if os.environ.get('GITHUB_REPOSITORY')!=provenance.REPOSITORY or os.environ.get('GITHUB_WORKFLOW_REF')!=provenance.REPOSITORY+'/'+policy['workflow_path']+'@refs/heads/'+policy['head_branch'] or os.environ.get('GITHUB_REF')!='refs/heads/'+policy['head_branch'] or os.environ.get('GITHUB_EVENT_NAME') not in ('schedule','workflow_dispatch'):fail('notion_context')
             execution={'run_id':int(os.environ.get('GITHUB_RUN_ID','0')),'run_attempt':int(os.environ.get('GITHUB_RUN_ATTEMPT','0')),'code_sha':recurring.executed_code_sha(),'controller_sha':os.environ.get('GITHUB_SHA')}
-            raw=a.bounded_file(args.publication_file,8192)
+            raw=a.bounded_file(args.publication_file,8192) if args.publication_file else None
         elif args.expected_parent is None:fail('notion_scope')
         request=transport.Transport(os.environ.get('NOTION_API_KEY'))
         github_token=os.environ.get('GITHUB_TOKEN')
@@ -864,7 +886,7 @@ def main(argv=None):
             apply=args.apply,public_policy=policy,approved_public_policy_sha256=args.approved_policy_sha256,
             publication_bytes=raw,execution=execution,public_client=public_client,checkpoint_stream=sys.stdout if args.apply else None,create_recovery=recovery,approved_recovery_sha=args.approved_recovery_sha256,property_manifest=property_manifest,approved_property_manifest_sha256=args.approved_property_manifest_sha256,
             historical_manifest=historical_manifest,approved_historical_manifest_sha256=args.approved_historical_manifest_sha256,
-            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True)
+            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True,fixed_source=args.fixed_source)
     except Exception as exc:
         result={'contract':CONTRACT,'status':'failed','stage':'input',**failure_diagnostic(exc),'write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
     import get_private_runtime_report as report

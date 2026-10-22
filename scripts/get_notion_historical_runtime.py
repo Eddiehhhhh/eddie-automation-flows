@@ -127,7 +127,7 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
     return result
 
 
-def capture(local,remote,token,root,store,request,*,candidate,expected,policy_hash,apply,writers_guard):
+def capture(local,remote,token,root,store,request,*,candidate,expected,policy_hash,apply,writers_guard,loader=None):
     """Read Notion only; retain exact native evidence in the ONE private journal."""
     probe=historical.validate_capture(candidate,expected,apply=apply)
     current,version=store.read();outbox.check_state(current)
@@ -136,7 +136,7 @@ def capture(local,remote,token,root,store,request,*,candidate,expected,policy_ha
     saved=current.get('historical_captures',{}).get(expected)
     reused=saved is not None
     if saved is None:
-        loader=source_loader.Loader(local,remote,token,root,policy_hash)
+        if loader is None: loader=source_loader.Loader(local,remote,token,root,policy_hash)
         loader.commit(candidate['source_commit'])
         for row in candidate['records'].values():loader.blob(candidate['source_commit'],row['path'],e.p.MAX_NOTE)
         publication=historical.Publication(local.vault,probe,e.digest(probe))
@@ -205,7 +205,7 @@ def capture_boundary(request, durable, emitter, *, notes, reused=False, refresh_
 
 
 def capture_group(local, remote, token, root, store, request, *, selection, expected,
-                  policy_hash, apply, writers_guard, durable, emitter, refresh):
+                  policy_hash, apply, writers_guard, durable, emitter, refresh, loader=None):
     """One bounded capture session. No runtime bootstrap, new counters or writes."""
     members = private_input.validate_capture_selection(selection, expected, apply=apply)
     if expected not in historical.APPROVED_CAPTURE_GROUPS or not apply:
@@ -233,7 +233,7 @@ def capture_group(local, remote, token, root, store, request, *, selection, expe
             prior_sequence = emitter.sequence
             result = capture(local, remote, token, root, store, request,
                 candidate=candidate, expected=member, policy_hash=policy_hash,
-                apply=True, writers_guard=writers_guard)
+                apply=True, writers_guard=writers_guard, loader=loader)
             if (durable.poisoned or emitter.failed
                     or durable.anchor['state_sha256'] != result['outer_journal_sha256']
                     or emitter.sequence != prior_sequence + int(not reused)):
@@ -344,7 +344,7 @@ def apply_boundary(request, durable, emitter, *, current, notes, plan=None):
 
 
 def apply_group(local, remote, token, root, store, request, *, selection, expected,
-                policy_hash, apply, writers_guard, durable, emitter, refresh):
+                policy_hash, apply, writers_guard, durable, emitter, refresh, loader=None):
     """Bounded historical body scopes inside ONE authenticated runtime session."""
     members = private_input.validate_apply_selection(selection, expected, apply=apply)
     if (expected not in historical.APPROVED_APPLY_GROUPS or not apply
@@ -354,7 +354,7 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
         e.fail('approval_missing')
     completed = []; status = 'applied'; reason = None; last_sha = None
     execution = None; prior_effects = False; scope_attempts = len(request.attempted)
-    loader = source_loader.Loader(local, remote, token, root, policy_hash)
+    if loader is None: loader = source_loader.Loader(local, remote, token, root, policy_hash)
     try:
         current, last_sha = store.read(); outbox.check_state(current)
         active = current['engine_state']['journal']; start = 0

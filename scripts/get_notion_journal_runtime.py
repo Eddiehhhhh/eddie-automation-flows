@@ -4,6 +4,7 @@ No credentials, HTTP implementation, remote writes or command-line entry.
 Transports are injected from the existing approved runtime. Flushing stdout is
 not proof of platform log retention: absent/mismatched provenance fails closed.
 """
+import get_notion_fixed_source as fixed_auth
 import get_private_proof as private_proof
 from copy import deepcopy
 from pathlib import Path
@@ -371,16 +372,24 @@ def _interval(step, job):
 
 def _records(raw, expected, notion_interval, get_interval, policy, run):
     if not isinstance(raw, bytes) or len(raw) > provenance.MAX_LOG: fail('journal_provenance_budget')
-    records = []; get_lines = []; previous = None; previous_stamp = None
+    records = []; get_lines = []; fixed_records = []; previous = None; previous_stamp = None
     try: lines = raw.decode('utf-8', 'strict').splitlines()
     except Exception: fail('journal_provenance_log')
     for line in lines:
         match = re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z) (.*)$', line)
         content = match[2] if match else line
-        if not content.startswith((MARKER, provenance.MARKER)): continue
+        if not content.startswith((MARKER, provenance.MARKER, fixed_auth.MARKER)): continue
         if match is None: fail('journal_provenance_time')
         stamp = provenance.timestamp(match[1])
+        if content.startswith(fixed_auth.MARKER):
+            if (get_interval is not None or records or fixed_records
+                    or not notion_interval[0] <= stamp <= notion_interval[1]):
+                fail('journal_provenance_record')
+            fixed_records.append(fixed_auth.parse(content[len(fixed_auth.MARKER):].encode(), expected, run))
+            previous_stamp = stamp
+            continue
         if content.startswith(provenance.MARKER):
+            if get_interval is None: fail('journal_provenance_record')
             if not get_interval[0] <= stamp <= get_interval[1]: fail('journal_provenance_time')
             get_lines.append(line); continue
         if not notion_interval[0] <= stamp <= notion_interval[1]: fail('journal_provenance_time')
@@ -405,6 +414,10 @@ def _records(raw, expected, notion_interval, get_interval, policy, run):
             fail('journal_provenance_record')
         records.append(value); previous = value['record_sha256']
     if not records: fail('journal_provenance_missing')
+    if get_interval is None:
+        if get_lines or len(fixed_records) != 1: fail('journal_provenance_record')
+        return records, fixed_records[0]
+    if fixed_records: fail('journal_provenance_record')
     get_record = provenance.parse_record(('\n'.join(get_lines) + '\n').encode(), policy, run)
     return records, get_record
 
@@ -413,9 +426,10 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
                    approved_public_policy_sha256, notion_policy_sha256, require_success=False):
     """Authenticate one original terminal Actions attempt, even if Notion failed.
 
-    This never qualifies a failed run as Get success. It separately requires a
-    successful Get step/record and exact controller bytes. Returned anchor still
-    requires RemoteJournal's private commit/tree/blob readback before use.
+    This never qualifies a failed run as Get success. Exact controller bytes
+    bind mutually exclusive canonical-success/publication or manual fixed-
+    archive/skipped-Get evidence. Returned anchor still requires RemoteJournal's
+    private commit/tree/blob readback before use.
     """
     try:
         if type(require_success) is not bool: fail('journal_provenance_run')
@@ -457,12 +471,19 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
         get_step = selected(policy['publication_step_name']); notion_step = selected(NOTION_STEP)
         if notion_step.get('conclusion') == 'skipped':
             fail('journal_provenance_no_checkpoint')
-        if (get_step.get('conclusion') != 'success'
+        fixed = get_step.get('conclusion') == 'skipped'
+        # Only the newly reviewed exact controller supports this second source
+        # identity. An old skipped Get step can never become archive authority.
+        if fixed and (policy['controller_template_sha256'] != controller.template_sha256()
+                or run['event'] != 'workflow_dispatch'):
+            fail('journal_provenance_steps')
+        if (get_step.get('conclusion') not in ('success', 'skipped')
                 or notion_step.get('conclusion') not in ('success', 'failure', 'cancelled', 'timed_out')
                 or get_step['number'] >= notion_step['number']): fail('journal_provenance_steps')
         if require_success and notion_step.get('conclusion') != 'success': fail('journal_provenance_steps')
-        get_times = _interval(get_step, job); notion_times = _interval(notion_step, job)
-        if get_times[1] > notion_times[0]: fail('journal_provenance_time')
+        get_times = None if fixed else _interval(get_step, job)
+        notion_times = _interval(notion_step, job)
+        if get_times is not None and get_times[1] > notion_times[0]: fail('journal_provenance_time')
         expected = context({'run_id': run_id, 'run_attempt': run_attempt,
             'code_sha': policy['code_sha'], 'controller_sha': run['head_sha'],
             'rules_sha256': policy['rules_sha256'], 'notion_policy_sha256': notion_policy_sha256,
@@ -481,7 +502,8 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'anchor': {key: final[key] for key in ('commit', 'state_blob', 'state_sha256')},
             'checkpoint': final, 'checkpoint_count': len(records), 'run_id': run_id,
             'run_attempt': run_attempt, 'job_id': job['id'],
-            'get_step_record': get_record, 'get_run_success_claim': False,
+            'get_step_record': None if fixed else get_record, 'get_run_success_claim': False,
+            **({'fixed_source_record': get_record} if fixed else {}),
             'run_binding': provenance.run_binding(run), 'latest_binding':provenance.run_binding(current), 'latest_attempt': current['run_attempt'],
             'completed_at': job['completed_at'],
             **({'clock_witness': clock_witness} if clock_witness is not None else {}),

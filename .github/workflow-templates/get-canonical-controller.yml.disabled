@@ -86,6 +86,7 @@ jobs:
           PY
       - name: Emit verified canonical publication anchor
         id: get_sync
+        if: ${{ github.event_name == 'schedule' || (inputs.notion_mode != 'historical-capture' && inputs.notion_mode != 'historical-apply') }}
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           GITHUB_TOKEN: ${{ github.token }}
@@ -104,8 +105,8 @@ jobs:
           python scripts/get_recurring_runtime.py "${args[@]}"
       - name: Sync confirmed Get content to Notion
         id: notion_sync
-        if: ${{ steps.get_sync.outcome == 'success' && (github.event_name == 'schedule' || inputs.apply) }}
-        continue-on-error: true
+        if: ${{ (steps.get_sync.outcome == 'success' || (github.event_name == 'workflow_dispatch' && inputs.apply && steps.get_sync.outcome == 'skipped' && (inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply'))) && (github.event_name == 'schedule' || inputs.apply) }}
+        continue-on-error: ${{ !(github.event_name == 'workflow_dispatch' && inputs.apply && (inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply')) }}
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
@@ -122,6 +123,11 @@ jobs:
               --approved-policy-sha256 "$POLICY_SHA256" \
               --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
               --apply --scope-from-policy
+          elif test "$NOTION_MODE" = historical-capture || test "$NOTION_MODE" = historical-apply; then
+            python scripts/get_notion_controller_route.py \
+              --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
+              --approved-policy-sha256 "$POLICY_SHA256" \
+              --fixed-source --apply --scope-from-policy
           else
             python scripts/get_notion_controller_route.py \
               --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
@@ -129,5 +135,6 @@ jobs:
               --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
               --apply --scope-from-policy
           fi
-# The same job has independent Get and Notion failure reporting. A Notion partial
-# outcome must not erase the successful Get step or its confirmed receipt marker.
+# Canonical runs retain independent Get and Notion failure reporting. A Notion
+# partial cannot erase a confirmed Get receipt. Fixed archive runs deliberately
+# skip Get and emit only their separate source-auth marker, never a Get receipt.

@@ -37,8 +37,26 @@ def template_sha256():
 
 PRE_PRIVATE_TEMPLATE_SHA256 = '9555eb4a70a35381505a46d767aa17663489e4e4548c3803d8c16a2a90cfb4f9'
 
+PRE_FIXED_TEMPLATE_SHA256 = '17520052435895138a6529f3a84958dddb8cc50b9c23b07e63c12e52c8f8f178'
+
+# Exact forward-only template migration. The existing private idle capsule must
+# separately authenticate the actual terminal original attempt and idle state.
+FIXED_TEMPLATE_SHA256 = '1d568531b4672b89ec80eaa08532e152d9c13a400602cfaf5438a3cd24f73dc5'
+PRE_FIXED_RUNTIME_SHA = '0e60865fb8e73793310c16e343d7df1717ee49c5'
+
+def fixed_idle_template_transition(old, new):
+    if not isinstance(old, dict) or not isinstance(new, dict): return False
+    if (old.get('code_sha') != PRE_FIXED_RUNTIME_SHA
+            or old.get('controller_template_sha256') != PRE_FIXED_TEMPLATE_SHA256
+            or new.get('controller_template_sha256') != FIXED_TEMPLATE_SHA256
+            or template_sha256() != FIXED_TEMPLATE_SHA256): return False
+    # Validate both literal templates, not a caller-supplied digest pair.
+    return (a.sha(policy_template_bytes(old)) == PRE_FIXED_TEMPLATE_SHA256
+        and a.sha(policy_template_bytes(new)) == FIXED_TEMPLATE_SHA256)
+
+
 def historical_template_digests():
-    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256)
+    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256, PRE_FIXED_TEMPLATE_SHA256)
 
 
 def policy_template_bytes(policy):
@@ -48,6 +66,11 @@ def policy_template_bytes(policy):
     current = template_bytes()
     if digest == a.sha(current):
         return current
+    if digest == PRE_FIXED_TEMPLATE_SHA256:
+        raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-pre-fixed.yml.disabled').read_bytes()
+        if len(raw) > MAX_CONTROLLER or a.sha(raw) != PRE_FIXED_TEMPLATE_SHA256:
+            p.fail('provenance_controller_template')
+        return raw
     if digest == PRE_PRIVATE_TEMPLATE_SHA256:
         raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-pre-private.yml.disabled').read_bytes()
         if not isinstance(raw, bytes) or len(raw) > MAX_CONTROLLER or a.sha(raw) != PRE_PRIVATE_TEMPLATE_SHA256:

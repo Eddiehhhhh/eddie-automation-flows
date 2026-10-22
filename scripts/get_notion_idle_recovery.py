@@ -110,15 +110,17 @@ def _capsule():
 
 
 def _forward_policy(policy, capsule):
-    """Only the executing rules/Get policy and unchanged controller template."""
+    """Executing rules/Get policy; unchanged or one exact fixed-source template."""
     import get_recurring_entry as entry
     import get_recurring_controller as controller
     import get_recurring_policy_recovery as recovery
     old = capsule['public_policy']
+    template_transition = controller.fixed_idle_template_transition(old, policy)
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
+    if template_transition: stable.remove('controller_template_sha256')
     return (isinstance(policy, dict)
         and all(policy.get(key) == old[key] for key in stable)
-        and old['controller_template_sha256'] == controller.template_sha256()
+        and (template_transition or old['controller_template_sha256'] == controller.template_sha256())
         and policy.get('code_sha') != old['code_sha']
         and policy.get('rules_sha256') == entry.rules_sha256()
         and policy.get('get_policy_sha256') == recovery.current_get_policy()
