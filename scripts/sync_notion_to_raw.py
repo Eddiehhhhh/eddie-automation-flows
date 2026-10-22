@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 BASE_URL = "https://api.notion.com/v1"
@@ -491,7 +491,10 @@ def block_text(block: Dict[str, Any]) -> str:
     return ""
 
 
-def render_blocks(api_key: str, blocks: List[Dict[str, Any]], depth: int = 0) -> List[str]:
+def render_blocks(
+    api_key: str, blocks: List[Dict[str, Any]], depth: int = 0, *,
+    children_loader: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
+) -> List[str]:
     lines: List[str] = []
     indent = "  " * depth
     for block in blocks:
@@ -578,8 +581,8 @@ def render_blocks(api_key: str, blocks: List[Dict[str, Any]], depth: int = 0) ->
                 lines.append("")
 
         if block.get("has_children"):
-            children = retrieve_block_children(api_key, str(block.get("id")))
-            child_lines = render_blocks(api_key, children, depth=depth + 1)
+            children = (children_loader or retrieve_block_children)(api_key, str(block.get("id")))
+            child_lines = render_blocks(api_key, children, depth=depth + 1, children_loader=children_loader)
             if child_lines:
                 if lines and lines[-1] != "":
                     lines.append("")

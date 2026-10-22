@@ -7,15 +7,20 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
+import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sync_notion_to_raw import (
     get_database,
-    paginate_database,
+    query_database,
     TZ,
     parse_time,
     load_notion_api_key,
@@ -23,9 +28,7 @@ from sync_notion_to_raw import (
     normalize_notion_id,
     render_blocks,
     render_frontmatter,
-    retrieve_block_children,
     rich_text_plain_text,
-    write_text,
 )
 
 
@@ -54,7 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only-missing", action="store_true", help="For full backfills, skip episodes already written under Raw/13 小宇宙.")
     parser.add_argument("--dry-run", action="store_true", help="Preview target files without writing.")
     parser.add_argument("--rebuild-index", action="store_true", help="Rebuild Raw/13 小宇宙/索引.md from local files.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.hours_back < 0 or args.max_episodes < 0:
+        parser.error("--hours-back and --max-episodes must be non-negative")
+    return args
 
 
 def fetch_page(api_key: str, page_id: str) -> Dict[str, Any]:
@@ -68,7 +74,37 @@ def now() -> dt.datetime:
 def read_state() -> Dict[str, Any]:
     if not STATE_PATH.exists():
         return {}
-    return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise RuntimeError("Invalid sync state: expected an object; state preserved")
+    return state
+
+
+def write_verified_text(path: Path, content: str, *, create_only: bool = False) -> None:
+    """Replace one file atomically; do not treat an unverified write as success."""
+    encoded = content.encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not create_only and path.exists() and path.read_bytes() == encoded:
+        return
+    temporary: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if temporary.read_bytes() != encoded:
+            raise RuntimeError("Temporary file verification failed")
+        if create_only:
+            # Atomic no-clobber publish: a concurrent destination is a conflict.
+            os.link(temporary, path)
+        else:
+            os.replace(temporary, path)
+        if path.read_bytes() != encoded:
+            raise RuntimeError("File readback failed")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def write_state(data: Dict[str, Any]) -> None:
@@ -76,30 +112,34 @@ def write_state(data: Dict[str, Any]) -> None:
     rendered = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if STATE_PATH.exists() and STATE_PATH.read_text(encoding="utf-8") == rendered:
         return
-    STATE_PATH.write_text(rendered, encoding="utf-8")
+    write_verified_text(STATE_PATH, rendered)
 
 
 def format_time(value: dt.datetime) -> str:
     return value.astimezone(TZ).isoformat(timespec="seconds")
 
 
-def build_episode_filter(*, full_sync: bool, hours_back: int) -> Dict[str, Any]:
-    if full_sync:
-        return LISTENED_FILTER
-
+def build_episode_filter(
+    *, full_sync: bool, hours_back: int, scan_started_at: Optional[dt.datetime] = None,
+) -> Dict[str, Any]:
+    started_at = scan_started_at if scan_started_at is not None else now()
     state = read_state()
     cutoff = parse_time(state.get("last_sync_at"))
-    if cutoff is None:
-        cutoff = now() - dt.timedelta(hours=hours_back)
-    return {
-        "and": [
-            LISTENED_FILTER,
-            {
-                "timestamp": "last_edited_time",
-                "last_edited_time": {"on_or_after": format_time(cutoff)},
-            },
-        ]
-    }
+    if "last_sync_at" in state and cutoff is None:
+        raise RuntimeError("Invalid last_sync_at; state preserved, repair it explicitly")
+    filters = [LISTENED_FILTER]
+    if not full_sync:
+        lookback = started_at - dt.timedelta(hours=hours_back)
+        cutoff = min(cutoff, lookback) if cutoff is not None else lookback
+        filters.append({
+            "timestamp": "last_edited_time",
+            "last_edited_time": {"on_or_after": format_time(cutoff)},
+        })
+    filters.append({
+        "timestamp": "last_edited_time",
+        "last_edited_time": {"on_or_before": format_time(started_at)},
+    })
+    return {"and": filters}
 
 
 def is_within(path: Path, root: Path) -> bool:
@@ -117,34 +157,56 @@ def current_episode_pages(
     hours_back: int,
     max_episodes: int,
     only_missing: bool,
-) -> List[Dict[str, Any]]:
+    scan_started_at: Optional[dt.datetime] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Return pages and proven query exhaustion, never infer it from a limit."""
     episode_db = get_database(api_key, EPISODE_DATABASE_ID)
     episode_db_id = normalize_notion_id(str(episode_db.get("id") or EPISODE_DATABASE_ID))
     pages: List[Dict[str, Any]] = []
-    filter_obj = build_episode_filter(full_sync=full_sync, hours_back=hours_back)
+    filter_obj = build_episode_filter(
+        full_sync=full_sync, hours_back=hours_back, scan_started_at=scan_started_at,
+    )
     scanned = 0
-    for page in paginate_database(
-        api_key,
-        episode_db_id,
-        filter_obj=filter_obj,
-    ):
-        scanned += 1
-        if scanned == 1 or scanned % 50 == 0:
-            print(f"SCANNED {scanned} listened episode candidates", flush=True)
-        if page.get("archived"):
-            continue
-        page_id = normalize_notion_id(str(page.get("id") or ""))
-        if not page_id:
-            continue
-        if only_missing:
-            existing = find_existing_file_across_roots(page_id)
-            if existing and is_within(existing, OUTPUT_ROOT):
+    cursor: Optional[str] = None
+    seen_cursors = set()
+    seen_ids = set()
+    while True:
+        response = query_database(api_key, episode_db_id, filter_obj=filter_obj, start_cursor=cursor)
+        if (not isinstance(response, dict) or not isinstance(response.get("results"), list)
+                or not isinstance(response.get("has_more"), bool)):
+            raise RuntimeError("Unknown episode query result; no watermark advancement")
+        has_more = response["has_more"]
+        next_cursor = response.get("next_cursor")
+        if has_more and (not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors):
+            raise RuntimeError("Incomplete or repeated episode cursor; no watermark advancement")
+        if not has_more and next_cursor is not None:
+            raise RuntimeError("Conflicting episode pagination terminal; no watermark advancement")
+        for page in response["results"]:
+            if not isinstance(page, dict) or not isinstance(page.get("id"), str) or not page["id"].strip():
+                raise RuntimeError("Missing episode identity; no watermark advancement")
+            page_id = normalize_notion_id(page["id"])
+            if page_id in seen_ids:
+                raise RuntimeError("Repeated episode identity; no watermark advancement")
+            seen_ids.add(page_id)
+            scanned += 1
+            if scanned == 1 or scanned % 50 == 0:
+                print(f"SCANNED {scanned} listened episode candidates", flush=True)
+            if page.get("archived"):
                 continue
-        pages.append(page)
-        if max_episodes > 0 and len(pages) >= max_episodes:
+            if only_missing:
+                existing = find_existing_file_across_roots(page_id)
+                if existing and is_within(existing, OUTPUT_ROOT):
+                    continue
+            pages.append(page)
+            if max_episodes > 0 and len(pages) >= max_episodes:
+                print(f"FOUND {len(pages)} listened episodes; limit reached, scan not certified complete", flush=True)
+                return pages, False
+        if not has_more:
             break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
     print(f"FOUND {len(pages)} listened episodes to sync", flush=True)
-    return pages
+    return pages, True
 
 
 def now_iso() -> str:
@@ -192,9 +254,26 @@ def prop_relation_ids(prop: Dict[str, Any]) -> List[str]:
 
 
 def prop_files(prop: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if prop.get("type") != "files":
-        return []
-    return [item for item in (prop.get("files") or []) if isinstance(item, dict)]
+    if not isinstance(prop, dict) or prop.get("type") != "files" or not isinstance(prop.get("files"), list):
+        raise RuntimeError("Invalid transcript files property")
+    files = prop["files"]
+    for item in files:
+        if not isinstance(item, dict) or item.get("type") not in {"file", "external"}:
+            raise RuntimeError("Invalid transcript attachment type")
+        if not isinstance(item.get("name", ""), str):
+            raise RuntimeError("Invalid transcript attachment name")
+        file_data = item.get(item["type"])
+        url = file_data.get("url") if isinstance(file_data, dict) else None
+        if not isinstance(url, str) or not url.strip():
+            raise RuntimeError("Missing transcript attachment URL")
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            valid = parsed.scheme in {"http", "https"} and bool(parsed.hostname) and not parsed.username and not parsed.password
+        except ValueError:
+            valid = False
+        if not valid or url != url.strip() or any(char.isspace() for char in url):
+            raise RuntimeError("Invalid transcript attachment URL")
+    return files
 
 
 def parse_iso_to_local(value: str) -> dt.datetime:
@@ -245,24 +324,221 @@ def find_existing_file_across_roots(page_id: str) -> Optional[Path]:
     return None
 
 
+def check_managed_path(path: Path, *, exists: bool = True) -> None:
+    """Only ordinary notes in registered year/month directories may be moved."""
+    roots = [OUTPUT_ROOT, *LEGACY_OUTPUT_ROOTS]
+    containing = [root for root in roots if is_within(path, root)]
+    if len(containing) != 1 or not is_within(path.resolve(), ROOT.resolve()):
+        raise RuntimeError("Unmanaged episode path; migration stopped")
+    root = containing[0]
+    parts = path.relative_to(root).parts
+    if (len(parts) != 3 or not re.fullmatch(r"[0-9]{4}", parts[0])
+            or not re.fullmatch(re.escape(parts[0]) + r"-(0[1-9]|1[0-2])", parts[1])
+            or path.suffix != ".md" or path.name == "索引.md"):
+        raise RuntimeError("Unmanaged episode path; migration stopped")
+    for component in [path, *path.parents]:
+        if component.is_symlink():
+            raise RuntimeError("Symlink episode path; migration stopped")
+        if component == ROOT:
+            break
+    if exists and not path.is_file():
+        raise RuntimeError("Episode is not an ordinary file; migration stopped")
+
+
+def all_episode_files(page_id: str) -> List[Path]:
+    """Do not conceal duplicate source IDs by choosing the first/shortest path."""
+    matches: List[Path] = []
+    for root in [OUTPUT_ROOT, *LEGACY_OUTPUT_ROOTS]:
+        if root.is_symlink() or not is_within(root.resolve(), ROOT.resolve()):
+            raise RuntimeError("Unmanaged episode root; migration stopped")
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink() or not is_within(path.resolve(), root.resolve()):
+                raise RuntimeError("Symlink episode path; migration stopped")
+            if path.suffix != ".md" or path.name == "索引.md" or path.is_dir():
+                continue
+            meta = parse_frontmatter(path.read_bytes().decode("utf-8"))
+            if normalize_notion_id(meta.get("episode_page_id", "")) == normalize_notion_id(page_id):
+                matches.append(path)
+    return matches
+
+
+def managed_note_bytes(path: Path, page_id: str) -> bytes:
+    check_managed_path(path)
+    data = path.read_bytes()
+    meta = parse_frontmatter(data.decode("utf-8"))
+    identity = meta.get("episode_page_id", "").lower()
+    normalized = normalize_notion_id(page_id)
+    if (not re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", normalized)
+            or identity not in {normalized, normalized.replace("-", "")}
+            or meta.get("source_system") != "notion"
+            or meta.get("source_type") != "xiaoyuzhou_episode"
+            or parse_time(meta.get("synced_at")) is None
+            or parse_time(meta.get("listened_at")) is None):
+        raise RuntimeError("Unmanaged episode identity; migration stopped")
+    return data
+
+
+def migration_signature(
+    data: bytes, ignore_fields: Tuple[str, ...] = ("listened_at", "updated_at", "synced_at"),
+) -> Tuple[Dict[str, str], str]:
+    """Compare all rendered bytes except the narrowly allowed date/version fields."""
+    text = data.decode("utf-8")
+    if not text.startswith("---\n") or "\n---\n" not in text:
+        raise RuntimeError("Unknown episode format; migration stopped")
+    header, body = text.split("\n---\n", 1)
+    fields: Dict[str, str] = {}
+    key = ""
+    for line in header.split("\n")[1:]:
+        if line.startswith("  ") and key:
+            fields[key] += "\n" + line
+        else:
+            if ": " not in line:
+                raise RuntimeError("Unknown episode metadata; migration stopped")
+            key, value = line.split(": ", 1)
+            if key in fields:
+                raise RuntimeError("Duplicate episode metadata; migration stopped")
+            fields[key] = value
+    for key in ignore_fields:
+        fields.pop(key, None)
+    return fields, body
+
+
+def migration_matches(before: bytes, content: bytes) -> bool:
+    old_fields, old_body = migration_signature(before)
+    new_fields, new_body = migration_signature(content)
+    # Missing additive fields are compatible with the original renderer. Present
+    # fields must match exactly, so edits cannot hide in the compatibility case.
+    for key in ("transcript_file_names", "transcript_file_count"):
+        if key not in old_fields:
+            new_fields.pop(key, None)
+    return old_fields == new_fields and old_body == new_body
+
+
+def git_read(*args: str) -> bytes:
+    result = subprocess.run(
+        ["git", "--no-optional-locks", "--no-replace-objects", "-C", str(ROOT), *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30,
+    )
+    if result.returncode:
+        raise RuntimeError("Recoverable Git before version unavailable; migration stopped")
+    return result.stdout
+
+
+def recoverable_before(path: Path, data: bytes) -> str:
+    """Require the complete original bytes in a pinned, clean Git HEAD blob."""
+    if Path(git_read("rev-parse", "--show-toplevel").decode().strip()).resolve() != ROOT.resolve():
+        raise RuntimeError("Wrong Git root; migration stopped")
+    head = git_read("rev-parse", "--verify", "HEAD").decode().strip()
+    relative = path.relative_to(ROOT).as_posix()
+    entry = git_read("ls-tree", "-z", head, "--", relative)
+    if not entry.startswith((b"100644 blob ", b"100755 blob ")):
+        raise RuntimeError("Untracked or non-file before version; migration stopped")
+    if git_read("show", f"{head}:{relative}") != data:
+        raise RuntimeError("Modified episode before version; migration stopped")
+    git_read("diff", "--cached", "--quiet", head, "--", relative)
+    return head
+
+
+def migrate_episode(old: Path, target: Path, page_id: str, content: str) -> None:
+    before = managed_note_bytes(old, page_id)
+    head = recoverable_before(old, before)
+    encoded = content.encode("utf-8")
+    if not migration_matches(before, encoded):
+        raise RuntimeError("Episode content changed or unknown; migration stopped")
+    check_managed_path(target, exists=False)
+    if target.exists():
+        # Resume only an exact completed destination (apart from its prior sync time).
+        destination = managed_note_bytes(target, page_id)
+        if (migration_signature(destination, ("synced_at",))
+                != migration_signature(encoded, ("synced_at",))):
+            raise RuntimeError("Episode destination conflict; migration stopped")
+    else:
+        write_verified_text(target, content, create_only=True)
+        destination = encoded
+    # Recheck HEAD first, then both files immediately before removing one old note.
+    if recoverable_before(old, before) != head:
+        raise RuntimeError("Episode changed during migration; old path preserved")
+    check_managed_path(target)
+    if target.read_bytes() != destination or managed_note_bytes(old, page_id) != before:
+        raise RuntimeError("Episode changed during migration; old path preserved")
+    old.unlink()
+    if old.exists() or target.read_bytes() != destination:
+        raise RuntimeError("Unknown episode migration outcome; watermark unchanged")
+
+
 def download_text(url: str) -> str:
-    last_error: Optional[Exception] = None
     for attempt in range(3):
         try:
             with urllib.request.urlopen(url, timeout=60) as resp:
-                return resp.read().decode("utf-8", errors="replace").strip()
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-            last_error = exc
+                text = resp.read().decode("utf-8", errors="strict")
+            if not text.removeprefix("\ufeff").strip():
+                raise RuntimeError("Empty transcript attachment")
+            return text
+        except UnicodeDecodeError:
+            raise RuntimeError("Transcript attachment is not valid UTF-8") from None
+        except urllib.error.HTTPError as exc:
+            if (exc.code == 429 or 500 <= exc.code < 600) and attempt < 2:
+                time.sleep(3)
+                continue
+            raise RuntimeError("Transcript attachment download failed") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
             if attempt < 2:
                 time.sleep(3)
                 continue
-            raise RuntimeError(f"Failed to download transcript file: {exc}") from exc
-    raise RuntimeError(f"Failed to download transcript file: {last_error}")
+            raise RuntimeError("Transcript attachment download failed") from None
+    raise RuntimeError("Transcript attachment download failed")
+
+
+def download_transcripts(files: List[Dict[str, Any]]) -> str:
+    """Read every declared attachment before allowing the current note to change."""
+    parts: List[str] = []
+    for index, item in enumerate(files, start=1):
+        text = download_text(item[item["type"]]["url"])
+        if len(files) > 1:
+            parts.append(f"### 逐字稿附件 {index}\n\n{text}")
+        else:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def retrieve_block_children_checked(api_key: str, block_id: str) -> List[Dict[str, Any]]:
+    """Refuse silent partial page bodies, including nested block collections."""
+    children: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    seen_cursors = set()
+    seen_ids = set()
+    while True:
+        params = {"page_size": "100"}
+        if cursor:
+            params["start_cursor"] = cursor
+        query = urllib.parse.urlencode(params)
+        response = notion_request(api_key, "GET", f"/blocks/{normalize_notion_id(block_id)}/children?{query}")
+        if (not isinstance(response, dict) or not isinstance(response.get("results"), list)
+                or not isinstance(response.get("has_more"), bool)):
+            raise RuntimeError("Unknown block query result; no watermark advancement")
+        has_more = response["has_more"]
+        next_cursor = response.get("next_cursor")
+        if has_more and (not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors):
+            raise RuntimeError("Incomplete or repeated block cursor; no watermark advancement")
+        if not has_more and next_cursor is not None:
+            raise RuntimeError("Conflicting block pagination terminal; no watermark advancement")
+        for block in response["results"]:
+            if not isinstance(block, dict) or not isinstance(block.get("id"), str) or not block["id"].strip():
+                raise RuntimeError("Missing block identity; no watermark advancement")
+            child_id = normalize_notion_id(block["id"])
+            if child_id in seen_ids:
+                raise RuntimeError("Repeated block identity; no watermark advancement")
+            seen_ids.add(child_id)
+            children.append(block)
+        if not has_more:
+            return children
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
 
 def build_body(api_key: str, page_id: str, description: str, transcript_text: str) -> str:
-    blocks = retrieve_block_children(api_key, page_id)
-    rendered = render_blocks(api_key, blocks)
+    blocks = retrieve_block_children_checked(api_key, page_id)
+    rendered = render_blocks(api_key, blocks, children_loader=retrieve_block_children_checked)
     parts: List[str] = []
     if description:
         parts.append("## 简介")
@@ -280,8 +556,8 @@ def build_body(api_key: str, page_id: str, description: str, transcript_text: st
         parts.append("## 页面内容")
         parts.append("")
         parts.extend(rendered)
-    body = "\n".join(parts).strip()
-    return body + "\n" if body else "\n"
+    body = "\n".join(parts)
+    return body + "\n" if body and not body.endswith("\n") else body or "\n"
 
 
 def sync_one(
@@ -292,6 +568,8 @@ def sync_one(
     page: Optional[Dict[str, Any]] = None,
 ) -> Path:
     page = page or fetch_page(api_key, page_id)
+    if normalize_notion_id(str(page.get("id") or "")) != normalize_notion_id(page_id):
+        raise RuntimeError("Source episode identity conflict; sync stopped")
     properties = page.get("properties") or {}
     title = title_from_properties(properties)
     listened_at = prop_text(properties.get("日期") or {})
@@ -324,7 +602,7 @@ def sync_one(
     duration_seconds = prop_number(properties.get("时长") or {})
     eid = prop_text(properties.get("Eid") or {})
     transcript_status = prop_text(properties.get("语音转文字状态") or {})
-    transcript_files = prop_files(properties.get("逐字稿") or {})
+    transcript_files = prop_files(properties["逐字稿"]) if "逐字稿" in properties else []
     transcript_file_name = transcript_files[0].get("name", "") if transcript_files else ""
     rating = prop_text(properties.get("评分") or {})
 
@@ -347,31 +625,45 @@ def sync_one(
             "listened_progress_seconds": int(prop_number(properties.get("收听进度") or {}) or 0),
             "transcript_status": transcript_status,
             "transcript_file_name": transcript_file_name,
+            "transcript_file_names": [item.get("name", "") for item in transcript_files],
+            "transcript_file_count": len(transcript_files),
             "rating": rating,
             "synced_at": now_iso(),
         }
     )
-    existing = find_existing_file_across_roots(page_id)
-    if existing and is_within(existing, OUTPUT_ROOT):
-        target = existing
-    else:
-        target = unique_target_path(year_dir, title, page_id)
+    existing_files = all_episode_files(page_id)
+    if any(not is_within(path, OUTPUT_ROOT) for path in existing_files):
+        raise RuntimeError("Unmanaged legacy episode root; separately scoped owner repair required")
+    current = [path for path in existing_files if path.parent == year_dir]
+    previous = [path for path in existing_files if path.parent != year_dir]
+    if len(current) > 1 or len(previous) > 1:
+        raise RuntimeError("Ambiguous episode copies; migration stopped")
+    existing = previous[0] if previous else None
+    preferred = year_dir / f"{safe_title_stem(title, page_id[:8])}.md"
+    if existing and not current and preferred.exists():
+        # A different managed source may reserve this title; an unrecognized file
+        # may instead be an interrupted write, so never silently route around it.
+        preferred_meta = parse_frontmatter(preferred.read_bytes().decode("utf-8"))
+        managed_note_bytes(preferred, preferred_meta.get("episode_page_id", ""))
+    target = current[0] if current else unique_target_path(year_dir, title, page_id)
+    for path in existing_files:
+        managed_note_bytes(path, page_id)
+    check_managed_path(target, exists=False)
+    if target.exists():
+        target_meta = parse_frontmatter(target.read_text(encoding="utf-8"))
+        if normalize_notion_id(target_meta.get("episode_page_id", "")) != normalize_notion_id(page_id):
+            raise RuntimeError("Episode target identity conflict; refusing overwrite")
     if dry_run:
-        print(f"DRY-RUN {normalize_notion_id(page_id)} -> {target.relative_to(ROOT)}")
+        print("DRY-RUN episode target")
     else:
-        transcript_text = ""
-        if transcript_files:
-            transcript_file = transcript_files[0]
-            file_obj = transcript_file.get(transcript_file.get("type") or "") or {}
-            transcript_url = file_obj.get("url") or ""
-            if transcript_url:
-                transcript_text = download_text(transcript_url)
+        transcript_text = download_transcripts(transcript_files)
         body = build_body(api_key, normalize_notion_id(page_id), description, transcript_text)
         content = f"{frontmatter}\n\n{body}"
-        if existing and existing != target:
-            existing.unlink(missing_ok=True)
-        write_text(target, content)
-        print(f"WROTE {target.relative_to(ROOT)}")
+        if existing:
+            migrate_episode(existing, target, page_id, content)
+        else:
+            write_verified_text(target, content)
+        print("WROTE episode")
     return target
 
 
@@ -445,22 +737,25 @@ def rebuild_index() -> Path:
         lines.append("")
 
     target = OUTPUT_ROOT / "索引.md"
-    write_text(target, "\n".join(lines).rstrip() + "\n")
+    write_verified_text(target, "\n".join(lines).rstrip() + "\n")
     return target
 
 
 def main() -> None:
     args = parse_args()
+    scan_started_at = now()
+    scan_complete = False
     page_ids = [normalize_notion_id(item) for item in args.page_id]
     pages_by_id: Dict[str, Dict[str, Any]] = {}
     if args.all_current or (not page_ids and not args.rebuild_index):
         api_key = load_notion_api_key()
-        current_pages = current_episode_pages(
+        current_pages, scan_complete = current_episode_pages(
             api_key,
             full_sync=args.all_current,
             hours_back=args.hours_back,
             max_episodes=args.max_episodes,
             only_missing=args.only_missing,
+            scan_started_at=scan_started_at,
         )
         for page in current_pages:
             page_id = normalize_notion_id(str(page.get("id") or ""))
@@ -477,7 +772,7 @@ def main() -> None:
         podcast_cache: Dict[str, Dict[str, str]] = {}
         total = len(page_ids)
         for index, page_id in enumerate(page_ids, start=1):
-            print(f"SYNC {index}/{total} {page_id}", flush=True)
+            print(f"SYNC {index}/{total}", flush=True)
             sync_one(
                 api_key,
                 page_id,
@@ -488,13 +783,31 @@ def main() -> None:
 
     if not args.dry_run:
         index_path = rebuild_index()
-        print(f"WROTE {index_path.relative_to(ROOT)}")
-        state = read_state()
-        state["last_sync_at"] = now_iso()
-        if args.all_current:
-            state["last_full_sync_at"] = state["last_sync_at"]
-        write_state(state)
+        print("WROTE index")
+        if scan_complete and not args.only_missing and not args.rebuild_index:
+            state = read_state()
+            state["last_sync_at"] = format_time(scan_started_at)
+            if args.all_current:
+                state["last_full_sync_at"] = state["last_sync_at"]
+            write_state(state)
+        else:
+            print("SOURCE_WATERMARK_UNCHANGED: limited, targeted, missing-only, or index-only run", flush=True)
+
+
+def run_cli() -> int:
+    """Keep source payloads, private paths and signed URLs out of direct logs."""
+    try:
+        main()
+    except Exception as exc:
+        print(f"ERROR PODCAST_SYNC_FAILED {type(exc).__name__}", file=sys.stderr)
+        return 1
+    except SystemExit as exc:
+        if isinstance(exc.code, int) or exc.code is None:
+            return int(exc.code or 0)
+        print("ERROR PODCAST_SYNC_FAILED SystemExit", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(run_cli())
