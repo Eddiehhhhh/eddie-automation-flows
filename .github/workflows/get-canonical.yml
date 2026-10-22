@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: '0e60865fb8e73793310c16e343d7df1717ee49c5'
+          ref: 'b5d4c0d2be3b83d4bcce7337ba1e692e955f6510'
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -47,7 +47,7 @@ jobs:
         run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
       - name: Verify pinned reviewed runtime
         env:
-          RUNTIME_SHA: '0e60865fb8e73793310c16e343d7df1717ee49c5'
+          RUNTIME_SHA: 'b5d4c0d2be3b83d4bcce7337ba1e692e955f6510'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Validate bounded Notion route before Get
         env:
@@ -72,8 +72,8 @@ jobs:
         run: python scripts/get_notion_controller_route.py --preflight
       - name: Prepare reviewed public policy
         env:
-          POLICY_B64: 'eyJjb2RlX3NoYSI6IjBlNjA4NjVmYjhlNzM3OTMzMTBjMTZlMzQzZDdkZjE3MTdlZTQ5YzUiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiIxNzUyMDA1MjQzNTg5NTEzOGE2NTI5ZjNhODQ5NThkZGRiOGNjNTBiOWMyM2IwN2U2M2MxMmU1MmM4ZjhmMTc4IiwiZ2V0X3BvbGljeV9zaGEyNTYiOiI3OGRhMTY5YmI2N2Y4ZmJjZWFmMWQyN2JkY2IzZWIzZjEzNzU3NmE4NGUxZTI5MTI1Nzg4ZWNlN2M4OTYwYjdiIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjNmN2ViY2RmZGE3M2MzYzUyMTFiMGRmOWFmNDk5YjhlMzUwOGIwOWZiNWViNGEyYmNkZmJjMTQ4NzNlNTNkMjciLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
-          POLICY_SHA256: '58a6f290f4094c241411a066fcdcaf00262c21f4598472a609358a3456650a0f'
+          POLICY_B64: 'eyJjb2RlX3NoYSI6ImI1ZDRjMGQyYmUzYjgzZDRiY2NlNzMzN2JhMWU2OTJlOTU1ZjY1MTAiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiIxZDU2ODUzMWI0NjcyYjg5ZWM4MGVhYTA4NTMyZTE1MmQ5YzEzYTQwMDYwMmNmYWY1NDM4YTNjZDI0ZjczZGM1IiwiZ2V0X3BvbGljeV9zaGEyNTYiOiJiNWRhOTQyY2JjNTkzMzhlNjRmYTgyYTE1YTA2ODFlNTA2N2E0NzYyYTcxNWRmMGJlYmJlN2RkZTg1ZWJiMTYxIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjY1N2Q2NzA4MzM3NzkzMDAyMzNkODRmOTBlZWQ1NzhmMDQ3MTc0M2U0YTFkZDliMjNlMzAzYjdkNmZmYWRlMWMiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
+          POLICY_SHA256: '360cb524f24d1f2c460be0fe53cea773bbd4f04ffe5aba6626fe4994940c3917'
         run: |
           python - <<'PY'
           import base64, hashlib, os
@@ -86,6 +86,7 @@ jobs:
           PY
       - name: Emit verified canonical publication anchor
         id: get_sync
+        if: ${{ github.event_name == 'schedule' || (inputs.notion_mode != 'historical-capture' && inputs.notion_mode != 'historical-apply') }}
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           GITHUB_TOKEN: ${{ github.token }}
@@ -93,8 +94,8 @@ jobs:
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          POLICY_SHA256: '58a6f290f4094c241411a066fcdcaf00262c21f4598472a609358a3456650a0f'
-          SCOPE_SHA256: '68d89a16d23298eefdc1b29abf99d64d223cc6179b8f64ce46ee10178c4f27f4'
+          POLICY_SHA256: '360cb524f24d1f2c460be0fe53cea773bbd4f04ffe5aba6626fe4994940c3917'
+          SCOPE_SHA256: '2e8833f8d7b273953cd15e963ff574fcd572df95649869fb58c19c513d16a10d'
         run: |
           args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
           if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
@@ -104,14 +105,14 @@ jobs:
           python scripts/get_recurring_runtime.py "${args[@]}"
       - name: Sync confirmed Get content to Notion
         id: notion_sync
-        if: ${{ steps.get_sync.outcome == 'success' && (github.event_name == 'schedule' || inputs.apply) }}
-        continue-on-error: true
+        if: ${{ (steps.get_sync.outcome == 'success' || (github.event_name == 'workflow_dispatch' && inputs.apply && steps.get_sync.outcome == 'skipped' && (inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply'))) && (github.event_name == 'schedule' || inputs.apply) }}
+        continue-on-error: ${{ !(github.event_name == 'workflow_dispatch' && inputs.apply && (inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply')) }}
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          POLICY_SHA256: '58a6f290f4094c241411a066fcdcaf00262c21f4598472a609358a3456650a0f'
+          POLICY_SHA256: '360cb524f24d1f2c460be0fe53cea773bbd4f04ffe5aba6626fe4994940c3917'
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
           NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
@@ -122,6 +123,11 @@ jobs:
               --approved-policy-sha256 "$POLICY_SHA256" \
               --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
               --apply --scope-from-policy
+          elif test "$NOTION_MODE" = historical-capture || test "$NOTION_MODE" = historical-apply; then
+            python scripts/get_notion_controller_route.py \
+              --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
+              --approved-policy-sha256 "$POLICY_SHA256" \
+              --fixed-source --apply --scope-from-policy
           else
             python scripts/get_notion_controller_route.py \
               --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
@@ -129,5 +135,6 @@ jobs:
               --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
               --apply --scope-from-policy
           fi
-# The same job has independent Get and Notion failure reporting. A Notion partial
-# outcome must not erase the successful Get step or its confirmed receipt marker.
+# Canonical runs retain independent Get and Notion failure reporting. A Notion
+# partial cannot erase a confirmed Get receipt. Fixed archive runs deliberately
+# skip Get and emit only their separate source-auth marker, never a Get receipt.
