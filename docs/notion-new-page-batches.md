@@ -61,7 +61,15 @@ page's complete ID/hash history and final receipt. One estimated state must
 fit 32 MiB; the six-state reserve must fit 192 MiB before the initial create.
 The existing 32 MiB state cap,
 192 MiB journal-byte cap, 2,000 Notion request cap, 64 MiB Notion response cap,
-and 1,200-second transport deadline remain unchanged.
+remain unchanged. The transport deadline is now 1,500 seconds from the same
+constructor-time origin (previously 1,200 seconds). This is a fixed five-minute
+allowance increase, not a clock reset or an exemption for proof/setup time.
+All modes share the same single session instance and existing counters. The
+workflow retains its 55-minute total job cap; preceding Get work and private
+Git/proof latency also consume job time, so completion inside that cap is not
+guaranteed. Cancellation and uncertain writes still require original resume
+verification. Historical metrics conservatively clamp displayed remaining time
+to 1,200,000 milliseconds; admission uses the actual unchanged-origin deadline.
 
 Before another batch starts, admission checks reserve complete-prefix reads,
 four phase checkpoints plus two rollback/completion checkpoints,

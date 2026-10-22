@@ -37,7 +37,7 @@ class Transport:
         if not isinstance(token,str) or not token or any(ord(c)<=32 for c in token):fail('missing_credentials')
         if any(not isinstance(x,str) or not re.fullmatch('[a-f0-9]{64}',x) for x in approved_writes):fail('invalid_approval')
         self._token=token;self.opener=opener or urllib.request.build_opener(urllib.request.ProxyHandler({}),ro.NoRedirect())
-        self.sleep=sleep;self.clock=clock;self.deadline=clock()+1200;self.last=None
+        self.sleep=sleep;self.clock=clock;self.deadline=clock()+1500;self.last=None
         self.attempts=0;self.bytes=0;self.approved=frozenset(approved_writes);self.attempted=set()
     def __call__(self,method,path,body=None):
         if not isinstance(path,str):fail('invalid_route')

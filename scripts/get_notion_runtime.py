@@ -73,7 +73,7 @@ ERRORS.update({'png_expired_evidence_invalid','png_expired_missing_unverified','
 ERRORS.update(e.REASONS)
 
 # Fixed program diagnostics only; never raw exception text or private values.
-DIAGNOSTIC_ERRORS=frozenset(ERRORS | recurring.PUBLIC_ERROR_CODES | {'journal_loader_failed', 'journal_provenance_steps', 'missing_credentials', 'journal_provenance_failed', 'journal_checkpoint_write', 'unread_target', 'journal_loader_commit', 'private_proof_unverified', 'invalid_children', 'outbox_chain_incomplete', 'identity_query_invalid', 'source_content_budget', 'journal_provenance_changed', 'journal_loader_local_mutation', 'unsupported_code_color', 'permission_denied', 'invalid_blocks', 'journal_provenance_record', 'invalid_route', 'source_chain_invalid', 'source_publication_budget', 'journal_provenance_missing', 'journal_loader_cache', 'invalid_approval', 'outbox_source_invalid', 'outbox_state_changed', 'response_budget', 'journal_provenance_workflow', 'source_history_budget', 'asset_write_contract_missing', 'journal_loader_tree', 'journal_provenance_log', 'source_foreign_get_change', 'request_budget', 'journal_loader_unrequested_blob', 'source_chain_budget', 'journal_provenance_controller_step', 'wrong_note_identity', 'outbox_state_invalid', 'journal_provenance_context', 'journal_checkpoint_failed', 'outbox_empty', 'journal_provenance_no_checkpoint', 'duplicate_id', 'read_transport_failed', 'unsupported_source_format', 'journal_provenance_budget', 'outbox_duplicate_id', 'journal_checkpoint_locked', 'journal_checkpoint_budget', 'invalid_cohort', 'journal_loader_blob', 'journal_provenance_jobs', 'journal_checkpoint_receipt', 'journal_checkpoint_context', 'journal_loader_target', 'wrong_schema', 'malformed_payload', 'pagination_budget', 'journal_loader_budget', 'journal_provenance_other_controller', 'outbox_chain_invalid', 'outbox_budget', 'journal_provenance_repository', 'outbox_approval_invalid', 'journal_busy', 'invalid_table', 'outbox_journal_failed', 'unsupported_prepend', 'source_object_invalid', 'journal_provenance_time', 'source_blob_invalid', 'journal_provenance_runs', 'write_uncertain', 'journal_provenance_run', 'journal_provenance_job', 'incomplete_pagination', 'read_api_failed', 'wrong_parent', 'wrong_database', 'write_not_authorized_or_already_attempted'})
+DIAGNOSTIC_ERRORS=frozenset(ERRORS | recurring.PUBLIC_ERROR_CODES | {'notion_journal_mode_busy', 'journal_loader_failed', 'journal_provenance_steps', 'missing_credentials', 'journal_provenance_failed', 'journal_checkpoint_write', 'unread_target', 'journal_loader_commit', 'private_proof_unverified', 'invalid_children', 'outbox_chain_incomplete', 'identity_query_invalid', 'source_content_budget', 'journal_provenance_changed', 'journal_loader_local_mutation', 'unsupported_code_color', 'permission_denied', 'invalid_blocks', 'journal_provenance_record', 'invalid_route', 'source_chain_invalid', 'source_publication_budget', 'journal_provenance_missing', 'journal_loader_cache', 'invalid_approval', 'outbox_source_invalid', 'outbox_state_changed', 'response_budget', 'journal_provenance_workflow', 'source_history_budget', 'asset_write_contract_missing', 'journal_loader_tree', 'journal_provenance_log', 'source_foreign_get_change', 'request_budget', 'journal_loader_unrequested_blob', 'source_chain_budget', 'journal_provenance_controller_step', 'wrong_note_identity', 'outbox_state_invalid', 'journal_provenance_context', 'journal_checkpoint_failed', 'outbox_empty', 'journal_provenance_no_checkpoint', 'duplicate_id', 'read_transport_failed', 'unsupported_source_format', 'journal_provenance_budget', 'outbox_duplicate_id', 'journal_checkpoint_locked', 'journal_checkpoint_budget', 'invalid_cohort', 'journal_loader_blob', 'journal_provenance_jobs', 'journal_checkpoint_receipt', 'journal_checkpoint_context', 'journal_loader_target', 'wrong_schema', 'malformed_payload', 'pagination_budget', 'journal_loader_budget', 'journal_provenance_other_controller', 'outbox_chain_invalid', 'outbox_budget', 'journal_provenance_repository', 'outbox_approval_invalid', 'journal_busy', 'invalid_table', 'outbox_journal_failed', 'unsupported_prepend', 'source_object_invalid', 'journal_provenance_time', 'source_blob_invalid', 'journal_provenance_runs', 'write_uncertain', 'journal_provenance_run', 'journal_provenance_job', 'incomplete_pagination', 'read_api_failed', 'wrong_parent', 'wrong_database', 'write_not_authorized_or_already_attempted'})
 
 def failure_diagnostic(exc):
     reason=str(exc)
@@ -334,6 +334,26 @@ def dispatch(*args,**kwargs):
         raise
 
 
+def canonical_mode_busy_result():
+    # This invocation did not write; an older journal may still have effects.
+    return {'contract':CONTRACT,'status':'failed','stage':'journal',
+        'reason':'notion_journal_mode_busy','write_state':'not_attempted',
+        'external_write_attempts':0,'journal_write_state':'not_attempted',
+        'unresolved_effects':'unknown','complete_library_claimed':False}
+
+
+def canonical_mode_guard(state, sha):
+    outbox.check_state(state)
+    if sha!=outbox.digest(state):fail('notion_state_anchor')
+    pending=state['engine_state']['journal']
+    if pending is None:return None
+    plan=pending['plan']
+    flags=[plan.get(key,False) for key in ('historical_only','property_only')]
+    if any(type(flag) is not bool for flag in flags) or all(flags):fail('notion_schema')
+    if any(flags):return canonical_mode_busy_result()
+    return None
+
+
 def incremental_scope_for(publication, journal):
     """Only fresh ordinary plans or a saved explicit incremental writer plan."""
     if e.creation_properties.eligible(publication) and (journal is None or e.incremental_properties.enabled(journal['plan'])):
@@ -345,6 +365,8 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
     property_runtime.check_dependency()
     state,sha=store.read();outbox.check_state(state)
     if sha!=outbox.digest(state):fail('notion_state_anchor')
+    busy=canonical_mode_guard(state,sha)
+    if busy is not None:return busy
     isolated=0
     if plan_recovery.validate_initial_state(state,sha):
         candidate=plan_recovery.isolate_outer(state,sha)
@@ -412,6 +434,7 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
 
 def _safe_result(value):
     if not isinstance(value,dict):return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
+    if e.same(value,canonical_mode_busy_result()):return canonical_mode_busy_result()
     if value.get('status')=='png_prepared':
         report=value.get('png_preparation',{})
         keys=('selected','upload_candidates','blocked','upload_bytes')
@@ -579,6 +602,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             current,sha=durable.read()
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
                 fail('notion_state_anchor')
+            if all(mode is None for mode in modes):
+                busy=canonical_mode_guard(current,sha)
+                if busy is not None:return busy
             old_journal=current['engine_state']['journal']
             recovery_mode_guard(current, found if present else {}, modes)
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
