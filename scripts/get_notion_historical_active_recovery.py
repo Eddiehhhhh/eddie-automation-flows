@@ -11,9 +11,10 @@ TAG = 'exact_historical_active_append_resume_v1'
 # Never populate from the current state, an input file or a command-line hash.
 import get_private_runtime_bindings as _private_bindings
 BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'BINDING')
+SUCCESSOR_BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'SUCCESSOR_BINDING')
 
 
-def binding():
+def _validated_binding(value):
     """Strict schema, with authority coming only from code-pinned private bytes."""
     import get_notion_outbox as o
     import get_publication_provenance as p
@@ -23,7 +24,7 @@ def binding():
         'state_bytes','plan_sha256','plan_bytes','engine_rules_sha256','manifest_sha256',
         'initial_index','initial_operation_sha256'}
     try:
-        b = deepcopy(BINDING)
+        b = deepcopy(value)
         if not isinstance(b,dict) or set(b) != keys: return None
         p.validate_policy(b['public_policy'], b['public_policy_sha256'])
         for k in ('notion_policy_sha256','job_sha256','plan_sha256','engine_rules_sha256',
@@ -57,10 +58,40 @@ def binding():
         return None
 
 
+
+def binding():
+    return _validated_binding(BINDING)
+
+
+def successor_binding():
+    base = binding(); successor = _validated_binding(SUCCESSOR_BINDING)
+    # One authenticated successor checkpoint of the SAME immutable operation.
+    # Never allow this registry to authorize a different plan or broader scope.
+    same = ('plan_sha256','plan_bytes','engine_rules_sha256','manifest_sha256',
+            'initial_index','initial_operation_sha256','state_bytes')
+    if (not base or not successor or any(base[k] != successor[k] for k in same)
+            or base['run_binding']['id'] == successor['run_binding']['id']
+            or base['public_policy'] == successor['public_policy']):
+        return None
+    return successor
+
+
+def _run_binding(run_id, attempt=None):
+    for b in (binding(), successor_binding()):
+        if (b and type(run_id) is int and run_id == b['run_binding']['id']
+                and (attempt is None or type(attempt) is int and attempt == b['run_binding']['run_attempt'])):
+            return b
+    return None
+
+
+def _state_binding(sha):
+    for b in (binding(), successor_binding()):
+        if b and sha == b['anchor']['state_sha256']: return b
+    return None
+
+
 def registered_run(run_id, attempt=None):
-    b = binding()
-    return bool(b and type(run_id) is int and run_id == b['run_binding']['id']
-                and (attempt is None or type(attempt) is int and attempt == b['run_binding']['run_attempt']))
+    return _run_binding(run_id, attempt) is not None
 
 
 def candidate_policy(policy, run):
@@ -68,7 +99,7 @@ def candidate_policy(policy, run):
     import get_recurring_controller as controller
     import get_recurring_policy_recovery as recovery
     import get_publication_provenance as p
-    b = binding()
+    b = _run_binding(run.get('id'), run.get('run_attempt'))
     if not b: return policy, False
     old = b['public_policy']
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
@@ -86,7 +117,7 @@ def candidate_policy(policy, run):
 def verify_original_record(record, job_id, *, job=None, raw=None, run=None):
     import get_publication_provenance as p
     import get_notion_outbox as o
-    b = binding()
+    b = _run_binding(record.get('run_id'), record.get('run_attempt'))
     if (not b or record != b['get_record'] or job_id != b['job_id']
             or o.digest(job) != b['job_sha256'] or p.run_binding(run) != b['run_binding']):
         p.fail('provenance_record')
@@ -94,7 +125,7 @@ def verify_original_record(record, job_id, *, job=None, raw=None, run=None):
 
 def recover_checkpoint(client, run_id, run_attempt):
     import get_notion_journal_runtime as c
-    b = binding()
+    b = _run_binding(run_id, run_attempt)
     if not registered_run(run_id, run_attempt): c.fail('journal_provenance_other_controller')
     # The full original verifier reconstructs compact proofs using the private
     # persisted records. Saved expanded logs never replace production retrieval.
@@ -174,7 +205,7 @@ def allows(plan, journal):
 def initial_state_valid(state, sha):
     import get_notion_outbox as o
     import get_private_preview_retention as retention
-    b = binding()
+    b = _state_binding(sha)
     try:
         o.check_state(state); raw = o.encoded(state); j = state['engine_state']['journal']
         return bool(b and sha == b['anchor']['state_sha256'] == o.digest(raw)
@@ -198,7 +229,7 @@ def check_mode(state, found, manifest, expected, other_modes):
 def transition_outer(state, sha, new_policy, *, proof):
     import get_notion_outbox as o
     import get_recurring_policy_recovery as recovery
-    b = binding()
+    b = _state_binding(sha)
     if (not initial_state_valid(state, sha) or not b
             or proof.get('recovery_anchor') != TAG
             or proof.get('status') != 'journal_provenance_verified'

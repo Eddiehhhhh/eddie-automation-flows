@@ -63,6 +63,13 @@ class Loader:
     def commit(self, commit):
         entry.a.checked(commit, 40)
         if commit in self.commits:
+            # Other exact-object readers share this ODB and may fetch a
+            # shallower tip after our first traversal. Object identity is
+            # immutable, but shallow-boundary metadata is not. Recheck it
+            # without resetting this loader's cumulative history budget.
+            shallow = Path(self.local.vault) / '.git/shallow'
+            if shallow.exists() and commit in entry.a.bounded_file(shallow, 2 * 1024 * 1024).decode().splitlines():
+                self.fetch(commit)
             return
         if len(self.commits) >= MAX_COMMITS:
             fail('source_history_budget')
