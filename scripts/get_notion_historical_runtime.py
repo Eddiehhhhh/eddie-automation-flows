@@ -33,7 +33,7 @@ class API(transport.API):
         return snapshot
 
 
-def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_hash,apply,writers_guard,loader=None,admit=None,verify_reused=False):
+def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_hash,apply,writers_guard,loader=None,admit=None,verify_reused=False,row_admit=None):
     historical.validate(manifest,expected,apply=apply)
     if transport.native.sha(manifest['data_source_id'])!=transport.native.DATA_SOURCE_PIN or transport.native.sha(manifest['database_id'])!=transport.native.DATABASE_PIN: e.fail('wrong_parent')
     current,version=store.read();outbox.check_state(current)
@@ -101,11 +101,16 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
         'write_state':'unknown' if active else 'not_attempted','prior_journal_effects':'unresolved' if active else 'none',
         'complete_library_claimed':False}
     if apply:
-        if admit is not None and not admit(current,plan): raise ApplyBoundaryYield()
+        if admit is not None and not (active and active['operation'] is not None) and not admit(current,plan): raise ApplyBoundaryYield()
         if not isinstance(request,transport.Transport): e.fail('approval_missing')
         allowed=pipeline.wire_allowlist(plan,api);api.approved=allowed;request.approved=allowed
+        def ordinary_row(engine, pending_plan):
+            outer=deepcopy(adapter.outer)
+            outer['engine_state']=deepcopy(engine)
+            return row_admit(outer,pending_plan)
         result=e.execute(plan,e.digest(plan),publication,api,adapter,expected_store_sha=sha,writers_guard=writers_guard,
-                         authorize_batch=pipeline.batch_authorizer(plan,api,request,adapter))
+                         authorize_batch=pipeline.batch_authorizer(plan,api,request,adapter),
+                         authorize_row=ordinary_row if row_admit is not None else None)
         safe=e.public_report(result)
         report.update(status='executed',execution=safe,external_write_attempts=safe['external_write_attempts'],write_state=safe['write_state'])
     final,final_sha=store.read()
@@ -303,7 +308,7 @@ def body_receipts_match(state, manifest):
     return True
 
 
-def apply_boundary(request, durable, emitter, *, current, notes, plan=None):
+def apply_boundary(request, durable, emitter, *, current, notes, plan=None, row_only=False):
     """Reserve a conservative ordinary flat-append scope, never reset counters.
 
     Admission is not a claim that unknown pagination, latency or external edits
@@ -323,8 +328,18 @@ def apply_boundary(request, durable, emitter, *, current, notes, plan=None):
                 or row.get('property_only') or row.get('old_roots')
                 or row.get('create_batches') for row in rows):
             e.fail('approval_missing')
-        commits = 6 * len(rows) + 3 if rows else 0
-        requests = 60 * len(rows) + 1
+        active=current['engine_state']['journal'] if row_only else None
+        remaining=len(rows)-(active['index'] if active is not None else 0)
+        reserve_rows=min(1,remaining) if row_only else len(rows)
+        commits = 6 * reserve_rows + 3 if reserve_rows else 0
+        requests = 60 * reserve_rows + 1
+        if row_only and active is None:
+            # The initial plan CAS is additional to the next clean-row reserve.
+            # After it commits, the same row still fits without an empty-plan
+            # yield caused solely by double-checking identical headroom.
+            commits += 1
+            current=deepcopy(current)
+            current['engine_state']['journal']={'plan_sha256':e.digest(plan),'plan':deepcopy(plan),'index':0,'operation':None}
         # Plan, operation before/working snapshots, new IDs, receipts and
         # normalized wire payloads coexist. Generous growth allowance is bounded
         # by the existing state limit; measured byte accounting still decides.
@@ -376,7 +391,7 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
                     'native_reverified': False, 'resumed_journal': False})
         for manifest, member in members[start:]:
             current, last_sha = store.read(); outbox.check_state(current)
-            if not apply_boundary(request, durable, emitter, current=current,
+            if not (active and active['operation'] is not None) and not apply_boundary(request, durable, emitter, current=current,
                                   notes=len(manifest['records'])):
                 raise ApplyBoundaryYield()
             reused = body_receipts_match(current, manifest)
@@ -386,9 +401,21 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
                 manifest=manifest, expected=member, policy_hash=policy_hash, apply=True,
                 writers_guard=writers_guard, loader=loader, verify_reused=True,
                 admit=lambda state, plan: apply_boundary(request, durable, emitter,
-                    current=state, notes=len(manifest['records']), plan=plan))
+                    current=state, notes=len(manifest['records']), plan=plan,row_only=True),
+                row_admit=lambda state, plan: apply_boundary(request,durable,emitter,
+                    current=state,notes=len(manifest['records']),plan=plan,row_only=True))
             execution = result.get('execution', {})
             last_sha = result['outer_journal_sha256']
+            if (not durable.poisoned and not emitter.failed
+                    and durable.anchor['state_sha256']==last_sha
+                    and execution.get('status')=='partial'
+                    and execution.get('reason')=='batch_boundary_yield'
+                    and execution.get('write_state') in ('confirmed','not_attempted')):
+                current,last_sha=store.read();outbox.check_state(current)
+                pending=current['engine_state']['journal']
+                if pending is not None and pending['operation'] is not None:e.fail('journal_failed')
+                status='partial';reason='batch_boundary_yield';prior_effects=False
+                break
             if (durable.poisoned or emitter.failed
                     or durable.anchor['state_sha256'] != last_sha
                     or result.get('scope_confirmed') is not True

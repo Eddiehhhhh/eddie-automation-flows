@@ -663,7 +663,7 @@ def created(snapshot, row, data_source, expected_page):
     return view['order']
 
 
-def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_sha, writers_guard, create_recovery=None, approved_recovery_sha=None, authorize_batch=None, authorize_properties=None):
+def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_sha, writers_guard, create_recovery=None, approved_recovery_sha=None, authorize_batch=None, authorize_properties=None, authorize_row=None):
     """Execute only injected methods: read_note, append_blocks, archive_block,
     create_page. There is NO real network adapter in this module.
 
@@ -742,14 +742,30 @@ def execute(plan, approved_plan_sha, publication, api, store, *, expected_store_
                     counts['body_verified']+=1
                     counts['metadata_pending']+=bool(outcome['held'])
                     counts['retained_conflicts']+=bool(outcome['held'])
+        if authorize_row is not None and not callable(authorize_row): fail('approval_missing')
+        def row_boundary():
+            admitted = authorize_row(deepcopy(value), deepcopy(plan))
+            if type(admitted) is not bool: fail('approval_missing')
+            if admitted: return None
+            return {'status':'partial','reason':'batch_boundary_yield',**counts,
+                    'state_sha256':version,'external_write_attempts':counts['write_calls'],
+                    'write_state':'confirmed' if counts['write_calls'] else 'not_attempted'}
         if journal is None:
             if version != plan['state_sha256']: fail('state_changed')
+            if authorize_row is not None:
+                boundary = row_boundary()
+                if boundary is not None: return boundary
             journal = {'plan_sha256':approved_plan_sha,'plan':deepcopy(plan),'index':0,'operation':None}
             value['journal'] = journal
             version = store.compare_and_set(version, value)
         elif journal.get('plan_sha256') != approved_plan_sha or journal.get('plan') != plan: fail('journal_busy')
         data_source = plan['policy']['data_source_id']
         while journal['index'] < len(plan['records']):
+            # Only an ordinary clean row boundary may yield. An uncertain
+            # pending operation must traverse the original recovery machinery.
+            if authorize_row is not None and journal['operation'] is None:
+                boundary = row_boundary()
+                if boundary is not None: return boundary
             row = plan['records'][journal['index']]; ident = row['note_id']
             publication.check(plan['publication'])
             if plan_recovery.held(value,ident,row.get('page_id')):fail('unresolved_operation')
