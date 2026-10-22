@@ -115,6 +115,9 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
     result={**pipeline.public_report(report),'initial_notes':0,'initial_range_candidates':0,
             'queued':len(final['pending_by_id']),'outer_journal_sha256':final_sha,
             'source_chain_complete':final['last_enqueued_publication']==final['observed_publication_tip']}
+    if apply:
+        # Only existing sanitized fixed enums; never publish exception text.
+        result.update(execution_status=safe['status'], execution_reason=safe['reason'])
     if active is not None and historical_active.allows(active['plan'], active):
         result.update(resumed_prior_plan_sha256=active['plan_sha256'],
             resumed_prior_rules_sha256=active['plan']['rules_sha256'])
@@ -457,9 +460,18 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
         'allow_archive': True, 'format_accepted': True, 'old_writer_evidence': writers_guard()}
     if not e.p.writer_gate(policy) or policy != plan['policy']: e.fail('writer_gate_unknown')
     row = plan['records'][active['index']]; operation = active['operation']
-    if operation['kind'] != 'cleanup' or operation['phase'] != 'verified' or row['old_roots']: e.fail('state_invalid')
+    if row['old_roots']: e.fail('state_invalid')
+    if operation is None:
+        # Exact progressed checkpoint: read first; no previous cleanup is
+        # invented, replayed or rewound. The original next-row before pin holds.
+        progress = historical_active.progress_binding()
+        if not progress or sha != progress['anchor']['state_sha256']: e.fail('state_invalid')
+        expected_native = row['before_sha256']
+    else:
+        if operation['kind'] != 'cleanup' or operation['phase'] != 'verified': e.fail('state_invalid')
+        expected_native = e.target_sha(operation['working'], row['note_id'], manifest['data_source_id'])
     snapshot = api.read_note(row['note_id'])
-    if e.target_sha(snapshot, row['note_id'], manifest['data_source_id']) != e.target_sha(operation['working'], row['note_id'], manifest['data_source_id']): e.fail('target_changed')
+    if e.target_sha(snapshot, row['note_id'], manifest['data_source_id']) != expected_native: e.fail('target_changed')
     publication.check(plan['publication'])
     if not e.p.writer_gate({'old_writer_evidence': writers_guard()}): e.fail('writer_gate_unknown')
     return {'source_ancestry_verified': True, 'native_verified': True, 'external_writes': 0, 'loader': loader}

@@ -8,6 +8,7 @@ import get_private_proof as private_proof
 from copy import deepcopy
 from pathlib import Path
 import re
+import hashlib
 from datetime import timedelta
 
 import get_notion_outbox as codec
@@ -140,6 +141,75 @@ class ExactJournalLoader:
         value = journal.retention.strict_json(data); codec.check_state(value)
         if codec.encoded(value) != data: fail('journal_loader_cache')
 
+    def _local_complete_successor(self, commit):
+        """Avoid re-shallowing a locally built CAS object, never remote readback.
+
+        Only a complete single-parent successor of this loader's authenticated
+        parent qualifies. Missing metadata uses the original bounded fetch;
+        malformed/corrupt identities fail closed. No blobs or refs are fetched.
+        """
+        info = self.local.run('cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)',
+                              data=(commit + '\n').encode())
+        if info == (commit + ' missing\n').encode(): return False
+        parts = info.decode().split()
+        if len(parts) != 3 or parts[:2] != [commit, 'commit'] or not parts[2].isdigit(): fail('journal_loader_commit')
+        if int(parts[2]) > 64 * 1024 * 1024: fail('journal_loader_budget')
+        raw = self.local.run('cat-file', 'commit', commit)
+        if hashlib.sha1(b'commit ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() != commit:
+            fail('journal_loader_commit')
+        headers = raw.split(b'\n\n', 1)[0].splitlines()
+        parents = [line[7:].decode() for line in headers if line.startswith(b'parent ')]
+        trees = [line[5:].decode() for line in headers if line.startswith(b'tree ')]
+        if len(trees) != 1: fail('journal_loader_tree')
+        tree = journal.checked(trees[0], 40)
+        if len(parents) != 1 or parents[0] not in self.verified_commits: return False
+        shallow = self.root / '.git/shallow'
+        if shallow.exists():
+            if shallow.stat().st_size > 2 * 1024 * 1024: fail('journal_loader_budget')
+            boundaries = shallow.read_text().splitlines()
+            if commit in boundaries or parents[0] in boundaries: return False
+        self._cached(parents[0])
+        pending = {tree}; seen = set(); total = 0
+        while pending:
+            batch = sorted(pending - seen)
+            if not batch: break
+            if len(seen) + len(batch) > 100000: fail('journal_loader_budget')
+            request = ''.join(x+'\n' for x in batch).encode()
+            sizes = self.local.run('cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)', data=request).decode().splitlines()
+            if len(sizes) != len(batch): fail('journal_loader_tree')
+            needed = 0
+            for oid, line in zip(batch, sizes):
+                parts = line.split()
+                if parts == [oid, 'missing']: return False
+                if len(parts) != 3 or parts[:2] != [oid, 'tree'] or not parts[2].isdigit(): fail('journal_loader_tree')
+                needed += int(parts[2]) + len(line.encode()) + 2
+            if total + needed > 64 * 1024 * 1024: fail('journal_loader_budget')
+            data = self.local.run('cat-file', '--batch', data=request)
+            total += len(data)
+            if total > 64 * 1024 * 1024: fail('journal_loader_budget')
+            offset = 0; pending = set()
+            for oid in batch:
+                end = data.find(b'\n', offset)
+                if end < 0: fail('journal_loader_tree')
+                header = data[offset:end].decode().split(); offset = end + 1
+                if header == [oid, 'missing']: return False
+                if len(header) != 3 or header[:2] != [oid, 'tree'] or not header[2].isdigit(): fail('journal_loader_tree')
+                size = int(header[2]); raw = data[offset:offset+size]; offset += size
+                if len(raw) != size or data[offset:offset+1] != b'\n': fail('journal_loader_tree')
+                offset += 1
+                if hashlib.sha1(b'tree ' + str(size).encode() + b'\0' + raw).hexdigest() != oid:
+                    fail('journal_loader_tree')
+                cursor = 0
+                while cursor < len(raw):
+                    space = raw.find(b' ', cursor); nul = raw.find(b'\0', space + 1)
+                    if space <= cursor or nul <= space + 1 or nul + 21 > len(raw): fail('journal_loader_tree')
+                    mode = raw[cursor:space]; child = raw[nul+1:nul+21].hex()
+                    if mode in (b'40000', b'040000'): pending.add(child)
+                    cursor = nul + 21
+                seen.add(oid)
+            if offset != len(data): fail('journal_loader_tree')
+        return True
+
     def __call__(self, commit):
         try:
             journal.checked(commit, 40); self._identity()
@@ -153,9 +223,10 @@ class ExactJournalLoader:
             existing_blobs = self._blobs()
             index = self.root / '.git/index'
             old_index = index.read_bytes() if index.exists() else None
-            self.remote.local.run('-c', 'gc.auto=0', '-c', 'maintenance.auto=false',
-                'fetch', '--depth=512', '--filter=blob:none', '--no-tags',
-                '--no-recurse-submodules', '--no-write-fetch-head', 'origin', commit)
+            if not self._local_complete_successor(commit):
+                self.remote.local.run('-c', 'gc.auto=0', '-c', 'maintenance.auto=false',
+                    'fetch', '--depth=512', '--filter=blob:none', '--no-tags',
+                    '--no-recurse-submodules', '--no-write-fetch-head', 'origin', commit)
             if self._blobs() - existing_blobs: fail('journal_loader_unrequested_blob')
             if self.local.run('cat-file', '-t', commit).strip() != b'commit': fail('journal_loader_commit')
             actual = self.remote.commit(commit)

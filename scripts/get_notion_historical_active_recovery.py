@@ -12,9 +12,10 @@ TAG = 'exact_historical_active_append_resume_v1'
 import get_private_runtime_bindings as _private_bindings
 BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'BINDING')
 SUCCESSOR_BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'SUCCESSOR_BINDING')
+PROGRESS_BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'PROGRESS_BINDING')
 
 
-def _validated_binding(value):
+def _validated_binding(value, *, progress=False):
     """Strict schema, with authority coming only from code-pinned private bytes."""
     import get_notion_outbox as o
     import get_publication_provenance as p
@@ -25,7 +26,7 @@ def _validated_binding(value):
         'initial_index','initial_operation_sha256'}
     try:
         b = deepcopy(value)
-        if not isinstance(b,dict) or set(b) != keys: return None
+        if not isinstance(b,dict) or set(b) != (keys | {'latest_binding'} if progress else keys): return None
         p.validate_policy(b['public_policy'], b['public_policy_sha256'])
         for k in ('notion_policy_sha256','job_sha256','plan_sha256','engine_rules_sha256',
                   'manifest_sha256','initial_operation_sha256'):
@@ -37,6 +38,9 @@ def _validated_binding(value):
                 or type(b['state_bytes']) is not int or not 0 < b['state_bytes'] <= o.e.MAX_STATE
                 or type(b['plan_bytes']) is not int or not 0 < b['plan_bytes'] <= o.e.MAX_STATE
                 or type(b['initial_index']) is not int or not 0 <= b['initial_index'] < o.e.MAX_RECORDS): return None
+        if 'latest_binding' in b:
+            if (p.run_binding(b['latest_binding']) != b['latest_binding']
+                    or p.run_semantic_binding(b['latest_binding']) != p.run_semantic_binding(b['run_binding'])): return None
         c = b['checkpoint']; policy = b['public_policy']; run = b['run_binding']
         if (c['sequence'] != b['checkpoint_count'] or c['state_bytes'] != b['state_bytes']
                 or c['readback_verified'] is not True or c['status'] != 'journal_readback_verified'
@@ -76,8 +80,23 @@ def successor_binding():
     return successor
 
 
+
+def progress_binding():
+    import get_notion_outbox as o
+    base = binding(); prior = successor_binding(); progress = _validated_binding(PROGRESS_BINDING, progress=True)
+    same = ('plan_sha256','plan_bytes','engine_rules_sha256','manifest_sha256')
+    if (not base or not prior or not progress or 'latest_binding' not in progress
+            or any(base[k] != progress[k] for k in same)
+            or progress['initial_index'] != base['initial_index'] + 1
+            or progress['initial_operation_sha256'] != o.digest(None)
+            or progress['run_binding']['id'] in (base['run_binding']['id'], prior['run_binding']['id'])
+            or progress['public_policy'] in (base['public_policy'], prior['public_policy'])):
+        return None
+    return progress
+
+
 def _run_binding(run_id, attempt=None):
-    for b in (binding(), successor_binding()):
+    for b in (binding(), successor_binding(), progress_binding()):
         if (b and type(run_id) is int and run_id == b['run_binding']['id']
                 and (attempt is None or type(attempt) is int and attempt == b['run_binding']['run_attempt'])):
             return b
@@ -85,7 +104,7 @@ def _run_binding(run_id, attempt=None):
 
 
 def _state_binding(sha):
-    for b in (binding(), successor_binding()):
+    for b in (binding(), successor_binding(), progress_binding()):
         if b and sha == b['anchor']['state_sha256']: return b
     return None
 
@@ -103,7 +122,7 @@ def candidate_policy(policy, run):
     if not b: return policy, False
     old = b['public_policy']
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
-    if (p.run_binding(run) == b['run_binding']
+    if (p.run_binding(run) in (b['run_binding'], b.get('latest_binding', b['run_binding']))
             and all(policy.get(k) == old[k] for k in stable)
             and policy.get('code_sha') != old['code_sha']
             and policy.get('rules_sha256') == entry.rules_sha256()
@@ -136,7 +155,7 @@ def recover_checkpoint(client, run_id, run_attempt):
     expected = {'anchor': b['anchor'], 'job_id': b['job_id'],
         'job_sha256': b['job_sha256'], 'checkpoint_count': b['checkpoint_count'],
         'checkpoint': b['checkpoint'], 'get_step_record': b['get_record'],
-        'run_binding': b['run_binding'], 'latest_binding': b['run_binding'],
+        'run_binding': b['run_binding'], 'latest_binding': b.get('latest_binding', b['run_binding']),
         'private_readback_required': True, 'clock_witness': None}
     if any(result.get(k) != v for k, v in expected.items()): c.fail('journal_provenance_record')
     return {**result, 'recovery_anchor': TAG}
@@ -234,7 +253,7 @@ def transition_outer(state, sha, new_policy, *, proof):
             or proof.get('recovery_anchor') != TAG
             or proof.get('status') != 'journal_provenance_verified'
             or proof.get('private_readback_required') is not True
-            or proof.get('latest_binding') != b['run_binding']
+            or proof.get('latest_binding') != b.get('latest_binding', b['run_binding'])
             or proof.get('run_id') != b['run_binding']['id']
             or proof.get('run_attempt') != b['run_binding']['run_attempt']
             or any(proof.get(k) != b[v] for k,v in (

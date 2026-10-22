@@ -7,7 +7,7 @@ PREPARE={'contract':CONTRACT,'status':'recurring_candidate_verified','main_updat
 
 FAILURE_KINDS=frozenset(('missing_key','invalid_type','invalid_value','io_error','guard_or_runtime'))
 
-def public(result,allowed_codes=(),*,allowed_stages=()):
+def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons=()):
     if not isinstance(result,dict):result={}
     if result.get('status')=='recurring_candidate_verified':
         required={'main_updated':False,'cas_attempts':0,'local_proposal_only':True,'apply_ready':False,
@@ -17,6 +17,10 @@ def public(result,allowed_codes=(),*,allowed_stages=()):
         if all(type(result.get(k)) is type(v) and result[k]==v for k,v in required.items()):return dict(PREPARE)
     out={'contract':CONTRACT,'status':result.get('status') if isinstance(result.get('status'),str) and result.get('status') in STATUSES else 'blocked',
          'business_health_asserted':False,'complete_library_claimed':False}
+    if result.get('execution_status') in ('verified','partial','blocked'):
+        out['execution_status']=result['execution_status']
+        reason=result.get('execution_reason')
+        out['execution_reason']=reason if reason is None or isinstance(reason,str) and reason in allowed_execution_reasons else 'other'
     for key in ('write_state','journal_write_state'):
         if result.get(key) in ('not_attempted','confirmed','unknown','uncertain'):out[key]=result[key]
     for key in ('reason','error'):

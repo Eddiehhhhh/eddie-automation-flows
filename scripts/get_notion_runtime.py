@@ -463,6 +463,10 @@ def _safe_result(value):
             base={k:value[k] for k in ('status','queued','source_chain_complete','journal_sha256','write_state','external_write_attempts')}
         except Exception:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
     if base.get('status')=='failed':return base
+    if value.get('execution_status') in ('verified','partial','blocked'):
+        base['execution_status']=value['execution_status']
+        reason=value.get('execution_reason')
+        base['execution_reason']=reason if reason is None or isinstance(reason,str) and reason in e.REASONS else 'other'
     if 'source_state_unprojected_receipts' in value:
         count=value['source_state_unprojected_receipts']
         if type(count) is not int or not 0<=count<=e.metadata_pending.MAX_SOURCE_STATE_HOLDS:fail('notion_scope')
@@ -864,7 +868,7 @@ def main(argv=None):
     except Exception as exc:
         result={'contract':CONTRACT,'status':'failed','stage':'input',**failure_diagnostic(exc),'write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
     import get_private_runtime_report as report
-    print(json.dumps(report.public(result, DIAGNOSTIC_ERRORS, allowed_stages=STAGES)),flush=True)
+    print(json.dumps(report.public(result, DIAGNOSTIC_ERRORS, allowed_stages=STAGES, allowed_execution_reasons=e.REASONS)),flush=True)
     return exit_status(result)
 
 
