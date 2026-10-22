@@ -115,7 +115,7 @@ def value(module, name):
     except Exception: fail()
 
 PRIVATE_REPOSITORY = 'Eddiehhhhh/eddie-llm-wiki'
-PRIVATE_PATH = '.sync/get-notion/runtime-bindings-0144ecd7fdf612659847b68afd649fd6403f56fdb74b43cd2a5508bf44b211cd.json'
+PRIVATE_PATH = '.sync/get-notion/runtime-bindings-' + TRUSTED_BUNDLE_SHA256 + '.json'
 
 def verified_private_blob(remote, commit):
     """Read only the fixed private destination; return PRIVATE evidence to caller.
