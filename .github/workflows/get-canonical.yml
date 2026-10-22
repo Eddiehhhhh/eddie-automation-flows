@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: 'f4380a7db191bad1284f102c751e1e6859396b0c'
+          ref: '290658b805c41c2993689e5ac7ef26393b25e991'
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -47,7 +47,7 @@ jobs:
         run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
       - name: Verify pinned reviewed runtime
         env:
-          RUNTIME_SHA: 'f4380a7db191bad1284f102c751e1e6859396b0c'
+          RUNTIME_SHA: '290658b805c41c2993689e5ac7ef26393b25e991'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Validate bounded Notion route before Get
         env:
@@ -72,8 +72,8 @@ jobs:
         run: python scripts/get_notion_controller_route.py --preflight
       - name: Prepare reviewed public policy
         env:
-          POLICY_B64: 'eyJjb2RlX3NoYSI6ImY0MzgwYTdkYjE5MWJhZDEyODRmMTAyYzc1MWUxZTY4NTkzOTZiMGMiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiIxNzUyMDA1MjQzNTg5NTEzOGE2NTI5ZjNhODQ5NThkZGRiOGNjNTBiOWMyM2IwN2U2M2MxMmU1MmM4ZjhmMTc4IiwiZ2V0X3BvbGljeV9zaGEyNTYiOiJkODM1NGJmMWI3ZjJlMWRmZjRiYzE1ZmMzODViOTFlMWEzMTFiNWNiZjg4ZWVlNWIzNmVkM2ZhYTYyZmMwYWIwIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjBlMjdiZjNkZjM1NjBiMzU1OWRkMGZjNzAxYmJiODgzM2ExMGZiMGZhODU3N2IwMTI1OTgyNTYxNDIxZGJiM2EiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
-          POLICY_SHA256: 'cb0dfca78f0ffea0fa30eba0e9008a0616e01d38ea835dab1ed2476e9b6ef9f5'
+          POLICY_B64: 'eyJjb2RlX3NoYSI6IjI5MDY1OGI4MDVjNDFjMjk5MzY4OWU1YWM3ZWYyNjM5M2IyNWU5OTEiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiIxNzUyMDA1MjQzNTg5NTEzOGE2NTI5ZjNhODQ5NThkZGRiOGNjNTBiOWMyM2IwN2U2M2MxMmU1MmM4ZjhmMTc4IiwiZ2V0X3BvbGljeV9zaGEyNTYiOiIxNDBmN2RkM2RhOTYwYTdmYjc5NjcyZWQwMTdhNDc0NWIzOGE4YTgwY2JjZmNkZGYyMjk5ODM4OWVmNWEwMGU3IiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjU5MjlkYTU5OGQyZWRiYjY1MTNjYWI4NDNmNGIwMzZlMTllZmZmNzcxZGQ1MzQyMDkwNTg5MWQ1NTc2YjM3NTAiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
+          POLICY_SHA256: 'ff2c32d5d444b0a94f43053b3d08c3acb591624bbae2adafd4984e63b6f362c0'
         run: |
           python - <<'PY'
           import base64, hashlib, os
@@ -93,8 +93,8 @@ jobs:
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          POLICY_SHA256: 'cb0dfca78f0ffea0fa30eba0e9008a0616e01d38ea835dab1ed2476e9b6ef9f5'
-          SCOPE_SHA256: 'e510a1c0896f0f23ef9fe4969773caa2dab1e8a84c399acf8d753f53e5f4ef7e'
+          POLICY_SHA256: 'ff2c32d5d444b0a94f43053b3d08c3acb591624bbae2adafd4984e63b6f362c0'
+          SCOPE_SHA256: '697db9021c211cbff80854cc193b0e3931142482581f18fbd8e17c45fca14c86'
         run: |
           args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
           if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
@@ -111,7 +111,7 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          POLICY_SHA256: 'cb0dfca78f0ffea0fa30eba0e9008a0616e01d38ea835dab1ed2476e9b6ef9f5'
+          POLICY_SHA256: 'ff2c32d5d444b0a94f43053b3d08c3acb591624bbae2adafd4984e63b6f362c0'
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
           NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
