@@ -393,7 +393,7 @@ def _successor_binding(value, *, inflight):
         selection=b['selection_sha256'] if inflight else b['manifest_sha256']
         p.a.checked(selection,64)
         if b['fixed_source_record']['mode']!='historical-apply' or b['fixed_source_record']['selection_sha256']!=selection:return None
-        if not isinstance(b['known_descendants'],list) or len(b['known_descendants'])!=2:return None
+        if not isinstance(b['known_descendants'],list) or len(b['known_descendants'])!=(4 if inflight else 2):return None
         parent=z['commit']
         for index,entry in enumerate(b['known_descendants']):
             if not isinstance(entry,dict) or set(entry)!={'parent','commit','changes'} or entry['parent']!=parent:return None
@@ -403,6 +403,9 @@ def _successor_binding(value, *, inflight):
                 paths=set(entry['changes'])
                 if index==0:
                     if paths!={'.github/state/notion-wiki-mirror-state.json'}:return None
+                elif index==3:
+                    if len(paths)!=652:return None
+                    if any(not isinstance(v,str) or not (v.startswith('Raw/12 我的运动/') or v.startswith('Raw/14 豆瓣影视/') or v in {'Raw/13 小宇宙/索引.md','.github/state/xiaoyuzhou-sync-state.json'}) for v in paths):return None
                 else:
                     # Exact values remain private and code-pinned. Only the
                     # already deployed archive/manifest/capsule roles fit here.
@@ -525,8 +528,8 @@ def _verify_successor(local, remote, loader, head, proof, *, inflight):
             if commit!=expected['commit'] or prior!=expected['parent'] or delta!=set(expected['changes']):o.fail('outbox_state_invalid')
             if any(current[2].get(k)!=tuple(v) for k,v in expected['changes'].items()):o.fail('outbox_state_invalid')
             if inflight:
-                if i==0 and any(prior_node[2].get(k,())[:2]!=('100644','blob') for k in delta):o.fail('outbox_state_invalid')
-                if i==1 and any(k in prior_node[2] for k in delta):o.fail('outbox_state_invalid')
+                if i in (0,3) and any(prior_node[2].get(k,())[:2]!=('100644','blob') for k in delta):o.fail('outbox_state_invalid')
+                if i in (1,2) and any(k in prior_node[2] for k in delta):o.fail('outbox_state_invalid')
         elif inflight and delta=={j.STATE_PATH}:
             if isolation_seen:o.fail('outbox_state_invalid')
             expected={'commit':commit,'state_blob':j.retention.oid(isolated_raw),'state_sha256':o.digest(isolated_raw)}
