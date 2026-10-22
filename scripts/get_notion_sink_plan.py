@@ -586,21 +586,20 @@ def render_markdown(data, ident, assets, source_path, content_tree, *, preserved
             payload = {'rich_text': rich_text(paragraphs[0])}
             children = [block('paragraph', {'rich_text': rich_text(part)}) for part in paragraphs[1:]]
             if kind=='numbered_list_item' and not task:
-                first = index == 0 or re.fullmatch(r'[0-9]+\. .*', lines[index - 1]) is None
-                if first:
-                    number = int(listing[3])
-                    if number == 1:
-                        payload['list_start_index'] = 1
-                    else:
-                        # Blank lines alone do not end a Markdown ordered list.
-                        # Keep only an exactly consecutive item in the same list;
-                        # a real start>1 or an intervening block still fails.
-                        prior = index - 1
-                        while prior >= 0 and not lines[prior].strip(): prior -= 1
-                        previous = re.fullmatch(r'([0-9]+)\. .*', lines[prior]) if prior >= 0 else None
-                        if (previous is None or number != int(previous[1]) + 1
-                                or not output or output[-1]['type'] != 'numbered_list_item'):
-                            stop('unsupported_source_format')
+                if len(listing[3]) > 9: stop('unsupported_source_format')
+                # CommonMark 5.3: blank lines loosen a list, not restart it.
+                # Only the first marker in the same top-level ordered-list
+                # group sets its start; subsequent marker numbers are ignored.
+                # Check both source adjacency and semantic output: task items,
+                # intervening blocks and other list kinds cannot join this group.
+                prior = index - 1
+                while prior >= 0 and not lines[prior].strip(): prior -= 1
+                same_group = (prior >= 0
+                    and re.fullmatch(r'[0-9]{1,9}\. .*', lines[prior]) is not None
+                    and bool(output) and output[-1]['type'] == 'numbered_list_item')
+                if not same_group:
+                    if int(listing[3]) != 1: stop('unsupported_source_format')
+                    payload['list_start_index'] = 1
             if task: kind = 'to_do'; payload['checked'] = task[1].lower() == 'x'
             output.append(block(kind, payload, children)); index = following; continue
         if line == '>' or line.startswith('> '):
