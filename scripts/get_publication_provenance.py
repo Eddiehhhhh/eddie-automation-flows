@@ -578,6 +578,12 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
                                        verified_controllers=verified_controllers,
                                        rejected_controllers=rejected_controllers)
             if value is not None:
+                if reserve_next_run:
+                    # Existence admission only, never publication authority.
+                    # Full original attempt/controller/log/alias checks above
+                    # have completed. Canonical selection below is unchanged.
+                    return {'status': 'public_provenance_capacity_verified',
+                            'candidate_runs_checked': checked}
                 found.append(value)
                 break
         if checked >= candidate_limit:
