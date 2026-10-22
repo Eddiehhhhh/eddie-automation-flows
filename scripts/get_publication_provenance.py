@@ -12,6 +12,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -603,20 +604,53 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
 
 def verify_execution(client, policy, execution, trigger):
     """Bind the executing pinned A to the exact reviewed controller at C."""
+    def reject(fields, row=None, reason='provenance_execution'):
+        # Fixed field names and bounded public enums only; never dump a body,
+        # identity, URL, token, exception text or arbitrary remote string.
+        status = row.get('status') if isinstance(row, dict) else None
+        conclusion = row.get('conclusion') if isinstance(row, dict) else None
+        known_status = ('queued', 'in_progress', 'completed', 'waiting', 'pending', 'requested')
+        known_conclusion = ('success', 'failure', 'cancelled', 'timed_out', 'skipped', 'neutral', 'action_required', 'stale')
+        diagnostic = {'contract': 'get-execution-rejection-1', 'fields': fields,
+                      'status': status if type(status) is str and status in known_status else 'other',
+                      'conclusion': conclusion if type(conclusion) is str and conclusion in known_conclusion else 'none' if conclusion is None else 'other'}
+        try:
+            print(json.dumps(diagnostic, sort_keys=True), file=sys.stderr)
+        except Exception:
+            pass  # Observability must never authorize or change the failure.
+        fail(reason)
     run_id = positive(execution['run_id']); attempt = positive(execution['run_attempt'])
     if execution['code_sha'] != policy['code_sha']:
-        fail('provenance_execution')
-    row = client.json('/actions/runs/' + str(run_id) + '/attempts/' + str(attempt))
-    repo = row.get('repository') if isinstance(row, dict) else None
-    head_repo = row.get('head_repository') if isinstance(row, dict) else None
-    if any(not isinstance(value, dict) or value.get('id') != policy['repository_id'] or value.get('full_name') != REPOSITORY or value.get('private') is not False for value in (repo, head_repo)):
-        fail('provenance_execution')
+        reject(['code_sha'])
     expected = {'id': run_id, 'run_attempt': attempt, 'workflow_id': policy['workflow_id'],
                 'path': policy['workflow_path'], 'head_branch': policy['head_branch'],
-                'head_sha': execution['controller_sha'], 'status': 'in_progress', 'conclusion': None,
+                'head_sha': execution['controller_sha'],
                 'event': 'schedule' if trigger == 'schedule' else 'workflow_dispatch'}
-    if any(row.get(key) != value for key, value in expected.items()):
-        fail('provenance_execution')
+    for read_number in range(3):
+        row = client.json('/actions/runs/' + str(run_id) + '/attempts/' + str(attempt))
+        repo = row.get('repository') if isinstance(row, dict) else None
+        head_repo = row.get('head_repository') if isinstance(row, dict) else None
+        if any(not isinstance(value, dict) or value.get('id') != policy['repository_id'] or value.get('full_name') != REPOSITORY or value.get('private') is not False for value in (repo, head_repo)):
+            reject(['repository_identity'], row)
+        mismatches = [key for key, value in expected.items() if row.get(key) != value]
+        if mismatches:
+            reject(mismatches, row)
+        if row.get('status') == 'in_progress' and row.get('conclusion') is None:
+            break
+        # A stale queued observation never authorizes work. Re-read only the
+        # same fully matched attempt, within the original shared transport caps.
+        if row.get('status') != 'queued' or row.get('conclusion') is not None or read_number == 2:
+            reject(['status', 'conclusion'], row)
+        delay = (5, 10)[read_number]
+        if client.elapsed + delay >= MAX_SECONDS:
+            reject(['wait_budget'], row, 'provenance_budget')
+        started = client.clock()
+        try:
+            client.sleep(delay)
+        finally:
+            client.elapsed += max(0, client.clock() - started)
+        if client.elapsed >= MAX_SECONDS:
+            reject(['wait_budget'], row, 'provenance_budget')
     controller.verify_remote(client, execution['controller_sha'], policy, event=row['event'])
 
 
