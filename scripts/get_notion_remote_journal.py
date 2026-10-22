@@ -8,6 +8,7 @@ outcomes are read back, never retried. A poisoned instance cannot be reused.
 """
 from collections import OrderedDict
 from copy import deepcopy
+from datetime import datetime
 import hashlib
 from pathlib import Path
 import re
@@ -26,6 +27,9 @@ MAX_STATE = 32 * 1024 * 1024
 MAX_COMMITS = 400
 MAX_BATCH_BYTES = 192 * 1024 * 1024
 MAX_HISTORY = 256
+MIRROR_PATH = '.github/state/notion-wiki-mirror-state.json'
+MAX_MIRROR_BYTES = 1024 * 1024
+MAX_MIRROR_READ_BYTES = 8 * 1024 * 1024
 RECEIPT_CONTRACT = 'get-notion-remote-journal-receipt-1'
 
 
@@ -147,7 +151,7 @@ class RemoteJournal:
     """
     def __init__(self, root, remote, *, anchor, load_commit, guard, confirm,
                  max_commits=MAX_COMMITS, max_batch_bytes=MAX_BATCH_BYTES,
-                 poll_attempts=6, sleep=time.sleep):
+                 poll_attempts=6, sleep=time.sleep, post_cas_paths=(), post_cas_mirror=False):
         self.poisoned = False
         self._png_not_dispatched = None
         self.lock = threading.Lock()
@@ -164,6 +168,19 @@ class RemoteJournal:
                 raise JournalFailure('request_budget', stage='budget')
         if not all(callable(f) for f in (load_commit, guard, confirm, sleep)):
             raise JournalFailure('state_invalid', stage='anchor')
+        # Trusted caller supplies a code-pinned closed set, never workflow input.
+        # Empty retains the original exact-HEAD behavior for all other callers.
+        if (not isinstance(post_cas_paths, tuple) or len(post_cas_paths) > 2
+                or any(not isinstance(path, str) or not path.startswith('Raw/09 ChatGPT/')
+                       or any(part in ('', '.', '..') for part in path.split('/'))
+                       for path in post_cas_paths)
+                or len(set(post_cas_paths)) != len(post_cas_paths)):
+            raise JournalFailure('state_invalid', stage='anchor')
+        if type(post_cas_mirror) is not bool:
+            raise JournalFailure('state_invalid', stage='anchor')
+        self.post_cas_mirror = post_cas_mirror
+        self.mirror_read_bytes = 0
+        self.post_cas_paths = frozenset(post_cas_paths)
         self.anchor = deepcopy(anchor)
         self.remote = remote
         self.load_commit = load_commit
@@ -208,6 +225,112 @@ class RemoteJournal:
         if self.guard(head) is not True:
             raise JournalFailure(stage='guard')
         return head
+
+    def _verify_mirror_state(self, head, tree):
+        """Read only this exact blob, with independent size/hash/JSON checks."""
+        row = tree.get(MIRROR_PATH)
+        if row is None or row[:2] != ('100644', 'blob'):
+            raise JournalFailure('state_changed', stage='history')
+        directory = checked(self.local.run('rev-parse', head + ':.github/state').decode().strip(), 40)
+        entries = self.remote.tree_entries(directory)
+        selected = [item for item in entries if item.get('path') == 'notion-wiki-mirror-state.json']
+        if len(selected) != 1:
+            raise JournalFailure('state_invalid', stage='history')
+        item = selected[0]; size = item.get('size')
+        if (item.get('mode') != row[0] or item.get('type') != row[1] or item.get('sha') != row[2]
+                or type(size) is not int or not 0 < size <= MAX_MIRROR_BYTES
+                or self.mirror_read_bytes + size > MAX_MIRROR_READ_BYTES):
+            raise JournalFailure('request_budget', stage='history')
+        self.mirror_read_bytes += size
+        raw = self.remote.blob(row[2], size)
+        if not isinstance(raw, bytes) or len(raw) != size or retention.oid(raw) != row[2]:
+            raise JournalFailure('state_invalid', stage='history')
+        value = retention.strict_json(raw)
+        if (not isinstance(value, dict) or not isinstance(value.get('generated_at'), str)
+                or not value['generated_at']):
+            raise JournalFailure('state_invalid', stage='history')
+        try:
+            timestamp = datetime.fromisoformat(value['generated_at'].replace('Z', '+00:00'))
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError('timestamp must retain a timezone')
+        except (ValueError, OverflowError):
+            raise JournalFailure('state_invalid', stage='history') from None
+        # Compatibility check against this producer's current save_state shape,
+        # not a new business schema or a general exemption for .github/state.
+        keys = {'source_system', 'scope', 'generated_at', 'root_title',
+                'parent_page_title', 'full_sync', 'entries', 'counts',
+                'include_patterns', 'exclude_patterns'}
+        if (set(value) != keys or value['source_system'] not in ('encrypted_bundle', 'git_tracked_repo')
+                or value['scope'] != 'public-safe' or type(value['full_sync']) is not bool
+                or any(not isinstance(value[k], str) for k in ('root_title', 'parent_page_title'))
+                or any(not isinstance(value[k], list) or any(not isinstance(x, str) for x in value[k])
+                       for k in ('include_patterns', 'exclude_patterns'))
+                or not isinstance(value['entries'], dict) or not isinstance(value['counts'], dict)):
+            raise JournalFailure('state_invalid', stage='history')
+        counts = {'root': 0, 'directory': 0, 'file': 0}
+        for key, entry in value['entries'].items():
+            if (not isinstance(key, str) or not key or not isinstance(entry, dict)
+                    or set(entry) != {'type', 'signature'} or not isinstance(entry['type'], str)
+                    or entry['type'] not in counts or not isinstance(entry['signature'], str)):
+                raise JournalFailure('state_invalid', stage='history')
+            kind = entry['type']; signature = entry['signature']
+            if ((kind == 'root' and signature != 'root-v1')
+                    or (kind == 'directory' and signature != 'directory-v1')
+                    or (kind == 'file' and not re.fullmatch('[a-f0-9]{64}', signature))):
+                raise JournalFailure('state_invalid', stage='history')
+            counts[kind] += 1
+        expected = {'directories': counts['directory'], 'files': counts['file'],
+                    'total_nodes': sum(counts.values())}
+        if (counts['root'] != 1 or set(value['counts']) != set(expected)
+                or any(type(value['counts'][k]) is not int or value['counts'][k] != v
+                       for k, v in expected.items())):
+            raise JournalFailure('state_invalid', stage='history')
+        return True
+
+    def _post_cas_head(self, commit, observed=None):
+        """Authenticate harmless descendants only AFTER our one attempted CAS.
+
+        The receipt stays anchored to our exact commit. Every intervening raw
+        commit/tree is authenticated; tip equality cannot hide edit-and-revert.
+        Unknown CAS responses remain unknown unless full readback proves them.
+        """
+        if observed == commit:
+            return self._head(commit)
+        observed = self._ref() if observed is None else observed
+        if observed == commit:
+            if self.guard(observed) is not True:
+                raise JournalFailure(stage='guard')
+            return observed
+        if not self.post_cas_paths and not self.post_cas_mirror:
+            raise JournalFailure('state_changed', stage='guard')
+        self.stage = 'history'
+        _, _, baseline = self._commit(commit)
+        mirror_baseline_verified = False
+        permitted = self.post_cas_paths | ({MIRROR_PATH} if self.post_cas_mirror else set())
+        cursor = observed
+        for _ in range(MAX_HISTORY):
+            _, parents, tree = self._commit(cursor)
+            if len(parents) != 1:
+                raise JournalFailure('state_changed', stage='history')
+            changed = {path for path in set(baseline) | set(tree)
+                       if baseline.get(path) != tree.get(path)}
+            if not changed <= permitted:
+                raise JournalFailure('state_changed', stage='history')
+            if MIRROR_PATH in changed:
+                if not mirror_baseline_verified:
+                    self._verify_mirror_state(commit, baseline)
+                    mirror_baseline_verified = True
+                self._verify_mirror_state(cursor, tree)
+            for path in self.post_cas_paths:
+                if (baseline.get(path, ())[:2] != ('100644', 'blob')
+                        or tree.get(path, ())[:2] != ('100644', 'blob')):
+                    raise JournalFailure('state_changed', stage='history')
+            cursor = parents[0]
+            if cursor == commit:
+                # Re-read mutable identity/head and original source guard after
+                # the history walk. Any concurrent movement is still rejected.
+                return self._head(observed)
+        raise JournalFailure('request_budget', stage='history')
 
     def _local_tree(self, head):
         # Git can read a loose object stored under the wrong OID. Rehash the
@@ -360,7 +483,7 @@ class RemoteJournal:
         value, digest, blob, actual = self._state(tree)
         if actual != data or digest != codec.digest(data) or blob != retention.oid(data):
             raise JournalFailure(stage='readback')
-        self._head(commit)
+        self._post_cas_head(commit)
         return {'contract': RECEIPT_CONTRACT, 'repository': REPOSITORY, 'ref': REF,
                 'path': STATE_PATH, 'parent_commit': parent, 'commit': commit,
                 'tree': tree_oid, 'state_blob': blob, 'state_sha256': digest,
@@ -372,7 +495,10 @@ class RemoteJournal:
         self.recovery = deepcopy(receipt)
         if self.confirm(deepcopy(receipt)) is not True:
             raise JournalFailure(stage='confirm', unknown=True, recovery=receipt)
-        self._head(receipt['commit'])
+        if receipt['cas_attempts'] == 1:
+            self._post_cas_head(receipt['commit'])
+        else:
+            self._head(receipt['commit'])
         self.anchor = {key: receipt[key] for key in ('commit', 'state_blob', 'state_sha256')}
         return deepcopy(value), receipt['state_sha256']
 
@@ -484,6 +610,9 @@ class RemoteJournal:
                 # complete readback and runs again after durable confirmation.
                 observed = self._ref()
                 if observed == commit: break
+                if observed != parent and (self.post_cas_paths or self.post_cas_mirror):
+                    self._post_cas_head(commit, observed)
+                    break
                 if observed != parent or attempt == self.poll_attempts - 1:
                     raise JournalFailure(stage='poll', unknown=True)
                 self.sleep(2 ** attempt)

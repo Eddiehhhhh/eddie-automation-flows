@@ -616,7 +616,11 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 # Keep original checkpoint authority untouched; adopt only the
                 # independently verified exact prepared successor as read anchor.
                 anchor=historical_active.verify_prepared_successor(local,remote,loader,parent,found)
-            durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=confirm)
+            post_cas_binding=historical_active.prepared_binding()
+            post_cas_paths=() if post_cas_binding is None else tuple(sorted({
+                path for row in post_cas_binding['known_descendants'] for path in row['changes']}))
+            durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=confirm,
+                post_cas_paths=post_cas_paths,post_cas_mirror=True)
             current,sha=durable.read()
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
                 fail('notion_state_anchor')
