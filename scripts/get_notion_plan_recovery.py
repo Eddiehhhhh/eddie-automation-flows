@@ -75,8 +75,14 @@ def validate_holds(holds):
     The complete original journal remains in the immutable anchor blob. No
     later source/rule change or retry_conflicts flag can release this hold.
     """
-    if not isinstance(holds,dict) or len(holds)>1:raise ValueError('state_invalid')
-    for ident,row in holds.items():
+    import get_notion_historical_active_recovery as active
+    exact=active.inflight_hold()
+    if not isinstance(holds,dict):raise ValueError('state_invalid')
+    legacy=dict(holds)
+    if exact and exact['note_id'] in legacy:
+        if p.encoded(legacy.pop(exact['note_id']))!=p.encoded(exact):raise ValueError('state_invalid')
+    if len(legacy)>1:raise ValueError('state_invalid')
+    for ident,row in legacy.items():
         if (p.digest(ident)!=HELD_NOTE_SHA256 or not isinstance(row,dict)
                 or row.get('note_id')!=ident or p.digest(row)!=HOLD_SHA256):
             raise ValueError('state_invalid')

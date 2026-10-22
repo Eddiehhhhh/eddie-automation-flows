@@ -453,7 +453,7 @@ def _safe_result(value):
         known_no_attempt=trusted_shape and value.get('write_state')=='not_attempted' and type(value.get('external_write_attempts')) is int and value['external_write_attempts']==0
         return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,
             'write_state':'not_attempted' if known_no_attempt else 'unknown',
-            'unresolved_operations':value.get('unresolved_operations') if type(value.get('unresolved_operations')) is int and 0<=value['unresolved_operations']<=1 else None,
+            'unresolved_operations':value.get('unresolved_operations') if type(value.get('unresolved_operations')) is int and 0<=value['unresolved_operations']<=2 else None,
             'unresolved_effects':'unknown',
             'external_write_attempts':0 if known_no_attempt else None,'asset_downloads':value.get('asset_downloads') if type(value.get('asset_downloads')) is int and 0<=value['asset_downloads']<=200 else None,'complete_library_claimed':False}
     base=pipeline.public_report(value)
@@ -475,9 +475,9 @@ def _safe_result(value):
     for key,cap in (('initial_notes',2),('initial_range_candidates',2),('queued',2500)):
         if type(value.get(key)) is not int or not 0<=value[key]<=cap:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
         base[key]=value[key]
-    for key in ('unresolved_operations','quarantine_transitions','quarantine_candidates'):
+    for key,cap in (('unresolved_operations',2),('quarantine_transitions',1),('quarantine_candidates',1)):
         count=value.get(key,0)
-        if type(count) is not int or not 0<=count<=1:fail('notion_scope')
+        if type(count) is not int or not 0<=count<=cap:fail('notion_scope')
         base[key]=count
     if value.get('unresolved_effects','none') not in ('none','unknown'):fail('notion_scope')
     base['unresolved_effects']=value.get('unresolved_effects','none')
@@ -616,6 +616,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 # Keep original checkpoint authority untouched; adopt only the
                 # independently verified exact prepared successor as read anchor.
                 anchor=historical_active.verify_prepared_successor(local,remote,loader,parent,found)
+            if present and found.get('recovery_anchor') == historical_active.INFLIGHT_TAG:
+                anchor=historical_active.verify_inflight_successor(local,remote,loader,parent,found)
             post_cas_binding=historical_active.prepared_binding()
             post_cas_paths=() if post_cas_binding is None else tuple(sorted({
                 path for row in post_cas_binding['known_descendants'] for path in row['changes']}))
@@ -652,7 +654,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     public_policy['get_policy_sha256'],proof=found)
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
-            if present and found.get('recovery_anchor') in (historical_active.TAG,historical_active.PREPARED_TAG):
+            already_isolated=(present and found.get('recovery_anchor')==historical_active.INFLIGHT_TAG
+                and current['policy_sha256']==public_policy['get_policy_sha256']
+                and historical_active.exact_hold_present(current['engine_state']))
+            if present and not already_isolated and found.get('recovery_anchor') in (historical_active.TAG,historical_active.PREPARED_TAG,historical_active.INFLIGHT_TAG):
                 # Complete source/native read-only checks before the FIRST CAS.
                 bridge_materialized=historical_runtime.verify_active_transition(local, remote, token, root, current, sha, request,
                     manifest=historical_manifest, expected=approved_historical_manifest_sha256,

@@ -308,6 +308,36 @@ def body_receipts_match(state, manifest):
     return True
 
 
+def held_scope_settled(state, manifest):
+    """May scan past one exact held scope; never means confirmed/complete."""
+    h=historical_active.inflight_hold();b=historical_active.inflight_binding()
+    if (not h or not b or e.digest(manifest)!=b['manifest_sha256']
+            or not historical_active.exact_hold_present(state['engine_state'])):return False
+    row=manifest['records'].get(h['note_id'])
+    if not row or row['target']['page_id']!=h['page_id']:return False
+    if h['note_id'] in state['engine_state']['receipts']:return False
+    others=deepcopy(manifest);others['records'].pop(h['note_id'])
+    return body_receipts_match(state,others)
+
+
+def verify_held_scope(local,remote,token,root,request,current,manifest,member,policy_hash,writers_guard,loader):
+    if not held_scope_settled(current,manifest):e.fail('unresolved_operation')
+    historical.validate(manifest,member,apply=True)
+    loader.ancestry(manifest['source_commit'],source_loader.entry.a.checked(local.run('rev-parse',source_loader.entry.r.MAIN_REF).decode().strip(),40))
+    for row in manifest['records'].values():loader.blob(manifest['source_commit'],row['path'],e.p.MAX_NOTE)
+    publication=historical.Publication(local.vault,manifest,member);publication.check(publication.descriptor)
+    if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
+    api=API(request,manifest['data_source_id'],sorted(manifest['records']))
+    hold=historical_active.inflight_hold()
+    for ident,row in manifest['records'].items():
+        if ident==hold['note_id']:continue
+        prior=current['engine_state']['receipts'][ident];snapshot=api.read_note(ident)
+        fresh=e.receipt(snapshot,ident,manifest['data_source_id'],[x['id'] for x in prior['managed_blocks']],publication.descriptor,row,prior['asset_bindings'])
+        if fresh!=prior:e.fail('human_edit_conflict')
+    publication.check(publication.descriptor)
+    if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
+
+
 def apply_boundary(request, durable, emitter, *, current, notes, plan=None, row_only=False):
     """Reserve a conservative ordinary flat-append scope, never reset counters.
 
@@ -367,7 +397,8 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
             or not isinstance(durable, journal.RemoteJournal) or store is not durable
             or not isinstance(emitter, checkpoints.CheckpointEmitter)):
         e.fail('approval_missing')
-    completed = []; status = 'applied'; reason = None; last_sha = None
+    current=None
+    completed = []; processed = []; held_members = []; status = 'applied'; reason = None; last_sha = None
     execution = None; prior_effects = False; scope_attempts = len(request.attempted)
     if loader is None: loader = source_loader.Loader(local, remote, token, root, policy_hash)
     try:
@@ -385,7 +416,10 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
             # Report only the contiguous prior-confirmed receipt prefix, even
             # when recovery must stop. These are NOT fresh native observations.
             for previous, previous_hash in members[:start]:
+                if held_scope_settled(current,previous):
+                    processed.append(previous_hash);held_members.append(previous_hash);continue
                 if not body_receipts_match(current, previous): break
+                processed.append(previous_hash)
                 completed.append({'manifest_sha256': previous_hash,
                     'pages': len(previous['records']), 'reused_receipts': True,
                     'native_reverified': False, 'resumed_journal': False})
@@ -397,6 +431,12 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
             reused = body_receipts_match(current, manifest)
             resuming = active is not None
             execution = None; scope_attempts = len(request.attempted)
+            if active is None and held_scope_settled(current,manifest):
+                verify_held_scope(local,remote,token,root,request,current,manifest,member,policy_hash,writers_guard,loader)
+                observed,observed_sha=store.read()
+                if observed_sha!=last_sha:e.fail('state_changed')
+                processed.append(member);held_members.append(member)
+                continue
             result = dispatch(local, remote, token, root, store, request,
                 manifest=manifest, expected=member, policy_hash=policy_hash, apply=True,
                 writers_guard=writers_guard, loader=loader, verify_reused=True,
@@ -416,17 +456,25 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
                 if pending is not None and pending['operation'] is not None:e.fail('journal_failed')
                 status='partial';reason='batch_boundary_yield';prior_effects=False
                 break
+            settled_hold=False
+            if historical_active.exact_hold_present(current['engine_state']):
+                observed,observed_sha=store.read()
+                if observed_sha!=last_sha:e.fail('state_changed')
+                current=observed
+                settled_hold=(observed['engine_state']['journal'] is None and held_scope_settled(observed,manifest))
             if (durable.poisoned or emitter.failed
                     or durable.anchor['state_sha256'] != last_sha
-                    or result.get('scope_confirmed') is not True
+                    or (result.get('scope_confirmed') is not True and not settled_hold)
                     or execution.get('status') != 'verified'
                     or execution.get('write_state') not in ('confirmed', 'not_attempted')):
                 status = 'failed'; reason = execution.get('reason') or 'historical_scope_incomplete'
                 break
             if active is not None:
-                if len(completed) != start: e.fail('journal_busy')
+                if len(processed) != start: e.fail('journal_busy')
                 active = None; prior_effects = False
-            completed.append({'manifest_sha256': member,
+            processed.append(member)
+            if settled_hold:held_members.append(member)
+            else:completed.append({'manifest_sha256': member,
                 'pages': len(manifest['records']), 'reused_receipts': reused,
                 'native_reverified': not resuming, 'resumed_journal': resuming})
             # A confirmed scope may be reported even if the subsequent fresh
@@ -435,7 +483,7 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
                 e.fail('writer_gate_unknown')
             current, fresh_sha = store.read(); outbox.check_state(current)
             if (fresh_sha != last_sha or current['engine_state']['journal'] is not None
-                    or not body_receipts_match(current, manifest)): e.fail('journal_failed')
+                    or not (body_receipts_match(current, manifest) or held_scope_settled(current,manifest))): e.fail('journal_failed')
         if status == 'applied': refresh()
     except ApplyBoundaryYield:
         status = 'partial'; reason = 'batch_boundary_yield'
@@ -447,12 +495,24 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
             status = 'failed'; reason = str(exc) if str(exc) in GROUP_REASONS else 'journal_failed'
     except Exception as exc:
         status = 'failed'; reason = str(exc) if str(exc) in GROUP_REASONS else 'historical_group_failed'
+    hold=historical_active.inflight_hold()
+    unresolved_count=int(bool(current is not None and hold and historical_active.exact_hold_present(current['engine_state'])
+        and any(hold['note_id'] in m['records'] and m['records'][hold['note_id']]['target']['page_id']==hold['page_id'] for m,d in members)))
+    confirmed_pages=0
+    for m,d in members:
+        for ident,row in m['records'].items():
+            one={**m,'records':{ident:row}}
+            confirmed_pages+=int(current is not None and body_receipts_match(current,one))
+    if current is None:unresolved_count=None;confirmed_pages=None
+    if status=='applied' and unresolved_count:status='partial';reason='unresolved_operation'
     uncertain = (durable.poisoned or emitter.failed
         or execution is not None and execution.get('write_state') not in ('confirmed', 'not_attempted')
         or execution is None and len(request.attempted) > scope_attempts
         or status != 'applied' and prior_effects)
     return {'contract': APPLY_GROUP_RESULT_CONTRACT, 'status': status,
         'selection_sha256': expected, 'scopes_selected': len(members),
+        'scopes_processed':len(processed),'unresolved_count':unresolved_count,
+        'pages_confirmed':confirmed_pages,
         'scopes_completed': len(completed), 'scopes_remaining': len(members)-len(completed),
         'pages': sum(row['pages'] for row in completed), 'members': completed,
         'reason': reason, 'stopped_execution': execution if status != 'applied' else None,
@@ -471,6 +531,7 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
     """
     if not historical_active.initial_state_valid(current, sha): e.fail('state_changed')
     active = current['engine_state']['journal']; plan = active['plan']
+    manifest,expected=historical_active.transition_manifest(manifest,expected,plan)
     historical.validate(manifest, expected, apply=True)
     if expected != plan['historical_manifest_sha256'] or manifest != plan['historical_manifest']: e.fail('approval_missing')
     if historical.creation_ids(manifest) or plan.get('property_manifest') is not None: e.fail('approval_missing')
@@ -495,8 +556,13 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
         if not progress or sha != progress['anchor']['state_sha256']: e.fail('state_invalid')
         expected_native = row['before_sha256']
     else:
+        inflight=historical_active.inflight_binding()
         prepared=historical_active.prepared_binding()
-        if (prepared and historical_active.plan_binding(plan)==prepared
+        if (inflight and historical_active.plan_binding(plan)==inflight
+                and sha==inflight['resume_anchor']['state_sha256']
+                and (operation['kind'],operation['phase'])==('append','in_flight')):
+            expected_native=None
+        elif (prepared and historical_active.plan_binding(plan)==prepared
                 and sha==prepared['resume_anchor']['state_sha256']
                 and (operation['kind'],operation['phase'])==('append','prepared')):
             expected_native=row['before_sha256']
@@ -504,7 +570,12 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
             if operation['kind'] != 'cleanup' or operation['phase'] != 'verified': e.fail('state_invalid')
             expected_native = e.target_sha(operation['working'], row['note_id'], manifest['data_source_id'])
     snapshot = api.read_note(row['note_id'])
-    if e.target_sha(snapshot, row['note_id'], manifest['data_source_id']) != expected_native: e.fail('target_changed')
+    actual_native=e.target_sha(snapshot,row['note_id'],manifest['data_source_id'])
+    if expected_native is None:
+        # Unchanged before is still uncertain, not permission to re-append.
+        # Original executor will block; a complete append must pass its own check.
+        if actual_native!=row['before_sha256']: e.fail('target_changed')
+    elif actual_native != expected_native: e.fail('target_changed')
     publication.check(plan['publication'])
     if not e.p.writer_gate({'old_writer_evidence': writers_guard()}): e.fail('writer_gate_unknown')
     return {'source_ancestry_verified': True, 'native_verified': True, 'external_writes': 0, 'loader': loader}

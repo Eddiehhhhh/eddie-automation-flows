@@ -40,11 +40,12 @@ def check_state(current, found):
     import get_recurring_policy_recovery as policy_recovery
     tag=found.get('recovery_anchor')
     active=current['engine_state']['journal']
-    b=active_recovery.prepared_binding()
-    exact=bool(b and active and active_recovery.plan_binding(active['plan'])==b
+    b=active_recovery.plan_binding(active['plan']) if active else None
+    exact=bool(b and b in (active_recovery.prepared_binding(),active_recovery.inflight_binding())
+        and active and active_recovery.plan_binding(active['plan'])==b
         and active_recovery.allows(active['plan'],active))
     if tag not in (None,TAG):
-        if tag!=active_recovery.PREPARED_TAG or not exact: e.fail('journal_busy')
+        if tag not in (active_recovery.PREPARED_TAG,active_recovery.INFLIGHT_TAG) or not exact: e.fail('journal_busy')
     if active is not None and active['plan']['rules_sha256']!=e.rules_sha256():
         if not exact or (tag is None and current['policy_sha256']!=policy_recovery.current_get_policy()):e.fail('journal_busy')
 
