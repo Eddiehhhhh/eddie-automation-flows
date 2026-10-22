@@ -468,8 +468,14 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
         if not progress or sha != progress['anchor']['state_sha256']: e.fail('state_invalid')
         expected_native = row['before_sha256']
     else:
-        if operation['kind'] != 'cleanup' or operation['phase'] != 'verified': e.fail('state_invalid')
-        expected_native = e.target_sha(operation['working'], row['note_id'], manifest['data_source_id'])
+        prepared=historical_active.prepared_binding()
+        if (prepared and historical_active.plan_binding(plan)==prepared
+                and sha==prepared['resume_anchor']['state_sha256']
+                and (operation['kind'],operation['phase'])==('append','prepared')):
+            expected_native=row['before_sha256']
+        else:
+            if operation['kind'] != 'cleanup' or operation['phase'] != 'verified': e.fail('state_invalid')
+            expected_native = e.target_sha(operation['working'], row['note_id'], manifest['data_source_id'])
     snapshot = api.read_note(row['note_id'])
     if e.target_sha(snapshot, row['note_id'], manifest['data_source_id']) != expected_native: e.fail('target_changed')
     publication.check(plan['publication'])

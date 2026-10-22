@@ -423,7 +423,7 @@ def _records(raw, expected, notion_interval, get_interval, policy, run):
 
 
 def recover_anchor(client, *, run_id, run_attempt, public_policy,
-                   approved_public_policy_sha256, notion_policy_sha256, require_success=False):
+                   approved_public_policy_sha256, notion_policy_sha256, require_success=False, include_job_digest=False):
     """Authenticate one original terminal Actions attempt, even if Notion failed.
 
     This never qualifies a failed run as Get success. Exact controller bytes
@@ -432,7 +432,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
     private commit/tree/blob readback before use.
     """
     try:
-        if type(require_success) is not bool: fail('journal_provenance_run')
+        if type(require_success) is not bool or type(include_job_digest) is not bool: fail('journal_provenance_run')
         policy = provenance.validate_policy(public_policy, approved_public_policy_sha256)
         provenance.positive(run_id); provenance.positive(run_attempt)
         journal.checked(notion_policy_sha256, 64)
@@ -507,7 +507,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'run_binding': provenance.run_binding(run), 'latest_binding':provenance.run_binding(current), 'latest_attempt': current['run_attempt'],
             'completed_at': job['completed_at'],
             **({'clock_witness': clock_witness} if clock_witness is not None else {}),
-            **({'job_sha256': codec.digest(job)} if require_success else {}),
+            **({'job_sha256': codec.digest(job)} if require_success or include_job_digest else {}),
             'private_readback_required': True, 'credentials_created': 0,
             'transport': 'caller_injected', 'new_permissions': 0}
     except CheckpointFailure: raise

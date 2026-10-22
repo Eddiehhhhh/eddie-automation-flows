@@ -13,6 +13,8 @@ import get_private_runtime_bindings as _private_bindings
 BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'BINDING')
 SUCCESSOR_BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'SUCCESSOR_BINDING')
 PROGRESS_BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'PROGRESS_BINDING')
+UNCONFIRMED_PREPARED_BINDING = _private_bindings.value('get_notion_historical_active_recovery', 'UNCONFIRMED_PREPARED_BINDING')
+PREPARED_TAG = 'exact_registered_unconfirmed_prepared_v1'
 
 
 def _validated_binding(value, *, progress=False):
@@ -96,7 +98,7 @@ def progress_binding():
 
 
 def _run_binding(run_id, attempt=None):
-    for b in (binding(), successor_binding(), progress_binding()):
+    for b in (binding(), successor_binding(), progress_binding(), prepared_binding()):
         if (b and type(run_id) is int and run_id == b['run_binding']['id']
                 and (attempt is None or type(attempt) is int and attempt == b['run_binding']['run_attempt'])):
             return b
@@ -104,8 +106,8 @@ def _run_binding(run_id, attempt=None):
 
 
 def _state_binding(sha):
-    for b in (binding(), successor_binding(), progress_binding()):
-        if b and sha == b['anchor']['state_sha256']: return b
+    for b in (binding(), successor_binding(), progress_binding(), prepared_binding()):
+        if b and sha == b.get('resume_anchor', b['anchor'])['state_sha256']: return b
     return None
 
 
@@ -146,6 +148,7 @@ def recover_checkpoint(client, run_id, run_attempt):
     import get_notion_journal_runtime as c
     b = _run_binding(run_id, run_attempt)
     if not registered_run(run_id, run_attempt): c.fail('journal_provenance_other_controller')
+    if b==prepared_binding(): return recover_prepared_checkpoint(client,b)
     # The full original verifier reconstructs compact proofs using the private
     # persisted records. Saved expanded logs never replace production retrieval.
     result = c.recover_anchor(client, run_id=run_id, run_attempt=run_attempt,
@@ -164,8 +167,10 @@ def recover_checkpoint(client, run_id, run_attempt):
 def _operation_valid(plan, journal, b):
     import get_notion_executor as e
     index = journal['index']; operation = journal['operation']
-    if index == b['initial_index']:
+    if index == b['initial_index'] and b!=prepared_binding():
         return operation is not None and e.digest(operation) == b['initial_operation_sha256']
+    if index == b['initial_index'] and operation is not None and operation.get('phase')=='prepared':
+        return e.digest(operation)==b['initial_operation_sha256']
     if index == len(plan['records']): return operation is None
     row = plan['records'][index]
     # This repair is append-only and must never broaden archive/create rights.
@@ -203,7 +208,7 @@ def _operation_valid(plan, journal, b):
 
 def allows(plan, journal):
     import get_notion_executor as e
-    b = binding()
+    b = plan_binding(plan)
     try:
         if (not b or not isinstance(plan, dict) or not isinstance(journal, dict)
                 or set(journal) != {'plan_sha256','plan','index','operation'}
@@ -227,8 +232,8 @@ def initial_state_valid(state, sha):
     b = _state_binding(sha)
     try:
         o.check_state(state); raw = o.encoded(state); j = state['engine_state']['journal']
-        return bool(b and sha == b['anchor']['state_sha256'] == o.digest(raw)
-            and len(raw) == b['state_bytes'] and retention.oid(raw) == b['anchor']['state_blob']
+        return bool(b and sha == b.get('resume_anchor', b['anchor'])['state_sha256'] == o.digest(raw)
+            and len(raw) == b['state_bytes'] and retention.oid(raw) == b.get('resume_anchor', b['anchor'])['state_blob']
             and state['policy_sha256'] == b['public_policy']['get_policy_sha256']
             and allows(j['plan'], j) and j['index'] == b['initial_index'])
     except Exception:
@@ -237,8 +242,8 @@ def initial_state_valid(state, sha):
 
 def check_mode(state, found, manifest, expected, other_modes):
     import get_notion_outbox as o
-    b = binding(); j = state['engine_state']['journal']
-    if found.get('recovery_anchor') == TAG or b and j and j.get('plan_sha256') == b['plan_sha256']:
+    j = state['engine_state']['journal']; b = plan_binding(j['plan']) if j else binding()
+    if found.get('recovery_anchor') in (TAG, PREPARED_TAG) or b and j and j.get('plan_sha256') == b['plan_sha256']:
         if (not b or any(x is not None for x in other_modes) or manifest is None
                 or expected != b['manifest_sha256'] or o.digest(manifest) != expected
                 or j is None or not allows(j['plan'], j)
@@ -250,7 +255,7 @@ def transition_outer(state, sha, new_policy, *, proof):
     import get_recurring_policy_recovery as recovery
     b = _state_binding(sha)
     if (not initial_state_valid(state, sha) or not b
-            or proof.get('recovery_anchor') != TAG
+            or proof.get('recovery_anchor') != (PREPARED_TAG if b==prepared_binding() else TAG)
             or proof.get('status') != 'journal_provenance_verified'
             or proof.get('private_readback_required') is not True
             or proof.get('latest_binding') != b.get('latest_binding', b['run_binding'])
@@ -269,9 +274,9 @@ def transition_outer(state, sha, new_policy, *, proof):
 def preserve(before, after):
     """CAS-level monotonicity in addition to external checkpoint authentication."""
     import get_notion_outbox as o
-    b = binding()
-    if not b: return
     old = before['engine_state']['journal']
+    b = plan_binding(old['plan']) if old else binding()
+    if not b: return
     if old is None or old.get('plan_sha256') != b['plan_sha256']: return
     if not allows(old['plan'], old): o.fail('outbox_state_invalid')
     new = after['engine_state']['journal']
@@ -328,3 +333,149 @@ def preserve(before, after):
         # appended() above validates the new native snapshot, roots and body.
         if any(z.get(k) != v for k,v in a.items() if k not in ('kind','phase')): o.fail('outbox_state_invalid')
     else: o.fail('outbox_state_invalid')
+
+def prepared_binding():
+    """One code-pinned failed fixed run and its separately verified successor."""
+    import get_notion_outbox as o
+    import get_publication_provenance as p
+    try:
+        b = deepcopy(UNCONFIRMED_PREPARED_BINDING)
+        keys = {'public_policy','public_policy_sha256','notion_policy_sha256','run_binding',
+            'job_id','job_sha256','get_record','fixed_source_record','checkpoint_count','latest_binding',
+            'checkpoint','anchor','resume_anchor','resume_tree','original_state_bytes',
+            'state_bytes','plan_sha256','plan_bytes','engine_rules_sha256','manifest_sha256',
+            'initial_index','initial_operation_sha256','known_descendants','deployment_objects'}
+        if not isinstance(b,dict) or set(b)!=keys: return None
+        p.validate_policy(b['public_policy'],b['public_policy_sha256'])
+        if (p.run_binding(b['run_binding'])!=b['run_binding'] or b['run_binding']['status']!='completed'
+                or b['run_binding']['conclusion']!='failure' or b['get_record'] is not None
+                or p.run_binding(b['latest_binding'])!=b['latest_binding']
+                or any(b['latest_binding'][k]!=v for k,v in b['run_binding'].items() if k!='updated_at')
+                or b['checkpoint_count']!=31 or b['initial_index']!=6): return None
+        for key in ('job_sha256','notion_policy_sha256','plan_sha256','engine_rules_sha256','manifest_sha256','initial_operation_sha256'):
+            p.a.checked(b[key],64)
+        c=b['checkpoint']; a=b['anchor']; z=b['resume_anchor']; run=b['run_binding']; policy=b['public_policy']
+        if (a!={k:c[k] for k in ('commit','state_blob','state_sha256')}
+                or c['sequence']!=b['checkpoint_count'] or c['state_bytes']!=b['original_state_bytes']
+                or c['record_sha256']!=o.digest({k:v for k,v in c.items() if k!='record_sha256'})
+                or c['readback_verified'] is not True or c['run_id']!=run['id'] or c['run_attempt']!=run['run_attempt']
+                or c['code_sha']!=policy['code_sha'] or c['controller_sha']!=run['head_sha']
+                or c['rules_sha256']!=policy['rules_sha256'] or c['public_policy_sha256']!=b['public_policy_sha256']
+                or c['notion_policy_sha256']!=b['notion_policy_sha256']
+                or set(z)!={'commit','state_blob','state_sha256'} or a==z): return None
+        for obj in (a,z):
+            p.a.checked(obj['commit'],40);p.a.checked(obj['state_blob'],40);p.a.checked(obj['state_sha256'],64)
+        p.a.checked(b['resume_tree'],40)
+        for key in ('state_bytes','original_state_bytes','plan_bytes'):
+            if type(b[key]) is not int or not 0<b[key]<=o.e.MAX_STATE:return None
+        from get_notion_fixed_source import parse
+        ctx={k:c[k] for k in ('run_id','run_attempt','code_sha','controller_sha','rules_sha256','notion_policy_sha256','public_policy_sha256')}
+        if parse(o.encoded(b['fixed_source_record']),ctx,run)!=b['fixed_source_record']:return None
+        if b['fixed_source_record']['mode']!='historical-apply' or b['fixed_source_record']['selection_sha256']!=b['manifest_sha256']:return None
+        if not isinstance(b['known_descendants'],list) or len(b['known_descendants'])!=2:return None
+        parent=z['commit']
+        for entry in b['known_descendants']:
+            if not isinstance(entry,dict) or set(entry)!={'parent','commit','changes'} or entry['parent']!=parent:return None
+            p.a.checked(entry['commit'],40)
+            if not isinstance(entry['changes'],dict) or not entry['changes']:return None
+            for path,entry_row in entry['changes'].items():
+                if not isinstance(path,str) or not path.startswith('Raw/') or '..' in path.split('/') or path.startswith('Raw/03 Get/'):return None
+                if not isinstance(entry_row,list) or len(entry_row)!=3 or entry_row[:2]!=['100644','blob']:return None
+                p.a.checked(entry_row[2],40)
+            parent=entry['commit']
+        if not isinstance(b['deployment_objects'],dict) or len(b['deployment_objects'])>8:return None
+        for path,oid in b['deployment_objects'].items():
+            if not path.startswith('.sync/get-notion/recovery-evidence/') or '..' in path.split('/'):return None
+            p.a.checked(oid,40)
+        return b
+    except Exception:
+        return None
+
+
+def plan_binding(plan):
+    b=prepared_binding()
+    if b and isinstance(plan,dict) and plan.get('historical_manifest_sha256')==b['manifest_sha256']:
+        return b
+    return binding()
+
+
+def recover_prepared_checkpoint(client, b):
+    import get_notion_journal_runtime as c
+    result=c.recover_anchor(client,run_id=b['run_binding']['id'],run_attempt=b['run_binding']['run_attempt'],
+        public_policy=deepcopy(b['public_policy']),approved_public_policy_sha256=b['public_policy_sha256'],
+        notion_policy_sha256=b['notion_policy_sha256'],include_job_digest=True)
+    expected={'anchor':b['anchor'],'checkpoint':b['checkpoint'],'checkpoint_count':b['checkpoint_count'],
+        'job_id':b['job_id'],'job_sha256':b['job_sha256'],'run_binding':b['run_binding'],
+        'latest_binding':b['latest_binding'],'get_step_record':None,'fixed_source_record':b['fixed_source_record'],
+        'private_readback_required':True,'get_run_success_claim':False}
+    if any(result.get(k)!=v for k,v in expected.items()):c.fail('journal_provenance_record')
+    return {**result,'recovery_anchor':PREPARED_TAG}
+
+
+def verify_prepared_successor(local, remote, loader, head, proof):
+    """Read-only dual-anchor authentication; no journal store exists yet."""
+    import get_notion_outbox as o
+    import get_notion_remote_journal as j
+    from types import SimpleNamespace
+    b=prepared_binding()
+    if (not b or proof.get('recovery_anchor')!=PREPARED_TAG or proof.get('anchor')!=b['anchor']
+            or proof.get('checkpoint')!=b['checkpoint'] or proof.get('fixed_source_record')!=b['fixed_source_record']):o.fail('outbox_state_invalid')
+    git=j.retention.LocalGit(local.vault)
+    def node(commit):
+        loader(commit)
+        tree,entries=j.RemoteJournal._local_tree(SimpleNamespace(local=git),commit)
+        parents=git.run('rev-list','--parents','-n','1',commit).decode().split()[1:]
+        if remote.commit(commit)!={'tree':tree,'parents':parents}:o.fail('outbox_state_invalid')
+        return tree,parents,entries
+    def state(commit,anchor,maximum):
+        tree,parents,entries=node(commit);row=entries.get(j.STATE_PATH)
+        if row!=('100644','blob',anchor['state_blob']):o.fail('outbox_state_invalid')
+        raw=git.blob(anchor['state_blob'])
+        if (len(raw)!=maximum or o.digest(raw)!=anchor['state_sha256'] or j.retention.oid(raw)!=anchor['state_blob']
+                or remote.blob(anchor['state_blob'],len(raw))!=raw):o.fail('outbox_state_invalid')
+        value=j.retention.strict_json(raw);o.check_state(value)
+        if o.encoded(value)!=raw:o.fail('outbox_state_invalid')
+        return value,(tree,parents,entries)
+    before,old=state(b['anchor']['commit'],b['anchor'],b['original_state_bytes'])
+    after,new=state(b['resume_anchor']['commit'],b['resume_anchor'],b['state_bytes'])
+    if new[0]!=b['resume_tree'] or new[1]!=[b['anchor']['commit']]:o.fail('outbox_state_invalid')
+    changed={k for k in set(old[2])|set(new[2]) if old[2].get(k)!=new[2].get(k)}
+    if changed!={j.STATE_PATH}:o.fail('outbox_state_invalid')
+    a=before['engine_state']['journal'];z=after['engine_state']['journal'];op=z['operation']
+    normalized=deepcopy(after);normalized['engine_state']['journal']['operation']=None
+    if (normalized!=before or a['index']!=b['initial_index'] or a['operation'] is not None
+            or o.digest(op)!=b['initial_operation_sha256'] or not initial_state_valid(after,o.digest(after))
+            or set(op)!={'kind','phase','before','response','archive_index'}
+            or (op['kind'],op['phase'],op['response'],op['archive_index'])!=('append','prepared',None,0)):
+        o.fail('outbox_state_invalid')
+    row=z['plan']['records'][z['index']]
+    captured=[v['snapshots'][row['note_id']] for v in before['historical_captures'].values() if row['note_id'] in v['snapshots']]
+    if len(captured)!=1 or op['before']!=captured[0] or o.e.target_sha(captured[0],row['note_id'],z['plan']['policy']['data_source_id'])!=row['before_sha256']:o.fail('outbox_state_invalid')
+    history=git.run('rev-list','--reverse','--max-count=257',b['resume_anchor']['commit']+'..'+head).decode().split()
+    git.run('merge-base','--is-ancestor',b['resume_anchor']['commit'],head)
+    if not 2<=len(history)<=256:o.fail('outbox_state_invalid')
+    prior=b['resume_anchor']['commit'];prior_node=new
+    allowed=dict(b['deployment_objects'])
+    capsule_path='.sync/get-notion/runtime-bindings-'+_private_bindings.TRUSTED_BUNDLE_SHA256+'.json'
+    import os
+    raw_path=os.environ[_private_bindings.ENV_FILE]
+    _private_bindings.read_local(raw_path,_private_bindings.TRUSTED_BUNDLE_SHA256)
+    # Re-read only exact code-pinned bytes; no unbounded or link-following read.
+    fd=os.open(raw_path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as handle:
+        raw_bytes=handle.read(_private_bindings.MAX_BYTES+1)
+    if len(raw_bytes)>_private_bindings.MAX_BYTES or o.digest(raw_bytes)!=_private_bindings.TRUSTED_BUNDLE_SHA256:o.fail('outbox_state_invalid')
+    allowed[capsule_path]=j.retention.oid(raw_bytes)
+    for i,commit in enumerate(history):
+        current=node(commit)
+        if current[1]!=[prior]:o.fail('outbox_state_invalid')
+        delta={k for k in set(prior_node[2])|set(current[2]) if prior_node[2].get(k)!=current[2].get(k)}
+        if i<2:
+            expected=b['known_descendants'][i]
+            if commit!=expected['commit'] or prior!=expected['parent'] or delta!=set(expected['changes']):o.fail('outbox_state_invalid')
+            if any(current[2].get(k)!=tuple(v) for k,v in expected['changes'].items()):o.fail('outbox_state_invalid')
+        elif any(k not in allowed or current[2].get(k)!=('100644','blob',allowed[k]) or k in prior_node[2] for k in delta):o.fail('outbox_state_invalid')
+        if current[2].get(j.STATE_PATH)!=new[2][j.STATE_PATH]:o.fail('outbox_state_invalid')
+        prior=commit;prior_node=current
+    if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
+    return deepcopy(b['resume_anchor'])

@@ -612,6 +612,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 confirm=checkpoints.CheckpointEmitter(checkpoint_stream,compact=compact_proofs,context={**execution,
                     'rules_sha256':public_policy['rules_sha256'],'notion_policy_sha256':e.digest(scope_for(public_policy)),
                     'public_policy_sha256':public_hash})
+            if present and found.get('recovery_anchor') == historical_active.PREPARED_TAG:
+                # Keep original checkpoint authority untouched; adopt only the
+                # independently verified exact prepared successor as read anchor.
+                anchor=historical_active.verify_prepared_successor(local,remote,loader,parent,found)
             durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=confirm)
             current,sha=durable.read()
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
@@ -644,7 +648,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     public_policy['get_policy_sha256'],proof=found)
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
-            if present and found.get('recovery_anchor') == historical_active.TAG:
+            if present and found.get('recovery_anchor') in (historical_active.TAG,historical_active.PREPARED_TAG):
                 # Complete source/native read-only checks before the FIRST CAS.
                 bridge_materialized=historical_runtime.verify_active_transition(local, remote, token, root, current, sha, request,
                     manifest=historical_manifest, expected=approved_historical_manifest_sha256,
