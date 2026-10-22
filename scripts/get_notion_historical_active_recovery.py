@@ -393,14 +393,27 @@ def _successor_binding(value, *, inflight):
         selection=b['selection_sha256'] if inflight else b['manifest_sha256']
         p.a.checked(selection,64)
         if b['fixed_source_record']['mode']!='historical-apply' or b['fixed_source_record']['selection_sha256']!=selection:return None
-        if not isinstance(b['known_descendants'],list) or len(b['known_descendants'])!=(0 if inflight else 2):return None
+        if not isinstance(b['known_descendants'],list) or len(b['known_descendants'])!=2:return None
         parent=z['commit']
-        for entry in b['known_descendants']:
+        for index,entry in enumerate(b['known_descendants']):
             if not isinstance(entry,dict) or set(entry)!={'parent','commit','changes'} or entry['parent']!=parent:return None
             p.a.checked(entry['commit'],40)
             if not isinstance(entry['changes'],dict) or not entry['changes']:return None
+            if inflight:
+                paths=set(entry['changes'])
+                if index==0:
+                    if paths!={'.github/state/notion-wiki-mirror-state.json'}:return None
+                else:
+                    # Exact values remain private and code-pinned. Only the
+                    # already deployed archive/manifest/capsule roles fit here.
+                    import re
+                    archives=[v for v in paths if isinstance(v,str) and re.fullmatch(r'\.sync/get-notion/recovery-evidence/[0-9a-f]{64}\.tar\.xz',v)]
+                    capsules=[v for v in paths if isinstance(v,str) and re.fullmatch(r'\.sync/get-notion/runtime-bindings-[0-9a-f]{64}\.json',v)]
+                    if len(paths)!=3 or len(archives)!=1 or len(capsules)!=1:return None
+                    if paths!={archives[0],archives[0][:-7]+'.manifest.json',capsules[0]}:return None
             for path,entry_row in entry['changes'].items():
-                if not isinstance(path,str) or not path.startswith('Raw/') or '..' in path.split('/') or path.startswith('Raw/03 Get/'):return None
+                if not isinstance(path,str) or '..' in path.split('/'):return None
+                if not inflight and (not path.startswith('Raw/') or path.startswith('Raw/03 Get/')):return None
                 if not isinstance(entry_row,list) or len(entry_row)!=3 or entry_row[:2]!=['100644','blob']:return None
                 p.a.checked(entry_row[2],40)
             parent=entry['commit']
@@ -511,6 +524,9 @@ def _verify_successor(local, remote, loader, head, proof, *, inflight):
             expected=b['known_descendants'][i]
             if commit!=expected['commit'] or prior!=expected['parent'] or delta!=set(expected['changes']):o.fail('outbox_state_invalid')
             if any(current[2].get(k)!=tuple(v) for k,v in expected['changes'].items()):o.fail('outbox_state_invalid')
+            if inflight:
+                if i==0 and any(prior_node[2].get(k,())[:2]!=('100644','blob') for k in delta):o.fail('outbox_state_invalid')
+                if i==1 and any(k in prior_node[2] for k in delta):o.fail('outbox_state_invalid')
         elif inflight and delta=={j.STATE_PATH}:
             if isolation_seen:o.fail('outbox_state_invalid')
             expected={'commit':commit,'state_blob':j.retention.oid(isolated_raw),'state_sha256':o.digest(isolated_raw)}
