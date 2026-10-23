@@ -21,7 +21,7 @@ INPUT_ANCHORS = _private_bindings.value('get_notion_historical_input', 'INPUT_AN
 PREFIX='.sync/get-notion/historical-inputs/'
 # Exact historical APPLY digest -> existing property-input digest. Empty is
 # inert. This release binding is not a caller-supplied mode or property approval.
-CREATE_PROPERTY_INPUTS = {}
+CREATE_PROPERTY_INPUTS = _private_bindings.value('get_notion_historical_input', 'CREATE_PROPERTY_INPUTS')
 
 
 def anchor_for(expected):

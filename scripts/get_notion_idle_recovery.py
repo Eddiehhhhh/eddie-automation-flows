@@ -15,6 +15,13 @@ MAX_EXTRA_RECEIPTS = 16
 CAPSULE_KEYS = {'public_policy', 'public_policy_sha256', 'notion_policy_sha256',
     'run_binding', 'job_id', 'job_sha256', 'get_record', 'checkpoint_count',
     'checkpoint', 'anchor', 'receipts'}
+CAPTURE_KEYS = CAPSULE_KEYS | {'latest_binding', 'fixed_source_record', 'terminal_report', 'capture_sha256'}
+
+
+def _capture(value):
+    return isinstance(value, dict) and set(value) == CAPTURE_KEYS
+
+
 RECEIPT_KEYS = {'commit', 'receipt_sha256', 'sequence', 'policy_sha256'}
 
 
@@ -29,7 +36,7 @@ def _capsule():
         return None
     try:
         value = deepcopy(PREDECESSOR)
-        if not isinstance(value, dict) or set(value) != CAPSULE_KEYS:
+        if not isinstance(value, dict) or set(value) not in (CAPSULE_KEYS, CAPTURE_KEYS):
             raise ValueError
         policy = p.validate_policy(value['public_policy'], value['public_policy_sha256'])
         c.journal.checked(value['notion_policy_sha256'], 64)
@@ -49,7 +56,10 @@ def _capsule():
         if p.timestamp(run['created_at']) > p.timestamp(run['updated_at']):
             raise ValueError
         record = value['get_record']
-        p.parse_record(p.publication_line(record).encode(), policy, run)
+        if not _capture(value):
+            p.parse_record(p.publication_line(record).encode(), policy, run)
+        elif record is not None or value['receipts'] != ():
+            raise ValueError
         count = value['checkpoint_count']
         final = value['checkpoint']
         if (type(count) is not int or not 1 <= count <= c.MAX_CHECKPOINTS
@@ -84,6 +94,22 @@ def _capsule():
                 or o.digest({k: v for k, v in final.items() if k != 'record_sha256'}) != final['record_sha256']
                 or value['anchor'] != {k: final[k] for k in ('commit', 'state_blob', 'state_sha256')}):
             raise ValueError
+        if _capture(value):
+            latest = value['latest_binding']
+            c._same_run(run, latest, cross_endpoint=True)
+            if (p.run_binding(latest) != latest or p.run_semantic_binding(run) != p.run_semantic_binding(latest)
+                    or latest['status'] != 'completed' or latest['conclusion'] != 'success'
+                    or latest['run_attempt'] != run['run_attempt'] or run['event'] != 'workflow_dispatch'):
+                raise ValueError
+            fixed = c.fixed_auth.parse(o.encoded(value['fixed_source_record']), expected, run)
+            if fixed['mode'] != 'historical-capture': raise ValueError
+            c.journal.checked(value['capture_sha256'], 64)
+            report = value['terminal_report']
+            if (not isinstance(report,dict) or set(report) != {'contract','status','business_health_asserted','complete_library_claimed'}
+                    or report['contract'] != 'get-private-runtime-report-2' or report['status'] != 'captured'
+                    or report['business_health_asserted'] is not False
+                    or report['complete_library_claimed'] is not False): raise ValueError
+            return value
         receipts = value['receipts']
         if not isinstance(receipts, tuple) or len(receipts) > MAX_EXTRA_RECEIPTS:
             raise ValueError
@@ -146,7 +172,7 @@ def verify_original_record(record, job_id, *, job=None):
     import get_publication_provenance as p
     import get_notion_outbox as o
     capsule = _capsule()
-    if (capsule is None or record != capsule['get_record']
+    if (capsule is None or _capture(capsule) or record != capsule['get_record']
             or type(job_id) is not int or job_id != capsule['job_id']
             or not isinstance(job, dict) or job.get('id') != job_id
             or o.digest(job) != capsule['job_sha256']):
@@ -173,7 +199,12 @@ def can_recover(policy, run_id, run_attempt):
 
 
 def _matches_proof(result, capsule):
-    return (isinstance(result, dict)
+    capture = _capture(capsule)
+    fixed_matches = (not capture or (
+        all(result.get(k) == capsule[k] for k in ('latest_binding','fixed_source_record','terminal_report'))
+        and result.get('terminal_conclusions') == {'job':'success','notion':'success','get':'skipped'}
+        and result.get('get_run_success_claim') is False)) if isinstance(result,dict) else False
+    return (isinstance(result, dict) and fixed_matches
         and result.get('status') == 'journal_provenance_verified'
         and result.get('anchor') == capsule['anchor']
         and result.get('run_id') == capsule['run_binding']['id']
@@ -197,7 +228,8 @@ def recover_checkpoint(client, run_id, run_attempt, *, current_public_policy):
     result = c.recover_anchor(client, run_id=run_id, run_attempt=run_attempt,
         public_policy=capsule['public_policy'],
         approved_public_policy_sha256=capsule['public_policy_sha256'],
-        notion_policy_sha256=capsule['notion_policy_sha256'], require_success=True)
+        notion_policy_sha256=capsule['notion_policy_sha256'], require_success=True,
+        **({'include_job_digest':True, 'include_terminal_report':True} if _capture(capsule) else {}))
     if not _matches_proof(result, capsule):
         c.fail('journal_provenance_record')
     return {**result, 'recovery_anchor': TAG}
@@ -221,6 +253,14 @@ def transition_outer(state, sha, new_get_policy_sha256, *, proof):
             or new_get_policy_sha256 != recovery.current_get_policy()
             or new_get_policy_sha256 == state['policy_sha256']):
         o.fail('outbox_state_invalid')
+    if _capture(capsule):
+        import get_notion_historical as historical
+        selected = capsule['fixed_source_record']['selection_sha256']
+        saved = state.get('historical_captures', {}).get(selected)
+        if not isinstance(saved,dict) or o.digest(saved) != capsule['capture_sha256']:
+            o.fail('outbox_state_invalid')
+        historical.check_captures({selected:saved})
+        historical.check_native_schema_capture(saved)
     result = deepcopy(state)
     result['policy_sha256'] = new_get_policy_sha256
     o.check_state(result)
