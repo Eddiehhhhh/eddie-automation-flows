@@ -154,11 +154,26 @@ def check_mode(state,found,manifest,expected,other_modes):
         transition_manifest(manifest,expected,j['plan'])
 
 
+
+def authenticated_proof_matches(proof,binding):
+    """Accept only original bounded discovery counters beside exact authority."""
+    import get_publication_provenance as provenance
+    if not isinstance(proof,dict):return False
+    diagnostics={'candidate_runs_checked','candidate_attempts_checked','provenance_reads','provenance_bytes'}
+    present=diagnostics & set(proof)
+    if present:
+        if present!=diagnostics or any(type(proof[k]) is not int for k in diagnostics):return False
+        if (not 1<=proof['candidate_runs_checked']<=4
+                or proof['candidate_attempts_checked']!=proof['candidate_runs_checked']
+                or not 1<=proof['provenance_reads']<=40
+                or not 1<=proof['provenance_bytes']<=provenance.MAX_TOTAL):return False
+    return {k:v for k,v in proof.items() if k not in diagnostics}=={**binding['proof'],'recovery_anchor':TAG}
+
 def transition_outer(state,sha,new_policy,*,proof):
     import get_notion_outbox as o
     import get_recurring_policy_recovery as r
     b=plan_binding(state['engine_state']['journal']['plan'])
-    if not b or proof!={**b['proof'],'recovery_anchor':TAG} or new_policy!=r.current_get_policy() or o.digest(state)!=sha:o.fail('outbox_state_invalid')
+    if not b or not authenticated_proof_matches(proof,b) or new_policy!=r.current_get_policy() or o.digest(state)!=sha:o.fail('outbox_state_invalid')
     if state['policy_sha256']==new_policy:
         original=deepcopy(state);original['policy_sha256']=b['public_policy']['get_policy_sha256']
         if not initial_state_valid(original,o.digest(original)):o.fail('outbox_state_invalid')
@@ -253,7 +268,7 @@ def verify_successor(local,remote,loader,head,proof):
     import get_notion_outbox as o
     import get_recurring_policy_recovery as policy
     b=run_binding(proof.get('run_id'),proof.get('run_attempt'))
-    if not b or proof!={**b['proof'],'recovery_anchor':TAG}:o.fail('outbox_state_invalid')
+    if not b or not authenticated_proof_matches(proof,b):o.fail('outbox_state_invalid')
     if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
     git=j.retention.LocalGit(local.vault)
     def node(commit):
