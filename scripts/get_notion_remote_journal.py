@@ -574,6 +574,8 @@ class RemoteJournal:
             historical.preserve_captures(old_value,value)
             import get_notion_historical_active_recovery as historical_active
             historical_active.preserve(old_value,value)
+            import get_notion_authenticated_recovery as authenticated_recovery
+            authenticated_recovery.preserve(old_value,value)
             if png_expired is not None:
                 expired.validate_transition(old_value, value, new_policy_sha256=policy, evidence=fresh_evidence)
             elif png_reset_ticket is None:
@@ -617,6 +619,8 @@ class RemoteJournal:
                     raise JournalFailure(stage='poll', unknown=True)
                 self.sleep(2 ** attempt)
             receipt, observed_value = self._verify(commit, parent, tree_oid, wanted, data)
+            engine.plan_recovery.preserve_holds(old_value['engine_state'],observed_value['engine_state'])
+            engine.plan_recovery.preserve_holds(value['engine_state'],observed_value['engine_state'])
             result = self._confirm(receipt, observed_value)
             if png_reset_ticket is None and png_expired is None:
                 self._png_not_dispatched = codec.png_store.not_dispatched_ticket(old_value,observed_value)

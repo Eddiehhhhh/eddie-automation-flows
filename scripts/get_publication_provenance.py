@@ -6,6 +6,7 @@ No credential discovery/store, new permissions, private requests or writes.
 The caller pins one reviewed repository/workflow/code policy independently.
 """
 import get_private_proof as private_proof
+import get_publication_registered_predecessor as registered_predecessor
 import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -429,6 +430,9 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
         return None
     candidate_policy, original_recovery = recovery.candidate_policy(policy, run)
+    registered_recovery = False
+    if not original_recovery:
+        candidate_policy, registered_recovery = registered_predecessor.candidate_policy(policy, run)
     try:
         # One discovery may encounter the same immutable controller repeatedly.
         # Deduplicate only after exact deterministic-byte verification. The
@@ -480,6 +484,9 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         if record is None:
             fail('provenance_record')
         recovery.verify_original_record(record, job['id'], job=job, raw=raw, run=run)
+    if registered_recovery:
+        if record is None: fail('provenance_record')
+        registered_predecessor.verify_original_record(record, job['id'], job=job, run=run)
     # Re-read the *original* attempt, then ensure latest is still the same run.
     # A failed/in-progress later rerun cannot erase this successful publication,
     # or inherit it: the record remains bound to the original attempt and job.

@@ -33,6 +33,7 @@ import get_notion_run15_recovery as run15_recovery
 import get_notion_run53_recovery as run53_recovery
 import get_notion_run57_recovery as run57_recovery
 import get_notion_historical_active_recovery as historical_active
+import get_notion_authenticated_recovery as authenticated_recovery
 import get_notion_idle_recovery as idle_recovery
 import get_notion_blocked_idle_recovery as blocked_idle
 import get_notion_run16_recovery as run16_recovery
@@ -271,7 +272,7 @@ def observe_expired_png(current, loaded, publication, request, writers_guard):
     return result
 
 
-def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,previous,loaded_assets=None):
+def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,previous,loaded_assets=None,history_witness=None):
     state,sha=store.read()
     selected=png_selected(pub.descriptor)
     if not selected:return pub,None,previous,None,writers_guard,None
@@ -292,7 +293,7 @@ def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,wri
         resolver=session.advance_uploads() if preparation['upload_candidates'] else png_image.Resolver(loaded.evidence,png_store.upload_receipts(state,asset_key=asset_key),current_commit=lambda:loaded.snapshot_head)
         state,sha=store.read()
         # Upload CAS changes the outer hash; the original queue descriptor is stale.
-        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state))
+        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state),history_witness=history_witness)
         session.publication=pub
     image_adapter=png_image.SnapshotAdapter(resolver,store.read,request=request,asset_get=png_image.AssetGet(),previous=previous)
     def candidates(old,new):
@@ -364,7 +365,7 @@ def incremental_scope_for(publication, journal):
     return None
 
 
-def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writers_guard,initial_factory=initial_inputs,create_recovery=None,approved_recovery_sha=None,loaded_assets=None):
+def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writers_guard,initial_factory=initial_inputs,create_recovery=None,approved_recovery_sha=None,loaded_assets=None,history_witness=None):
     property_runtime.check_dependency()
     state,sha=store.read();outbox.check_state(state)
     if sha!=outbox.digest(state):fail('notion_state_anchor')
@@ -384,15 +385,15 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
         if desc.get('initial_cohort') is not None:
             pub,scope,ds,counts=initial_resume(local,remote,root,plan,token,policy_hash)
         else:
-            source_loader.load_queue_publication(local,remote,token,root,{k:desc[k] for k in ('commit','parent')}|{'receipt_sha256':desc['outbox_receipt_sha256']},policy_hash)
-            pub=outbox.QueuePublication(local.vault,state,sha,resume=True);scope={};ds=plan['policy']['data_source_id']
+            source_loader.load_queue_publication(local,remote,token,root,{k:desc[k] for k in ('commit','parent')}|{'receipt_sha256':desc['outbox_receipt_sha256']},policy_hash,history_witness=history_witness)
+            pub=outbox.QueuePublication(local.vault,state,sha,resume=True,history_witness=history_witness);scope={};ds=plan['policy']['data_source_id']
     elif not initial_done(state):
         parent=a.checked(local.run('rev-parse',r.MAIN_REF).decode().strip(),40)
         pub,scope,ds,counts=initial_factory(local,remote,parent,request)
     else:
         origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
-        chain=source_loader.load_confirmed_chain(local,remote,token,root,tip,origin,state['last_enqueued_publication'] or origin,policy_hash)
-        candidate=outbox.enqueue(local.vault,state,sha,chain,outbox.digest(chain))
+        chain=source_loader.load_confirmed_chain(local,remote,token,root,tip,origin,state['last_enqueued_publication'] or origin,policy_hash,history_witness=history_witness)
+        candidate=outbox.enqueue(local.vault,state,sha,chain,outbox.digest(chain),history_witness=history_witness)
         if not e.same(candidate,state):
             if apply:
                 version=store.compare_and_set(sha,candidate);state,sha=store.read()
@@ -403,8 +404,8 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
         if not state['pending_by_id']:
             return {'status':'queue_partial' if state.get('source_state_holds') else 'queue_empty','source_state_unprojected_receipts':len(state.get('source_state_holds',{})),'queued':0,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         first=state['pending_by_id'][state['rotation_order'][0]]
-        source_loader.load_queue_publication(local,remote,token,root,{k:first[k] for k in ('commit','parent','receipt_sha256')},policy_hash)
-        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state));scope={}
+        source_loader.load_queue_publication(local,remote,token,root,{k:first[k] for k in ('commit','parent','receipt_sha256')},policy_hash,history_witness=history_witness)
+        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state),history_witness=history_witness);scope={}
         receipts=state['engine_state']['receipts']
         if receipts:ds=next(iter(receipts.values()))['data_source_id']
         else:ds=next(iter(transport.native.collect(request)['snapshots'].values()))['parent_data_source']
@@ -421,7 +422,7 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
     if incremental_scope is not None:
         policy['property_incremental_scope_sha256']=e.digest(incremental_scope)
     upload_attempts_before=len(getattr(request,'attempted',set()))
-    pub,png_resolver,image_adapter,attachment_provider,page_guard,png_preparation=png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,image_adapter,loaded_assets)
+    pub,png_resolver,image_adapter,attachment_provider,page_guard,png_preparation=png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,image_adapter,loaded_assets,history_witness=history_witness)
     if png_preparation is not None and not apply:
         return {'status':'png_prepared','png_preparation':png_preparation,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
     upload_attempts=len(getattr(request,'attempted',set()))-upload_attempts_before
@@ -562,7 +563,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         if apply and (not PRODUCTION_ACTIVATED or not recurring.PRODUCTION_ACTIVATED):fail('notion_activation_pending')
         if expected_parent is not None:a.checked(expected_parent,40)
         client=public_client if public_client is not None else provenance.AnonymousGithub()
-        public_hash=None;tip=None
+        public_hash=None;tip=None;history_witness=None
         if apply or public_policy is not None:
             stage='policy'
             public_policy=recurring.validate_policy(public_policy,approved_public_policy_sha256,entry.BOOTSTRAP)
@@ -619,6 +620,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 anchor=historical_active.verify_prepared_successor(local,remote,loader,parent,found)
             if present and found.get('recovery_anchor') == historical_active.INFLIGHT_TAG:
                 anchor=historical_active.verify_inflight_successor(local,remote,loader,parent,found)
+            if present and found.get('recovery_anchor') == authenticated_recovery.TAG:
+                anchor=authenticated_recovery.verify_successor(local,remote,loader,parent,found)
             post_cas_binding=historical_active.prepared_binding()
             post_cas_paths=() if post_cas_binding is None else tuple(sorted({
                 path for row in post_cas_binding['known_descendants'] for path in row['changes']}))
@@ -633,6 +636,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             old_journal=current['engine_state']['journal']
             recovery_mode_guard(current, found if present else {}, modes)
             historical_active.check_mode(current, found if present else {}, historical_manifest,
+                approved_historical_manifest_sha256, (property_manifest, historical_capture))
+            authenticated_recovery.check_mode(current, found if present else {}, historical_manifest,
                 approved_historical_manifest_sha256, (property_manifest, historical_capture))
             historical_bridge_loader=None
             if fixed_source:
@@ -661,6 +666,18 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 write_possible=apply
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
+            if present and found.get('recovery_anchor') == authenticated_recovery.TAG:
+                already_new_isolated=(current['policy_sha256']==public_policy['get_policy_sha256']
+                    and authenticated_recovery.exact_hold_present(current['engine_state']))
+                if not already_new_isolated:
+                    bridge_materialized=historical_runtime.verify_active_transition(local, remote, token, root, current, sha, request,
+                        manifest=historical_manifest, expected=approved_historical_manifest_sha256,
+                        policy_hash=public_policy['get_policy_sha256'], writers_guard=guarded_writers)
+                    historical_bridge_loader=bridge_materialized['loader']
+                    candidate=authenticated_recovery.isolate_outer(current,sha,public_policy['get_policy_sha256'])
+                    write_possible=apply
+                    if apply: current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                    else: store=ReadOnlyStore(candidate);current,sha=store.read()
             already_isolated=(present and found.get('recovery_anchor')==historical_active.INFLIGHT_TAG
                 and current['policy_sha256']==public_policy['get_policy_sha256']
                 and historical_active.exact_hold_present(current['engine_state']))
@@ -738,6 +755,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     safe.update(resumed_prior_plan_sha256=old_journal['plan_sha256'],
                         resumed_prior_rules_sha256=old_journal['plan']['rules_sha256'])
                 return safe
+            if public_policy is not None and provenance.HISTORY_WITNESS is not None:
+                history_witness = provenance.verify_history_witness(client, public_policy,
+                    candidate_runs_checked=found.get('candidate_runs_checked', 0) if present else 0)
             loaded_assets=None
             png_transition=None
             preload_state=current;preload_sha=sha
@@ -758,8 +778,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 preload_sha=outbox.digest(preload_state)
             if tip is not None and preload_state['engine_state']['journal'] is None:
                 origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
-                preview_chain=source_loader.load_confirmed_chain(local,remote,token,root,tip,origin,preload_state['last_enqueued_publication'] or origin,public_policy['get_policy_sha256'])
-                preload_state=outbox.enqueue(local.vault,preload_state,preload_sha,preview_chain,outbox.digest(preview_chain))
+                preview_chain=source_loader.load_confirmed_chain(local,remote,token,root,tip,origin,preload_state['last_enqueued_publication'] or origin,public_policy['get_policy_sha256'],history_witness=history_witness)
+                preload_state=outbox.enqueue(local.vault,preload_state,preload_sha,preview_chain,outbox.digest(preview_chain),history_witness=history_witness)
                 preload_sha=outbox.digest(preload_state)
             batch=png_batch_ids(preload_state)
             pending_plan=preload_state['engine_state']['journal']
@@ -776,8 +796,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 else:
                     first=preload_state['pending_by_id'][batch[0]]
                     row={k:first[k] for k in ('commit','parent','receipt_sha256')}
-                source_loader.load_queue_publication(local,remote,token,root,row,preload_state['policy_sha256'])
-                before_pub=outbox.QueuePublication(local.vault,preload_state,preload_sha,resume=pending is not None,max_records=queue_limit(preload_state))
+                source_loader.load_queue_publication(local,remote,token,root,row,preload_state['policy_sha256'],history_witness=history_witness)
+                before_pub=outbox.QueuePublication(local.vault,preload_state,preload_sha,resume=pending is not None,max_records=queue_limit(preload_state),history_witness=history_witness)
                 loaded_assets=png_loader.load(local,remote,before_pub.descriptor,selected_anchor,selected_anchor_sha,preload_state['policy_sha256'])
             if present and found.get('recovery_anchor')=='exact_run10_acknowledged_create_v1':
                 if not plan_recovery.validate_run10_state(current,sha):fail('notion_state_anchor')
@@ -807,7 +827,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 chain_origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
                 # Verify the current Get marker before any initial Notion call.
                 # No successful old source payload is requested again.
-                source_loader.load_confirmed_chain(local,remote,token,root,tip,chain_origin,current['last_enqueued_publication'] or chain_origin,public_policy['get_policy_sha256'])
+                source_loader.load_confirmed_chain(local,remote,token,root,tip,chain_origin,current['last_enqueued_publication'] or chain_origin,public_policy['get_policy_sha256'],history_witness=history_witness)
             elif initial_done(current) or plan_recovery.validate_initial_state(current,sha):
                 if public_policy is None:fail('notion_marker')
                 found=provenance.discover(client,public_policy)
@@ -815,7 +835,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             stage='execute';write_possible=apply
             result=dispatch(local,remote,token,root,store,request,tip=tip,
                 policy_hash=public_policy['get_policy_sha256'] if public_policy else '0'*64,
-                apply=apply,writers_guard=guarded_writers,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,loaded_assets=loaded_assets)
+                apply=apply,writers_guard=guarded_writers,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,loaded_assets=loaded_assets,history_witness=history_witness)
             stage='final';source_guard()
             # Refresh the separately verified Actions anchor even on a no-op.
             # Identical bytes emit a verified cas_attempts=0 checkpoint; this

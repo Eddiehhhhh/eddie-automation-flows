@@ -70,17 +70,24 @@ def validate_initial_state(state, sha):
 
 
 def validate_holds(holds):
-    """Only one externally pinned hold; reference retains all old evidence.
+    """Only externally pinned holds; references retain all original evidence.
 
     The complete original journal remains in the immutable anchor blob. No
     later source/rule change or retry_conflicts flag can release this hold.
     """
     import get_notion_historical_active_recovery as active
+    import get_notion_authenticated_recovery as authenticated
     exact=active.inflight_hold()
+    registered=([exact] if exact else [])+authenticated.inflight_holds()
     if not isinstance(holds,dict):raise ValueError('state_invalid')
     legacy=dict(holds)
-    if exact and exact['note_id'] in legacy:
-        if p.encoded(legacy.pop(exact['note_id']))!=p.encoded(exact):raise ValueError('state_invalid')
+    seen={}
+    for exact in registered:
+        ident=exact['note_id']
+        if ident in seen and p.encoded(seen[ident])!=p.encoded(exact):raise ValueError('state_invalid')
+        seen[ident]=exact
+        if ident in legacy:
+            if p.encoded(legacy.pop(ident))!=p.encoded(exact):raise ValueError('state_invalid')
     if len(legacy)>1:raise ValueError('state_invalid')
     for ident,row in legacy.items():
         if (p.digest(ident)!=HELD_NOTE_SHA256 or not isinstance(row,dict)

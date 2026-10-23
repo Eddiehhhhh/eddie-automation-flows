@@ -22,6 +22,46 @@ MAX_STATE=e.MAX_STATE
 encoded=e.encoded
 digest=e.digest
 
+class BoundedSourceReader(git.OfflineGit):
+    """Only derived validated trees are evicted; immutable objects stay in ODB."""
+    def tree(self, commit):
+        if commit not in self.cache and len(self.cache) >= 2:
+            del self.cache[next(iter(self.cache))]
+        result = super().tree(commit)
+        # Keep the current and previous full tree, not one per ancestor.
+        self.cache.pop(commit, None)
+        self.cache[commit] = result
+        while len(self.cache) > 2:
+            del self.cache[next(iter(self.cache))]
+        return result
+
+
+def witness_parent(reader, cursor, history_witness):
+    if history_witness is None:
+        return None
+    if type(history_witness) is not entry.VerifiedHistoryWitness:
+        entry.fail('entry_history_witness')
+    if cursor != history_witness.observed_commit:
+        return None
+    # Recheck the exact receipt and both Get-tree endpoints. Authority is the
+    # caller's freshly authenticated typed witness, never endpoint equality.
+    entry.unchanged_get_history(reader, history_witness.receipt_commit, cursor,
+                                history_witness=history_witness)
+    return history_witness.receipt_commit
+
+
+def source_ancestry(reader, ancestor, descendant, history_witness=None):
+    if history_witness is None:
+        reader.local.run('merge-base', '--is-ancestor', ancestor, descendant)
+        return
+    # Reuse raw OID, single-parent and 16384-node validation; no alternative
+    # network transport is supplied. The source loader must hydrate first.
+    import get_confirmed_source as source
+    loader = source.Loader(reader.local, None, None, None, '0' * 64,
+                           history_witness=history_witness)
+    loader.ancestry(ancestor, descendant)
+
+
 class Blocked(ValueError):pass
 def fail(reason):raise Blocked(reason) from None
 
@@ -97,7 +137,7 @@ def checked_receipt(reader,commit,receipt_sha,policy,budget):
     budget['receipt_bytes']+=int(size)
     return entry.read_receipt(reader,commit,receipt_sha,policy)
 
-def verified_publication(reader,row,policy,previous=None,budget=None):
+def verified_publication(reader,row,policy,previous=None,budget=None,*,history_witness=None):
     budget={'bytes':0,'events':0,'receipt_bytes':0} if budget is None else budget
     if not isinstance(row,dict) or set(row)!={'commit','parent','receipt_sha256'}:fail('outbox_chain_invalid')
     for key in ('commit','parent'):p.hex_hash(row[key],40)
@@ -106,12 +146,12 @@ def verified_publication(reader,row,policy,previous=None,budget=None):
     if entry.single_parent(reader,row['commit'])!=row['parent'] or receipt['parent_commit']!=row['parent'] or reader.source_get_tree(row['parent'])!=receipt['before_get_tree']:fail('outbox_chain_invalid')
     if previous is not None:
         if receipt['previous_receipt_commit']!=previous['commit'] or receipt['previous_receipt_sha256']!=previous['receipt_sha256'] or receipt['sequence']!=previous['sequence']+1:fail('outbox_chain_invalid')
-        entry.unchanged_get_history(reader,previous['commit'],row['parent'])
+        entry.unchanged_get_history(reader,previous['commit'],row['parent'],history_witness=history_witness)
     records=markdown_delta(reader,row['parent'],row['commit'],budget)
     if sorted(records)!=receipt['changed_content_ids'] or entry.a.sha(entry.a.encoded(entry.delta(reader,row['parent'],row['commit'])))!=receipt['delta_sha256']:fail('outbox_chain_invalid')
     return receipt,records
 
-def enqueue(root,state,expected_state_sha,chain,expected_chain_sha):
+def enqueue(root,state,expected_state_sha,chain,expected_chain_sha,*,history_witness=None):
     """Pure state transition; caller MUST durably CAS this before planning.
 
     A state-only confirmed receipt advances the traversal cursor but adds zero
@@ -124,7 +164,7 @@ def enqueue(root,state,expected_state_sha,chain,expected_chain_sha):
     anchor(chain['origin']);anchor(chain['after']);anchor(chain['tip']);p.hex_hash(chain['policy_sha256'],64)
     rows=chain['publications']
     if not isinstance(rows,list) or len(rows)>MAX_CHAIN or len(encoded(chain))>512*1024:fail('outbox_budget')
-    value=deepcopy(state);reader=git.OfflineGit(root);budget={'bytes':0,'events':0,'receipt_bytes':0}
+    value=deepcopy(state);reader=BoundedSourceReader(root);budget={'bytes':0,'events':0,'receipt_bytes':0}
     if value['origin'] is None:
         if chain['after']!=chain['origin']:fail('outbox_chain_invalid')
         start=chain['origin'];reader.tree(start['commit'])
@@ -136,7 +176,7 @@ def enqueue(root,state,expected_state_sha,chain,expected_chain_sha):
     elif chain['origin']!=value['origin'] or chain['policy_sha256']!=value['policy_sha256'] or chain['after']!=value['last_enqueued_publication']:fail('outbox_chain_invalid')
     tip=chain['tip'];old_tip=value['observed_publication_tip']
     if tip['sequence']<old_tip['sequence'] or tip['sequence']==old_tip['sequence'] and tip!=old_tip:fail('outbox_chain_invalid')
-    reader.local.run('merge-base','--is-ancestor',old_tip['commit'],tip['commit'])
+    source_ancestry(reader,old_tip['commit'],tip['commit'],history_witness)
     if tip['receipt_sha256'] is not None:
         tip_receipt=checked_receipt(reader,tip['commit'],tip['receipt_sha256'],value['policy_sha256'],budget)
         if tip_receipt['sequence']!=tip['sequence'] or entry.single_parent(reader,tip['commit'])!=tip_receipt['parent_commit'] or reader.source_get_tree(tip_receipt['parent_commit'])!=tip_receipt['before_get_tree']:fail('outbox_chain_invalid')
@@ -144,7 +184,7 @@ def enqueue(root,state,expected_state_sha,chain,expected_chain_sha):
     value['observed_publication_tip']=deepcopy(tip)
     previous=value['last_enqueued_publication']
     for row in rows:
-        receipt,records=verified_publication(reader,row,value['policy_sha256'],previous,budget)
+        receipt,records=verified_publication(reader,row,value['policy_sha256'],previous,budget,history_witness=history_witness)
         e.metadata_pending.retain_source_state_signal(value,row,receipt)
         for ident,source in records.items():
             if ident not in value['pending_by_id']:value['rotation_order'].append(ident)
@@ -152,12 +192,12 @@ def enqueue(root,state,expected_state_sha,chain,expected_chain_sha):
         previous={'commit':row['commit'],'receipt_sha256':row['receipt_sha256'],'sequence':receipt['sequence']}
         value['last_enqueued_publication']=previous
     head=reader.local.run('rev-parse','refs/heads/main').decode().strip()
-    reader.local.run('merge-base','--is-ancestor',previous['commit'],head)
+    source_ancestry(reader,previous['commit'],head,history_witness)
     if previous['sequence']>tip['sequence'] or previous['sequence']==tip['sequence'] and previous!=tip:fail('outbox_chain_invalid')
-    reader.local.run('merge-base','--is-ancestor',previous['commit'],tip['commit'])
+    source_ancestry(reader,previous['commit'],tip['commit'],history_witness)
     # Bounded prefix traversal may persist, but cannot execute before reaching
     # this independently trusted, current confirmed-publication tip.
-    entry.unchanged_get_history(reader,tip['commit'],head)
+    entry.unchanged_get_history(reader,tip['commit'],head,history_witness=history_witness)
     check_state(value);return value
 
 class QueuePublication:
@@ -166,12 +206,13 @@ class QueuePublication:
     records is a selected subset of that commit's genuine changed_content_ids.
     It NEVER relabels old pending IDs as changes in a newer/state-only commit.
     """
-    def __init__(self,root,state,expected_state_sha,*,resume=False,max_records=e.MAX_RECORDS):
+    def __init__(self,root,state,expected_state_sha,*,resume=False,max_records=e.MAX_RECORDS,history_witness=None):
         if type(max_records) is not int or not 1<=max_records<=e.MAX_RECORDS:fail('outbox_budget')
         check_state(state)
         if digest(state)!=expected_state_sha:fail('outbox_state_changed')
         if state['last_enqueued_publication']!=state['observed_publication_tip']:fail('outbox_chain_incomplete')
-        self.repo=git.OfflineGit(root);self.current_ref='refs/heads/main';self.state=deepcopy(state)
+        self.history_witness=history_witness
+        self.repo=BoundedSourceReader(root);self.current_ref='refs/heads/main';self.state=deepcopy(state)
         journal=state['engine_state']['journal']
         if journal is not None:
             if not resume:fail('journal_busy')
@@ -189,7 +230,7 @@ class QueuePublication:
                 order=[selected]
             first=state['pending_by_id'][order[0]];row={k:first[k] for k in ('commit','parent','receipt_sha256')}
             wanted=[i for i in order if state['pending_by_id'][i]['commit']==row['commit']][:max_records]
-        receipt,actual=verified_publication(self.repo,row,state['policy_sha256'])
+        receipt,actual=verified_publication(self.repo,row,state['policy_sha256'],history_witness=history_witness)
         if not wanted or any(i not in actual for i in wanted):fail('outbox_source_invalid')
         if journal is None:
             for ident in wanted:
@@ -202,7 +243,18 @@ class QueuePublication:
             'outbox_receipt_sha256':row['receipt_sha256'],'outbox_state_sha256':expected_state_sha if journal is None else desc['outbox_state_sha256']}
         if journal is not None and not e.same(desc,self.descriptor):fail('outbox_source_invalid')
         self.check(self.descriptor)
-    check=e.GitPublication.check
+    def check(self, descriptor):
+        if self.history_witness is None:
+            return e.GitPublication.check(self, descriptor)
+        if descriptor != self.descriptor: e.fail('source_invalid')
+        try:
+            head = self.repo.local.run('rev-parse', self.current_ref).decode().strip()
+            source_ancestry(self.repo, descriptor['commit'], head, self.history_witness)
+            tree = self.repo.tree(head)
+            if any(tree.get(row['path']) != ('100644', 'blob', row['blob'])
+                   for row in descriptor['records'].values()): e.fail('source_changed')
+        except e.Blocked: raise
+        except Exception: e.fail('source_changed')
     check_assets=e.GitPublication.check_assets
     read=e.GitPublication.read
 

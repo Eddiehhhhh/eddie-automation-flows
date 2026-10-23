@@ -5,6 +5,7 @@ Transports are injected from the existing approved runtime. Flushing stdout is
 not proof of platform log retention: absent/mismatched provenance fails closed.
 """
 import get_notion_fixed_source as fixed_auth
+import get_notion_authenticated_recovery as authenticated_recovery
 import get_private_proof as private_proof
 from copy import deepcopy
 from pathlib import Path
@@ -693,6 +694,13 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     public_policy=policy, approved_public_policy_sha256=approved_public_policy_sha256,
                     notion_policy_sha256=notion_policy_sha256)
             except CheckpointFailure as exc:
+                if (str(exc) == 'journal_provenance_other_controller'
+                        and authenticated_recovery.registered_run(row['id'], row['run_attempt'])
+                        and authenticated_recovery.candidate_policy(policy, row)[1]):
+                    result = authenticated_recovery.recover_checkpoint(bounded, row['id'], row['run_attempt'])
+                    match_candidate(result, row)
+                    return {**result, 'candidate_runs_checked': checked, 'candidate_attempts_checked': checked,
+                        'provenance_reads': bounded.requests, 'provenance_bytes': bounded.bytes}
                 if (str(exc) == 'journal_provenance_other_controller'
                         and historical_active.registered_run(row['id'], row['run_attempt'])
                         and historical_active.candidate_policy(policy, row)[1]):

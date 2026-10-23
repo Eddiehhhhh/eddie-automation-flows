@@ -12,6 +12,7 @@ import get_notion_properties_runtime as properties
 import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
 import get_notion_historical_active_recovery as historical_active
+import get_notion_authenticated_recovery as authenticated_recovery
 
 
 class API(transport.API):
@@ -308,15 +309,28 @@ def body_receipts_match(state, manifest):
     return True
 
 
+def held_scope_holds(state, manifest):
+    """Exact registered holds in this immutable scope, never absence evidence."""
+    engine=state['engine_state']
+    holds=e.plan_recovery.validate_holds(engine.get('unresolved_by_id',{}))
+    registered=authenticated_recovery.registry()
+    legacy=historical_active.inflight_binding();hold=historical_active.inflight_hold()
+    if legacy and hold:registered=[{'manifest_sha256':legacy['manifest_sha256'],'hold':hold}]+registered
+    member=e.digest(manifest);found={}
+    for binding in registered:
+        h=binding['hold'];ident=h['note_id'];row=manifest['records'].get(ident)
+        if (binding['manifest_sha256']==member and row and row['target']['page_id']==h['page_id']
+                and e.same(holds.get(ident),h)):
+            found[ident]=h
+    return found
+
+
 def held_scope_settled(state, manifest):
-    """May scan past one exact held scope; never means confirmed/complete."""
-    h=historical_active.inflight_hold();b=historical_active.inflight_binding()
-    if (not h or not b or e.digest(manifest)!=b['manifest_sha256']
-            or not historical_active.exact_hold_present(state['engine_state'])):return False
-    row=manifest['records'].get(h['note_id'])
-    if not row or row['target']['page_id']!=h['page_id']:return False
-    if h['note_id'] in state['engine_state']['receipts']:return False
-    others=deepcopy(manifest);others['records'].pop(h['note_id'])
+    """May scan past exact held rows; never means confirmed or resolved."""
+    holds=held_scope_holds(state,manifest)
+    if not holds or any(ident in state['engine_state']['receipts'] for ident in holds):return False
+    others=deepcopy(manifest)
+    for ident in holds:others['records'].pop(ident)
     return body_receipts_match(state,others)
 
 
@@ -328,9 +342,9 @@ def verify_held_scope(local,remote,token,root,request,current,manifest,member,po
     publication=historical.Publication(local.vault,manifest,member);publication.check(publication.descriptor)
     if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
     api=API(request,manifest['data_source_id'],sorted(manifest['records']))
-    hold=historical_active.inflight_hold()
+    holds=held_scope_holds(current,manifest)
     for ident,row in manifest['records'].items():
-        if ident==hold['note_id']:continue
+        if ident in holds:continue
         prior=current['engine_state']['receipts'][ident];snapshot=api.read_note(ident)
         fresh=e.receipt(snapshot,ident,manifest['data_source_id'],[x['id'] for x in prior['managed_blocks']],publication.descriptor,row,prior['asset_bindings'])
         if fresh!=prior:e.fail('human_edit_conflict')
@@ -457,7 +471,8 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
                 status='partial';reason='batch_boundary_yield';prior_effects=False
                 break
             settled_hold=False
-            if historical_active.exact_hold_present(current['engine_state']):
+            if (historical_active.exact_hold_present(current['engine_state'])
+                    or authenticated_recovery.exact_hold_present(current['engine_state'])):
                 observed,observed_sha=store.read()
                 if observed_sha!=last_sha:e.fail('state_changed')
                 current=observed
@@ -495,9 +510,11 @@ def apply_group(local, remote, token, root, store, request, *, selection, expect
             status = 'failed'; reason = str(exc) if str(exc) in GROUP_REASONS else 'journal_failed'
     except Exception as exc:
         status = 'failed'; reason = str(exc) if str(exc) in GROUP_REASONS else 'historical_group_failed'
-    hold=historical_active.inflight_hold()
-    unresolved_count=int(bool(current is not None and hold and historical_active.exact_hold_present(current['engine_state'])
-        and any(hold['note_id'] in m['records'] and m['records'][hold['note_id']]['target']['page_id']==hold['page_id'] for m,d in members)))
+    unresolved_count=0
+    if current is not None:
+        holds=e.plan_recovery.validate_holds(current['engine_state'].get('unresolved_by_id',{}))
+        unresolved_count=sum(any(ident in m['records'] and m['records'][ident]['target']['page_id']==hold['page_id']
+            for m,d in members) for ident,hold in holds.items())
     confirmed_pages=0
     for m,d in members:
         for ident,row in m['records'].items():
@@ -529,9 +546,11 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
     Read-only. No plan creation, state transition, transport approval or CAS.
     The caller retains original provenance/lease and confirms the later CAS.
     """
-    if not historical_active.initial_state_valid(current, sha): e.fail('state_changed')
+    authenticated=authenticated_recovery.initial_state_valid(current,sha)
+    if not authenticated and not historical_active.initial_state_valid(current, sha): e.fail('state_changed')
     active = current['engine_state']['journal']; plan = active['plan']
-    manifest,expected=historical_active.transition_manifest(manifest,expected,plan)
+    recovery=authenticated_recovery if authenticated else historical_active
+    manifest,expected=recovery.transition_manifest(manifest,expected,plan)
     historical.validate(manifest, expected, apply=True)
     if expected != plan['historical_manifest_sha256'] or manifest != plan['historical_manifest']: e.fail('approval_missing')
     if historical.creation_ids(manifest) or plan.get('property_manifest') is not None: e.fail('approval_missing')
@@ -558,7 +577,11 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
     else:
         inflight=historical_active.inflight_binding()
         prepared=historical_active.prepared_binding()
-        if (inflight and historical_active.plan_binding(plan)==inflight
+        registered=authenticated_recovery.plan_binding(plan) if authenticated else None
+        if (registered and sha==registered['proof']['anchor']['state_sha256']
+                and (operation['kind'],operation['phase'])==('append','in_flight')):
+            expected_native=None
+        elif (inflight and historical_active.plan_binding(plan)==inflight
                 and sha==inflight['resume_anchor']['state_sha256']
                 and (operation['kind'],operation['phase'])==('append','in_flight')):
             expected_native=None

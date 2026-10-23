@@ -31,10 +31,13 @@ def fail(reason):
 
 
 class Loader:
-    def __init__(self, local, remote, token, root, policy_hash):
+    def __init__(self, local, remote, token, root, policy_hash, *, history_witness=None):
         entry.a.checked(policy_hash, 64)
         self.local = local
-        self.reader = entry.a.OfflineGit(local.vault)
+        self.reader = outbox.BoundedSourceReader(local.vault)
+        if history_witness is not None and type(history_witness) is not entry.VerifiedHistoryWitness:
+            fail('entry_history_witness')
+        self.history_witness = history_witness
         self.remote = remote
         # token/root retain the shared runtime adapter signature. Credentials
         # are already encapsulated in the injected LocalGit/Remote, never read
@@ -180,6 +183,12 @@ class Loader:
     def unchanged(self, ancestor, descendant):
         self.commit(ancestor); cursor = descendant
         expected = self.reader.source_get_tree(ancestor)
+        witness = self.history_witness
+        if witness is not None and ancestor == witness.receipt_commit:
+            self.commit(witness.observed_commit)
+            self.blob(ancestor, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
+            outbox.witness_parent(self.reader, witness.observed_commit, witness)
+            ancestor = witness.observed_commit
         for _ in range(entry.MAX_INTERVENING + 1):
             self.commit(cursor)
             if self.reader.source_get_tree(cursor) != expected:
@@ -197,6 +206,14 @@ class Loader:
             parents = self.ancestry_metadata(cursor)
             if cursor == ancestor:
                 return
+            witness = self.history_witness
+            if witness is not None and cursor == witness.observed_commit:
+                if parents != (entry.single_parent(self.reader, cursor),):
+                    fail('source_chain_invalid')
+                self.commit(witness.receipt_commit)
+                self.blob(witness.receipt_commit, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
+                cursor = outbox.witness_parent(self.reader, cursor, witness)
+                continue
             parent = entry.single_parent(self.reader, cursor)
             if parents != (parent,):
                 fail('source_chain_invalid')
@@ -264,7 +281,7 @@ class Loader:
         return used
 
 
-def load_confirmed_chain(local, remote, token, root, tip, origin, after, policy_hash):
+def load_confirmed_chain(local, remote, token, root, tip, origin, after, policy_hash, *, history_witness=None):
     """Return enqueue's private chain envelope; no state/ref/remote writes.
 
     tip/origin/after are exact {commit, receipt_sha256, sequence} anchors.
@@ -276,7 +293,7 @@ def load_confirmed_chain(local, remote, token, root, tip, origin, after, policy_
         outbox.anchor(value)
     if not origin['sequence'] <= after['sequence'] <= tip['sequence'] or after['sequence'] == origin['sequence'] and after != origin or tip['sequence'] == after['sequence'] and tip != after:
         fail('source_chain_invalid')
-    loader = Loader(local, remote, token, root, policy_hash)
+    loader = Loader(local, remote, token, root, policy_hash, history_witness=history_witness)
     loader.receipt(origin); loader.receipt(after)
     head = entry.a.checked(loader.reader.local.run('rev-parse', entry.r.MAIN_REF).decode().strip(), 40)
     loader.unchanged(tip['commit'], head)
@@ -312,7 +329,7 @@ def load_confirmed_chain(local, remote, token, root, tip, origin, after, policy_
         used = loader.materialize(row, paths, MAX_CONTENT_BYTES - budget['bytes'])
         if used is None:
             break
-        receipt, records = outbox.verified_publication(loader.reader, row, policy_hash, cursor, budget)
+        receipt, records = outbox.verified_publication(loader.reader, row, policy_hash, cursor, budget, history_witness=history_witness)
         selected.append(row)
         cursor = {'commit': row['commit'], 'receipt_sha256': row['receipt_sha256'], 'sequence': receipt['sequence']}
         loader.reader.cache.clear(); loader.metadata.clear()
@@ -325,7 +342,7 @@ def load_confirmed_chain(local, remote, token, root, tip, origin, after, policy_
     return result
 
 
-def load_queue_publication(local, remote, token, root, publication, policy_hash):
+def load_queue_publication(local, remote, token, root, publication, policy_hash, *, history_witness=None):
     """Load one original pending publication's entire genuine Markdown diff.
 
     publication is the exact trusted pending/journal row containing only commit,
@@ -338,7 +355,7 @@ def load_queue_publication(local, remote, token, root, publication, policy_hash)
     for key in ('commit', 'parent'):
         entry.a.checked(publication[key], 40)
     entry.a.checked(publication['receipt_sha256'], 64)
-    loader = Loader(local, remote, token, root, policy_hash)
+    loader = Loader(local, remote, token, root, policy_hash, history_witness=history_witness)
     head = entry.a.checked(loader.reader.local.run('rev-parse', entry.r.MAIN_REF).decode().strip(), 40)
     loader.ancestry(publication['commit'], head)
     loader.blob(publication['commit'], entry.FULL_RECEIPT, entry.MAX_RECEIPT)
@@ -349,4 +366,4 @@ def load_queue_publication(local, remote, token, root, publication, policy_hash)
         fail('source_chain_invalid')
     if loader.materialize(row, paths, MAX_CONTENT_BYTES) is None:
         fail('source_publication_budget')
-    return outbox.verified_publication(loader.reader, row, policy_hash)
+    return outbox.verified_publication(loader.reader, row, policy_hash, history_witness=history_witness)
