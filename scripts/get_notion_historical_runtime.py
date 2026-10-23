@@ -34,6 +34,62 @@ class API(transport.API):
         return snapshot
 
 
+def creation_recovery_for(active, manifest, expected, api):
+    """One code-pinned unknown CREATE; native reads only, never retry POST.
+
+    Permission is the exact immutable registration, not the freshly generated
+    snapshot digest. The engine re-reads and repeats its strict created check.
+    """
+    from get_notion_live_transport import fingerprint, wire_blocks
+    from get_notion_property_transaction import creation_wire_properties
+    import get_notion_create_resume as create_resume
+    if active is None: return None
+    plan = active.get('plan') if isinstance(active, dict) else None
+    if not isinstance(plan, dict): e.fail('journal_busy')
+    digest = e.digest(plan)
+    binding = create_resume.plan_binding(plan)
+    if binding is None: return None
+    keys = {'plan_sha256', 'manifest_sha256', 'source_commit', 'initial_index',
+            'operation_sha256', 'note_id', 'page_id', 'source', 'request_sha256'}
+    if (not isinstance(binding, dict) or not keys <= set(binding)
+            or binding['plan_sha256'] != digest or active.get('plan_sha256') != digest
+            or binding['manifest_sha256'] != expected or plan.get('historical_manifest') != manifest
+            or plan.get('historical_manifest_sha256') != expected
+            or binding['source_commit'] != manifest['source_commit']
+            or type(binding['initial_index']) is not int
+            or not 0 <= binding['initial_index'] < len(plan.get('records', []))):
+        e.fail('approval_missing')
+    e.p.hex_hash(binding['operation_sha256'],64);e.p.hex_hash(binding['request_sha256'],64)
+    e.p.note_id(binding['note_id']);e.p.notion_id(binding['page_id'])
+    index = active.get('index')
+    if type(index) is not int or index < binding['initial_index']:e.fail('journal_busy')
+    if index != binding['initial_index']:return None
+    row = plan['records'][index]; operation = active.get('operation')
+    if (row.get('note_id') != binding['note_id'] or row.get('action') != 'create'
+            or row.get('source') != binding['source']
+            or manifest['records'].get(row['note_id'], {}).get('mode') != 'new_numeric'
+            or not isinstance(operation,dict) or operation.get('kind') != 'create'):
+        e.fail('approval_missing')
+    # Only the original in-flight/no-response state can borrow this permission.
+    if (operation.get('phase') != 'in_flight' or operation.get('response') is not None
+            or e.digest(operation) != binding['operation_sha256']):
+        e.fail('uncertain_create')
+    before = operation.get('before')
+    if (not isinstance(before,dict) or before.get('complete') is not True
+            or before.get('native_blocks_available') is not True
+            or before.get('identity_query_complete') is not True
+            or before.get('exact_id_matches') != []
+            or e.target(before,row['note_id'],manifest['data_source_id']) is not None):
+        e.fail('uncertain_create')
+    request = {'parent':{'type':'data_source_id','data_source_id':manifest['data_source_id']},
+        'properties':creation_wire_properties(row), 'children':wire_blocks(row['request_blocks'],None,uploaded_pngs=row.get('uploaded_pngs'))}
+    if fingerprint('POST','/pages',request) != binding['request_sha256']:
+        e.fail('approval_missing')
+    snapshot = api.read_note(row['note_id'])
+    e.created(snapshot,row,manifest['data_source_id'],binding['page_id'])
+    return {'plan_sha256':digest,'note_id':row['note_id'],'page_id':binding['page_id'],
+            'snapshot_sha256':e.target_sha(snapshot,row['note_id'],manifest['data_source_id'])}
+
 def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_hash,apply,writers_guard,loader=None,admit=None,verify_reused=False,row_admit=None):
     historical.validate(manifest,expected,apply=apply)
     if transport.native.sha(manifest['data_source_id'])!=transport.native.DATA_SOURCE_PIN or transport.native.sha(manifest['database_id'])!=transport.native.DATABASE_PIN: e.fail('wrong_parent')
@@ -111,7 +167,9 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
             outer=deepcopy(adapter.outer)
             outer['engine_state']=deepcopy(engine)
             return row_admit(outer,pending_plan)
+        create_recovery=creation_recovery_for(active,manifest,expected,api)
         result=e.execute(plan,e.digest(plan),publication,api,adapter,expected_store_sha=sha,writers_guard=writers_guard,
+                         create_recovery=create_recovery,approved_recovery_sha=e.digest(create_recovery) if create_recovery is not None else None,
                          authorize_batch=pipeline.batch_authorizer(plan,api,request,adapter),
                          authorize_row=ordinary_row if row_admit is not None else None)
         safe=e.public_report(result)
@@ -559,6 +617,10 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
     Read-only. No plan creation, state transition, transport approval or CAS.
     The caller retains original provenance/lease and confirms the later CAS.
     """
+    import get_notion_create_resume as create_resume
+    if create_resume.initial_or_transitioned_state_valid(current,sha):
+        return verify_create_resume_transition(local,remote,token,root,current,sha,request,
+            manifest=manifest,expected=expected,policy_hash=policy_hash,writers_guard=writers_guard)
     authenticated=authenticated_recovery.initial_state_valid(current,sha)
     if not authenticated and not historical_active.initial_state_valid(current, sha): e.fail('state_changed')
     active = current['engine_state']['journal']; plan = active['plan']
@@ -615,3 +677,41 @@ def verify_active_transition(local, remote, token, root, current, sha, request, 
     publication.check(plan['publication'])
     if not e.p.writer_gate({'old_writer_evidence': writers_guard()}): e.fail('writer_gate_unknown')
     return {'source_ancestry_verified': True, 'native_verified': True, 'external_writes': 0, 'loader': loader}
+
+
+def verify_create_resume_transition(local,remote,token,root,current,sha,request,*,
+                                    manifest,expected,policy_hash,writers_guard):
+    """Exact unknown CREATE native confirmation before policy-only transition."""
+    import get_notion_create_resume as create_resume
+    if not create_resume.initial_or_transitioned_state_valid(current,sha):e.fail('state_changed')
+    active=current['engine_state']['journal'];plan=active['plan']
+    historical.validate(manifest,expected,apply=True)
+    if (manifest!=plan.get('historical_manifest') or expected!=plan.get('historical_manifest_sha256')
+            or not historical.creation_ids(manifest)):e.fail('approval_missing')
+    property_expected=private_input.creation_property_for(expected,required=True)
+    raw=private_input.read(remote,property_expected,contract=properties.tx.CONTRACT)
+    property_manifest=private_input.strict_capture_json(raw,256*1024)
+    if property_manifest!=plan.get('property_manifest') or property_expected!=plan.get('property_manifest_sha256'):
+        e.fail('approval_missing')
+    historical.bind_creation_properties(manifest,property_manifest,property_expected)
+    historical.require_creation_capture(current.get('historical_captures',{}),manifest,expected)
+    properties.check_dependency()
+    loader=source_loader.Loader(local,remote,token,root,policy_hash)
+    head=source_loader.entry.a.checked(local.run('rev-parse',source_loader.entry.r.MAIN_REF).decode().strip(),40)
+    loader.ancestry(manifest['source_commit'],head)
+    for source in manifest['records'].values():loader.blob(manifest['source_commit'],source['path'],e.p.MAX_NOTE)
+    publication=historical.Publication(local.vault,manifest,expected)
+    if publication.descriptor!=plan['publication']:e.fail('source_changed')
+    api=API(request,manifest['data_source_id'],sorted(manifest['records']))
+    schema=api.schema();titles=[name for name,row in schema.items() if isinstance(row,dict) and row.get('type')=='title']
+    if len(titles)!=1:e.fail('property_schema_changed')
+    policy={'data_source_id':manifest['data_source_id'],'id_property':'笔记 ID','title_property':titles[0],
+        'allow_create':True,'allow_archive':True,'format_accepted':True,'old_writer_evidence':writers_guard()}
+    if not e.p.writer_gate(policy) or policy!=plan['policy']:e.fail('writer_gate_unknown')
+    properties.tx.context(publication,schema,property_manifest,property_expected,policy)
+    historical.check_creation_titles(plan,publication,property_manifest,property_expected)
+    recovered=creation_recovery_for(active,manifest,expected,api)
+    if recovered is None:e.fail('uncertain_create')
+    publication.check(plan['publication'])
+    if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
+    return {'source_ancestry_verified':True,'native_verified':True,'external_writes':0,'loader':loader}

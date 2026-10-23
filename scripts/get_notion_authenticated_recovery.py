@@ -6,6 +6,7 @@ only releases that execution slot while permanently denying the note/page.
 """
 from copy import deepcopy
 import get_private_runtime_bindings as bindings
+import get_notion_create_resume as create_resume
 
 TAG = 'authenticated_unknown_append_v1'
 
@@ -45,10 +46,24 @@ def _make_hold(b, note, page):
         'reason': 'uncertain_append', 'effects': 'unresolved', 'retry_allowed': False}
 
 
-def run_binding(run_id, attempt=None):
+def _append_run_binding(run_id, attempt=None):
     found = [b for b in registry() if type(run_id) is int and b['proof']['run_id'] == run_id
              and (attempt is None or type(attempt) is int and b['proof']['run_attempt'] == attempt)]
     return found[0] if len(found) == 1 else None
+
+
+def run_binding(run_id, attempt=None):
+    old = _append_run_binding(run_id, attempt)
+    new = create_resume.run_binding(run_id, attempt)
+    if old is not None and new is not None: raise ValueError('authenticated_recovery_invalid')
+    return new if new is not None else old
+
+
+def plan_binding(plan):
+    old = _append_plan_binding(plan)
+    new = create_resume.plan_binding(plan)
+    if old is not None and new is not None: raise ValueError('authenticated_recovery_invalid')
+    return new if new is not None else old
 
 
 def registered_run(run_id, attempt=None):
@@ -56,11 +71,13 @@ def registered_run(run_id, attempt=None):
 
 
 def candidate_policy(policy, run):
+    if create_resume.run_binding(run.get("id"), run.get("run_attempt")) is not None:
+        return create_resume.candidate_policy(policy, run)
     import get_publication_provenance as p
     import get_recurring_entry as entry
     import get_recurring_controller as controller
     import get_recurring_policy_recovery as recovery
-    b = run_binding(run.get('id'), run.get('run_attempt'))
+    b = _append_run_binding(run.get('id'), run.get('run_attempt'))
     if not b: return policy, False
     old = b['public_policy']
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
@@ -76,8 +93,10 @@ def candidate_policy(policy, run):
 
 
 def recover_checkpoint(client, run_id, run_attempt):
+    if create_resume.run_binding(run_id, run_attempt) is not None:
+        return create_resume.recover_checkpoint(client, run_id, run_attempt)
     import get_notion_journal_runtime as j
-    b = run_binding(run_id, run_attempt)
+    b = _append_run_binding(run_id, run_attempt)
     if not b: j.fail('journal_provenance_other_controller')
     result = j.recover_anchor(client, run_id=run_id, run_attempt=run_attempt,
         public_policy=b['public_policy'], approved_public_policy_sha256=b['public_policy_sha256'],
@@ -88,7 +107,7 @@ def recover_checkpoint(client, run_id, run_attempt):
     return {**result, 'recovery_anchor': TAG}
 
 
-def plan_binding(plan):
+def _append_plan_binding(plan):
     o = _codec()
     matches = [b for b in registry() if o.digest(plan) == b['plan_sha256']]
     return matches[0] if len(matches) == 1 else None
@@ -96,7 +115,7 @@ def plan_binding(plan):
 
 def initial_state_valid(state, sha):
     try:
-        o = _codec(); j = state['engine_state']['journal']; b = plan_binding(j['plan'])
+        o = _codec(); j = state['engine_state']['journal']; b = _append_plan_binding(j['plan'])
         if not b or o.digest(state) != sha or sha != b['proof']['anchor']['state_sha256']: return False
         row = j['plan']['records'][b['initial_index']]; op = j['operation']; h = b['hold']
         return (j['plan_sha256'] == b['plan_sha256'] and j['index'] == b['initial_index']
@@ -119,9 +138,11 @@ def exact_hold_present(engine):
 
 
 def allows(plan, journal):
-    """Reuse the original append-only operation verifier for every phase."""
+    """Dispatch exact create registrations; retain original append verifier."""
+    if create_resume.plan_binding(plan) is not None:
+        return create_resume.allows(plan, journal)
     try:
-        o = _codec(); b = plan_binding(plan)
+        o = _codec(); b = _append_plan_binding(plan)
         if (not b or set(journal) != {'plan_sha256', 'plan', 'index', 'operation'}
                 or journal.get('plan_sha256') != b['plan_sha256'] or o.encoded(journal.get('plan')) != o.encoded(plan)
                 or plan.get('historical_only') is not True or plan.get('property_only')
@@ -159,7 +180,7 @@ def isolation_successors(binding):
 
 
 def prior_isolation(state):
-    o = _codec(); j = state['engine_state']['journal']; b = plan_binding(j['plan']) if j else None
+    o = _codec(); j = state['engine_state']['journal']; b = _append_plan_binding(j['plan']) if j else None
     if not b or not allows(j['plan'],j) or not exact_hold_present(state['engine_state']): return None
     matches = [v for v in isolation_successors(b) if v['policy_sha256'] == state['policy_sha256']
                and v['proof']['anchor']['state_sha256'] == o.digest(state)
@@ -176,7 +197,7 @@ def transition_isolated_policy(state, sha, new_policy):
 
 
 def _isolated_variant(state, new_policy):
-    b = plan_binding(state['engine_state']['journal']['plan'])
+    b = _append_plan_binding(state['engine_state']['journal']['plan'])
     result = deepcopy(state); result['policy_sha256'] = new_policy
     result['engine_state'].setdefault('unresolved_by_id', {})[b['hold']['note_id']] = deepcopy(b['hold'])
     result['engine_state']['journal']['index'] += 1
@@ -192,7 +213,10 @@ def isolate_outer(state, sha, new_policy):
 
 
 def check_mode(state, found, manifest, expected, other_modes):
-    o = _codec(); j = state['engine_state']['journal']; b = plan_binding(j['plan']) if j else None
+    active = state['engine_state']['journal']
+    if found.get('recovery_anchor') == create_resume.TAG or (active and create_resume.plan_binding(active['plan']) is not None):
+        return create_resume.check_mode(state, found, manifest, expected, other_modes)
+    o = _codec(); j = state['engine_state']['journal']; b = _append_plan_binding(j['plan']) if j else None
     if found.get('recovery_anchor') != TAG: return
     if not b or any(other_modes) or expected != b['selection_sha256']: o.fail('outbox_state_invalid')
     import get_notion_historical_input as inputs
@@ -210,7 +234,7 @@ def verify_successor(local, remote, loader, head, proof):
     from types import SimpleNamespace
     import get_notion_remote_journal as j
     import get_recurring_policy_recovery as policy
-    o = _codec(); b = run_binding(proof.get('run_id'), proof.get('run_attempt'))
+    o = _codec(); b = _append_run_binding(proof.get('run_id'), proof.get('run_attempt'))
     if (not b or proof.get('recovery_anchor') != TAG or proof.get('anchor') != b['proof']['anchor']
             or proof.get('checkpoint') != b['proof']['checkpoint']): o.fail('outbox_state_invalid')
     if remote.ref(j.REF) != head: o.fail('outbox_state_changed')
@@ -270,7 +294,7 @@ def verify_successor(local, remote, loader, head, proof):
 
 
 def transition_manifest(manifest, expected, plan):
-    o = _codec(); b = plan_binding(plan)
+    o = _codec(); b = _append_plan_binding(plan)
     if not b: return manifest, expected
     if expected != b['selection_sha256']: o.fail('outbox_state_invalid')
     import get_notion_historical_input as inputs
@@ -282,9 +306,12 @@ def transition_manifest(manifest, expected, plan):
 
 def preserve(before, after):
     """CAS-level monotonicity in addition to external checkpoint authentication."""
+    active = before['engine_state']['journal']
+    if active and create_resume.plan_binding(active['plan']) is not None:
+        return create_resume.preserve(before, after)
     import get_notion_outbox as o
     old = before['engine_state']['journal']
-    b = plan_binding(old['plan']) if old else None
+    b = _append_plan_binding(old['plan']) if old else None
     if not b: return
     if old is None or old.get('plan_sha256') != b['plan_sha256']: return
     if not allows(old['plan'], old): o.fail('outbox_state_invalid')

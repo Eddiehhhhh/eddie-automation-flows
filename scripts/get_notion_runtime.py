@@ -34,6 +34,7 @@ import get_notion_run53_recovery as run53_recovery
 import get_notion_run57_recovery as run57_recovery
 import get_notion_historical_active_recovery as historical_active
 import get_notion_authenticated_recovery as authenticated_recovery
+import get_notion_create_resume as create_resume
 import get_notion_idle_recovery as idle_recovery
 import get_notion_blocked_idle_recovery as blocked_idle
 import get_notion_run16_recovery as run16_recovery
@@ -622,6 +623,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 anchor=historical_active.verify_inflight_successor(local,remote,loader,parent,found)
             if present and found.get('recovery_anchor') == authenticated_recovery.TAG:
                 anchor=authenticated_recovery.verify_successor(local,remote,loader,parent,found)
+            if present and found.get('recovery_anchor') == create_resume.TAG:
+                anchor=create_resume.verify_successor(local,remote,loader,parent,found)
             post_cas_binding=historical_active.prepared_binding()
             post_cas_paths=() if post_cas_binding is None else tuple(sorted({
                 path for row in post_cas_binding['known_descendants'] for path in row['changes']}))
@@ -666,6 +669,17 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 write_possible=apply
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
+            if present and found.get('recovery_anchor') == create_resume.TAG:
+                # Read-only full native/source acceptance precedes policy-only CAS.
+                # Never isolate, skip, or retry the registered uncertain create.
+                bridge_materialized=historical_runtime.verify_active_transition(local, remote, token, root, current, sha, request,
+                    manifest=historical_manifest, expected=approved_historical_manifest_sha256,
+                    policy_hash=public_policy['get_policy_sha256'], writers_guard=guarded_writers)
+                historical_bridge_loader=bridge_materialized['loader']
+                candidate=create_resume.transition_outer(current,sha,public_policy['get_policy_sha256'],proof=found)
+                write_possible=apply
+                if apply: current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                else: store=ReadOnlyStore(candidate);current,sha=store.read()
             if present and found.get('recovery_anchor') == authenticated_recovery.TAG:
                 already_new_isolated=(current['policy_sha256']==public_policy['get_policy_sha256']
                     and authenticated_recovery.exact_hold_present(current['engine_state']))
