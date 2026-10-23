@@ -104,7 +104,7 @@ def recover_checkpoint(client, run_id, run_attempt, *, current_public_policy):
 
 
 def _verify_business(state,v):
-    """Re-derive 29 confirmed selected rows plus one exact unresolved hold.
+    """Re-derive the registered selection minus one exact unresolved hold.
 
     Other globally registered old holds are preserved, not counted as this
     selection's failures. Their entire map is still byte-locked to registration.
@@ -115,6 +115,7 @@ def _verify_business(state,v):
     engine=state['engine_state']
     if engine['journal'] is not None or o.encoded(engine.get('unresolved_by_id',{})) != o.encoded(v['holds']): o.fail('outbox_state_invalid')
     members=inputs.validate_apply_selection(v['selection'],v['selection_sha256'],apply=True)
+    expected_rows=sum(len(manifest['records']) for manifest, _ in members)
     rows={}; confirmed={}; selected_holds=[]
     for manifest,digest in members:
         for ident,row in manifest['records'].items():
@@ -131,7 +132,7 @@ def _verify_business(state,v):
             else:
                 if not historical.body_receipts_match(state,{**manifest,'records':{ident:row}}): o.fail('outbox_state_invalid')
                 confirmed[ident]=engine['receipts'][ident]
-    if (len(rows)!=30 or len(confirmed)!=29 or selected_holds!=[v['selected_hold']]
+    if (expected_rows <= 1 or len(rows)!=expected_rows or len(confirmed)!=expected_rows-1 or selected_holds!=[v['selected_hold']]
             or o.encoded(confirmed)!=o.encoded(v['receipts'])): o.fail('outbox_state_invalid')
 
 

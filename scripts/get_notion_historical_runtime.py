@@ -139,17 +139,24 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
 def capture(local,remote,token,root,store,request,*,candidate,expected,policy_hash,apply,writers_guard,loader=None):
     """Read Notion only; retain exact native evidence in the ONE private journal."""
     probe=historical.validate_capture(candidate,expected,apply=apply)
+    new_ids=historical.creation_ids(probe)
+    if new_ids and new_ids != set(candidate['records']):e.fail('approval_missing')
     current,version=store.read();outbox.check_state(current)
     if current['engine_state']['journal'] is not None: e.fail('journal_busy')
     if not e.p.writer_gate({'old_writer_evidence':writers_guard()}): e.fail('writer_gate_unknown')
     saved=current.get('historical_captures',{}).get(expected)
     reused=saved is not None
+    if saved is not None and new_ids:
+        # Never retrofit immutable old captures or pretend old evidence is fresh.
+        historical.check_native_schema_capture(saved)
     if saved is None:
         if loader is None: loader=source_loader.Loader(local,remote,token,root,policy_hash)
         loader.commit(candidate['source_commit'])
         for row in candidate['records'].values():loader.blob(candidate['source_commit'],row['path'],e.p.MAX_NOTE)
         publication=historical.Publication(local.vault,probe,e.digest(probe))
         api=API(request,candidate['data_source_id'],sorted(candidate['records']))
+        native_schema=api.schema() if new_ids else None
+        if new_ids:historical.native_schema_evidence(native_schema)
         snapshots={ident:api.read_note(ident) for ident in sorted(candidate['records'])}
         manifest=deepcopy(candidate);manifest['contract']=historical.CONTRACT
         for ident,row in manifest['records'].items():
@@ -159,6 +166,9 @@ def capture(local,remote,token,root,store,request,*,candidate,expected,policy_ha
                 row['target']=pin
             elif e.target(snapshots[ident],ident,manifest['data_source_id']) is not None:e.fail('duplicate_id')
         saved={'candidate':deepcopy(candidate),'manifest':manifest,'snapshots':snapshots}
+        if new_ids:
+            if api.schema()!=native_schema:e.fail('property_schema_changed')
+            saved['native_schema_evidence']=historical.native_schema_evidence(native_schema)
         historical.check_captures({expected:saved})
         publication.check(publication.descriptor)
         if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')

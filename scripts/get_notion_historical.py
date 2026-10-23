@@ -284,7 +284,7 @@ def check_captures(captures):
     if not isinstance(captures,dict) or len(captures)>250: e.fail('state_invalid')
     if len(e.encoded(captures))>16*1024*1024: e.fail('request_budget')
     for key,value in captures.items():
-        if not isinstance(value,dict) or set(value)!={'candidate','manifest','snapshots'}: e.fail('state_invalid')
+        if not isinstance(value,dict) or set(value) not in ({'candidate','manifest','snapshots'}, {'candidate','manifest','snapshots','native_schema_evidence'}): e.fail('state_invalid')
         validate_capture(value['candidate'],key)
         manifest=value['manifest'];validate(manifest,e.digest(manifest))
         if set(value['snapshots'])!=set(manifest['records']): e.fail('state_invalid')
@@ -294,6 +294,50 @@ def check_captures(captures):
         for row in base['records'].values():
             if row['mode']=='existing_placeholder': row['target']={'page_id':row['target']['page_id']}
         if base!=value['candidate']: e.fail('state_invalid')
+        if 'native_schema_evidence' in value:
+            check_native_schema_capture(value)
+
+
+
+SCHEMA_CAPTURE_CONTRACT = 'get-notion-native-schema-capture-1'
+
+
+def native_schema_evidence(properties):
+    """Validate properties returned by native API.schema; no inferred IDs."""
+    from get_notion_properties import schema_projection
+    if not isinstance(properties, dict) or len(e.encoded(properties)) > 256 * 1024:
+        e.fail('property_schema_changed')
+    identity = properties.get('笔记 ID')
+    titles = [value for value in properties.values()
+              if isinstance(value, dict) and value.get('type') == 'title']
+    if (not isinstance(identity, dict) or identity.get('type') != 'rich_text'
+            or not isinstance(identity.get('id'), str) or not identity['id']
+            or len(titles) != 1 or not isinstance(titles[0].get('id'), str)
+            or not titles[0]['id']):
+        e.fail('property_schema_changed')
+    projection = schema_projection(properties)
+    return {'contract': SCHEMA_CAPTURE_CONTRACT, 'properties': deepcopy(properties),
+            'properties_sha256': e.digest(properties),
+            'schema_projection_sha256': e.digest(projection)}
+
+
+def check_native_schema_capture(value):
+    """A schema witness is tied to one exact all-new capture, never ownership."""
+    manifest = value['manifest']
+    if creation_ids(manifest) != set(manifest['records']):
+        e.fail('state_invalid')
+    evidence = value.get('native_schema_evidence')
+    if (not isinstance(evidence, dict)
+            or set(evidence) != {'contract', 'properties', 'properties_sha256', 'schema_projection_sha256'}
+            or evidence != native_schema_evidence(evidence.get('properties'))):
+        e.fail('state_invalid')
+    for ident, snapshot in value['snapshots'].items():
+        if (not isinstance(snapshot, dict) or snapshot.get('complete') is not True
+                or snapshot.get('native_blocks_available') is not True
+                or snapshot.get('identity_query_complete') is not True
+                or snapshot.get('exact_id_matches') != []
+                or e.target(snapshot, ident, manifest['data_source_id']) is not None):
+            e.fail('target_invalid')
 
 
 def preserve_captures(old,new):
