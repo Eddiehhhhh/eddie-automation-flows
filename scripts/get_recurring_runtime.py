@@ -34,7 +34,7 @@ STAGES = frozenset(('policy', 'execution_provenance', 'remote_guard', 'checkout'
     'publication', 'old_writer_guard', 'credentials', 'source_transport'))
 ENTRY_ERRORS = frozenset(('entry_batch_bound', 'entry_bootstrap_changed',
     'entry_content_ids', 'entry_counts', 'entry_external_anchor_required',
-    'entry_foreign_delta', 'entry_foreign_get_change', 'entry_history_bound',
+    'entry_foreign_delta', 'entry_foreign_get_change', 'entry_history_bound', 'entry_history_witness',
     'entry_non_linear_history', 'entry_ownership_changed', 'entry_plan',
     'entry_policy_changed', 'entry_publication_unconfirmed', 'entry_readback',
     'entry_receipt_anchor', 'entry_receipt_budget', 'entry_receipt_only_commit',
@@ -44,7 +44,7 @@ ENTRY_ERRORS = frozenset(('entry_batch_bound', 'entry_bootstrap_changed',
 
 
 CORE_ERRORS = frozenset(('adapter_adoption_changed_note', 'adapter_alias', 'adapter_anchor', 'adapter_arguments', 'adapter_atomic_unavailable', 'adapter_baseline_hash', 'adapter_baseline_readback', 'adapter_blob_budget', 'adapter_blob_readback', 'adapter_candidate_publish', 'adapter_candidate_readback', 'adapter_detail_schema', 'adapter_detail_set', 'adapter_duplicate_source', 'adapter_file_budget', 'adapter_file_changed', 'adapter_incomplete_capture', 'adapter_incomplete_list', 'adapter_missing_blob', 'adapter_old_hash', 'adapter_operation', 'adapter_output', 'adapter_output_conflict', 'adapter_ownership_changed', 'adapter_path', 'adapter_receipt', 'adapter_source_changed', 'adapter_source_identity', 'adapter_source_tree', 'adapter_state_budget', 'adapter_state_commit', 'adapter_state_hash', 'adapter_state_schema', 'adapter_state_source_hash', 'adapter_state_worktree_changed', 'adapter_tree_budget', 'adapter_write_scope', 'asset_materialization_required', 'baseline_missing', 'canonical_alias', 'canonical_baseline_identity', 'canonical_baseline_type', 'canonical_baseline_version', 'canonical_budget', 'canonical_current_set', 'canonical_details', 'canonical_duplicate_identity', 'canonical_duplicate_path', 'canonical_generated_header', 'canonical_identity', 'canonical_legacy_binding', 'canonical_legacy_state_missing', 'canonical_note_budget', 'canonical_owner_overlap', 'canonical_parent_changed', 'canonical_path', 'canonical_preview_anchor', 'canonical_preview_blob', 'canonical_preview_schema', 'canonical_readback', 'canonical_reserved_changed', 'canonical_selection', 'canonical_source_schema', 'canonical_state_hash', 'canonical_state_schema', 'canonical_write_scope', 'destination_collision', 'detail_identity', 'detail_required', 'identity_reserved', 'legacy_missing', 'legacy_references_unresolved', 'legacy_structure_ambiguous', 'local_note_edited', 'preview_source_changed', 'provenance_budget', 'provenance_controller_policy', 'provenance_credentials', 'provenance_exclusion', 'provenance_execution', 'provenance_job', 'provenance_job_bound', 'provenance_log_redirect', 'provenance_logs_shape', 'provenance_logs_unavailable', 'provenance_no_receipt', 'provenance_no_verified_publication', 'provenance_policy', 'provenance_receipt_fork', 'provenance_receipt_sequence', 'provenance_record', 'provenance_record_count', 'provenance_repository', 'provenance_run', 'provenance_run_bound', 'provenance_run_changed', 'provenance_schema', 'provenance_target', 'provenance_timestamp', 'provenance_transport', 'provenance_unavailable', 'provenance_unconfirmed', 'provenance_workflow', 'source_created_changed', 'source_field_missing', 'source_metadata_changed', 'source_metadata_shape', 'source_missing', 'source_note_type_changed', 'source_payload_incomplete', 'source_shadowed_field', 'source_shape_unsupported', 'source_structured_text_unmapped', 'source_text_missing', 'source_transcript_pending', 'source_unknown_changed', 'source_unknown_fields', 'source_version_mismatch', 'source_version_race'))
-CORE_ERRORS = CORE_ERRORS | {'provenance_prepare_only'}
+CORE_ERRORS = CORE_ERRORS | {'provenance_prepare_only', 'provenance_history_witness', 'provenance_candidate_bound'}
 SOURCE_ERRORS = {'GetNote HTTP '+str(v): 'source_http_'+str(v) for v in (400,401,403,404,408,429,500,502,503,504)}
 SOURCE_ERRORS.update({'GetNote transport failed': 'source_transport_failed', 'GetNote redirect blocked': 'source_redirect_blocked', 'GetNote incomplete body': 'source_incomplete_body', 'Get response byte limit reached': 'source_response_budget'})
 
@@ -129,8 +129,9 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
     at_stage('bootstrap_inventory', load_inventory, reader, remote, token, root / 'bootstrap', bootstrap['commit'])
     current = at_stage('current_inventory', load_inventory, reader, remote, token, root / 'parent', parent)
     anchor = None
+    history_witness = None
     if entry.FULL_RECEIPT in reader.tree(parent):
-        verified = at_stage('receipt_provenance', provenance.discover, client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt)
+        verified = at_stage('receipt_provenance', provenance.discover, client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt, capture_history_witness=True)
         anchor = verified['anchor']; commit = anchor['commit']
         fetch_commit(local, commit, entry.MAX_INTERVENING + 2)
         load_receipt(reader, remote, token, root, commit)
@@ -138,6 +139,10 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
         if receipt['sequence'] != verified['receipt_sequence']:
             fail('runtime_receipt')
         before = receipt['parent_commit']; previous = receipt['previous_receipt_commit']
+        if provenance.history_witness_required(anchor, receipt):
+            history_witness = verified.get('history_witness') or at_stage('receipt_provenance', provenance.verify_history_witness, client, policy, candidate_runs_checked=verified['candidate_runs_checked'])
+            fetch_commit(local, history_witness.observed_commit)
+
         # The independently authenticated receipt binds these exact hashes.
         fetch_commit(local, before, entry.MAX_INTERVENING + 2)
         fetch_commit(local, previous)
@@ -145,14 +150,14 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
             load_receipt(reader, remote, token, root, previous)
         for target in sorted({before, commit}):
             at_stage('current_inventory', load_inventory, reader, remote, token, root / target, target)
-    _, _, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap)
+    _, _, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap, history_witness=history_witness)
     _, legacy, registry = states
     at_stage('legacy_baselines', m.selected_baselines, reader, legacy, parent, remote)
     at_stage('new_baselines', engine.new_baselines, reader, registry, parent, remote)
     preview = None
     if n.STATE not in current:
         _, preview = at_stage('preview_inputs', m.load_canonical_inputs, reader, remote, token, root, parent)
-    return anchor, preview
+    return anchor, preview, history_witness
 
 
 def run(token, source, *, policy, approved_policy_sha256, remote=None, public_client=None,
@@ -191,12 +196,12 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
         local = at_stage('checkout', r.readback_checkout, root / 'objects', bootstrap['capture_anchor']['capture_commit'], token)
         remote.local = local
         reader, evidence, _ = at_stage('capture_evidence', m.load_evidence, local, remote, token, root, parent, anchor=bootstrap['capture_anchor'])
-        anchor, preview = at_stage('trusted_inputs', load_trusted_inputs, local, reader, evidence, remote, token, root, parent, client, policy,
+        anchor, preview, history_witness = at_stage('trusted_inputs', load_trusted_inputs, local, reader, evidence, remote, token, root, parent, client, policy,
             bootstrap=bootstrap, exclude_run_id=run_context['run_id'] if run_context else None,
             exclude_run_attempt=run_context['run_attempt'] if run_context else None)
         at_stage('remote_guard', m.guard, remote, parent)
         plan, files = at_stage('canonical_prepare', entry.prepare, reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
-            anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger)
+            anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger, history_witness=history_witness)
         at_stage('remote_guard', m.guard, remote, parent)
         result = at_stage('candidate_report', entry.public_report, plan, files)
         if result['status'] != 'recurring_local_candidate_verified':
@@ -208,15 +213,15 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
         def readback(commit, values):
             return m.fetch_selected(remote, {p: ('100644', 'blob', r.oid(data), len(data)) for p, data in values.items()}, token, root / 'readback')
         publication = at_stage('publication', m.publish, reader, remote, plan, files, result['plan_sha256'], readback,
-            checkpoint=checkpoint, verifier=lambda rd, pl, fs: entry.verify_plan(rd, evidence, pl, fs, policy['rules_sha256'], bootstrap=bootstrap),
+            checkpoint=checkpoint, verifier=lambda rd, pl, fs: entry.verify_plan(rd, evidence, pl, fs, policy['rules_sha256'], bootstrap=bootstrap, history_witness=history_witness),
             writers_guard=writers_guard if writers_guard is not None else m.disabled_writers)
         # From this point any local callback failure must preserve actual Get
         # success. The public record contains no note IDs, paths, or source text.
         result.update(publication, status='recurring_transaction_verified')
         try:
             record = provenance.publication_record(reader, evidence, plan, files, publication, policy['rules_sha256'],
-                **run_context, bootstrap=bootstrap)
-            handoff = entry.confirmed_private_handoff(reader, evidence, plan, files, publication, policy['rules_sha256'], bootstrap=bootstrap)
+                **run_context, bootstrap=bootstrap, history_witness=history_witness)
+            handoff = entry.confirmed_private_handoff(reader, evidence, plan, files, publication, policy['rules_sha256'], bootstrap=bootstrap, history_witness=history_witness)
             result['publication_record'] = record
             result['confirmed_content_ids'] = len(handoff['changed_content_ids'])
             # Validate the exact output before crossing even an injected boundary.

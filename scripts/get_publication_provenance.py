@@ -6,6 +6,7 @@ No credential discovery/store, new permissions, private requests or writes.
 The caller pins one reviewed repository/workflow/code policy independently.
 """
 import get_private_proof as private_proof
+import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import argparse
@@ -25,6 +26,7 @@ from get_recurring_entry import a, m
 
 REPOSITORY = 'Eddiehhhhh/eddie-automation-flows'
 API = 'https://api.github.com/repos/' + REPOSITORY
+HISTORY_WITNESS = _private_bindings.value('get_publication_provenance', 'HISTORY_WITNESS')
 CONTRACT = 'get-canonical-publication-anchor-1'
 POLICY_CONTRACT = 'get-public-actions-provenance-policy-1'
 MARKER = 'GET_CANONICAL_PUBLICATION_V1 '
@@ -203,11 +205,11 @@ class PublicGithub(_PublicGithub):
         super().__init__(token=token, opener=opener, clock=clock, sleep=sleep)
 
 
-def publication_record(reader, evidence, plan, files, publication, approved_rules_sha256, *, run_id, run_attempt, code_sha, controller_sha=None, bootstrap=entry.BOOTSTRAP):
+def publication_record(reader, evidence, plan, files, publication, approved_rules_sha256, *, run_id, run_attempt, code_sha, controller_sha=None, bootstrap=entry.BOOTSTRAP, history_witness=None):
     """Call only with the actual shared publisher result after exact readback."""
     positive(run_id); positive(run_attempt); a.checked(code_sha, 40)
     controller_sha = a.checked(controller_sha if controller_sha is not None else code_sha, 40)
-    handoff = entry.confirmed_private_handoff(reader, evidence, plan, files, publication, approved_rules_sha256, bootstrap=bootstrap)
+    handoff = entry.confirmed_private_handoff(reader, evidence, plan, files, publication, approved_rules_sha256, bootstrap=bootstrap, history_witness=history_witness)
     if not handoff['receipt_commit'] or not handoff['receipt_sha256']:
         fail('provenance_no_receipt')
     receipt = entry.read_receipt(reader, handoff['receipt_commit'], handoff['receipt_sha256'], plan['policy_sha256'])
@@ -406,8 +408,10 @@ def run_semantic_binding(run):
     return {k: v for k, v in run_binding(run).items() if k not in ('created_at', 'updated_at')}
 
 
-def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None, rejected_controllers=None):
+def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None, rejected_controllers=None, include_verified_details=False):
     """Prove one original successful attempt, never a later attempt's result."""
+    if type(include_verified_details) is not bool:
+        fail('provenance_record')
     check_run_identity(listed, policy)
     run_id = positive(listed['id'])
     attempt = positive(listed['run_attempt'] if run_attempt is None else run_attempt)
@@ -501,12 +505,80 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
             'receipt_sequence': record['receipt_sequence'], 'record_sha256': record['record_sha256'],
             'run_id': run_id, 'run_attempt': attempt, 'job_id': job['id'],
             'completed_at': job['completed_at'],
+            **({'verified_details': {'run_binding': run_binding(run),
+                 'job_sha256': _history_job_sha256(job), 'record': deepcopy(record)}}
+               if include_verified_details else {}),
             **({'clock_witness': clock_witness} if clock_witness is not None else {})}
 
 
-def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, reserve_next_run=False):
+def _history_job_sha256(job):
+    # Preserve the ORIGINAL idle registration codec, which has no trailing LF.
+    import get_notion_outbox as codec
+    return codec.digest(job)
+
+
+def history_witness_required(anchor, receipt):
+    """Selection only, never trust: only edges incident to the pinned receipt."""
+    value = HISTORY_WITNESS
+    if value is None:
+        return False
+    if not isinstance(value, dict) or not isinstance(value.get('get_record'), dict):
+        fail('provenance_history_witness')
+    commit = value['get_record'].get('receipt_commit')
+    return anchor['commit'] == commit or receipt.get('previous_receipt_commit') == commit
+
+
+def _history_witness_registration(policy):
+    import get_notion_idle_recovery as idle
+    value = deepcopy(HISTORY_WITNESS)
+    keys = {'public_policy', 'public_policy_sha256', 'run_binding',
+            'job_id', 'job_sha256', 'get_record'}
+    if not isinstance(value, dict) or set(value) != keys:
+        fail('provenance_history_witness')
+    old = validate_policy(value['public_policy'], value['public_policy_sha256'])
+    run = value['run_binding']; record = value['get_record']
+    if (not isinstance(run, dict) or run_binding(run) != run
+            or type(run.get('id')) is not int or run['id'] != 39803282386
+            or type(run.get('run_attempt')) is not int or run['run_attempt'] != 1
+            or run.get('status') != 'completed' or run.get('conclusion') != 'success'
+            or not idle._forward_policy(policy, {'public_policy': old})):
+        fail('provenance_history_witness')
+    positive(value['job_id']); a.checked(value['job_sha256'], 64)
+    parse_record(publication_line(record).encode(), old, run)
+    if (record['receipt_sequence'] != 2 or record['main_updated'] is not False
+            or record['cas_attempts'] != 0 or record['readback_verified'] is not True
+            or record['observed_main_commit'] == record['receipt_commit']):
+        fail('provenance_history_witness')
+    return value, old, run
+
+
+def _history_witness_from_verified(value, verified):
+    run = value['run_binding']; record = value['get_record']
+    if (verified is None or verified['job_id'] != value['job_id']
+            or a.encoded(verified['verified_details']) != a.encoded({'run_binding': run,
+                'job_sha256': value['job_sha256'], 'record': record})):
+        fail('provenance_history_witness')
+    return entry.VerifiedHistoryWitness(record['receipt_commit'],
+        record['receipt_sha256'], record['receipt_sequence'],
+        record['observed_main_commit'], record['record_sha256'])
+
+
+
+def verify_history_witness(client, policy, *, candidate_runs_checked):
+    """Fresh authentication within the SAME four-candidate and transport budget."""
+    if type(candidate_runs_checked) is not int or not 0 <= candidate_runs_checked < MAX_CANDIDATES:
+        fail('provenance_candidate_bound')
+    value, old, run = _history_witness_registration(policy)
+    listed = check_run_identity(client.json('/actions/runs/' + str(run['id'])), old)
+    verified = verified_candidate(client, listed, old,
+        run_attempt=run['run_attempt'], include_verified_details=True)
+    return _history_witness_from_verified(value, verified)
+
+
+def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, reserve_next_run=False, capture_history_witness=False):
     """Original four-candidate discovery; optional admission reserves one slot."""
-    if type(reserve_next_run) is not bool: fail('provenance_exclusion')
+    if type(reserve_next_run) is not bool or type(capture_history_witness) is not bool: fail('provenance_exclusion')
+    captured_witness = None
     candidate_limit = MAX_CANDIDATES - int(reserve_next_run)
     if (exclude_run_id is None) != (exclude_run_attempt is None):
         fail('provenance_exclusion')
@@ -561,6 +633,11 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
         for attempt in range(run['run_attempt'], 0, -1):
             if run['id'] == exclude_run_id and attempt == exclude_run_attempt:
                 continue
+            capture = (capture_history_witness and HISTORY_WITNESS is not None
+                       and run['id'] == 39803282386 and attempt == 1)
+            # Lazy policy validation: ordinary non-witness runs remain original.
+            witness_info = _history_witness_registration(policy) if capture else None
+            verification_policy = witness_info[1] if capture else policy
             # Deduplicate only a controller mismatch actually verified earlier
             # in this discovery. The immutable head/event/policy key proves the
             # same first successful attempt cannot become an eligible anchor.
@@ -568,17 +645,22 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             if (type(run.get('run_attempt')) is int and run['run_attempt'] == 1
                     and attempt == 1 and run.get('status') == 'completed'
                     and run.get('conclusion') == 'success'):
-                selected_policy, _ = recovery.candidate_policy(policy, run)
+                selected_policy, _ = recovery.candidate_policy(verification_policy, run)
                 negative_key = (run['head_sha'], run['event'], a.sha(a.encoded(selected_policy)))
                 if negative_key in rejected_controllers:
                     continue
             if checked >= candidate_limit:
                 break
             checked += 1
-            value = verified_candidate(client, run, policy, run_attempt=attempt,
+            value = verified_candidate(client, run, verification_policy, run_attempt=attempt,
                                        verified_controllers=verified_controllers,
-                                       rejected_controllers=rejected_controllers)
+                                       rejected_controllers=rejected_controllers,
+                                       include_verified_details=capture)
             if value is not None:
+                if capture:
+                    registration, _, _ = _history_witness_registration(policy)
+                    captured_witness = _history_witness_from_verified(registration, value)
+                    value = {key: item for key, item in value.items() if key != 'verified_details'}
                 if reserve_next_run:
                     # Existence admission only, never publication authority.
                     # Full original attempt/controller/log/alias checks above
@@ -598,7 +680,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             fail('provenance_receipt_fork')
         by_sequence[sequence] = value['anchor']
     chosen = max(found, key=lambda x: (x['receipt_sequence'], timestamp(x['completed_at']), x['run_id']))
-    return {**chosen, 'status': 'public_provenance_verified', 'candidate_runs_checked': checked,
+    return {**chosen, **({'history_witness': captured_witness} if capture_history_witness else {}), 'status': 'public_provenance_verified', 'candidate_runs_checked': checked,
             'publication_records_verified': len(found), 'new_permissions': 0, 'credentials_used': getattr(client, 'credentials_used', 0)}
 
 
@@ -664,12 +746,14 @@ def prepare_with_public_provenance(reader, evidence, parent, source, client, pol
         # exact immutable bootstrap and rejects any intervening Get mutation.
         return entry.prepare(reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
                              preview=preview, bootstrap=bootstrap, trigger=trigger)
-    verified = discover(client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt)
+    verified = discover(client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt, capture_history_witness=True)
     receipt = entry.read_receipt(reader, verified['anchor']['commit'], verified['anchor']['receipt_sha256'], policy['get_policy_sha256'])
     if receipt['sequence'] != verified['receipt_sequence']:
         fail('provenance_receipt_sequence')
+    history_witness = (verified.get('history_witness') or verify_history_witness(client, policy, candidate_runs_checked=verified['candidate_runs_checked'])
+        if history_witness_required(verified['anchor'], receipt) else None)
     return entry.prepare(reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
-                         anchor=verified['anchor'], bootstrap=bootstrap, trigger=trigger)
+                         anchor=verified['anchor'], bootstrap=bootstrap, trigger=trigger, history_witness=history_witness)
 
 
 def main(argv=None):

@@ -8,6 +8,7 @@ Receipts are integrity/continuity records, not cryptographic authorship claims.
 """
 import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
+from dataclasses import dataclass
 import argparse
 import json
 import os
@@ -67,10 +68,37 @@ def single_parent(reader, commit):
     return rows[1]
 
 
-def unchanged_get_history(reader, ancestor, descendant):
+@dataclass(frozen=True)
+class VerifiedHistoryWitness:
+    """In-memory authority returned only by original publication verification.
+
+    Never read this from a plan, receipt, CLI, repository file or business state.
+    """
+    receipt_commit: str
+    receipt_sha256: str
+    receipt_sequence: int
+    observed_commit: str
+    record_sha256: str
+
+
+def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None):
     """Reject an edit-and-revert too, rather than merely comparing tip trees."""
     a.checked(ancestor, 40); a.checked(descendant, 40)
     expected = reader.source_get_tree(ancestor)
+    if history_witness is not None:
+        if type(history_witness) is not VerifiedHistoryWitness:
+            fail('entry_history_witness')
+        if ancestor == history_witness.receipt_commit:
+            # The fresh original canonical proof authenticates the prefix;
+            # endpoint equality alone never supplies that authority.
+            raw = reader.read(ancestor, FULL_RECEIPT, MAX_RECEIPT)
+            value = m.strict_capture_json(raw, MAX_RECEIPT)
+            if (a.sha(raw) != history_witness.receipt_sha256
+                    or type(value.get('sequence')) is not int
+                    or value['sequence'] != history_witness.receipt_sequence
+                    or reader.source_get_tree(history_witness.observed_commit) != expected):
+                fail('entry_history_witness')
+            ancestor = history_witness.observed_commit
     cursor = descendant
     for _ in range(MAX_INTERVENING + 1):
         if reader.source_get_tree(cursor) != expected:
@@ -206,7 +234,7 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
     return ids
 
 
-def verify_trusted_publication(reader, evidence, anchor, policy, bootstrap):
+def verify_trusted_publication(reader, evidence, anchor, policy, bootstrap, *, history_witness=None):
     """The commit/hash pair is EXTERNAL trust, supplied only after verified readback.
 
     We verify its complete transaction and its immediate predecessor link. The
@@ -230,7 +258,7 @@ def verify_trusted_publication(reader, evidence, anchor, policy, bootstrap):
         prior = read_receipt(reader, previous, receipt['previous_receipt_sha256'], policy)
         if prior['sequence'] + 1 != receipt['sequence'] or prior['state_sha256'] != receipt['previous_legacy_sha256'] or prior['registry_sha256'] != receipt['previous_registry_sha256']:
             fail('entry_receipt_anchor')
-    unchanged_get_history(reader, previous, parent)
+    unchanged_get_history(reader, previous, parent, history_witness=history_witness)
     if a.sha(a.encoded(delta(reader, parent, commit))) != receipt['delta_sha256']:
         fail('entry_foreign_delta')
     all_delta = delta(reader, parent, commit, exclude_receipt=False)
@@ -255,7 +283,7 @@ def check_counts(counts, states):
         fail('entry_counts')
 
 
-def trust_current(reader, evidence, parent, approved_rules_sha256, anchor=None, *, bootstrap=BOOTSTRAP):
+def trust_current(reader, evidence, parent, approved_rules_sha256, anchor=None, *, bootstrap=BOOTSTRAP, history_witness=None):
     if approved_rules_sha256 != rules_sha256():
         fail('entry_rules_changed')
     policy = policy_sha256(approved_rules_sha256, bootstrap)
@@ -263,9 +291,9 @@ def trust_current(reader, evidence, parent, approved_rules_sha256, anchor=None, 
     if anchor is None:
         trusted = bootstrap['commit']; receipt = None; states = initial
     else:
-        receipt, states = verify_trusted_publication(reader, evidence, anchor, policy, bootstrap)
+        receipt, states = verify_trusted_publication(reader, evidence, anchor, policy, bootstrap, history_witness=history_witness)
         trusted = anchor['commit']
-    unchanged_get_history(reader, trusted, parent)
+    unchanged_get_history(reader, trusted, parent, history_witness=history_witness)
     # Equal full Get trees guarantee these exact state/inventory bytes at parent.
     return policy, receipt, states
 
@@ -298,10 +326,10 @@ def add_receipt(reader, parent, engine_plan, files, receipt_bytes):
     return commit, tree, writes
 
 
-def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=None, preview=None, bootstrap=BOOTSTRAP, trigger='manual'):
+def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=None, preview=None, bootstrap=BOOTSTRAP, trigger='manual', history_witness=None):
     if trigger not in ('manual', 'schedule'):
         fail('entry_trigger')
-    policy, previous, states = trust_current(reader, evidence, parent, approved_rules_sha256, anchor, bootstrap=bootstrap)
+    policy, previous, states = trust_current(reader, evidence, parent, approved_rules_sha256, anchor, bootstrap=bootstrap, history_witness=history_witness)
     current, legacy, registry = states
     legacy_sha = previous['state_sha256'] if previous else bootstrap['legacy_sha256']
     registry_sha = previous['registry_sha256'] if previous else None
@@ -347,26 +375,26 @@ def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=N
     # needs a fresh local preparation, preserving the archive commit verbatim.
     plan['approval_payload_sha256'] = a.sha(a.encoded({'policy_sha256': policy,
         'engine_payload_sha256': plan['engine_approval_payload_sha256'], 'receipt_sha256': plan['receipt_sha256']}))
-    verify_plan(reader, evidence, plan, files, approved_rules_sha256, bootstrap=bootstrap)
+    verify_plan(reader, evidence, plan, files, approved_rules_sha256, bootstrap=bootstrap, history_witness=history_witness)
     return plan, files
 
 
-def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstrap=BOOTSTRAP):
+def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstrap=BOOTSTRAP, history_witness=None):
     engine.verify_plan(reader, plan, files)
     bootstrap_states(reader, evidence, bootstrap)
     if plan.get('entry_contract') != CONTRACT or plan.get('policy_sha256') != policy_sha256(approved_rules_sha256, bootstrap) or approved_rules_sha256 != rules_sha256():
         fail('entry_policy_changed')
     if not files:
         if plan.get('receipt_commit') is not None:
-            verify_trusted_publication(reader, evidence, {'commit': plan['receipt_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap)
-            unchanged_get_history(reader, plan['receipt_commit'], plan['parent_commit'])
+            verify_trusted_publication(reader, evidence, {'commit': plan['receipt_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap, history_witness=history_witness)
+            unchanged_get_history(reader, plan['receipt_commit'], plan['parent_commit'], history_witness=history_witness)
         if plan.get('proposed_content_ids') != []:
             fail('entry_content_ids')
         return
     if plan.get('receipt_commit') != plan['candidate_commit']:
         fail('entry_receipt_anchor')
     receipt, _ = verify_trusted_publication(reader, evidence,
-        {'commit': plan['candidate_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap)
+        {'commit': plan['candidate_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap, history_witness=history_witness)
     if receipt['changed_content_ids'] != plan['proposed_content_ids'] or receipt['counts'] != plan['counts'] or receipt['engine_payload_sha256'] != plan['engine_approval_payload_sha256']:
         fail('entry_plan')
     expected = a.sha(a.encoded({'policy_sha256': plan['policy_sha256'],
@@ -375,7 +403,7 @@ def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstr
         fail('entry_plan')
 
 
-def confirmed_private_handoff(reader, evidence, plan, files, publication, approved_rules_sha256, *, bootstrap=BOOTSTRAP):
+def confirmed_private_handoff(reader, evidence, plan, files, publication, approved_rules_sha256, *, bootstrap=BOOTSTRAP, history_witness=None):
     """For a future sink only AFTER the shared publisher's verified readback.
 
     This helper is not a publisher or a trust-provenance fetcher. The caller must
@@ -384,7 +412,7 @@ def confirmed_private_handoff(reader, evidence, plan, files, publication, approv
     """
     if publication != {'main_updated': bool(files), 'cas_attempts': 1 if files else 0, 'readback_verified': True}:
         fail('entry_publication_unconfirmed')
-    verify_plan(reader, evidence, plan, files, approved_rules_sha256, bootstrap=bootstrap)
+    verify_plan(reader, evidence, plan, files, approved_rules_sha256, bootstrap=bootstrap, history_witness=history_witness)
     return {'contract': 'get-confirmed-content-handoff-1', 'commit': plan['candidate_commit'],
             'receipt_commit': plan['receipt_commit'], 'receipt_sha256': plan['receipt_sha256'],
             'changed_content_ids': list(plan['proposed_content_ids'])}

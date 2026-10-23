@@ -34,6 +34,7 @@ import get_notion_run53_recovery as run53_recovery
 import get_notion_run57_recovery as run57_recovery
 import get_notion_historical_active_recovery as historical_active
 import get_notion_idle_recovery as idle_recovery
+import get_notion_blocked_idle_recovery as blocked_idle
 import get_notion_run16_recovery as run16_recovery
 import get_notion_run18_recovery as run18_recovery
 import get_notion_run28_recovery as run28_recovery
@@ -652,6 +653,12 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 write_possible=apply
                 candidate=idle_recovery.transition_outer(current,sha,
                     public_policy['get_policy_sha256'],proof=found)
+                if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                else:store=ReadOnlyStore(candidate);current,sha=store.read()
+            if present and found.get('recovery_anchor')==blocked_idle.TAG:
+                candidate=blocked_idle.transition_outer(current,sha,
+                    public_policy['get_policy_sha256'],proof=found)
+                write_possible=apply
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
             already_isolated=(present and found.get('recovery_anchor')==historical_active.INFLIGHT_TAG

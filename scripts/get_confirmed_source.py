@@ -6,6 +6,7 @@ Git hashes into authorship. It writes only missing objects to an existing local
 ODB, never a ref, source Get API, asset, journal, or external destination.
 """
 import base64
+import hashlib
 from copy import deepcopy
 from pathlib import Path
 
@@ -18,6 +19,7 @@ MAX_EVENTS = 2500
 MAX_LINKS = 4096
 MAX_COMMITS = 16384
 MAX_FETCHES = 256
+MAX_COMMIT_BYTES = 1024 * 1024
 
 
 class SourceFailure(ValueError):
@@ -38,7 +40,7 @@ class Loader:
         # are already encapsulated in the injected LocalGit/Remote, never read
         # from the environment here or sent to a different transport.
         self.policy = policy_hash
-        self.commits = set(); self.fetches = 0
+        self.commits = set(); self.metadata_seen = set(); self.fetches = 0
         self.receipts = {}; self.receipt_bytes = 0
         self.loaded_bytes = 0; self.metadata = {}
 
@@ -71,7 +73,7 @@ class Loader:
             if shallow.exists() and commit in entry.a.bounded_file(shallow, 2 * 1024 * 1024).decode().splitlines():
                 self.fetch(commit)
             return
-        if len(self.commits) >= MAX_COMMITS:
+        if commit not in self.metadata_seen and len(self.commits | self.metadata_seen) >= MAX_COMMITS:
             fail('source_history_budget')
         info = self.object_info(commit)
         if info is None:
@@ -85,6 +87,51 @@ class Loader:
             self.fetch(commit)
         self.reader.tree(commit)
         self.commits.add(commit)
+
+    def ancestry_metadata(self, commit):
+        """Authenticate only parent-chain metadata, never materialize tree paths.
+
+        No parent proof is cached. Each visit rereads raw OID and shallow state;
+        metadata_seen contributes to the original cumulative unique-commit cap,
+        but cannot satisfy commit()/blob()/receipt() tree validation.
+        """
+        entry.a.checked(commit, 40)
+        seen = commit in self.commits or commit in self.metadata_seen
+        if not seen and len(self.commits | self.metadata_seen) >= MAX_COMMITS:
+            fail('source_history_budget')
+        info = self.object_info(commit)
+        if info is None:
+            if seen: fail('source_object_invalid')
+            self.fetch(commit)
+        elif info[0] != 'commit':
+            fail('source_object_invalid')
+        shallow = Path(self.local.vault) / '.git/shallow'
+        if shallow.exists() and commit in entry.a.bounded_file(shallow, 2 * 1024 * 1024).decode().splitlines():
+            self.fetch(commit)
+        info = self.object_info(commit)
+        if info is None or info[0] != 'commit' or not 0 < info[1] <= MAX_COMMIT_BYTES:
+            fail('source_object_invalid')
+        raw = self.reader.local.run('cat-file', 'commit', commit)
+        if (len(raw) != info[1]
+                or hashlib.sha1(b'commit ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() != commit):
+            fail('source_object_invalid')
+        headers, separator, _ = raw.partition(b'\n\n')
+        lines = headers.split(b'\n')
+        if (not separator or not lines[0].startswith(b'tree ')
+                or len(lines[0]) != 45
+                or sum(line.startswith(b'tree ') for line in lines) != 1):
+            fail('source_object_invalid')
+        try:
+            tree = entry.a.checked(lines[0][5:].decode('ascii'), 40)
+            parents = tuple(entry.a.checked(line[7:].decode('ascii'), 40)
+                            for line in lines if line.startswith(b'parent '))
+        except (ValueError, UnicodeError):
+            fail('source_object_invalid')
+        tree_info = self.object_info(tree)
+        if tree_info is None or tree_info[0] != 'tree':
+            fail('source_object_invalid')
+        self.metadata_seen.add(commit)
+        return parents
 
     def blob(self, commit, path, cap):
         self.commit(commit)
@@ -144,13 +191,16 @@ class Loader:
 
     def ancestry(self, ancestor, descendant):
         # Pending sources may be older than the fresh runner's shallow tip.
-        # Load only linear commit/tree metadata, allowing later publications.
+        # Authenticate raw linear commit metadata, not unrelated full trees.
         cursor = descendant
         for _ in range(MAX_COMMITS):
-            self.commit(cursor)
+            parents = self.ancestry_metadata(cursor)
             if cursor == ancestor:
                 return
-            cursor = entry.single_parent(self.reader, cursor)
+            parent = entry.single_parent(self.reader, cursor)
+            if parents != (parent,):
+                fail('source_chain_invalid')
+            cursor = parent
             self.reader.cache.clear()
         fail('source_history_budget')
 

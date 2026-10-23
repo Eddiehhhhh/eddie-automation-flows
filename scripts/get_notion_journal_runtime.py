@@ -27,6 +27,7 @@ import get_notion_run28_recovery as run28_recovery
 import get_notion_run32_recovery as run32_recovery
 import get_notion_png_recovery as png_recovery
 import get_notion_idle_recovery as idle_recovery
+import get_notion_blocked_idle_recovery as blocked_idle
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '
 CONTRACT = 'get-notion-journal-checkpoint-1'
@@ -422,8 +423,43 @@ def _records(raw, expected, notion_interval, get_interval, policy, run):
     return records, get_record
 
 
+def _terminal_report(raw, notion_interval, *, completed_at=None):
+    """Opt-in exact final public result from the authenticated original job log.
+
+    This is not a new log claim: the ordinary original attempt, controller,
+    checkpoint chain, job digest and fresh rereads remain mandatory.
+    """
+    found=[]; last_checkpoint=None
+    for line in raw.decode('utf-8','strict').splitlines():
+        match=re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z) (.*)$',line)
+        content=match[2] if match else line
+        if content.startswith(MARKER):
+            if found or match is None: fail('journal_provenance_record')
+            last_checkpoint=provenance.timestamp(match[1])
+        if 'get-private-runtime-report-2' not in content: continue
+        # Ignore the displayed shell source, not an emitted report. A JSON
+        # report with this contract must have a timestamp and exact object.
+        if not content.startswith('{'): continue
+        value=journal.retention.strict_json(content.encode())
+        if not isinstance(value,dict) or value.get('contract')!='get-private-runtime-report-2': continue
+        if match is None or found or last_checkpoint is None: fail('journal_provenance_record')
+        stamp=provenance.timestamp(match[1])
+        # API timestamps without a fractional component identify an entire second.
+        # Only this opt-in terminal report uses that explicit representation;
+        # original checkpoints and fractional API endpoints stay exact.
+        whole_second = (isinstance(completed_at, str) and re.fullmatch(
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', completed_at) is not None
+            and provenance.timestamp(completed_at) == notion_interval[1])
+        within_end = (stamp < notion_interval[1] + timedelta(seconds=1)
+            if whole_second else stamp <= notion_interval[1])
+        if not notion_interval[0] <= last_checkpoint <= stamp or not within_end: fail('journal_provenance_time')
+        found.append(value)
+    if len(found)!=1: fail('journal_provenance_record')
+    return found[0]
+
+
 def recover_anchor(client, *, run_id, run_attempt, public_policy,
-                   approved_public_policy_sha256, notion_policy_sha256, require_success=False, include_job_digest=False):
+                   approved_public_policy_sha256, notion_policy_sha256, require_success=False, include_job_digest=False, include_terminal_report=False):
     """Authenticate one original terminal Actions attempt, even if Notion failed.
 
     This never qualifies a failed run as Get success. Exact controller bytes
@@ -432,7 +468,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
     private commit/tree/blob readback before use.
     """
     try:
-        if type(require_success) is not bool or type(include_job_digest) is not bool: fail('journal_provenance_run')
+        if type(require_success) is not bool or type(include_job_digest) is not bool or type(include_terminal_report) is not bool: fail('journal_provenance_run')
         policy = provenance.validate_policy(public_policy, approved_public_policy_sha256)
         provenance.positive(run_id); provenance.positive(run_attempt)
         journal.checked(notion_policy_sha256, 64)
@@ -490,6 +526,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'public_policy_sha256': approved_public_policy_sha256})
         raw = private_proof.expand_for(client, client.logs(job['id']), policy=policy, run=run, notion_policy_sha256=notion_policy_sha256)
         records, get_record = _records(raw, expected, notion_times, get_times, policy, run)
+        terminal_report = _terminal_report(raw, notion_times, completed_at=notion_step.get('completed_at')) if include_terminal_report else None
         # Re-read the exact original attempt, not just the mutable run alias.
         original = _terminal_run(client.json(root + '/attempts/' + str(run_attempt)), policy)
         if provenance.run_binding(original) != provenance.run_binding(run): fail('journal_provenance_changed')
@@ -504,6 +541,9 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'run_attempt': run_attempt, 'job_id': job['id'],
             'get_step_record': None if fixed else get_record, 'get_run_success_claim': False,
             **({'fixed_source_record': get_record} if fixed else {}),
+            **({'terminal_report': terminal_report, 'terminal_conclusions': {
+                'job': job['conclusion'], 'notion': notion_step['conclusion'],
+                'get': get_step['conclusion']}} if include_terminal_report else {}),
             'run_binding': provenance.run_binding(run), 'latest_binding':provenance.run_binding(current), 'latest_attempt': current['run_attempt'],
             'completed_at': job['completed_at'],
             **({'clock_witness': clock_witness} if clock_witness is not None else {}),
@@ -657,6 +697,13 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                         and historical_active.registered_run(row['id'], row['run_attempt'])
                         and historical_active.candidate_policy(policy, row)[1]):
                     result = historical_active.recover_checkpoint(bounded, row['id'], row['run_attempt'])
+                    match_candidate(result, row)
+                    return {**result, 'candidate_runs_checked': checked, 'candidate_attempts_checked': checked,
+                        'provenance_reads': bounded.requests, 'provenance_bytes': bounded.bytes}
+                if (str(exc) == 'journal_provenance_other_controller'
+                        and blocked_idle.can_recover(policy, row['id'], row['run_attempt'])):
+                    result = blocked_idle.recover_checkpoint(bounded, row['id'], row['run_attempt'],
+                        current_public_policy=policy)
                     match_candidate(result, row)
                     return {**result, 'candidate_runs_checked': checked, 'candidate_attempts_checked': checked,
                         'provenance_reads': bounded.requests, 'provenance_bytes': bounded.bytes}
