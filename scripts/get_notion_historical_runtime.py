@@ -53,7 +53,8 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
     if loader is None: loader=source_loader.Loader(local,remote,token,root,policy_hash)
     loader.commit(manifest['source_commit'])
     for row in manifest['records'].values(): loader.blob(manifest['source_commit'],row['path'],e.p.MAX_NOTE)
-    if active is not None and historical_active.allows(active['plan'], active):
+    if active is not None and (historical_active.allows(active['plan'], active)
+            or authenticated_recovery.allows(active['plan'], active)):
         head = source_loader.entry.a.checked(local.run('rev-parse', source_loader.entry.r.MAIN_REF).decode().strip(), 40)
         loader.ancestry(manifest['source_commit'], head)
     publication=historical.Publication(local.vault,manifest,expected)
@@ -81,7 +82,8 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
                 if fresh!=prior:e.fail('human_edit_conflict')
     if active:
         plan=deepcopy(active['plan'])
-        if ((plan['rules_sha256']!=e.rules_sha256() and not historical_active.allows(plan, active)) or plan['publication']!=publication.descriptor
+        if ((plan['rules_sha256']!=e.rules_sha256() and not (historical_active.allows(plan, active)
+                or authenticated_recovery.allows(plan, active))) or plan['publication']!=publication.descriptor
                 or plan['policy']!=policy or plan.get('historical_manifest')!=manifest
                 or plan.get('property_manifest_sha256')!=property_expected
                 or plan.get('property_manifest')!=property_manifest):e.fail('journal_busy')
@@ -124,7 +126,8 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
     if apply:
         # Only existing sanitized fixed enums; never publish exception text.
         result.update(execution_status=safe['status'], execution_reason=safe['reason'])
-    if active is not None and historical_active.allows(active['plan'], active):
+    if active is not None and (historical_active.allows(active['plan'], active)
+            or authenticated_recovery.allows(active['plan'], active)):
         result.update(resumed_prior_plan_sha256=active['plan_sha256'],
             resumed_prior_rules_sha256=active['plan']['rules_sha256'])
     if verify_reused:

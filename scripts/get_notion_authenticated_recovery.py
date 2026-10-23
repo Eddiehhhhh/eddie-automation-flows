@@ -137,16 +137,58 @@ def allows(plan, journal):
         return False
 
 
-def isolate_outer(state, sha, new_policy):
+def isolation_successors(binding):
+    """Code-pinned original checkpoint proofs, never learned from live state."""
+    o = _codec()
+    values = bindings.value('get_notion_authenticated_recovery', 'ISOLATION_SUCCESSORS')
+    if not isinstance(values, list) or len(values) > 16: o.fail('outbox_state_invalid')
+    found = []
+    for item in values:
+        if set(item) != {'original_run_id','original_run_attempt','policy_sha256','proof'}: o.fail('outbox_state_invalid')
+        proof = item['proof']
+        if (proof.get('status') != 'journal_provenance_verified'
+                or proof.get('private_readback_required') is not True
+                or proof.get('terminal_report',{}).get('journal_write_state') != 'confirmed'
+                or proof.get('checkpoint_count') != 1
+                or proof.get('anchor',{}).get('state_sha256') != proof.get('checkpoint',{}).get('state_sha256')):
+            o.fail('outbox_state_invalid')
+        if (item['original_run_id'],item['original_run_attempt']) == (binding['proof']['run_id'],binding['proof']['run_attempt']):
+            found.append(item)
+    if len({v['policy_sha256'] for v in found}) != len(found): o.fail('outbox_state_invalid')
+    return found
+
+
+def prior_isolation(state):
+    o = _codec(); j = state['engine_state']['journal']; b = plan_binding(j['plan']) if j else None
+    if not b or not allows(j['plan'],j) or not exact_hold_present(state['engine_state']): return None
+    matches = [v for v in isolation_successors(b) if v['policy_sha256'] == state['policy_sha256']
+               and v['proof']['anchor']['state_sha256'] == o.digest(state)
+               and v['proof']['anchor']['state_blob'] == o.e.p.git_blob(o.encoded(state))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def transition_isolated_policy(state, sha, new_policy):
     o = _codec()
     import get_recurring_policy_recovery as policy
-    if not initial_state_valid(state, sha) or new_policy != policy.current_get_policy(): o.fail('outbox_state_invalid')
+    if o.digest(state) != sha or not prior_isolation(state) or new_policy != policy.current_get_policy(): o.fail('outbox_state_invalid')
+    result = deepcopy(state); result['policy_sha256'] = new_policy
+    return result
+
+
+def _isolated_variant(state, new_policy):
     b = plan_binding(state['engine_state']['journal']['plan'])
     result = deepcopy(state); result['policy_sha256'] = new_policy
     result['engine_state'].setdefault('unresolved_by_id', {})[b['hold']['note_id']] = deepcopy(b['hold'])
     result['engine_state']['journal']['index'] += 1
     result['engine_state']['journal']['operation'] = None
     return result
+
+
+def isolate_outer(state, sha, new_policy):
+    o = _codec()
+    import get_recurring_policy_recovery as policy
+    if not initial_state_valid(state, sha) or new_policy != policy.current_get_policy(): o.fail('outbox_state_invalid')
+    return _isolated_variant(state,new_policy)
 
 
 def check_mode(state, found, manifest, expected, other_modes):
@@ -188,6 +230,13 @@ def verify_successor(local, remote, loader, head, proof):
     if not initial_state_valid(original, anchor['state_sha256']): o.fail('outbox_state_invalid')
     isolated = isolate_outer(original, anchor['state_sha256'], policy.current_get_policy())
     isolated_raw = o.encoded(isolated); isolated_blob = j.retention.oid(isolated_raw)
+    variants = {isolated_blob:isolated_raw}
+    for item in isolation_successors(b):
+        raw_variant = o.encoded(_isolated_variant(original,item['policy_sha256']))
+        if (o.digest(raw_variant) != item['proof']['anchor']['state_sha256']
+                or j.retention.oid(raw_variant) != item['proof']['anchor']['state_blob']): o.fail('outbox_state_invalid')
+        variants[j.retention.oid(raw_variant)] = raw_variant
+    previous_state = original; upgraded = False
     node(head)
     git.run('merge-base', '--is-ancestor', prior, head)
     history = git.run('rev-list', '--reverse', '--max-count=257', prior + '..' + head).decode().split()
@@ -198,10 +247,21 @@ def verify_successor(local, remote, loader, head, proof):
         if current[1] != [prior]: o.fail('outbox_state_invalid')
         changed = {k for k in set(base[2]) | set(current[2]) if base[2].get(k) != current[2].get(k)}
         if j.STATE_PATH in changed:
-            if seen or changed != {j.STATE_PATH} or current[2][j.STATE_PATH] != ('100644', 'blob', isolated_blob): o.fail('outbox_state_invalid')
-            if git.blob(isolated_blob) != isolated_raw or remote.blob(isolated_blob, len(isolated_raw)) != isolated_raw: o.fail('outbox_state_invalid')
-            anchor = {'commit': commit, 'state_blob': isolated_blob, 'state_sha256': o.digest(isolated_raw)}
-            seen = True
+            if changed != {j.STATE_PATH}: o.fail('outbox_state_invalid')
+            row = current[2][j.STATE_PATH]
+            if row[:2] != ('100644','blob'): o.fail('outbox_state_invalid')
+            if not seen:
+                wanted = variants.get(row[2])
+                if wanted is None: o.fail('outbox_state_invalid')
+                seen = True
+            else:
+                if upgraded or not prior_isolation(previous_state): o.fail('outbox_state_invalid')
+                wanted = o.encoded(transition_isolated_policy(previous_state,o.digest(previous_state),policy.current_get_policy()))
+                if row[2] != j.retention.oid(wanted): o.fail('outbox_state_invalid')
+                upgraded = True
+            if git.blob(row[2]) != wanted or remote.blob(row[2],len(wanted)) != wanted: o.fail('outbox_state_invalid')
+            previous_state = j.retention.strict_json(wanted)
+            anchor = {'commit':commit,'state_blob':row[2],'state_sha256':o.digest(wanted)}
         elif any(k == 'Raw/03 Get' or k.startswith('Raw/03 Get/') for k in changed): o.fail('outbox_state_invalid')
         if current[2].get(j.STATE_PATH) != ('100644', 'blob', anchor['state_blob']): o.fail('outbox_state_invalid')
         prior = commit; base = current
@@ -234,6 +294,9 @@ def preserve(before, after):
     import get_recurring_policy_recovery as recovery
     if initial_state_valid(before, o.digest(before)):
         if o.encoded(after) in (o.encoded(before), o.encoded(isolate_outer(before, o.digest(before), recovery.current_get_policy()))): return
+        o.fail('outbox_state_invalid')
+    if prior_isolation(before):
+        if o.encoded(after) in (o.encoded(before),o.encoded(transition_isolated_policy(before,o.digest(before),recovery.current_get_policy()))): return
         o.fail('outbox_state_invalid')
     if before['policy_sha256'] != after['policy_sha256']: o.fail('outbox_state_invalid')
     import get_recurring_policy_recovery as recovery

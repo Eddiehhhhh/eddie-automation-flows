@@ -669,6 +669,12 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if present and found.get('recovery_anchor') == authenticated_recovery.TAG:
                 already_new_isolated=(current['policy_sha256']==public_policy['get_policy_sha256']
                     and authenticated_recovery.exact_hold_present(current['engine_state']))
+                if not already_new_isolated and authenticated_recovery.prior_isolation(current):
+                    candidate=authenticated_recovery.transition_isolated_policy(current,sha,public_policy['get_policy_sha256'])
+                    write_possible=apply
+                    if apply: current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                    else: store=ReadOnlyStore(candidate);current,sha=store.read()
+                    already_new_isolated=True
                 if not already_new_isolated:
                     bridge_materialized=historical_runtime.verify_active_transition(local, remote, token, root, current, sha, request,
                         manifest=historical_manifest, expected=approved_historical_manifest_sha256,
