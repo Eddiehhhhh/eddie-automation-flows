@@ -655,6 +655,12 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     'public_policy_sha256':public_hash}, fixed_selection)
             prior_effects=bool(old_journal and (old_journal.get('index') or old_journal.get('operation') and e.operation_has_effects(old_journal['operation'])))
             store=durable if apply else ReadOnlyStore(current)
+            # Canonical immutable history proof must complete before an own
+            # policy-transition CAS changes the private proof resolver's head.
+            # Keep the same client, budgets and every original witness check.
+            if all(mode is None for mode in modes) and public_policy is not None and provenance.HISTORY_WITNESS is not None:
+                history_witness = provenance.verify_history_witness(client, public_policy,
+                    candidate_runs_checked=found.get('candidate_runs_checked', 0) if present else 0)
             # The separate authenticated idle predecessor bridge is deliberately
             # before every mode return. It grants no pending-plan or input scope.
             if present and found.get('recovery_anchor')==idle_recovery.TAG:
@@ -775,9 +781,6 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     safe.update(resumed_prior_plan_sha256=old_journal['plan_sha256'],
                         resumed_prior_rules_sha256=old_journal['plan']['rules_sha256'])
                 return safe
-            if public_policy is not None and provenance.HISTORY_WITNESS is not None:
-                history_witness = provenance.verify_history_witness(client, public_policy,
-                    candidate_runs_checked=found.get('candidate_runs_checked', 0) if present else 0)
             loaded_assets=None
             png_transition=None
             preload_state=current;preload_sha=sha
