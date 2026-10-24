@@ -108,8 +108,12 @@ def rich_text(value):
         text = re.sub(r'<[bB][rR] ?/?>', '\n', text)
         if '![' in text or re.search(r'(?<!\w)_|_(?!\w)|__|~~|<', text):
             stop('unsupported_source_format')
+        # Hash escapes are inline Markdown syntax, not native text. Preserve
+        # paired backslashes: N slashes before # render as floor(N/2) slashes.
+        # Code spans/fences and link destinations never pass through here.
+        text = re.sub(r'(\\+)#', lambda match: '\\' * (len(match[1]) // 2) + '#', text)
         return text
-    token = re.compile(r'(\\[\\`*\[\]()~]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\)|' + LITERAL_BRACKET + r')')
+    token = re.compile(r'(\\[\\`*\[\]()~#]|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s()]+\)|' + LITERAL_BRACKET + r')')
     cursor = 0
     for match in token.finditer(value):
         plain = value[cursor:match.start()]
