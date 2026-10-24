@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/test-weread-canonical-paths.yml'
       - 'scripts/sync_notion_weread_to_raw.py'
+      - 'scripts/sync_notion_douban_to_raw.py'
+      - 'requirements-notion-properties.txt'
       - 'scripts/sync_notion_to_raw.py'
       - 'tests/**'
       - 'docs/weread-canonical-paths.md'
@@ -24,6 +26,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+      - name: Install YAML test dependency
+        run: 'python3 -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
       - name: Run offline regression tests
         run: python3 -m unittest discover -s tests -v
       - name: Check whitespace
