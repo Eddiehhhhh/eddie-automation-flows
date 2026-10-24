@@ -597,7 +597,13 @@ def verify_history_witness(client, policy, *, candidate_runs_checked):
 
 
 def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, reserve_next_run=False, capture_history_witness=False):
-    """Original four-candidate discovery; optional admission reserves one slot."""
+    """Four candidate slots; one may locate an already registered producer.
+
+    The registered coordinate is a search hint only. Its original attempt still
+    passes verified_candidate, and the original receipt/history/current-source
+    consumers remain authoritative. Missing/denied/changed proof is not skipped.
+    Optional admission still reserves one of the four slots for the next run.
+    """
     if type(reserve_next_run) is not bool or type(capture_history_witness) is not bool: fail('provenance_exclusion')
     captured_witness = None
     candidate_limit = MAX_CANDIDATES - int(reserve_next_run)
@@ -640,19 +646,38 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
         if len(rows) < RUN_PAGE_SIZE:
             break
     listed.sort(key=lambda x: (timestamp(x['updated_at']), x['id']), reverse=True)
+    locator = registered_predecessor.discovery_locator(policy)
+    if locator == (exclude_run_id, exclude_run_attempt):
+        locator = None
+    if locator is not None:
+        located = check_run_identity(client.json('/actions/runs/' + str(locator[0])), policy)
+        if located['id'] != locator[0] or located['run_attempt'] < locator[1]:
+            fail('provenance_run_changed')
+        observed = [row for row in listed if row['id'] == locator[0]]
+        if observed and run_binding(observed[0]) != run_binding(located):
+            fail('provenance_run_changed')
+        # Exact original attempt first, not the possibly failed/latest rerun.
+        # The normal dynamic list remains after it; its other attempts are not
+        # erased. The original attempt is charged once, never an extra slot.
+        listed.insert(0, located)
     found = []; checked = 0; verified_controllers = set(); rejected_controllers = set()
-    for run in listed:
+    checked_attempts = set()
+    for position, run in enumerate(listed):
+        located_attempt = locator[1] if locator is not None and position == 0 else None
         # A first attempt listed as terminal failure cannot contain a successful
         # publication. This is negative selection only, never anchor evidence.
         # Reruns remain eligible: an earlier successful attempt must not vanish.
-        if (run['run_attempt'] == 1 and run.get('status') == 'completed'
+        if (located_attempt is None and run['run_attempt'] == 1 and run.get('status') == 'completed'
                 and run.get('conclusion') in ('failure', 'cancelled', 'timed_out', 'skipped', 'action_required', 'neutral', 'stale')):
             continue
         # Read attempts in descending order, never fabricate an older success
         # from latest metadata. Failed/nonpublication attempts consume the same
         # four-candidate bound. A verified publication ends this run's search.
-        for attempt in range(run['run_attempt'], 0, -1):
+        attempts = (located_attempt,) if located_attempt is not None else range(run['run_attempt'], 0, -1)
+        for attempt in attempts:
             if run['id'] == exclude_run_id and attempt == exclude_run_attempt:
+                continue
+            if (run['id'], attempt) in checked_attempts:
                 continue
             capture = (capture_history_witness and HISTORY_WITNESS is not None
                        and run['id'] == 40088040731 and attempt == 1)
@@ -673,10 +698,13 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             if checked >= candidate_limit:
                 break
             checked += 1
+            checked_attempts.add((run['id'], attempt))
             value = verified_candidate(client, run, verification_policy, run_attempt=attempt,
                                        verified_controllers=verified_controllers,
                                        rejected_controllers=rejected_controllers,
                                        include_verified_details=capture)
+            if located_attempt is not None and value is None:
+                fail('provenance_no_verified_publication')
             if value is not None:
                 if capture:
                     registration, _, _ = _history_witness_registration(policy)

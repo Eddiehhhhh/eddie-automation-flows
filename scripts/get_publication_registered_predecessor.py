@@ -54,3 +54,23 @@ def verify_original_record(record, job_id, *, job, run):
             or not isinstance(job, dict) or job.get('id') != job_id
             or o.digest(job) != rows[0]['job_sha256']):
         p.fail('provenance_record')
+
+
+def discovery_locator(policy):
+    """One already registered producer coordinate, never publication evidence.
+
+    Discovery must fetch its current alias and reauthenticate the exact original
+    attempt/controller/job/log/record. It consumes an ORIGINAL candidate slot and
+    the SAME transport budget. No arbitrary caller/state/CLI locator is accepted.
+    Old incompatible policies retain their original discovery behavior.
+    """
+    import get_publication_provenance as p
+    import get_notion_idle_recovery as idle
+    eligible = [row for row in registry() if idle._forward_policy(policy, row)]
+    if not eligible:
+        return None
+    row = max(eligible, key=lambda item: (
+        item['get_record']['receipt_sequence'],
+        p.timestamp(item['run_binding']['updated_at']),
+        item['run_binding']['id'], item['run_binding']['run_attempt']))
+    return (row['run_binding']['id'], row['run_binding']['run_attempt'])
