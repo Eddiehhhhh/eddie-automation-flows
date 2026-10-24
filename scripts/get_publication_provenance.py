@@ -409,6 +409,17 @@ def run_semantic_binding(run):
     return {k: v for k, v in run_binding(run).items() if k not in ('created_at', 'updated_at')}
 
 
+def effective_candidate_policy(policy, run):
+    # Negative controller caching and full verification must use the same
+    # exact registered policy. A controller rejected under current rules is
+    # not evidence against a separately authenticated predecessor policy.
+    candidate_policy, original_recovery = recovery.candidate_policy(policy, run)
+    registered_recovery = False
+    if not original_recovery:
+        candidate_policy, registered_recovery = registered_predecessor.candidate_policy(policy, run)
+    return candidate_policy, original_recovery, registered_recovery
+
+
 def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None, rejected_controllers=None, include_verified_details=False):
     """Prove one original successful attempt, never a later attempt's result."""
     if type(include_verified_details) is not bool:
@@ -429,10 +440,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         fail('provenance_run_changed')
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
         return None
-    candidate_policy, original_recovery = recovery.candidate_policy(policy, run)
-    registered_recovery = False
-    if not original_recovery:
-        candidate_policy, registered_recovery = registered_predecessor.candidate_policy(policy, run)
+    candidate_policy, original_recovery, registered_recovery = effective_candidate_policy(policy, run)
     try:
         # One discovery may encounter the same immutable controller repeatedly.
         # Deduplicate only after exact deterministic-byte verification. The
@@ -545,7 +553,7 @@ def _history_witness_registration(policy):
     old = validate_policy(value['public_policy'], value['public_policy_sha256'])
     run = value['run_binding']; record = value['get_record']
     if (not isinstance(run, dict) or run_binding(run) != run
-            or type(run.get('id')) is not int or run['id'] != 39803282386
+            or type(run.get('id')) is not int or run['id'] != 40058867901
             or type(run.get('run_attempt')) is not int or run['run_attempt'] != 1
             or run.get('status') != 'completed' or run.get('conclusion') != 'success'
             or not idle._forward_policy(policy, {'public_policy': old})):
@@ -647,7 +655,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             if run['id'] == exclude_run_id and attempt == exclude_run_attempt:
                 continue
             capture = (capture_history_witness and HISTORY_WITNESS is not None
-                       and run['id'] == 39803282386 and attempt == 1)
+                       and run['id'] == 40058867901 and attempt == 1)
             # Lazy policy validation: ordinary non-witness runs remain original.
             witness_info = _history_witness_registration(policy) if capture else None
             verification_policy = witness_info[1] if capture else policy
@@ -658,7 +666,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             if (type(run.get('run_attempt')) is int and run['run_attempt'] == 1
                     and attempt == 1 and run.get('status') == 'completed'
                     and run.get('conclusion') == 'success'):
-                selected_policy, _ = recovery.candidate_policy(verification_policy, run)
+                selected_policy, _, _ = effective_candidate_policy(verification_policy, run)
                 negative_key = (run['head_sha'], run['event'], a.sha(a.encoded(selected_policy)))
                 if negative_key in rejected_controllers:
                     continue

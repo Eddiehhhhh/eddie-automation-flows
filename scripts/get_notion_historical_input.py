@@ -85,6 +85,7 @@ def validate_capture_selection(value, expected, *, apply=False):
     # exact approved member digest; grouping neither merges nor rewrites them.
     if remote_module.REPOSITORY != e.p.REPOSITORY: e.fail('wrong_parent')
     seen_ids = set(); seen_pages = set(); seen_paths = set(); common = None
+    capture_mode = None
     result = []
     for candidate, member in zip(value['candidates'], members):
         anchor_for(member)
@@ -95,12 +96,18 @@ def validate_capture_selection(value, expected, *, apply=False):
         if common is not None and binding != common: e.fail('approval_missing')
         common = binding
         for ident, row in candidate['records'].items():
-            # These registrations are capture-only existing-page cohorts.
-            if row['mode'] != 'existing_placeholder': e.fail('approval_missing')
-            page = row['target']['page_id']
-            if ident in seen_ids or page in seen_pages or row['path'] in seen_paths:
+            # Homogeneous capture-only cohorts reuse singleton evidence gates.
+            # This does not authorize creates or property/body apply groups.
+            if row['mode'] not in ('existing_placeholder', 'new_numeric'):
+                e.fail('approval_missing')
+            if capture_mode is not None and row['mode'] != capture_mode:
+                e.fail('approval_missing')
+            capture_mode = row['mode']
+            page = row['target']['page_id'] if capture_mode == 'existing_placeholder' else None
+            if ident in seen_ids or (page is not None and page in seen_pages) or row['path'] in seen_paths:
                 e.fail('duplicate_id')
-            seen_ids.add(ident); seen_pages.add(page); seen_paths.add(row['path'])
+            seen_ids.add(ident); seen_paths.add(row['path'])
+            if page is not None: seen_pages.add(page)
         result.append((candidate, member))
     if len(seen_ids) > h.MAX_CAPTURE_RUN_RECORDS: e.fail('request_budget')
     return tuple(result)
