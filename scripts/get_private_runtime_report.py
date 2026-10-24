@@ -34,4 +34,39 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
         if type(value) is int and 0<=value<=1000000 or key in result and value is None:out[key]=value
     values=result.get('http_statuses')
     if isinstance(values,list) and len(values)<=20 and all(type(v) is int and 100<=v<=599 for v in values):out['http_statuses']=values
+    diagnostic_codes = frozenset(('rate_budget', 'rate_stop', 'response_byte_budget', 'invalid_source_version',
+        'invalid_response_length', 'incomplete_response_body', 'transport_failed',
+        'redirect_blocked', 'request_failed', 'api_error', 'http_error', 'other', 'unavailable'))
+    code = result.get('source_diagnostic_code')
+    if isinstance(code, str) and code in diagnostic_codes and out['status'] == 'recurring_failed':
+        out['source_diagnostic_code'] = code
+        if code in ('rate_budget', 'rate_stop'):
+            reason = result.get('source_rate_reason')
+            if reason in ('qps_global', 'qps_bucket', 'quota_day', 'quota_month', 'not_member', 'unknown'):
+                out['source_rate_reason'] = reason
+            for key in ('source_rate_budget', 'source_rate_http_429'):
+                if type(result.get(key)) is bool:
+                    out[key] = result[key]
+        phase = result.get('source_phase')
+        if phase in ('not_started', 'list', 'detail'):
+            out['source_phase'] = phase
+        for key in ('source_operation_active', 'source_counters_valid', 'source_deadline_reached'):
+            if type(result.get(key)) is bool:
+                out[key] = result[key]
+        limits = {'source_api_requests': 2073, 'source_http_attempts': 10365,
+                  'source_detail_requests': 1924, 'source_list_pages': 150,
+                  'source_response_bytes': 130 * 1024 * 1024}
+        counts = {key: result.get(key) for key in limits}
+        valid = result.get('source_counters_valid') is True and all(type(v) is int and 0 <= v <= limits[k] for k, v in counts.items())
+        valid = valid and counts['source_http_attempts'] <= 5 * counts['source_api_requests']
+        if valid:
+            out.update(counts)
+        elif result.get('source_counters_valid') is True:
+            out['source_counters_valid'] = False
+        elapsed = result.get('source_elapsed_ms')
+        if type(elapsed) is int and 0 <= elapsed <= 3600000:
+            out['source_elapsed_ms'] = elapsed
+            delay = result.get('source_first_operation_delay_ms')
+            if type(delay) is int and 0 <= delay <= elapsed:
+                out['source_first_operation_delay_ms'] = delay
     return out

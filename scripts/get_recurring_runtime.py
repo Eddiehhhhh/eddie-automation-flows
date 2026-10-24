@@ -52,6 +52,107 @@ SOURCE_ERRORS.update({'GetNote transport failed': 'source_transport_failed', 'Ge
 # All values are program-defined fixed diagnostics, never exception arguments.
 PUBLIC_ERROR_CODES = frozenset(ERRORS | m.ERRORS | ENTRY_ERRORS | m.c.ERRORS | CORE_ERRORS | set(SOURCE_ERRORS.values()))
 
+# Diagnostics observe existing source calls; no deadline, retry or business gate
+# is added, removed or reset. Exception text is never returned to callers.
+class SourceObserver:
+    def __init__(self, source, policy, budget_seconds):
+        self.source = source
+        self.policy = policy
+        self.started = policy.deadline - budget_seconds
+        self.first = None
+        self.phase = 'not_started'
+        self.active = False
+        self.operation_failure = None
+
+    def __getattr__(self, name):
+        return getattr(self.source, name)
+
+    def _call(self, phase, operation, *args):
+        now = self.policy.clock()
+        if self.first is None:
+            self.first = now
+        self.phase, self.active = phase, True
+        self.operation_failure = None
+        try:
+            result = operation(*args)
+        except (Exception, SystemExit) as exc:
+            self.operation_failure = exc
+            raise
+        self.active = False
+        return result
+
+    def enumerate(self):
+        return self._call('list', self.source.enumerate)
+
+    def detail_raw(self, ident):
+        return self._call('detail', self.source.detail_raw, ident)
+
+    def diagnostic(self, exc):
+        import math
+        now = self.policy.clock()
+        values = {'source_diagnostic_code': source_diagnostic_code(exc),
+                  'source_phase': self.phase,
+                  'source_operation_active': self.active and self.operation_failure is exc}
+        from source_sync_rate import RateLimitFailure, REASONS
+        if isinstance(exc, RateLimitFailure):
+            values['source_rate_reason'] = exc.reason if exc.reason in REASONS else 'unknown'
+            values['source_rate_budget'] = bool(exc.budget)
+            values['source_rate_http_429'] = exc.http_status == 429
+        counts = {'source_api_requests': self.source.api_requests,
+                  'source_http_attempts': self.source.http_attempts,
+                  'source_detail_requests': self.source.details,
+                  'source_list_pages': len(self.source.list_receipts),
+                  'source_response_bytes': self.source.budget.used}
+        limits = {'source_api_requests': 2073, 'source_http_attempts': 10365,
+                  'source_detail_requests': 1924, 'source_list_pages': 150,
+                  'source_response_bytes': 130 * 1024 * 1024}
+        valid = all(type(v) is int and 0 <= v <= limits[k] for k, v in counts.items())
+        valid = valid and counts['source_http_attempts'] <= 5 * counts['source_api_requests']
+        values['source_counters_valid'] = bool(valid)
+        if valid:
+            values.update(counts)
+        elapsed = now - self.started
+        delay = None if self.first is None else self.first - self.started
+        if (type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed <= 3600
+                and (delay is None or type(delay) in (int, float) and math.isfinite(delay) and 0 <= delay <= elapsed)):
+            values['source_elapsed_ms'] = int(elapsed * 1000)
+            if delay is not None:
+                values['source_first_operation_delay_ms'] = int(delay * 1000)
+        values['source_deadline_reached'] = bool(now >= self.policy.deadline)
+        return values
+
+
+def source_diagnostic_code(exc):
+    from source_sync_rate import RateLimitFailure
+    from source_sync_inventory import SourceLimit
+    from get_mirror_incremental_replay import ParityFailure
+    if isinstance(exc, RateLimitFailure):
+        if exc.budget:
+            return 'rate_budget'
+        return 'rate_stop'
+    if isinstance(exc, SourceLimit) and str(exc) == 'source byte limit':
+        return 'response_byte_budget'
+    if isinstance(exc, ParityFailure) and str(exc) == 'invalid_raw_version':
+        return 'invalid_source_version'
+    if type(exc) is RuntimeError:
+        fixed = {'invalid Get response length': 'invalid_response_length',
+                 'incomplete Get response body': 'incomplete_response_body',
+                 'GetNote incomplete body': 'incomplete_response_body',
+                 'GetNote transport failed': 'transport_failed',
+                 'GetNote redirect blocked': 'redirect_blocked',
+                 'Get response byte limit reached': 'response_byte_budget',
+                 'GetNote request failed': 'request_failed'}
+        if str(exc) in fixed:
+            return fixed[str(exc)]
+        # API error details/codes may originate in private responses. Classify
+        # the known prefix only; never return any caller-provided suffix.
+        if str(exc).startswith('GetNote API error '):
+            return 'api_error'
+        if str(exc) in {'GetNote HTTP ' + str(n) for n in (400, 401, 403, 404, 408, 429, 500, 502, 503, 504)}:
+            return 'http_error'
+    return 'other'
+
+
 def public_result(result):
     import get_private_runtime_report as report
     return report.public(result, PUBLIC_ERROR_CODES, allowed_stages=STAGES)
@@ -325,7 +426,9 @@ def main(argv=None):
         import sync_getnote_to_raw as sync
         from source_sync_rate import RequestPolicy
         key, client_id = at_stage('credentials', sync.load_credentials)
-        source = at_stage('source_transport', m.c.Source, key, client_id, RequestPolicy(seconds=35 * 60))
+        rate_policy = RequestPolicy(seconds=35 * 60)
+        source = at_stage('source_transport', m.c.Source, key, client_id, rate_policy)
+        source = SourceObserver(source, rate_policy, 35 * 60)
         def checkpoint(plan):
             nonlocal attempt_started
             m.write_checkpoint(args.checkpoint, plan)
@@ -343,6 +446,11 @@ def main(argv=None):
             writers_guard=writers_guard)
     except (Exception, SystemExit) as exc:
         result = failure(exc, attempt_started=attempt_started)
+        if 'source' in locals() and isinstance(source, SourceObserver):
+            try:
+                result.update(source.diagnostic(exc))
+            except Exception:
+                result['source_diagnostic_code'] = 'unavailable'
     print(json.dumps(public_result(result)), flush=True)
     # No built-in Notion call/job; an independent sink must not turn a successful
     # Get job into failed provenance. Callback partials are explicitly nonfatal.
