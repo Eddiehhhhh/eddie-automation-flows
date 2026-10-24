@@ -553,7 +553,7 @@ def _history_witness_registration(policy):
     old = validate_policy(value['public_policy'], value['public_policy_sha256'])
     run = value['run_binding']; record = value['get_record']
     if (not isinstance(run, dict) or run_binding(run) != run
-            or type(run.get('id')) is not int or run['id'] != 40058867901
+            or type(run.get('id')) is not int or run['id'] != 40088040731
             or type(run.get('run_attempt')) is not int or run['run_attempt'] != 1
             or run.get('status') != 'completed' or run.get('conclusion') != 'success'
             or not idle._forward_policy(policy, {'public_policy': old})):
@@ -655,7 +655,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             if run['id'] == exclude_run_id and attempt == exclude_run_attempt:
                 continue
             capture = (capture_history_witness and HISTORY_WITNESS is not None
-                       and run['id'] == 40058867901 and attempt == 1)
+                       and run['id'] == 40088040731 and attempt == 1)
             # Lazy policy validation: ordinary non-witness runs remain original.
             witness_info = _history_witness_registration(policy) if capture else None
             verification_policy = witness_info[1] if capture else policy

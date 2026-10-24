@@ -19,6 +19,7 @@ import build_observatory_frontend
 import iteration_closeout
 import iteration_incremental_audit
 import iteration_source_discovery
+from iteration_public_state import public_state
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -271,7 +272,7 @@ def main() -> int:
         if not state_path.is_absolute():
             state_path = ROOT / state_path
         summary["state_output_path"] = iteration_source_discovery.rel(state_path)
-        summary["state_output_changed"] = stable_write_json(state_path, summary)
+        summary["state_output_changed"] = stable_write_json(state_path, public_state(summary))
 
     if args.format == "markdown":
         print(render_markdown(summary), end="")

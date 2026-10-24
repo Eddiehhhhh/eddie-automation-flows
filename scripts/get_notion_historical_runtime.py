@@ -90,7 +90,9 @@ def creation_recovery_for(active, manifest, expected, api):
     return {'plan_sha256':digest,'note_id':row['note_id'],'page_id':binding['page_id'],
             'snapshot_sha256':e.target_sha(snapshot,row['note_id'],manifest['data_source_id'])}
 
-def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_hash,apply,writers_guard,loader=None,admit=None,verify_reused=False,row_admit=None):
+def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_hash,apply,writers_guard,loader=None,admit=None,verify_reused=False,row_admit=None,settle_row_yield=None,resume_admit=None):
+    if settle_row_yield is not None and (row_admit is None or not callable(settle_row_yield)):e.fail('approval_missing')
+    if resume_admit is not None and not callable(resume_admit):e.fail('approval_missing')
     historical.validate(manifest,expected,apply=apply)
     if transport.native.sha(manifest['data_source_id'])!=transport.native.DATA_SOURCE_PIN or transport.native.sha(manifest['database_id'])!=transport.native.DATABASE_PIN: e.fail('wrong_parent')
     current,version=store.read();outbox.check_state(current)
@@ -160,6 +162,9 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
         'write_state':'unknown' if active else 'not_attempted','prior_journal_effects':'unresolved' if active else 'none',
         'complete_library_claimed':False}
     if apply:
+        # Saved prepared CREATE bypasses executor clean-row hooks; reserve it
+        # before any resumed native write, without clearing a pending operation.
+        if resume_admit is not None and resume_admit(current,plan) is not True:e.fail('request_budget')
         if admit is not None and not (active and active['operation'] is not None) and not admit(current,plan): raise ApplyBoundaryYield()
         if not isinstance(request,transport.Transport): e.fail('approval_missing')
         allowed=pipeline.wire_allowlist(plan,api);api.approved=allowed;request.approved=allowed
@@ -172,6 +177,9 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
                          create_recovery=create_recovery,approved_recovery_sha=e.digest(create_recovery) if create_recovery is not None else None,
                          authorize_batch=pipeline.batch_authorizer(plan,api,request,adapter),
                          authorize_row=ordinary_row if row_admit is not None else None)
+        if (settle_row_yield is not None and getattr(row_admit,'clean_boundary_denied',False) is True
+                and result.get('status')=='partial' and result.get('reason')=='batch_boundary_yield'):
+            result=settle_row_yield(adapter,plan,result)
         safe=e.public_report(result)
         report.update(status='executed',execution=safe,external_write_attempts=safe['external_write_attempts'],write_state=safe['write_state'])
     final,final_sha=store.read()
