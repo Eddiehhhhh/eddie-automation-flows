@@ -572,8 +572,14 @@ def _history_witness_from_verified(value, verified):
 
 
 def verify_history_witness(client, policy, *, candidate_runs_checked):
-    """Fresh authentication within the SAME four-candidate and transport budget."""
-    if type(candidate_runs_checked) is not int or not 0 <= candidate_runs_checked < MAX_CANDIDATES:
+    """Authenticate the exact registered history fact, not a discovery candidate.
+
+    Dynamic publication discovery retains its original four-candidate scope.
+    This single fixed run/attempt/job/record is accepted only by the original
+    exact registration verifier. It cannot become another discovered anchor.
+    Use the SAME client so all requests, bytes and elapsed time remain bounded.
+    """
+    if type(candidate_runs_checked) is not int or not 0 <= candidate_runs_checked <= MAX_CANDIDATES:
         fail('provenance_candidate_bound')
     value, old, run = _history_witness_registration(policy)
     listed = check_run_identity(client.json('/actions/runs/' + str(run['id'])), old)

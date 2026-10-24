@@ -16,10 +16,18 @@ CAPSULE_KEYS = {'public_policy', 'public_policy_sha256', 'notion_policy_sha256',
     'run_binding', 'job_id', 'job_sha256', 'get_record', 'checkpoint_count',
     'checkpoint', 'anchor', 'receipts'}
 CAPTURE_KEYS = CAPSULE_KEYS | {'latest_binding', 'fixed_source_record', 'terminal_report', 'capture_sha256'}
+APPLY_KEYS = CAPSULE_KEYS | {'latest_binding', 'fixed_source_record', 'terminal_report', 'apply_evidence'}
 
 
 def _capture(value):
     return isinstance(value, dict) and set(value) == CAPTURE_KEYS
+
+
+def _apply(value):
+    return isinstance(value,dict) and set(value)==APPLY_KEYS
+
+def _fixed(value):
+    return _capture(value) or _apply(value)
 
 
 RECEIPT_KEYS = {'commit', 'receipt_sha256', 'sequence', 'policy_sha256'}
@@ -36,7 +44,7 @@ def _capsule():
         return None
     try:
         value = deepcopy(PREDECESSOR)
-        if not isinstance(value, dict) or set(value) not in (CAPSULE_KEYS, CAPTURE_KEYS):
+        if not isinstance(value, dict) or set(value) not in (CAPSULE_KEYS, CAPTURE_KEYS, APPLY_KEYS):
             raise ValueError
         policy = p.validate_policy(value['public_policy'], value['public_policy_sha256'])
         c.journal.checked(value['notion_policy_sha256'], 64)
@@ -56,7 +64,7 @@ def _capsule():
         if p.timestamp(run['created_at']) > p.timestamp(run['updated_at']):
             raise ValueError
         record = value['get_record']
-        if not _capture(value):
+        if not _fixed(value):
             p.parse_record(p.publication_line(record).encode(), policy, run)
         elif record is not None or value['receipts'] != ():
             raise ValueError
@@ -94,7 +102,7 @@ def _capsule():
                 or o.digest({k: v for k, v in final.items() if k != 'record_sha256'}) != final['record_sha256']
                 or value['anchor'] != {k: final[k] for k in ('commit', 'state_blob', 'state_sha256')}):
             raise ValueError
-        if _capture(value):
+        if _fixed(value):
             latest = value['latest_binding']
             c._same_run(run, latest, cross_endpoint=True)
             if (p.run_binding(latest) != latest or p.run_semantic_binding(run) != p.run_semantic_binding(latest)
@@ -102,6 +110,10 @@ def _capsule():
                     or latest['run_attempt'] != run['run_attempt'] or run['event'] != 'workflow_dispatch'):
                 raise ValueError
             fixed = c.fixed_auth.parse(o.encoded(value['fixed_source_record']), expected, run)
+            if _apply(value):
+                if fixed['mode']!='historical-apply':raise ValueError
+                _check_apply_evidence(value)
+                return value
             if fixed['mode'] != 'historical-capture': raise ValueError
             c.journal.checked(value['capture_sha256'], 64)
             report = value['terminal_report']
@@ -172,7 +184,7 @@ def verify_original_record(record, job_id, *, job=None):
     import get_publication_provenance as p
     import get_notion_outbox as o
     capsule = _capsule()
-    if (capsule is None or _capture(capsule) or record != capsule['get_record']
+    if (capsule is None or _fixed(capsule) or record != capsule['get_record']
             or type(job_id) is not int or job_id != capsule['job_id']
             or not isinstance(job, dict) or job.get('id') != job_id
             or o.digest(job) != capsule['job_sha256']):
@@ -199,7 +211,7 @@ def can_recover(policy, run_id, run_attempt):
 
 
 def _matches_proof(result, capsule):
-    capture = _capture(capsule)
+    capture = _fixed(capsule)
     fixed_matches = (not capture or (
         all(result.get(k) == capsule[k] for k in ('latest_binding','fixed_source_record','terminal_report'))
         and result.get('terminal_conclusions') == {'job':'success','notion':'success','get':'skipped'}
@@ -229,7 +241,7 @@ def recover_checkpoint(client, run_id, run_attempt, *, current_public_policy):
         public_policy=capsule['public_policy'],
         approved_public_policy_sha256=capsule['public_policy_sha256'],
         notion_policy_sha256=capsule['notion_policy_sha256'], require_success=True,
-        **({'include_job_digest':True, 'include_terminal_report':True} if _capture(capsule) else {}))
+        **({'include_job_digest':True, 'include_terminal_report':True} if _fixed(capsule) else {}))
     if not _matches_proof(result, capsule):
         c.fail('journal_provenance_record')
     return {**result, 'recovery_anchor': TAG}
@@ -261,7 +273,49 @@ def transition_outer(state, sha, new_get_policy_sha256, *, proof):
             o.fail('outbox_state_invalid')
         historical.check_captures({selected:saved})
         historical.check_native_schema_capture(saved)
+    if _apply(capsule):
+        _check_apply_evidence(capsule,state)
     result = deepcopy(state)
     result['policy_sha256'] = new_get_policy_sha256
     o.check_state(result)
     return result
+
+
+def _check_apply_evidence(capsule,state=None):
+    """Exact completed selection, including metadata holds; no new write grant."""
+    import get_notion_outbox as o
+    import get_notion_historical as historical
+    c=capsule['apply_evidence'];report=capsule['terminal_report']
+    keys={'manifest','property_manifest_sha256','plan_sha256','body_receipt_sha256','property_receipt_sha256','held'}
+    if not isinstance(c,dict) or set(c)!=keys:o.fail('outbox_state_invalid')
+    selected=capsule['fixed_source_record']['selection_sha256'];manifest=c['manifest']
+    historical.validate(manifest,selected,apply=True)
+    ids=set(manifest['records'])
+    if (not ids or not historical.creation_ids(manifest)==ids
+            or not all(isinstance(c[k],dict) and set(c[k])==ids for k in ('body_receipt_sha256','property_receipt_sha256','held'))):o.fail('outbox_state_invalid')
+    for k in ('property_manifest_sha256','plan_sha256'):o.e.p.hex_hash(c[k],64)
+    for ident in ids:
+        o.e.p.hex_hash(c['body_receipt_sha256'][ident],64);o.e.p.hex_hash(c['property_receipt_sha256'][ident],64)
+        if not isinstance(c['held'][ident],dict):o.fail('outbox_state_invalid')
+    reportkeys={'contract','status','business_health_asserted','complete_library_claimed','execution_status','execution_reason','write_state','external_write_attempts','asset_downloads'}
+    held=any(c['held'].values())
+    if (not isinstance(report,dict) or set(report)!=reportkeys
+            or report['contract']!='get-private-runtime-report-2' or report['status']!='executed'
+            or report['business_health_asserted'] is not False or report['complete_library_claimed'] is not False
+            or report['execution_status']!=('partial' if held else 'verified')
+            or report['execution_reason'] is not None or report['write_state']!='confirmed'
+            or type(report['external_write_attempts']) is not int or not 0<=report['external_write_attempts']<=len(ids)
+            or type(report['asset_downloads']) is not int or report['asset_downloads']!=0):o.fail('outbox_state_invalid')
+    if state is None:return
+    engine=state['engine_state']
+    if engine['journal'] is not None:o.fail('outbox_state_invalid')
+    historical.require_creation_capture(state.get('historical_captures',{}),manifest,selected)
+    for ident in ids:
+        source=manifest['records'][ident];body=engine['receipts'].get(ident);prop=engine['property_receipts'].get(ident)
+        if (not isinstance(body,dict) or not isinstance(prop,dict)
+                or o.digest(body)!=c['body_receipt_sha256'][ident] or o.digest(prop)!=c['property_receipt_sha256'][ident]
+                or body.get('readback_verified') is not True or prop.get('readback_verified') is not True
+                or body.get('creation_plan_sha256')!=c['plan_sha256'] or prop.get('manifest_sha256')!=c['property_manifest_sha256']
+                or prop.get('held')!=c['held'][ident] or body.get('page_id')!=prop.get('page_id')
+                or body.get('note_id')!=ident or ident in engine['failures'] or ident in engine['unresolved_by_id']
+                or any(r.get('source_commit')!=manifest['source_commit'] or r.get('md_blob')!=source['blob'] or r.get('data_source_id')!=manifest['data_source_id'] for r in (body,prop))):o.fail('outbox_state_invalid')
