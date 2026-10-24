@@ -71,23 +71,119 @@ class Tests(unittest.TestCase):
         timer=t.Timer(iter((0,10)).__next__);timer.call('synthetic-secret',lambda:7)
         self.assertEqual(timer.rows,{})
 
+@contextlib.contextmanager
+def synthetic_journal(mode):
+    """Load the real CAS implementation with self-contained synthetic edges.
+
+    Only the transport, object/state codec and unrelated preservation hooks are
+    synthetic. CAS ordering, exception classification, poison and confirmation
+    are the actual published methods. All module substitutions are scoped.
+    """
+    import hashlib
+    import importlib.util
+    import threading
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    encode=lambda value:json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+    digest=lambda value:hashlib.sha256(value if isinstance(value,bytes) else encode(value)).hexdigest()
+    oid=lambda raw:hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+    def preserve(old,new):
+        if old.get('protected') != new.get('protected'):raise ValueError('synthetic protection')
+    def check(value):
+        if set(value) != {'engine_state','revision','protected'}:raise ValueError('synthetic shape')
+    codec=SimpleNamespace(encoded=encode,digest=digest,check_state=check,Blocked=ValueError,
+        png_store=SimpleNamespace(preserve=preserve,not_dispatched_ticket=lambda *args:None))
+    engine=SimpleNamespace(Blocked=ValueError,plan_recovery=SimpleNamespace(preserve_holds=preserve))
+    modules={'get_notion_executor':engine,'get_notion_outbox':codec,
+        'get_private_preview_retention':SimpleNamespace(oid=oid,GitHubRemote=SimpleNamespace(source_get_tree=lambda *args:None)),
+        'get_notion_historical':SimpleNamespace(preserve_captures=preserve),
+        'get_notion_historical_active_recovery':SimpleNamespace(preserve=preserve),
+        'get_notion_authenticated_recovery':SimpleNamespace(preserve=preserve)}
+    path=Path(t.__file__).with_name('get_notion_remote_journal.py')
+    spec=importlib.util.spec_from_file_location('_synthetic_timing_journal',path)
+    journal=importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules,modules):
+        spec.loader.exec_module(journal)
+        class Store(journal.RemoteJournal):
+            def __init__(self):
+                self._timing=t.Timer();self.poisoned=False;self.recovery=None
+                self.confirm_entered=False;self.stage='anchor';self.lock=threading.Lock()
+                self._png_not_dispatched=None;self.post_cas_paths=frozenset();self.post_cas_mirror=False
+                self.max_commits=400;self.max_batch_bytes=192*1024*1024;self.poll_attempts=2
+                self.commits_attempted=0;self.new_blob_bytes=0;self.charged_blobs=set()
+                self.old={'engine_state':{'protected':True},'revision':0,'protected':True}
+                self.new={**deepcopy(self.old),'revision':1};self.initial='a'*40;self.candidate='b'*40
+                self.head=self.initial;self.remote=SimpleNamespace(cas_main=self.push)
+                self.calls=[];self.confirmations=[];self.external_writes=[];self.delays=[]
+                self.sleep=self.delays.append;self.confirm=self.callback
+                self.anchor={'commit':self.initial,'state_blob':None,'state_sha256':digest(self.old)}
+            def _current(self,**kwargs):
+                self._ready()
+                return self.initial,'c'*40,{},deepcopy(self.old),digest(self.old),None,encode(self.old)
+            def _build(self,parent,before,data):
+                return self.candidate,'d'*40,oid(data),{}
+            def _head(self,expected=None):
+                if expected is not None and expected != self.head:raise journal.JournalFailure('state_changed')
+                return self.head
+            def _post_cas_head(self,commit,observed=None):return self._head(commit)
+            def push(self,parent,commit):
+                self.calls.append((parent,commit))
+                if mode=='reject':raise TimeoutError('synthetic push')
+                self.head=commit
+            def _ref(self):
+                if mode=='readback_failure':raise TimeoutError('synthetic readback')
+                return self.initial if mode=='stale' else self.head
+            def _verify(self,commit,parent,tree,wanted,data):
+                receipt={'commit':commit,'state_blob':oid(data),'state_sha256':digest(data),'cas_attempts':1}
+                return receipt,deepcopy(self.new)
+            def callback(self,receipt):
+                self.confirmations.append(deepcopy(receipt))
+                return mode!='confirmation_failure'
+            def execute(self):
+                try:self.compare_and_set_verified(digest(self.old),self.new)
+                except journal.JournalFailure as exc:
+                    return {'status':'blocked','reason':str(exc),'external_write_attempts':0}
+                self.external_writes.append('synthetic write')
+                return {'status':'verified','external_write_attempts':1}
+        yield Store(),journal,digest
+
+
 class JournalFailureIntegrationTests(unittest.TestCase):
+    def assert_poisoned_without_retry(self,store,journal,digest):
+        self.assertTrue(store.poisoned)
+        with self.assertRaises(journal.JournalFailure):store.read()
+        with self.assertRaises(journal.JournalFailure):
+            store.compare_and_set_verified(digest(store.old),store.new)
+        self.assertEqual(len(store.calls),1)
+
     def test_missing_clock_keeps_unknown_poison_and_one_attempt(self):
-        from test_notion_remote_journal import JournalTests
-        with patch.object(t.time, 'monotonic_ns', None):
-            result=JournalTests('test_readback_transport_failure_is_unknown_without_retry').run()
-        self.assertTrue(result.wasSuccessful(), str(result.failures)+str(result.errors))
+        with patch.object(t.time,'monotonic_ns',None),synthetic_journal('readback_failure') as (store,journal,digest):
+            with self.assertRaises(journal.JournalFailure) as got:
+                store.compare_and_set_verified(digest(store.old),store.new)
+            self.assertEqual(str(got.exception),'journal_failed')
+            self.assertEqual(got.exception.outcome,'unknown')
+            self.assertEqual(len(store.calls),1);self.assertEqual(store.confirmations,[])
+            self.assert_poisoned_without_retry(store,journal,digest)
 
     def test_output_failure_does_not_unlock_external_write(self):
-        from test_notion_remote_journal import ExecutorOrderingTests
-        with patch('builtins.print', side_effect=OSError('synthetic output failure')):
-            result=ExecutorOrderingTests('test_failed_inflight_confirmation_prevents_notion_api_write').run()
-        self.assertTrue(result.wasSuccessful(), str(result.failures)+str(result.errors))
+        with synthetic_journal('confirmation_failure') as (store,journal,digest):
+            with patch('builtins.print',side_effect=OSError('synthetic output failure')):
+                result=store.execute()
+            self.assertEqual(result,{'status':'blocked','reason':'journal_failed','external_write_attempts':0})
+            self.assertEqual(store.external_writes,[]);self.assertTrue(store.poisoned)
+            self.assertEqual(store.recovery['commit'],store.head)
+            self.assertEqual(len(store.confirmations),1)
+            self.assert_poisoned_without_retry(store,journal,digest)
 
     def test_clock_exception_keeps_stale_cas_no_retry(self):
-        from test_notion_remote_journal import JournalTests
-        with patch.object(t.time, 'monotonic_ns', side_effect=RuntimeError('synthetic clock failure')):
-            result=JournalTests('test_rejected_or_forever_stale_never_retries').run()
-        self.assertTrue(result.wasSuccessful(), str(result.failures)+str(result.errors))
+        for mode in ('reject','stale'):
+            with self.subTest(mode=mode),patch.object(t.time,'monotonic_ns',side_effect=RuntimeError('synthetic clock failure')):
+                with synthetic_journal(mode) as (store,journal,digest):
+                    with self.assertRaises(journal.JournalFailure) as got:
+                        store.compare_and_set_verified(digest(store.old),store.new)
+                    self.assertEqual(got.exception.outcome,'unknown')
+                    self.assertEqual(len(store.calls),1);self.assertEqual(store.confirmations,[])
+                    self.assert_poisoned_without_retry(store,journal,digest)
 
 if __name__=='__main__':unittest.main()
