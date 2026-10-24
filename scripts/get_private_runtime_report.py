@@ -69,4 +69,21 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
             delay = result.get('source_first_operation_delay_ms')
             if type(delay) is int and 0 <= delay <= elapsed:
                 out['source_first_operation_delay_ms'] = delay
+    # Fixed stage names only. Parent and child values are inclusive, not additive.
+    preparation_stages = frozenset(('policy', 'execution_provenance', 'remote_guard',
+        'checkout', 'capture_evidence', 'parent_history', 'bootstrap_history',
+        'bootstrap_inventory', 'current_inventory', 'receipt_provenance',
+        'trusted_inputs', 'trusted_states', 'legacy_baselines', 'new_baselines',
+        'preview_inputs', 'canonical_prepare', 'candidate_report'))
+    timings = result.get('preparation_inclusive_timings')
+    if out['status'] == 'recurring_failed' and type(timings) is dict and len(timings) <= len(preparation_stages):
+        safe = {}
+        for stage, value in timings.items():
+            if (type(stage) is str and stage in preparation_stages and type(value) is dict
+                    and set(value) == {'ms', 'calls'} and type(value['ms']) is int
+                    and 0 <= value['ms'] <= 3600000 and type(value['calls']) is int
+                    and 1 <= value['calls'] <= 1024):
+                safe[stage] = {'ms': value['ms'], 'calls': value['calls']}
+        if safe:
+            out['preparation_inclusive_timings'] = safe
     return out

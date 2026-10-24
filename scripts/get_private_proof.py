@@ -112,6 +112,7 @@ class PrivateRecords:
     def __init__(self,remote,*,max_commits=MAX_COMMITS):
         if type(max_commits) is not int or not 1<=max_commits<=MAX_COMMITS:fail()
         self.remote=remote;self.limit=max_commits;self.nodes=[];self.blobs={};self.head=None;self.bytes=0
+        self._node_cache={}
     def guard(self):
         m=self.remote.metadata()
         if m.get('full_name')!=REPOSITORY or m.get('private') is not True:fail()
@@ -129,6 +130,13 @@ class PrivateRecords:
         return node
     def read_node(self,commit):
         checked(commit,40)
+        # Per-resolver immutable-object cache only. Mutable repository/head
+        # guards still execute through guard(), including before/after resolve.
+        # Hints are locators, not proof: the original complete record checks
+        # and ancestor traversal remain unchanged after this metadata lookup.
+        key=(REPOSITORY,commit)
+        if key in self._node_cache:
+            return deepcopy(self._node_cache[key])
         metadata=self.remote.commit(commit);tree=checked(metadata.get('tree'),40);parents=metadata.get('parents')
         if not isinstance(parents,list) or len(parents)>1:fail()
         parent=checked(parents[0],40) if parents else None
@@ -142,7 +150,13 @@ class PrivateRecords:
             if (path in selected or row.get('type')!='blob' or row.get('mode')!='100644'
                     or type(row.get('size')) is not int or not 0<row['size']<=MAX_OBJECT):fail()
             selected[path]=(checked(row.get('sha'),40),row['size'])
-        return {'commit':commit,'tree':tree,'parent':parent,'objects':selected}
+        node={'commit':commit,'tree':tree,'parent':parent,'objects':selected}
+        # Cache only after every original metadata validation succeeds. The
+        # three fixed journal hint fields add at most three off-chain nodes.
+        # A full cache merely declines retention; it never changes validation.
+        if len(self._node_cache)<self.limit+3:
+            self._node_cache[key]=deepcopy(node)
+        return node
     def object(self,node,kind):
         row=node['objects'].get(PATHS[kind])
         if row is None:return None

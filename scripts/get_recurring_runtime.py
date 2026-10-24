@@ -6,6 +6,9 @@ is installed here. A separately reviewed production scope is required for apply.
 """
 import get_private_proof as private_proof
 import argparse
+import contextvars
+import math
+import time
 import json
 import os
 from pathlib import Path
@@ -54,6 +57,53 @@ PUBLIC_ERROR_CODES = frozenset(ERRORS | m.ERRORS | ENTRY_ERRORS | m.c.ERRORS | C
 
 # Diagnostics observe existing source calls; no deadline, retry or business gate
 # is added, removed or reset. Exception text is never returned to callers.
+# Inclusive timings: nested parent/child durations overlap and must not be summed.
+PREPARATION_STAGES = frozenset(('policy', 'execution_provenance', 'remote_guard',
+    'checkout', 'capture_evidence', 'parent_history', 'bootstrap_history',
+    'bootstrap_inventory', 'current_inventory', 'receipt_provenance',
+    'trusted_inputs', 'trusted_states', 'legacy_baselines', 'new_baselines',
+    'preview_inputs', 'canonical_prepare', 'candidate_report'))
+_PREPARATION_TIMER = contextvars.ContextVar('get_preparation_timer', default=None)
+
+
+class PreparationTimer:
+    def __init__(self, clock=None):
+        # Separate observational clock, same real monotonic basis. Never consume
+        # an injected RequestPolicy fake clock or change its deadline/start.
+        self.clock = clock or time.monotonic
+        self.values = {}
+        self.invalid = set()
+
+    def start(self, stage):
+        try:
+            if stage in PREPARATION_STAGES:
+                return self.clock()
+        except Exception:
+            pass
+        return None
+
+    def finish(self, stage, start):
+        try:
+            if start is None or stage not in PREPARATION_STAGES:
+                return
+            elapsed = self.clock() - start
+            old = self.values.get(stage, {'ms': 0, 'calls': 0})
+            if not math.isfinite(elapsed) or not 0 <= elapsed <= 3600:
+                self.invalid.add(stage)
+                return
+            value = {'ms': old['ms'] + int(elapsed * 1000), 'calls': old['calls'] + 1}
+            if value['ms'] > 3600000 or value['calls'] > 1024:
+                self.invalid.add(stage)
+                return
+            self.values[stage] = value
+        except Exception:
+            self.invalid.add(stage)
+
+    def diagnostic(self):
+        return {stage: dict(value) for stage, value in self.values.items()
+                if stage not in self.invalid}
+
+
 class SourceObserver:
     def __init__(self, source, policy, budget_seconds):
         self.source = source
@@ -160,12 +210,25 @@ def public_result(result):
 def at_stage(stage, operation, *args, **kwargs):
     if stage not in STAGES:
         fail('runtime_failed')
+    timer = _PREPARATION_TIMER.get()
+    started = None
+    if timer is not None:
+        try:
+            started = timer.start(stage)
+        except (Exception, SystemExit):
+            pass
     try:
         return operation(*args, **kwargs)
     except (Exception, SystemExit) as exc:
         if not isinstance(getattr(exc, 'runtime_stage', None), str) or exc.runtime_stage not in STAGES:
             exc.runtime_stage = stage
         raise
+    finally:
+        if timer is not None:
+            try:
+                timer.finish(stage, started)
+            except (Exception, SystemExit):
+                pass
 
 
 
@@ -400,6 +463,8 @@ def main(argv=None):
     parser.add_argument('--expected-parent'); parser.add_argument('--trigger', choices=('manual', 'schedule'), default='manual')
     args = parser.parse_args(argv)
     attempt_started = False
+    timing_token = None
+    timer = None
     try:
         # Fail closed before any credential lookup or network on pending apply.
         if args.apply and not PRODUCTION_ACTIVATED:
@@ -429,6 +494,11 @@ def main(argv=None):
         rate_policy = RequestPolicy(seconds=35 * 60)
         source = at_stage('source_transport', m.c.Source, key, client_id, rate_policy)
         source = SourceObserver(source, rate_policy, 35 * 60)
+        try:
+            timer = PreparationTimer()
+            timing_token = _PREPARATION_TIMER.set(timer)
+        except (Exception, SystemExit):
+            timer = None
         def checkpoint(plan):
             nonlocal attempt_started
             m.write_checkpoint(args.checkpoint, plan)
@@ -451,6 +521,14 @@ def main(argv=None):
                 result.update(source.diagnostic(exc))
             except Exception:
                 result['source_diagnostic_code'] = 'unavailable'
+        if timer is not None:
+            try:
+                result['preparation_inclusive_timings'] = timer.diagnostic()
+            except (Exception, SystemExit):
+                pass
+    finally:
+        if timing_token is not None:
+            _PREPARATION_TIMER.reset(timing_token)
     print(json.dumps(public_result(result)), flush=True)
     # No built-in Notion call/job; an independent sink must not turn a successful
     # Get job into failed provenance. Callback partials are explicitly nonfatal.
