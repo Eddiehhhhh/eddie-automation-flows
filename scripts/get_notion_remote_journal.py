@@ -15,6 +15,7 @@ import re
 import tempfile
 import threading
 import time
+import get_notion_journal_timing as timing
 
 import get_notion_executor as engine
 import get_notion_outbox as codec
@@ -152,6 +153,7 @@ class RemoteJournal:
     def __init__(self, root, remote, *, anchor, load_commit, guard, confirm,
                  max_commits=MAX_COMMITS, max_batch_bytes=MAX_BATCH_BYTES,
                  poll_attempts=6, sleep=time.sleep, post_cas_paths=(), post_cas_mirror=False):
+        self._timing = timing.Timer()
         self.poisoned = False
         self._png_not_dispatched = None
         self.lock = threading.Lock()
@@ -220,6 +222,7 @@ class RemoteJournal:
             raise JournalFailure('state_changed', stage='guard')
         return head
 
+    @timing.observed('source_head_guard')
     def _head(self, expected=None):
         head = self._ref(expected)
         if self.guard(head) is not True:
@@ -287,6 +290,7 @@ class RemoteJournal:
             raise JournalFailure('state_invalid', stage='history')
         return True
 
+    @timing.observed('post_cas_guard')
     def _post_cas_head(self, commit, observed=None):
         """Authenticate harmless descendants only AFTER our one attempted CAS.
 
@@ -373,6 +377,7 @@ class RemoteJournal:
             raise JournalFailure('state_invalid', stage='load')
         return root, entries
 
+    @timing.observed('commit_load')
     def _commit(self, head):
         self.stage = 'load'
         self.load_commit(head)
@@ -387,6 +392,7 @@ class RemoteJournal:
             raise JournalFailure('state_invalid', stage='readback')
         return tree, parents[1:], entries
 
+    @timing.observed('state_validate')
     def _state(self, tree):
         row = tree.get(STATE_PATH)
         if row is None:
@@ -400,7 +406,7 @@ class RemoteJournal:
         data = self.local.blob(row[2])
         if (len(data) != int(size) or len(data) > MAX_STATE
                 or retention.oid(data) != row[2]
-                or self.remote.blob(row[2], len(data)) != data):
+                or self._timing.call('remote_state_blob', self.remote.blob, row[2], len(data)) != data):
             raise JournalFailure('state_invalid', stage='readback')
         value = retention.strict_json(data)
         codec.check_state(value)
@@ -408,6 +414,7 @@ class RemoteJournal:
             raise JournalFailure('state_invalid', stage='readback')
         return value, codec.digest(data), row[2], data
 
+    @timing.observed('current')
     def _current(self, *, recheck=True):
         head = self._head()
         _, _, anchored_tree = self._commit(self.anchor['commit'])
@@ -451,6 +458,7 @@ class RemoteJournal:
         except Exception:
             raise JournalFailure(stage=self.stage) from None
 
+    @timing.observed('build')
     def _build(self, parent, before, data):
         self.stage = 'prepare'
         blob = retention.oid(data)
@@ -473,6 +481,7 @@ class RemoteJournal:
             raise JournalFailure(stage='prepare')
         return commit, tree_oid, blob, wanted
 
+    @timing.observed('readback')
     def _verify(self, commit, parent, tree_oid, wanted, data):
         self.stage = 'readback'
         if isinstance(self.remote, ImmutableJournalRemote):
@@ -489,11 +498,12 @@ class RemoteJournal:
                 'tree': tree_oid, 'state_blob': blob, 'state_sha256': digest,
                 'state_bytes': len(data), 'cas_attempts': 1, 'readback_verified': True}, value
 
+    @timing.observed('confirm')
     def _confirm(self, receipt, value):
         self.stage = 'confirm'
         self.confirm_entered = True
         self.recovery = deepcopy(receipt)
-        if self.confirm(deepcopy(receipt)) is not True:
+        if self._timing.call('checkpoint_callback', self.confirm, deepcopy(receipt)) is not True:
             raise JournalFailure(stage='confirm', unknown=True, recovery=receipt)
         if receipt['cas_attempts'] == 1:
             self._post_cas_head(receipt['commit'])
@@ -545,6 +555,7 @@ class RemoteJournal:
         finally:
             self.lock.release()
 
+    @timing.observed('cas_total', emit=True)
     def _compare_and_set(self, expected_sha, value, *, png_reset_ticket=None, typed_evidence=None, png_expired=None):
         # Every CAS attempt consumes the old ticket, including a no-op/failure.
         self._png_not_dispatched = None
@@ -603,14 +614,14 @@ class RemoteJournal:
             self.charged_blobs.add(blob)
             attempted = True
             try:
-                self.remote.cas_main(parent, commit)
+                self._timing.call('push', self.remote.cas_main, parent, commit)
             except Exception:
                 pass  # Ambiguous response: exact readback, NEVER a second CAS.
             self.stage = 'poll'
             for attempt in range(self.poll_attempts):
                 # Poll only mutable identity/ref. Full source guard follows the
                 # complete readback and runs again after durable confirmation.
-                observed = self._ref()
+                observed = self._timing.call('poll_ref', self._ref)
                 if observed == commit: break
                 if observed != parent and (self.post_cas_paths or self.post_cas_mirror):
                     self._post_cas_head(commit, observed)
