@@ -6,11 +6,16 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import get_private_proof as p
+from test_private_proof_fixed_paths import build_tree
 POLICY={'code_sha':'1'*40,'rules_sha256':'2'*64,'get_policy_sha256':'3'*64}
 RUN={'id':11,'run_attempt':1,'head_sha':'4'*40}
 CONTEXT={'run_id':11,'run_attempt':1,'code_sha':'1'*40,'controller_sha':'4'*40,'rules_sha256':'2'*64}
 STATE=p.encoded({'contract':'synthetic-only','private_note':'not for public output'})
 RECEIPT=p.public_encoded({'parent_commit':'b'*40,'sequence':1,'policy_sha256':'3'*64})
+# Original semantic assertions retained. Fixture aliases below are converted
+# into genuine immutable Git tree objects at the Remote boundary.
+ROOT_TREE,_=build_tree([{'path':p.PATHS['journal'],'type':'blob','mode':'100644','sha':p.oid(STATE),'size':len(STATE)},
+                       {'path':p.PATHS['publication'],'type':'blob','mode':'100644','sha':p.oid(RECEIPT),'size':len(RECEIPT)}])
 class Remote:
     def __init__(self):
         self.head='a'*40;self.meta={'full_name':p.REPOSITORY,'private':True};self.calls=[]
@@ -20,14 +25,21 @@ class Remote:
     def row(self,kind,raw):return {'path':p.PATHS[kind],'type':'blob','mode':'100644','sha':p.oid(raw),'size':len(raw)}
     def metadata(self):self.calls.append('metadata');return deepcopy(self.meta)
     def ref(self,r):self.calls.append(('ref',r));return self.head
-    def commit(self,c):self.calls.append(('commit',c));return deepcopy(self.commits[c])
-    def tree_entries(self,t,r):self.calls.append(('tree',t,r));return deepcopy(self.entries[t])
+    def commit(self,c):
+        self.calls.append(('commit',c));value=deepcopy(self.commits[c])
+        value['tree']=build_tree(self.entries[value['tree']])[0]
+        return value
+    def tree_entries(self,t,r):
+        self.calls.append(('tree',t,r));assert r is False
+        objects={}
+        for flat in self.entries.values():objects.update(build_tree(flat)[1])
+        return deepcopy(objects[t])
     def blob(self,h,n):self.calls.append(('blob',h,n));return self.blobs[h]
 
 def journal(cas=1):
     value={**CONTEXT,'contract':'get-notion-journal-checkpoint-1','status':'journal_readback_verified',
         'notion_policy_sha256':'5'*64,'public_policy_sha256':p.sha(p.public_encoded(POLICY)),'sequence':1,'previous_record_sha256':None,
-        'parent_commit':'b'*40 if cas else None,'commit':'a'*40,'tree':'c'*40,'state_blob':p.oid(STATE),
+        'parent_commit':'b'*40 if cas else None,'commit':'a'*40,'tree':ROOT_TREE,'state_blob':p.oid(STATE),
         'state_sha256':p.sha(STATE),'state_bytes':len(STATE),'cas_attempts':cas,'readback_verified':True}
     value['record_sha256']=p.sha(value);return value
 

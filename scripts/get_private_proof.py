@@ -8,6 +8,7 @@ from copy import deepcopy
 import hashlib
 import json
 import re
+import sys
 from get_mirror_incremental_replay import capture_json_bytes as public_encoded
 
 CONTRACT='get-private-proof-2'
@@ -113,19 +114,93 @@ class PrivateRecords:
         if type(max_commits) is not int or not 1<=max_commits<=MAX_COMMITS:fail()
         self.remote=remote;self.limit=max_commits;self.nodes=[];self.blobs={};self.head=None;self.bytes=0
         self._node_cache={}
+        # One root plus the two fixed paths, with no shared root double-count.
+        # At most three original state hints may be outside the ancestor chain.
+        depth=sum(len(path.split('/')) for path in PATHS.values())-(len(PATHS)-1)
+        self._tree_limit=depth*(self.limit+3)
+        self._tree_cache={}
+        self._diagnostic={'stage':'binding','reason':'unverified'}
+    def _reject(self,stage,reason):
+        self._diagnostic={'stage':stage,'reason':reason};fail()
+    def _read(self,stage,method,*args):
+        self._diagnostic={'stage':stage,'reason':'unverified'}
+        try:return method(*args)
+        except Exception as exc:
+            # Only original fixed local error enums are classified. Never emit
+            # exception text, private paths/URLs, hashes, IDs, tokens or bodies.
+            code=str(exc)
+            reason=('transport' if code in ('remote_read_failed','remote_redirect_blocked')
+                or isinstance(exc,(OSError,TimeoutError)) else
+                'size' if code=='remote_response_budget' else
+                'shape' if code in ('invalid_json','remote_schema_invalid','invalid_source_tree') else
+                'hash' if code in ('invalid_commit','remote_commit_invalid','remote_blob_invalid') else
+                'ancestry' if code=='remote_ref_invalid' else 'unverified')
+            self._diagnostic={'stage':stage,'reason':reason};raise
+    def _report_failure(self):
+        value=self._diagnostic
+        stages={'binding','metadata','ref','commit','tree','blob','receipt','ancestry'}
+        reasons={'unverified','transport','shape','size','hash','ancestry'}
+        try:
+            print(json.dumps({'contract':'get-private-proof-diagnostic-1',
+                'stage':value['stage'] if value['stage'] in stages else 'binding',
+                'reason':value['reason'] if value['reason'] in reasons else 'unverified'},sort_keys=True),file=sys.stderr)
+        except Exception:pass  # Reporting cannot change rejection or authority.
+    def _fixed_tree(self,tree):
+        checked(tree,40);key=(REPOSITORY,tree)
+        if key in self._tree_cache:return self._tree_cache[key]
+        if len(self._tree_cache)>=self._tree_limit:self._reject('tree','size')
+        entries=self._read('tree',self.remote.tree_entries,tree,False)
+        if not isinstance(entries,list):self._reject('tree','shape')
+        if len(entries)>100000:self._reject('tree','size')
+        rows={};parts={part for path in PATHS.values() for part in path.split('/')}
+        modes={'040000':'tree','100644':'blob','100755':'blob','120000':'blob','160000':'commit'}
+        for row in entries:
+            if not isinstance(row,dict):self._reject('tree','shape')
+            name=row.get('path');mode=row.get('mode');kind=row.get('type');sha=row.get('sha')
+            if (not isinstance(name,str) or not name or name in ('.','..')
+                    or '/' in name or '\0' in name or name in rows
+                    or mode not in modes or modes[mode]!=kind):self._reject('tree','shape')
+            if not isinstance(sha,str) or not re.fullmatch('[0-9a-f]{40}',sha):self._reject('tree','hash')
+            if kind=='blob' and (type(row.get('size')) is not int or row['size']<0):self._reject('tree','shape')
+            rows[name]={k:row[k] for k in ('path','mode','type','sha','size') if k in row}
+        try:
+            ordered=sorted(rows.values(),key=lambda row:(row['path']+('/' if row['type']=='tree' else '')).encode('utf-8'))
+            body=b''.join((row['mode'].lstrip('0')+' '+row['path']).encode('utf-8')+b'\0'+bytes.fromhex(row['sha']) for row in ordered)
+        except (UnicodeError,ValueError):self._reject('tree','shape')
+        if hashlib.sha1(b'tree '+str(len(body)).encode()+b'\0'+body).hexdigest()!=tree:self._reject('tree','hash')
+        # Retain only tiny, SHA-verified metadata projections, never unrelated
+        # whole-tree rows, URLs or any private body. Mutable guards never cache.
+        result={name:row for name,row in rows.items() if name in parts}
+        self._tree_cache[key]=result
+        return result
+    def _fixed_path_entries(self,tree):
+        selected={}
+        for path in PATHS.values():
+            current=tree;components=path.split('/')
+            for index,name in enumerate(components):
+                row=self._fixed_tree(current).get(name)
+                if row is None:break  # Original absence: never invent an object.
+                if index<len(components)-1:
+                    if row['type']!='tree' or row['mode']!='040000':self._reject('tree','shape')
+                    current=row['sha']
+                else:
+                    if row['type']!='blob' or row['mode']!='100644':self._reject('tree','shape')
+                    if type(row.get('size')) is not int or not 0<row['size']<=MAX_OBJECT:self._reject('tree','size')
+                    selected[path]=(row['sha'],row['size'])
+        return selected
     def guard(self):
-        m=self.remote.metadata()
-        if m.get('full_name')!=REPOSITORY or m.get('private') is not True:fail()
-        head=checked(self.remote.ref(REF),40)
+        m=self._read('metadata',self.remote.metadata)
+        if m.get('full_name')!=REPOSITORY or m.get('private') is not True:self._reject('metadata','shape')
+        head=checked(self._read('ref',self.remote.ref,REF),40)
         if self.head is None:self.head=head
-        elif head!=self.head:fail()
+        elif head!=self.head:self._reject('ref','ancestry')
         return head
     def node(self,index):
         if index<len(self.nodes):return self.nodes[index]
-        if index!=len(self.nodes) or index>=self.limit:fail()
+        if index!=len(self.nodes) or index>=self.limit:self._reject('ancestry','ancestry')
         commit=self.head if index==0 else self.nodes[-1]['parent']
         if commit is None:return None
-        if any(v['commit']==commit for v in self.nodes):fail()
+        if any(v['commit']==commit for v in self.nodes):self._reject('ancestry','ancestry')
         node=self.read_node(commit);self.nodes.append(node)
         return node
     def read_node(self,commit):
@@ -137,19 +212,10 @@ class PrivateRecords:
         key=(REPOSITORY,commit)
         if key in self._node_cache:
             return deepcopy(self._node_cache[key])
-        metadata=self.remote.commit(commit);tree=checked(metadata.get('tree'),40);parents=metadata.get('parents')
-        if not isinstance(parents,list) or len(parents)>1:fail()
+        metadata=self._read('commit',self.remote.commit,commit);tree=checked(metadata.get('tree'),40);parents=metadata.get('parents')
+        if not isinstance(parents,list) or len(parents)>1:self._reject('ancestry','ancestry')
         parent=checked(parents[0],40) if parents else None
-        entries=self.remote.tree_entries(tree,True)
-        if not isinstance(entries,list) or len(entries)>100000:fail()
-        selected={}
-        for row in entries:
-            if not isinstance(row,dict):fail()
-            path=row.get('path')
-            if path not in PATHS.values():continue
-            if (path in selected or row.get('type')!='blob' or row.get('mode')!='100644'
-                    or type(row.get('size')) is not int or not 0<row['size']<=MAX_OBJECT):fail()
-            selected[path]=(checked(row.get('sha'),40),row['size'])
+        selected=self._fixed_path_entries(tree)
         node={'commit':commit,'tree':tree,'parent':parent,'objects':selected}
         # Cache only after every original metadata validation succeeds. The
         # three fixed journal hint fields add at most three off-chain nodes.
@@ -162,12 +228,13 @@ class PrivateRecords:
         if row is None:return None
         blob,size=row;key=(blob,size)
         if key not in self.blobs:
-            if self.bytes+size>MAX_PRIVATE_BYTES:fail()
-            raw=self.remote.blob(blob,size)
-            if not isinstance(raw,bytes) or len(raw)!=size or oid(raw)!=blob:fail()
+            if self.bytes+size>MAX_PRIVATE_BYTES:self._reject('blob','size')
+            raw=self._read('blob',self.remote.blob,blob,size)
+            if not isinstance(raw,bytes) or len(raw)!=size or oid(raw)!=blob:self._reject('blob','hash')
             self.blobs[key]=raw;self.bytes+=len(raw)
         return self.blobs[key]
     def receipt_origins(self,index,blob,receipt,*,hints_only=False):
+        self._diagnostic={'stage':'ancestry','reason':'unverified'}
         parent=checked(receipt.get('parent_commit'),40);seen=set()
         # A private current-state reference is ONLY a search hint. Its target
         # still requires immutable object verification and the externally
@@ -196,11 +263,13 @@ class PrivateRecords:
         fail()
     def resolve(self,p,*,policy,run,notion_policy_sha256=None):
         try:
+            self._diagnostic={'stage':'binding','reason':'unverified'}
             checked_pointer(p);self.guard()
             context={'run_id':run['id'],'run_attempt':run['run_attempt'],'code_sha':policy['code_sha'],
                      'controller_sha':run['head_sha'],'rules_sha256':policy['rules_sha256']}
             deferred=[]
             def publication_match(node,raw,receipt,origins):
+                self._diagnostic={'stage':'binding','reason':'unverified'}
                 for origin in origins:
                     if receipt.get('policy_sha256')!=policy['get_policy_sha256']:
                       # Reuse the original exact predecessor bridge only after
@@ -241,7 +310,8 @@ class PrivateRecords:
                         record['record_sha256']=sha(record)
                         if pointer('journal',record)==p:self.guard();return record
                 else:
-                    raw=self.object(node,'publication');receipt=strict(raw,MAX_OBJECT,serializer=public_encoded)
+                    raw=self.object(node,'publication');self._diagnostic={'stage':'receipt','reason':'unverified'}
+                    receipt=strict(raw,MAX_OBJECT,serializer=public_encoded)
                     if receipt.get('sequence')!=p['sequence']:continue
                     hints=list(self.receipt_origins(i,blob,receipt,hints_only=True))
                     if hints:
@@ -265,8 +335,10 @@ class PrivateRecords:
                 matched=publication_match(node,raw,receipt,self.receipt_origins(index,blob,receipt))
                 if matched is not None:return matched
             fail()
-        except PrivateProofError:raise
-        except Exception:fail()
+        except PrivateProofError:
+            self._report_failure();raise
+        except Exception:
+            self._report_failure();fail()
 
 def source_for(client):
     for _ in range(5):
