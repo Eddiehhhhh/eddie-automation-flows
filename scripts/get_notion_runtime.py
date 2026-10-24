@@ -437,6 +437,24 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
     return {**result,**counts,'source_state_unprojected_receipts':len(final.get('source_state_holds',{})),'queued':len(final['pending_by_id']),'outer_journal_sha256':final_sha,'source_chain_complete':final['last_enqueued_publication']==final['observed_publication_tip']}
 
 
+def unresolved_report_limit():
+    """Reporting bound only: one exact legacy hold plus registered exact holds.
+
+    This does not admit holds or alter any transaction/write budget. State
+    admission remains plan_recovery.validate_holds with full evidence equality.
+    """
+    active = historical_active.inflight_hold()
+    registered = ([active] if active else []) + authenticated_recovery.inflight_holds()
+    rows = {}
+    for hold in registered:
+        ident = hold['note_id']
+        if ident in rows and not e.same(rows[ident], hold):
+            fail('notion_scope')
+        rows[ident] = hold
+    plan_recovery.validate_holds(rows)
+    return 1 + len(rows)
+
+
 def _safe_result(value):
     if not isinstance(value,dict):return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
     if e.same(value,canonical_mode_busy_result()):return canonical_mode_busy_result()
@@ -456,7 +474,7 @@ def _safe_result(value):
         known_no_attempt=trusted_shape and value.get('write_state')=='not_attempted' and type(value.get('external_write_attempts')) is int and value['external_write_attempts']==0
         return {'contract':CONTRACT,'status':'failed','stage':stage,'reason':reason,
             'write_state':'not_attempted' if known_no_attempt else 'unknown',
-            'unresolved_operations':value.get('unresolved_operations') if type(value.get('unresolved_operations')) is int and 0<=value['unresolved_operations']<=2 else None,
+            'unresolved_operations':value.get('unresolved_operations') if type(value.get('unresolved_operations')) is int and 0<=value['unresolved_operations']<=unresolved_report_limit() else None,
             'unresolved_effects':'unknown',
             'external_write_attempts':0 if known_no_attempt else None,'asset_downloads':value.get('asset_downloads') if type(value.get('asset_downloads')) is int and 0<=value['asset_downloads']<=200 else None,'complete_library_claimed':False}
     base=pipeline.public_report(value)
@@ -478,7 +496,7 @@ def _safe_result(value):
     for key,cap in (('initial_notes',2),('initial_range_candidates',2),('queued',2500)):
         if type(value.get(key)) is not int or not 0<=value[key]<=cap:return {'contract':CONTRACT,'status':'failed','write_state':'unknown','external_write_attempts':None}
         base[key]=value[key]
-    for key,cap in (('unresolved_operations',2),('quarantine_transitions',1),('quarantine_candidates',1)):
+    for key,cap in (('unresolved_operations',unresolved_report_limit()),('quarantine_transitions',1),('quarantine_candidates',1)):
         count=value.get(key,0)
         if type(count) is not int or not 0<=count<=cap:fail('notion_scope')
         base[key]=count

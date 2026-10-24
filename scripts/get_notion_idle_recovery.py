@@ -16,6 +16,7 @@ CAPSULE_KEYS = {'public_policy', 'public_policy_sha256', 'notion_policy_sha256',
     'run_binding', 'job_id', 'job_sha256', 'get_record', 'checkpoint_count',
     'checkpoint', 'anchor', 'receipts'}
 CAPTURE_KEYS = CAPSULE_KEYS | {'latest_binding', 'fixed_source_record', 'terminal_report', 'capture_sha256'}
+GROUP_CAPTURE_KEYS = CAPSULE_KEYS | {'latest_binding', 'fixed_source_record', 'terminal_report', 'group_capture_evidence'}
 APPLY_KEYS = CAPSULE_KEYS | {'latest_binding', 'fixed_source_record', 'terminal_report', 'apply_evidence'}
 
 
@@ -23,11 +24,15 @@ def _capture(value):
     return isinstance(value, dict) and set(value) == CAPTURE_KEYS
 
 
+def _group_capture(value):
+    return isinstance(value,dict) and set(value)==GROUP_CAPTURE_KEYS
+
+
 def _apply(value):
     return isinstance(value,dict) and set(value)==APPLY_KEYS
 
 def _fixed(value):
-    return _capture(value) or _apply(value)
+    return _capture(value) or _apply(value) or _group_capture(value)
 
 
 RECEIPT_KEYS = {'commit', 'receipt_sha256', 'sequence', 'policy_sha256'}
@@ -44,7 +49,7 @@ def _capsule():
         return None
     try:
         value = deepcopy(PREDECESSOR)
-        if not isinstance(value, dict) or set(value) not in (CAPSULE_KEYS, CAPTURE_KEYS, APPLY_KEYS):
+        if not isinstance(value, dict) or set(value) not in (CAPSULE_KEYS, CAPTURE_KEYS, APPLY_KEYS, GROUP_CAPTURE_KEYS):
             raise ValueError
         policy = p.validate_policy(value['public_policy'], value['public_policy_sha256'])
         c.journal.checked(value['notion_policy_sha256'], 64)
@@ -115,6 +120,9 @@ def _capsule():
                 _check_apply_evidence(value)
                 return value
             if fixed['mode'] != 'historical-capture': raise ValueError
+            if _group_capture(value):
+                _check_group_capture_evidence(value)
+                return value
             c.journal.checked(value['capture_sha256'], 64)
             report = value['terminal_report']
             if (not isinstance(report,dict) or set(report) != {'contract','status','business_health_asserted','complete_library_claimed'}
@@ -273,6 +281,8 @@ def transition_outer(state, sha, new_get_policy_sha256, *, proof):
             o.fail('outbox_state_invalid')
         historical.check_captures({selected:saved})
         historical.check_native_schema_capture(saved)
+    if _group_capture(capsule):
+        _check_group_capture_evidence(capsule,state)
     if _apply(capsule):
         _check_apply_evidence(capsule,state)
     result = deepcopy(state)
@@ -319,3 +329,42 @@ def _check_apply_evidence(capsule,state=None):
                 or prop.get('held')!=c['held'][ident] or body.get('page_id')!=prop.get('page_id')
                 or body.get('note_id')!=ident or ident in engine['failures'] or ident in engine['unresolved_by_id']
                 or any(r.get('source_commit')!=manifest['source_commit'] or r.get('md_blob')!=source['blob'] or r.get('data_source_id')!=manifest['data_source_id'] for r in (body,prop))):o.fail('outbox_state_invalid')
+
+
+def _check_group_capture_evidence(capsule, state=None):
+    """One exact completed capture group; no apply grant or hold release."""
+    import get_notion_outbox as o
+    import get_notion_historical as historical
+    import get_notion_historical_input as private_input
+    evidence = capsule['group_capture_evidence']
+    selected = capsule['fixed_source_record']['selection_sha256']
+    if (not isinstance(evidence,dict)
+            or set(evidence) != {'descriptor','candidates','capture_sha256'}
+            or selected not in historical.APPROVED_CAPTURE_GROUPS
+            or evidence['descriptor'] != historical.APPROVED_CAPTURE_GROUPS[selected]):
+        o.fail('outbox_state_invalid')
+    members = historical.capture_members(selected)
+    hashes = evidence['capture_sha256']
+    if not isinstance(hashes,dict) or set(hashes) != set(members):
+        o.fail('outbox_state_invalid')
+    for digest in hashes.values():o.e.p.hex_hash(digest,64)
+    collection = {'contract':historical.CAPTURE_COLLECTION_CONTRACT,
+        'selection_sha256':selected,'candidates':evidence['candidates']}
+    validated = private_input.validate_capture_selection(collection,selected,apply=True)
+    report = capsule['terminal_report']
+    if (not isinstance(report,dict)
+            or set(report) != {'contract','status','business_health_asserted','complete_library_claimed','journal_write_state'}
+            or report['contract'] != 'get-private-runtime-report-2'
+            or report['status'] != 'captured'
+            or report['business_health_asserted'] is not False
+            or report['complete_library_claimed'] is not False
+            or report['journal_write_state'] != 'confirmed'):
+        o.fail('outbox_state_invalid')
+    if state is None:return
+    for candidate, member in validated:
+        saved = state.get('historical_captures',{}).get(member)
+        if (not isinstance(saved,dict) or o.digest(saved) != hashes[member]
+                or saved.get('candidate') != candidate):
+            o.fail('outbox_state_invalid')
+        historical.check_captures({member:saved})
+        historical.check_native_schema_capture(saved)
