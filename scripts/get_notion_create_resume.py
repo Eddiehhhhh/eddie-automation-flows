@@ -6,6 +6,7 @@ No isolation, append authority, arbitrary plan or property-only permission.
 from copy import deepcopy
 import get_private_runtime_bindings as bindings
 TAG='exact_registered_create_resume_v1'
+ACK_CONTRACT='get-notion-exact-acknowledged-create-receipt-1'
 KEYS={'proof','public_policy','public_policy_sha256','notion_policy_sha256',
       'plan_sha256','manifest_sha256','source_commit','initial_index','operation_sha256',
       'note_id','page_id','source','request_sha256','record_count','selection_sha256'}
@@ -18,7 +19,7 @@ def registry():
     if not isinstance(entries,list) or len(entries)>16: o.fail('outbox_state_invalid')
     seen=set()
     for b in entries:
-        if not isinstance(b,dict) or set(b)!=KEYS: o.fail('outbox_state_invalid')
+        if not isinstance(b,dict) or set(b) not in (KEYS,KEYS|{'acknowledged_successor'}): o.fail('outbox_state_invalid')
         p=b['proof'];policy=c.provenance.validate_policy(b['public_policy'],b['public_policy_sha256'])
         for k in ('plan_sha256','manifest_sha256','operation_sha256','request_sha256','notion_policy_sha256','selection_sha256'):c.journal.checked(b[k],64)
         c.journal.checked(b['source_commit'],40);o.e.p.note_id(b['note_id']);o.e.p.notion_id(b['page_id'])
@@ -53,6 +54,17 @@ def registry():
                 or cp['status']!='journal_readback_verified'
                 or o.digest({k:v for k,v in cp.items() if k!='record_sha256'})!=cp['record_sha256']
                 or p['anchor']!={k:cp[k] for k in ('commit','state_blob','state_sha256')}):o.fail('outbox_state_invalid')
+        if 'acknowledged_successor' in b:
+            successor=b['acknowledged_successor']
+            if (not isinstance(successor,dict) or set(successor)!={'contract','anchor','tree','state_bytes','operation_sha256'}
+                    or successor['contract']!=ACK_CONTRACT or not isinstance(successor['anchor'],dict)
+                    or set(successor['anchor'])!={'commit','state_blob','state_sha256'}
+                    or type(successor['state_bytes']) is not int or not 0<successor['state_bytes']<=c.journal.MAX_STATE):o.fail('outbox_state_invalid')
+            for key,width in (('commit',40),('state_blob',40),('state_sha256',64)):
+                c.journal.checked(successor['anchor'][key],width)
+                if successor['anchor'][key]==p['anchor'][key]:o.fail('outbox_state_invalid')
+            c.journal.checked(successor['tree'],40);c.journal.checked(successor['operation_sha256'],64)
+            if successor['operation_sha256']==b['operation_sha256']:o.fail('outbox_state_invalid')
         fixed=c.fixed_auth.parse(o.encoded(p['fixed_source_record']),context,run)
         if b['selection_sha256']!=b['manifest_sha256'] or fixed['mode']!='historical-apply' or fixed['selection_sha256']!=b['manifest_sha256']:o.fail('outbox_state_invalid')
     return deepcopy(entries)
@@ -109,6 +121,15 @@ def allows(plan,journal):
                 or any(r['action']!='create' for r in plan['records'][b['initial_index']:])):return False
         index=journal['index'];op=journal['operation'];row=plan['records'][b['initial_index']]
         if row['note_id']!=b['note_id'] or row['source']!=b['source'] or request_sha(row,plan)!=b['request_sha256']:return False
+        if 'acknowledged_successor' in b:
+            # This capability can confirm one existing page, never create the
+            # remaining rows or fall back to its original in-flight state.
+            if index==b['initial_index']:
+                return (isinstance(op,dict) and set(op)=={'kind','phase','before','response','archive_index'}
+                    and e.digest(op)==b['acknowledged_successor']['operation_sha256']
+                    and op['kind']=='create' and op['phase']=='acknowledged'
+                    and op['response']==b['page_id'] and type(op['archive_index']) is int and op['archive_index']==0)
+            return index==b['initial_index']+1 and op is None
         if index==b['initial_index']:return op is not None and e.digest(op)==b['operation_sha256'] and op['kind']=='create' and op['phase']=='in_flight' and op['response'] is None
         if index==b['record_count']:return op is None
         if op is None:return True
@@ -131,8 +152,10 @@ def initial_state_valid(state,sha):
     import get_notion_outbox as o
     try:
         o.check_state(state);j=state['engine_state']['journal'];b=plan_binding(j['plan']);raw=o.encoded(state)
-        return bool(b and o.digest(raw)==sha==b['proof']['anchor']['state_sha256']
-            and len(raw)==b['proof']['checkpoint']['state_bytes'] and o.e.p.git_blob(raw)==b['proof']['anchor']['state_blob']
+        anchor=b['acknowledged_successor']['anchor'] if b and 'acknowledged_successor' in b else b['proof']['anchor'] if b else None
+        size=b['acknowledged_successor']['state_bytes'] if b and 'acknowledged_successor' in b else b['proof']['checkpoint']['state_bytes'] if b else None
+        return bool(b and o.digest(raw)==sha==anchor['state_sha256']
+            and len(raw)==size and o.e.p.git_blob(raw)==anchor['state_blob']
             and state['policy_sha256']==b['public_policy']['get_policy_sha256'] and j['index']==b['initial_index']
             and allows(j['plan'],j) and b['note_id'] not in state['engine_state']['receipts']
             and b['note_id'] not in state['engine_state'].get('unresolved_by_id',{}))
@@ -202,7 +225,18 @@ def preserve(before,after):
     a=before['engine_state'];z=after['engine_state'];new=z['journal']
     if new is None:
         wanted=deepcopy(before);wanted['engine_state']['journal']=None
-        if old['index']!=b['record_count'] or old['operation'] is not None or after!=wanted:o.fail('outbox_state_invalid')
+        last=b['initial_index']+1 if 'acknowledged_successor' in b else b['record_count']
+        if old['index']!=last or old['operation'] is not None or after!=wanted:o.fail('outbox_state_invalid')
+        if 'acknowledged_successor' in b:
+            # The ordinary clean-yield path checks every completed prefix row.
+            # Retain a CAS-level paired-receipt check for this exact fifth row.
+            row=old['plan']['records'][b['initial_index']];ident=b['note_id'];body=a['receipts'].get(ident,{})
+            expected={'note_id':ident,'page_id':b['page_id'],'data_source_id':old['plan']['policy']['data_source_id'],
+                'source_commit':b['source_commit'],'md_blob':row['source']['blob'],
+                'creation_plan_sha256':b['plan_sha256'],'readback_verified':True}
+            if any(body.get(k)!=v for k,v in expected.items()) or ident in a['failures']:o.fail('outbox_state_invalid')
+            paired=deepcopy(a);e.property_transaction.record_creation(paired,row,old['plan'])
+            if a.get('property_receipts',{}).get(ident)!=paired['property_receipts'][ident]:o.fail('outbox_state_invalid')
         return
     if not allows(new['plan'],new) or not old['index']<=new['index']<=old['index']+1:o.fail('outbox_state_invalid')
     if new['index']==old['index']:
@@ -269,6 +303,7 @@ def verify_successor(local,remote,loader,head,proof):
     import get_recurring_policy_recovery as policy
     b=run_binding(proof.get('run_id'),proof.get('run_attempt'))
     if not b or not authenticated_proof_matches(proof,b):o.fail('outbox_state_invalid')
+    if 'acknowledged_successor' in b:return _verify_acknowledged_successor(local,remote,loader,head,proof,b)
     if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
     git=j.retention.LocalGit(local.vault)
     def node(commit):
@@ -308,3 +343,75 @@ def initial_or_transitioned_state_valid(state,sha):
         b=plan_binding(state['engine_state']['journal']['plan']);old=deepcopy(state);old['policy_sha256']=b['public_policy']['get_policy_sha256']
         return initial_state_valid(old,o.digest(old))
     except Exception:return False
+
+
+def receipt_only_binding(plan):
+    """The immutable ack capability grants no native write authority."""
+    b=plan_binding(plan)
+    return b if b and 'acknowledged_successor' in b else None
+
+
+def _verify_acknowledged_successor(local,remote,loader,head,proof,b):
+    """Authenticate cp19 and its exact ack-only child as separate authorities.
+
+    The original proof is never changed or promoted to a nonexistent checkpoint.
+    Only the verified read anchor may advance, then by one policy-only CAS.
+    """
+    from types import SimpleNamespace
+    import get_notion_remote_journal as j
+    import get_notion_outbox as o
+    import get_recurring_policy_recovery as policy
+    if not authenticated_proof_matches(proof,b):o.fail('outbox_state_invalid')
+    if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
+    git=j.retention.LocalGit(local.vault)
+    def node(commit):
+        loader(commit);tree,entries=j.RemoteJournal._local_tree(SimpleNamespace(local=git),commit)
+        parents=git.run('rev-list','--parents','-n','1',commit).decode().split()[1:]
+        if remote.commit(commit)!={'tree':tree,'parents':parents}:o.fail('outbox_state_invalid')
+        return tree,parents,entries
+    def state(anchor,size):
+        current=node(anchor['commit'])
+        if current[2].get(j.STATE_PATH)!=('100644','blob',anchor['state_blob']):o.fail('outbox_state_invalid')
+        raw=git.blob(anchor['state_blob'])
+        if (len(raw)!=size or o.digest(raw)!=anchor['state_sha256'] or j.retention.oid(raw)!=anchor['state_blob']
+                or remote.blob(anchor['state_blob'],size)!=raw):o.fail('outbox_state_invalid')
+        value=j.retention.strict_json(raw);o.check_state(value)
+        if o.encoded(value)!=raw:o.fail('outbox_state_invalid')
+        return value,raw,current
+    authenticated=b['proof']['anchor'];successor=b['acknowledged_successor']
+    before,before_raw,old=state(authenticated,b['proof']['checkpoint']['state_bytes'])
+    after,after_raw,base=state(successor['anchor'],successor['state_bytes'])
+    if base[0]!=successor['tree'] or base[1]!=[authenticated['commit']]:o.fail('outbox_state_invalid')
+    changed={k for k in set(old[2])|set(base[2]) if old[2].get(k)!=base[2].get(k)}
+    if changed!={j.STATE_PATH}:o.fail('outbox_state_invalid')
+    pending=before['engine_state']['journal'];op=pending['operation']
+    if (pending['index']!=b['initial_index'] or not isinstance(op,dict)
+            or set(op)!={'kind','phase','before','response','archive_index'}
+            or (op['kind'],op['phase'],op['response'],op['archive_index'])!=('create','in_flight',None,0)
+            or o.digest(op)!=b['operation_sha256']):o.fail('outbox_state_invalid')
+    restored=deepcopy(after)
+    restored['engine_state']['journal']['operation']['phase']='in_flight'
+    restored['engine_state']['journal']['operation']['response']=None
+    if o.encoded(restored)!=before_raw or not initial_state_valid(after,o.digest(after)):o.fail('outbox_state_invalid')
+    # Exact digest equality above binds every other state byte, including the
+    # original plan, index, before snapshot, captures, receipts and holds.
+    desired=transition_outer(after,o.digest(after),policy.current_get_policy(),proof=proof)
+    target=o.encoded(desired);oid=j.retention.oid(target)
+    anchor=deepcopy(successor['anchor']);prior=anchor['commit']
+    node(head);git.run('merge-base','--is-ancestor',prior,head)
+    history=git.run('rev-list','--reverse','--max-count=257',prior+'..'+head).decode().split()
+    if len(history)>256:o.fail('outbox_state_invalid')
+    seen=False
+    for commit in history:
+        current=node(commit)
+        if current[1]!=[prior]:o.fail('outbox_state_invalid')
+        changed={k for k in set(base[2])|set(current[2]) if base[2].get(k)!=current[2].get(k)}
+        if j.STATE_PATH in changed:
+            if (seen or changed!={j.STATE_PATH} or current[2][j.STATE_PATH]!=('100644','blob',oid)
+                    or git.blob(oid)!=target or remote.blob(oid,len(target))!=target):o.fail('outbox_state_invalid')
+            seen=True;anchor={'commit':commit,'state_blob':oid,'state_sha256':o.digest(target)}
+        elif any(k=='Raw/03 Get' or k.startswith('Raw/03 Get/') for k in changed):o.fail('outbox_state_invalid')
+        if current[2].get(j.STATE_PATH)!=('100644','blob',anchor['state_blob']):o.fail('outbox_state_invalid')
+        prior=commit;base=current
+    if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
+    return anchor

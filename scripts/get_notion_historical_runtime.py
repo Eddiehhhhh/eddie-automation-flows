@@ -70,8 +70,12 @@ def creation_recovery_for(active, manifest, expected, api):
             or manifest['records'].get(row['note_id'], {}).get('mode') != 'new_numeric'
             or not isinstance(operation,dict) or operation.get('kind') != 'create'):
         e.fail('approval_missing')
-    # Only the original in-flight/no-response state can borrow this permission.
-    if (operation.get('phase') != 'in_flight' or operation.get('response') is not None
+    # The ack-only variant can verify its exact existing page, never borrow
+    # the old in-flight recovery permission or alter the saved response.
+    receipt_only=create_resume.receipt_only_binding(plan)
+    if receipt_only:
+        if not create_resume.allows(plan,active):e.fail('uncertain_create')
+    elif (operation.get('phase') != 'in_flight' or operation.get('response') is not None
             or e.digest(operation) != binding['operation_sha256']):
         e.fail('uncertain_create')
     before = operation.get('before')
@@ -85,7 +89,7 @@ def creation_recovery_for(active, manifest, expected, api):
         'properties':creation_wire_properties(row), 'children':wire_blocks(row['request_blocks'],None,uploaded_pngs=row.get('uploaded_pngs'))}
     if fingerprint('POST','/pages',request) != binding['request_sha256']:
         e.fail('approval_missing')
-    snapshot = api.read_note(row['note_id'])
+    snapshot = e.read_target(api,row['note_id'],manifest['data_source_id']) if receipt_only else api.read_note(row['note_id'])
     e.created(snapshot,row,manifest['data_source_id'],binding['page_id'])
     return {'plan_sha256':digest,'note_id':row['note_id'],'page_id':binding['page_id'],
             'snapshot_sha256':e.target_sha(snapshot,row['note_id'],manifest['data_source_id'])}
@@ -167,17 +171,33 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
         if resume_admit is not None and resume_admit(current,plan) is not True:e.fail('request_budget')
         if admit is not None and not (active and active['operation'] is not None) and not admit(current,plan): raise ApplyBoundaryYield()
         if not isinstance(request,transport.Transport): e.fail('approval_missing')
-        allowed=pipeline.wire_allowlist(plan,api);api.approved=allowed;request.approved=allowed
+        import get_notion_create_resume as create_resume
+        receipt_only=create_resume.receipt_only_binding(plan)
+        allowed=frozenset() if receipt_only else pipeline.wire_allowlist(plan,api)
+        api.approved=allowed;request.approved=allowed
+        recovery_boundary=False
         def ordinary_row(engine, pending_plan):
+            nonlocal recovery_boundary
+            if receipt_only:
+                pending=engine['journal']
+                if (pending is None or pending_plan!=plan or not create_resume.allows(plan,pending)
+                        or pending['index']!=receipt_only['initial_index']+1 or pending['operation'] is not None):e.fail('approval_missing')
+                recovery_boundary=True
+                return False
             outer=deepcopy(adapter.outer)
             outer['engine_state']=deepcopy(engine)
             return row_admit(outer,pending_plan)
         create_recovery=creation_recovery_for(active,manifest,expected,api)
         result=e.execute(plan,e.digest(plan),publication,api,adapter,expected_store_sha=sha,writers_guard=writers_guard,
                          create_recovery=create_recovery,approved_recovery_sha=e.digest(create_recovery) if create_recovery is not None else None,
-                         authorize_batch=pipeline.batch_authorizer(plan,api,request,adapter),
-                         authorize_row=ordinary_row if row_admit is not None else None)
-        if (settle_row_yield is not None and getattr(row_admit,'clean_boundary_denied',False) is True
+                         authorize_batch=None if receipt_only else pipeline.batch_authorizer(plan,api,request,adapter),
+                         authorize_row=ordinary_row if receipt_only or row_admit is not None else None)
+        if recovery_boundary:
+            # Keep the original receipt CAS and clean-yield clearance CAS
+            # separate. No fused checkpoint or truncated/re-authored plan.
+            from get_notion_single_create_admission import settle_clean_yield
+            result=settle_clean_yield(e,adapter,plan,result)
+        elif (settle_row_yield is not None and getattr(row_admit,'clean_boundary_denied',False) is True
                 and result.get('status')=='partial' and result.get('reason')=='batch_boundary_yield'):
             result=settle_row_yield(adapter,plan,result)
         safe=e.public_report(result)
