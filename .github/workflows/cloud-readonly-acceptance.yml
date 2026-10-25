@@ -9,6 +9,11 @@ on:
       - tests/test_cloud_private_checkout.py
       - .github/workflows/cloud-readonly-acceptance.yml
   workflow_dispatch:
+    inputs:
+      diagnostic_only:
+        description: Observe only the unchanged private binding loader; no migration
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -16,6 +21,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   verify:
+    if: inputs.diagnostic_only != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -35,3 +41,31 @@ jobs:
         run: python scripts/cloud_acceptance.py --vault vault --output /tmp/cloud-acceptance.json
       - name: Publish only allowlisted status
         run: cat /tmp/cloud-acceptance.json >> "$GITHUB_STEP_SUMMARY"
+  bindings-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnostic_only == true && github.ref == 'refs/heads/fix/get-shadow-diagnostics-20261012'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: aecf535c2f264d26fccea6526a615156e6d35537
+          path: runtime
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Test read-only diagnostic boundaries without credentials
+        run: python -m unittest discover -s tests -p 'test_bindings_readonly_diagnostic.py' -v
+      - name: Observe unchanged private binding loader once
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_BINDINGS_DIAGNOSTIC_ONLY: 'true'
+          APPLY: 'false'
+          NOTION_MODE: canonical
+          NOTION_INPUT_SHA256: ''
+        run: python scripts/get_bindings_readonly_diagnostic.py
