@@ -7,6 +7,7 @@ from copy import deepcopy
 import get_private_runtime_bindings as bindings
 TAG='exact_registered_create_resume_v1'
 ACK_CONTRACT='get-notion-exact-acknowledged-create-receipt-1'
+RECEIPT_CONTRACT='get-notion-exact-persisted-create-receipt-1'
 KEYS={'proof','public_policy','public_policy_sha256','notion_policy_sha256',
       'plan_sha256','manifest_sha256','source_commit','initial_index','operation_sha256',
       'note_id','page_id','source','request_sha256','record_count','selection_sha256'}
@@ -19,7 +20,7 @@ def registry():
     if not isinstance(entries,list) or len(entries)>16: o.fail('outbox_state_invalid')
     seen=set()
     for b in entries:
-        if not isinstance(b,dict) or set(b) not in (KEYS,KEYS|{'acknowledged_successor'}): o.fail('outbox_state_invalid')
+        if not isinstance(b,dict) or set(b) not in (KEYS,KEYS|{'acknowledged_successor'},KEYS|{'receipt_successor'}): o.fail('outbox_state_invalid')
         p=b['proof'];policy=c.provenance.validate_policy(b['public_policy'],b['public_policy_sha256'])
         for k in ('plan_sha256','manifest_sha256','operation_sha256','request_sha256','notion_policy_sha256','selection_sha256'):c.journal.checked(b[k],64)
         c.journal.checked(b['source_commit'],40);o.e.p.note_id(b['note_id']);o.e.p.notion_id(b['page_id'])
@@ -65,6 +66,19 @@ def registry():
                 if successor['anchor'][key]==p['anchor'][key]:o.fail('outbox_state_invalid')
             c.journal.checked(successor['tree'],40);c.journal.checked(successor['operation_sha256'],64)
             if successor['operation_sha256']==b['operation_sha256']:o.fail('outbox_state_invalid')
+        if 'receipt_successor' in b:
+            successor=b['receipt_successor']
+            if (not isinstance(successor,dict) or set(successor)!={'contract','anchor','tree','state_bytes'}
+                    or successor['contract']!=RECEIPT_CONTRACT or not isinstance(successor['anchor'],dict)
+                    or set(successor['anchor'])!={'commit','state_blob','state_sha256'}
+                    or type(successor['state_bytes']) is not int or not 0<successor['state_bytes']<=c.journal.MAX_STATE):o.fail('outbox_state_invalid')
+            for key,width in (('commit',40),('state_blob',40),('state_sha256',64)):
+                c.journal.checked(successor['anchor'][key],width)
+                if successor['anchor'][key]==p['anchor'][key]:o.fail('outbox_state_invalid')
+            c.journal.checked(successor['tree'],40)
+            # This capability only yields before a remaining row. It never
+            # makes the executor complete/re-enter the last original row.
+            if b['initial_index']+1>=b['record_count']:o.fail('outbox_state_invalid')
         fixed=c.fixed_auth.parse(o.encoded(p['fixed_source_record']),context,run)
         if b['selection_sha256']!=b['manifest_sha256'] or fixed['mode']!='historical-apply' or fixed['selection_sha256']!=b['manifest_sha256']:o.fail('outbox_state_invalid')
     return deepcopy(entries)
@@ -121,6 +135,10 @@ def allows(plan,journal):
                 or any(r['action']!='create' for r in plan['records'][b['initial_index']:])):return False
         index=journal['index'];op=journal['operation'];row=plan['records'][b['initial_index']]
         if row['note_id']!=b['note_id'] or row['source']!=b['source'] or request_sha(row,plan)!=b['request_sha256']:return False
+        if 'receipt_successor' in b:
+            # The response and receipt already exist. Neither replay the
+            # acknowledged operation nor prepare any remaining CREATE.
+            return index==b['initial_index']+1 and op is None
         if 'acknowledged_successor' in b:
             # This capability can confirm one existing page, never create the
             # remaining rows or fall back to its original in-flight state.
@@ -152,12 +170,14 @@ def initial_state_valid(state,sha):
     import get_notion_outbox as o
     try:
         o.check_state(state);j=state['engine_state']['journal'];b=plan_binding(j['plan']);raw=o.encoded(state)
-        anchor=b['acknowledged_successor']['anchor'] if b and 'acknowledged_successor' in b else b['proof']['anchor'] if b else None
-        size=b['acknowledged_successor']['state_bytes'] if b and 'acknowledged_successor' in b else b['proof']['checkpoint']['state_bytes'] if b else None
+        successor=(b.get('receipt_successor') or b.get('acknowledged_successor')) if b else None
+        anchor=successor['anchor'] if successor else b['proof']['anchor'] if b else None
+        size=successor['state_bytes'] if successor else b['proof']['checkpoint']['state_bytes'] if b else None
+        receipt=bool(b and 'receipt_successor' in b)
         return bool(b and o.digest(raw)==sha==anchor['state_sha256']
             and len(raw)==size and o.e.p.git_blob(raw)==anchor['state_blob']
-            and state['policy_sha256']==b['public_policy']['get_policy_sha256'] and j['index']==b['initial_index']
-            and allows(j['plan'],j) and b['note_id'] not in state['engine_state']['receipts']
+            and state['policy_sha256']==b['public_policy']['get_policy_sha256'] and j['index']==b['initial_index']+int(receipt)
+            and allows(j['plan'],j) and (b['note_id'] in state['engine_state']['receipts']) is receipt
             and b['note_id'] not in state['engine_state'].get('unresolved_by_id',{}))
     except Exception:return False
 
@@ -225,9 +245,9 @@ def preserve(before,after):
     a=before['engine_state'];z=after['engine_state'];new=z['journal']
     if new is None:
         wanted=deepcopy(before);wanted['engine_state']['journal']=None
-        last=b['initial_index']+1 if 'acknowledged_successor' in b else b['record_count']
+        last=b['initial_index']+1 if receipt_only_binding(old['plan']) else b['record_count']
         if old['index']!=last or old['operation'] is not None or after!=wanted:o.fail('outbox_state_invalid')
-        if 'acknowledged_successor' in b:
+        if receipt_only_binding(old['plan']):
             # The ordinary clean-yield path checks every completed prefix row.
             # Retain a CAS-level paired-receipt check for this exact fifth row.
             row=old['plan']['records'][b['initial_index']];ident=b['note_id'];body=a['receipts'].get(ident,{})
@@ -303,7 +323,7 @@ def verify_successor(local,remote,loader,head,proof):
     import get_recurring_policy_recovery as policy
     b=run_binding(proof.get('run_id'),proof.get('run_attempt'))
     if not b or not authenticated_proof_matches(proof,b):o.fail('outbox_state_invalid')
-    if 'acknowledged_successor' in b:return _verify_acknowledged_successor(local,remote,loader,head,proof,b)
+    if 'acknowledged_successor' in b or 'receipt_successor' in b:return _verify_acknowledged_successor(local,remote,loader,head,proof,b)
     if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
     git=j.retention.LocalGit(local.vault)
     def node(commit):
@@ -348,11 +368,11 @@ def initial_or_transitioned_state_valid(state,sha):
 def receipt_only_binding(plan):
     """The immutable ack capability grants no native write authority."""
     b=plan_binding(plan)
-    return b if b and 'acknowledged_successor' in b else None
+    return b if b and ('acknowledged_successor' in b or 'receipt_successor' in b) else None
 
 
 def _verify_acknowledged_successor(local,remote,loader,head,proof,b):
-    """Authenticate cp19 and its exact ack-only child as separate authorities.
+    """Authenticate a checkpoint and its exact typed child separately.
 
     The original proof is never changed or promoted to a nonexistent checkpoint.
     Only the verified read anchor may advance, then by one policy-only CAS.
@@ -378,21 +398,24 @@ def _verify_acknowledged_successor(local,remote,loader,head,proof,b):
         value=j.retention.strict_json(raw);o.check_state(value)
         if o.encoded(value)!=raw:o.fail('outbox_state_invalid')
         return value,raw,current
-    authenticated=b['proof']['anchor'];successor=b['acknowledged_successor']
+    authenticated=b['proof']['anchor'];successor=b.get('receipt_successor') or b['acknowledged_successor']
     before,before_raw,old=state(authenticated,b['proof']['checkpoint']['state_bytes'])
     after,after_raw,base=state(successor['anchor'],successor['state_bytes'])
     if base[0]!=successor['tree'] or base[1]!=[authenticated['commit']]:o.fail('outbox_state_invalid')
     changed={k for k in set(old[2])|set(base[2]) if old[2].get(k)!=base[2].get(k)}
     if changed!={j.STATE_PATH}:o.fail('outbox_state_invalid')
-    pending=before['engine_state']['journal'];op=pending['operation']
-    if (pending['index']!=b['initial_index'] or not isinstance(op,dict)
-            or set(op)!={'kind','phase','before','response','archive_index'}
-            or (op['kind'],op['phase'],op['response'],op['archive_index'])!=('create','in_flight',None,0)
-            or o.digest(op)!=b['operation_sha256']):o.fail('outbox_state_invalid')
-    restored=deepcopy(after)
-    restored['engine_state']['journal']['operation']['phase']='in_flight'
-    restored['engine_state']['journal']['operation']['response']=None
-    if o.encoded(restored)!=before_raw or not initial_state_valid(after,o.digest(after)):o.fail('outbox_state_invalid')
+    if 'receipt_successor' in b:
+        verify_receipt_successor_state(before,after,b)
+    else:
+        pending=before['engine_state']['journal'];op=pending['operation']
+        if (pending['index']!=b['initial_index'] or not isinstance(op,dict)
+                or set(op)!={'kind','phase','before','response','archive_index'}
+                or (op['kind'],op['phase'],op['response'],op['archive_index'])!=('create','in_flight',None,0)
+                or o.digest(op)!=b['operation_sha256']):o.fail('outbox_state_invalid')
+        restored=deepcopy(after)
+        restored['engine_state']['journal']['operation']['phase']='in_flight'
+        restored['engine_state']['journal']['operation']['response']=None
+        if o.encoded(restored)!=before_raw or not initial_state_valid(after,o.digest(after)):o.fail('outbox_state_invalid')
     # Exact digest equality above binds every other state byte, including the
     # original plan, index, before snapshot, captures, receipts and holds.
     desired=transition_outer(after,o.digest(after),policy.current_get_policy(),proof=proof)
@@ -415,3 +438,34 @@ def _verify_acknowledged_successor(local,remote,loader,head,proof,b):
         prior=commit;base=current
     if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
     return anchor
+
+
+def verify_receipt_successor_state(before,after,b):
+    """Only the original acknowledged CREATE's exact receipt completion.
+
+    This is Git/state validation, not native ownership evidence. The runtime
+    must independently read and reconstruct the full native receipt before CAS.
+    """
+    import get_notion_outbox as o
+    import get_notion_executor as e
+    o.check_state(before);o.check_state(after)
+    if 'receipt_successor' not in b or not initial_state_valid(after,o.digest(after)):o.fail('outbox_state_invalid')
+    pending=before['engine_state']['journal'];op=pending['operation']
+    if (pending['plan_sha256']!=b['plan_sha256'] or e.digest(pending['plan'])!=b['plan_sha256']
+            or pending['index']!=b['initial_index'] or not isinstance(op,dict)
+            or set(op)!={'kind','phase','before','response','archive_index'}
+            or (op['kind'],op['phase'],op['response'])!=('create','acknowledged',b['page_id'])
+            or type(op['archive_index']) is not int or op['archive_index']!=0
+            or o.digest(op)!=b['operation_sha256']):o.fail('outbox_state_invalid')
+    row=pending['plan']['records'][b['initial_index']];ident=b['note_id']
+    if ident in before['engine_state']['receipts'] or ident in before['engine_state'].get('property_receipts',{}):o.fail('outbox_state_invalid')
+    body=after['engine_state']['receipts'].get(ident,{})
+    expected={'note_id':ident,'page_id':b['page_id'],'data_source_id':pending['plan']['policy']['data_source_id'],
+        'source_commit':b['source_commit'],'md_blob':row['source']['blob'],'creation_plan_sha256':b['plan_sha256'],
+        'readback_verified':True,'protected_blocks':[],'asset_bindings':row.get('preserved_asset_bindings',{})}
+    if any(body.get(k)!=v for k,v in expected.items()):o.fail('outbox_state_invalid')
+    wanted=deepcopy(before);wanted['engine_state']['journal'].update(index=b['initial_index']+1,operation=None)
+    wanted['engine_state']['receipts'][ident]=deepcopy(body)
+    wanted['engine_state']['failures'].pop(ident,None)
+    e.property_transaction.record_creation(wanted['engine_state'],row,pending['plan'])
+    if wanted!=after:o.fail('outbox_state_invalid')

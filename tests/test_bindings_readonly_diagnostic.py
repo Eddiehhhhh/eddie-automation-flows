@@ -18,7 +18,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 # Diagnostic CI has the separately pinned checkout. Ordinary PR CI has the
-# unchanged old loader directly in this branch; verify its exact bytes below.
+# reviewed capsule-pin-only successor directly in this branch. Both loader
+# identities are checked byte-for-byte below; no pin normalization is allowed.
 ORIGINAL = ROOT / 'runtime' if (ROOT / 'runtime/scripts/get_private_runtime_bindings.py').is_file() else ROOT
 SPEC = importlib.util.spec_from_file_location('diagnostic', ROOT / 'scripts/get_bindings_readonly_diagnostic.py')
 d = importlib.util.module_from_spec(SPEC)
@@ -239,10 +240,12 @@ class StaticContractTests(unittest.TestCase):
         self.assertEqual(source.count('bindings.bootstrap('),1)
         self.assertNotIn('TRUSTED_BUNDLE_SHA256 =',source)
 
-    def test_original_loader_bytes_unchanged(self):
+    def test_loader_has_exact_reviewed_identity_for_checkout(self):
         raw=(ORIGINAL/'scripts/get_private_runtime_bindings.py').read_bytes()
-        self.assertEqual(hashlib.sha256(raw).hexdigest(),
-                         'a2b104cddbe11b2b8ae7518ff0e517b95cf8da2b0deec7283c931ed27dc32ad5')
+        expected=('a2b104cddbe11b2b8ae7518ff0e517b95cf8da2b0deec7283c931ed27dc32ad5'
+                  if ORIGINAL==ROOT/'runtime' else
+                  'd6e568a4e9f14cf4dc0a5b040ccf8965dbf17e3d62a2dc87a9b9d228bcadc12f')
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),expected)
 
 
 class RuntimeIdentityTests(unittest.TestCase):

@@ -187,6 +187,10 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
             outer=deepcopy(adapter.outer)
             outer['engine_state']=deepcopy(engine)
             return row_admit(outer,pending_plan)
+        if receipt_only and 'receipt_successor' in receipt_only:
+            # Repeat the native evidence at dispatch, not just before the
+            # policy-only CAS. No writes are enabled and no row may advance.
+            verify_persisted_creation_receipt(current,api)
         create_recovery=creation_recovery_for(active,manifest,expected,api)
         result=e.execute(plan,e.digest(plan),publication,api,adapter,expected_store_sha=sha,writers_guard=writers_guard,
                          create_recovery=create_recovery,approved_recovery_sha=e.digest(create_recovery) if create_recovery is not None else None,
@@ -738,8 +742,34 @@ def verify_create_resume_transition(local,remote,token,root,current,sha,request,
     if not e.p.writer_gate(policy) or policy!=plan['policy']:e.fail('writer_gate_unknown')
     properties.tx.context(publication,schema,property_manifest,property_expected,policy)
     historical.check_creation_titles(plan,publication,property_manifest,property_expected)
-    recovered=creation_recovery_for(active,manifest,expected,api)
-    if recovered is None:e.fail('uncertain_create')
+    binding=create_resume.plan_binding(plan)
+    if binding and 'receipt_successor' in binding:
+        verify_persisted_creation_receipt(current,api)
+    else:
+        recovered=creation_recovery_for(active,manifest,expected,api)
+        if recovered is None:e.fail('uncertain_create')
     publication.check(plan['publication'])
     if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
     return {'source_ancestry_verified':True,'native_verified':True,'external_writes':0,'loader':loader}
+
+
+def verify_persisted_creation_receipt(current,api):
+    """Fresh complete native identity/body/properties/ownership, read-only.
+
+    Never rebuild native evidence from the saved receipt or from enhanced
+    Markdown. The original read_target/created/receipt checks remain mandatory.
+    """
+    import get_notion_create_resume as create_resume
+    if not create_resume.initial_or_transitioned_state_valid(current,e.digest(current)):e.fail('state_changed')
+    active=current['engine_state']['journal'];plan=active['plan']
+    binding=create_resume.receipt_only_binding(plan)
+    if not binding or 'receipt_successor' not in binding:e.fail('approval_missing')
+    row=plan['records'][binding['initial_index']];ident=binding['note_id'];ds=plan['policy']['data_source_id']
+    snapshot=e.read_target(api,ident,ds)
+    managed=e.created(snapshot,row,ds,binding['page_id'])
+    fresh=e.receipt(snapshot,ident,ds,managed,plan['publication'],row['source'],row.get('preserved_asset_bindings'))
+    fresh['creation_plan_sha256']=e.digest(plan)
+    if fresh!=current['engine_state']['receipts'].get(ident):e.fail('human_edit_conflict')
+    paired=deepcopy(current['engine_state']);e.property_transaction.record_creation(paired,row,plan)
+    if paired['property_receipts'].get(ident)!=current['engine_state'].get('property_receipts',{}).get(ident):e.fail('human_edit_conflict')
+    return True
