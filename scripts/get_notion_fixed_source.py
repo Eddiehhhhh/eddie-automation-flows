@@ -40,6 +40,7 @@ def check_state(current, found):
     import get_notion_historical_active_recovery as active_recovery
     import get_notion_authenticated_recovery as authenticated_recovery
     import get_notion_create_resume as create_resume
+    import get_notion_clean_active_resume as clean_active
     import get_recurring_policy_recovery as policy_recovery
     tag=found.get('recovery_anchor')
     active=current['engine_state']['journal']
@@ -49,7 +50,9 @@ def check_state(current, found):
         and active_recovery.allows(active['plan'],active))
     exact_new = bool(active and authenticated_recovery.allows(active['plan'], active))
     exact_create = bool(active and create_resume.allows(active['plan'],active))
-    if tag == create_resume.TAG:
+    if tag == clean_active.TAG:
+        if not active or not clean_active.initial_or_transitioned_state_valid(current,e.digest(current)):e.fail('journal_busy')
+    elif tag == create_resume.TAG:
         if not exact_create: e.fail('journal_busy')
     elif tag == authenticated_recovery.TAG:
         if not exact_new or exact_create: e.fail('journal_busy')

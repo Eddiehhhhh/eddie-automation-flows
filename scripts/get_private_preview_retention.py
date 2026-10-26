@@ -18,6 +18,10 @@ import resource
 import stat
 import subprocess
 import tempfile
+import math
+import signal
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -217,6 +221,67 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         fail('remote_redirect_blocked')
 
 
+# Process-wide: rebuilding an adapter cannot reset retry allowance. Physical
+# attempts and application-read bytes are separate from logical proof budgets.
+_TREE_RETRY_LIMIT = 8
+_TREE_RETRIES_USED = 0
+_TREE_READ_METRICS = {'attempts': 0, 'extra_attempts': 0, 'read_bytes': 0, 'charged_bytes': 0, 'read_failures': 0}
+_TREE_READ_LOCK = threading.Lock()
+
+
+class _TreeReadDeadline:
+    """One hard wall-clock window around BOTH attempts and complete read.
+
+    Linux CI invokes the synchronous runtime on the main thread. No thread or
+    nested alarm fallback is allowed. An existing alarm is never overwritten.
+    """
+    def __enter__(self):
+        self.locked=False;self.installed=False;self.armed=False
+        if (threading.current_thread() is not threading.main_thread()
+                or not all(hasattr(signal,k) for k in ('SIGALRM','ITIMER_REAL','getitimer','setitimer'))
+                or not _TREE_READ_LOCK.acquire(blocking=False)):fail('remote_read_failed')
+        self.locked=True
+        try:
+            if signal.getitimer(signal.ITIMER_REAL)!=(0.0,0.0):fail('remote_read_failed')
+            self.old=signal.getsignal(signal.SIGALRM)
+            self.start=time.monotonic();self.last=self.start
+            if not math.isfinite(self.start):fail('remote_read_failed')
+            self.deadline=self.start+60.0
+            signal.signal(signal.SIGALRM,self.expired);self.installed=True
+            signal.setitimer(signal.ITIMER_REAL,self.remaining());self.armed=True
+            return self
+        except Exception:
+            self.__exit__(None,None,None)
+            fail('remote_read_failed')
+
+    def expired(self,signum,frame):
+        fail('remote_read_failed')
+
+    def remaining(self):
+        now=time.monotonic()
+        if not math.isfinite(now) or now<self.last or now>=self.deadline:fail('remote_read_failed')
+        self.last=now
+        return self.deadline-now
+
+    def __exit__(self,*unused):
+        try:
+            if self.armed:signal.setitimer(signal.ITIMER_REAL,0)
+        finally:
+            try:
+                if self.installed:signal.signal(signal.SIGALRM,self.old)
+            finally:
+                if self.locked:_TREE_READ_LOCK.release()
+
+
+def _tree_open_transient(error):
+    # No exception text, generic URLError, TLS, certificate, permission, redirect
+    # or response/read failure grants retry authority.
+    if type(error) is urllib.error.HTTPError:
+        return error.code in (502,503,504) and (error.headers is None or error.headers.get('Retry-After') in (None,'0'))
+    cause=error.reason if type(error) is urllib.error.URLError else error
+    return type(cause) in (ConnectionResetError,ConnectionAbortedError,ConnectionRefusedError,TimeoutError)
+
+
 class GitHubRemote:
     """Fixed repository, read-only REST verification and create-only Git refs."""
     def __init__(self, local, token):
@@ -227,6 +292,8 @@ class GitHubRemote:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def request(self, suffix, *, missing=False, maximum=1024 * 1024):
+        if isinstance(suffix,str) and re.fullmatch(r'/git/trees/[0-9a-f]{40}',suffix) and not missing:
+            return self._immutable_tree_request(suffix,maximum)
         request = urllib.request.Request('https://api.github.com/repos/' + REPOSITORY + suffix,
             headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
                      'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'get-private-preview-retention'})
@@ -251,6 +318,49 @@ class GitHubRemote:
             raise
         except Exception:
             fail('remote_read_failed')
+
+    def _immutable_tree_request(self,suffix,maximum):
+        global _TREE_RETRIES_USED
+        if (not re.fullmatch(r'/git/trees/[0-9a-f]{40}',suffix)
+                or type(maximum) is not int or not 0<maximum<=16*1024*1024):fail('remote_read_failed')
+        request=urllib.request.Request('https://api.github.com/repos/'+REPOSITORY+suffix,
+            headers={'Authorization':'Bearer '+self.token,'Accept':'application/vnd.github+json',
+                'X-GitHub-Api-Version':'2022-11-28','User-Agent':'get-private-preview-retention'})
+        try:
+            with _TreeReadDeadline() as deadline:
+                for attempt in range(2):
+                    timeout=deadline.remaining()
+                    _TREE_READ_METRICS['attempts']+=1
+                    try:
+                        response=self.opener.open(request,timeout=timeout)
+                    except Exception as error:
+                        retry=_tree_open_transient(error)
+                        if isinstance(error,urllib.error.HTTPError):error.close()
+                        deadline.remaining()
+                        if not retry or attempt or _TREE_RETRIES_USED>=_TREE_RETRY_LIMIT:fail('remote_read_failed')
+                        _TREE_RETRIES_USED+=1;_TREE_READ_METRICS['extra_attempts']+=1
+                        continue
+                    # Never retry any error after open returns, including partial
+                    # bodies, close/JSON/schema failure or non-200 mock response.
+                    with response:
+                        if response.status!=200:fail('remote_read_failed')
+                        # On a partial-read exception the library exposes no
+                        # byte count: conservatively charge the full bound and
+                        # abort. Never reset a byte budget to permit a retry.
+                        _TREE_READ_METRICS['charged_bytes']+=maximum+1
+                        try:data=response.read(maximum+1)
+                        except Exception:
+                            _TREE_READ_METRICS['read_failures']+=1
+                            raise
+                        _TREE_READ_METRICS['read_bytes']+=len(data)
+                        _TREE_READ_METRICS['charged_bytes']-=maximum+1-len(data)
+                    deadline.remaining()
+                    if len(data)>maximum:fail('remote_response_budget')
+                    value=strict_json(data)
+                    if not isinstance(value,dict):fail('remote_schema_invalid')
+                    return value
+        except RetentionFailure:raise
+        except Exception:fail('remote_read_failed')
 
     def metadata(self):
         return self.request('')

@@ -52,7 +52,7 @@ class Opener:
         self.commits={HEAD:{'sha':HEAD,'tree':{'sha':self.root},'parents':[{'sha':PARENT}]},PARENT:{'sha':PARENT,'tree':{'sha':empty},'parents':[]}}
         self.blobs={p.oid(STATE):STATE,p.oid(RECEIPT):RECEIPT};self.calls=[];self.fault=None;self.head=HEAD
     def open(self,request,timeout):
-        assert request.get_method()=='GET' and timeout==60
+        assert request.get_method()=='GET' and 0 < timeout <= 60  # shared hard deadline, never reset
         prefix='https://api.github.com/repos/'+p.REPOSITORY;assert request.full_url.startswith(prefix)
         path=request.full_url[len(prefix):];self.calls.append(path)
         if path=='':value={'full_name':p.REPOSITORY,'private':True}

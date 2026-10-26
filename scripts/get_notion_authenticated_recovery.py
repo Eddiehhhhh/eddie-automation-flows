@@ -7,6 +7,7 @@ only releases that execution slot while permanently denying the note/page.
 from copy import deepcopy
 import get_private_runtime_bindings as bindings
 import get_notion_create_resume as create_resume
+import get_notion_clean_active_resume as clean_active
 
 TAG = 'authenticated_unknown_append_v1'
 
@@ -53,6 +54,8 @@ def _append_run_binding(run_id, attempt=None):
 
 
 def run_binding(run_id, attempt=None):
+    exact = clean_active.run_binding(run_id, attempt)
+    if exact is not None: return exact
     old = _append_run_binding(run_id, attempt)
     new = create_resume.run_binding(run_id, attempt)
     if old is not None and new is not None: raise ValueError('authenticated_recovery_invalid')
@@ -60,6 +63,8 @@ def run_binding(run_id, attempt=None):
 
 
 def plan_binding(plan):
+    exact = clean_active.plan_binding(plan)
+    if exact is not None: return exact
     old = _append_plan_binding(plan)
     new = create_resume.plan_binding(plan)
     if old is not None and new is not None: raise ValueError('authenticated_recovery_invalid')
@@ -71,6 +76,8 @@ def registered_run(run_id, attempt=None):
 
 
 def candidate_policy(policy, run):
+    if clean_active.run_binding(run.get("id"), run.get("run_attempt")) is not None:
+        return clean_active.candidate_policy(policy, run)
     if create_resume.run_binding(run.get("id"), run.get("run_attempt")) is not None:
         return create_resume.candidate_policy(policy, run)
     import get_publication_provenance as p
@@ -93,6 +100,8 @@ def candidate_policy(policy, run):
 
 
 def recover_checkpoint(client, run_id, run_attempt):
+    if clean_active.run_binding(run_id, run_attempt) is not None:
+        return clean_active.recover_checkpoint(client, run_id, run_attempt)
     if create_resume.run_binding(run_id, run_attempt) is not None:
         return create_resume.recover_checkpoint(client, run_id, run_attempt)
     import get_notion_journal_runtime as j
@@ -139,6 +148,8 @@ def exact_hold_present(engine):
 
 def allows(plan, journal):
     """Dispatch exact create registrations; retain original append verifier."""
+    if clean_active.plan_binding(plan) is not None:
+        return clean_active.allows(plan, journal)
     if create_resume.plan_binding(plan) is not None:
         return create_resume.allows(plan, journal)
     try:
@@ -214,6 +225,8 @@ def isolate_outer(state, sha, new_policy):
 
 def check_mode(state, found, manifest, expected, other_modes):
     active = state['engine_state']['journal']
+    if found.get('recovery_anchor') == clean_active.TAG or (active and clean_active.plan_binding(active['plan']) is not None):
+        return clean_active.check_mode(state, found, manifest, expected, other_modes)
     if found.get('recovery_anchor') == create_resume.TAG or (active and create_resume.plan_binding(active['plan']) is not None):
         return create_resume.check_mode(state, found, manifest, expected, other_modes)
     o = _codec(); j = state['engine_state']['journal']; b = _append_plan_binding(j['plan']) if j else None
@@ -307,6 +320,8 @@ def transition_manifest(manifest, expected, plan):
 def preserve(before, after):
     """CAS-level monotonicity in addition to external checkpoint authentication."""
     active = before['engine_state']['journal']
+    if active and clean_active.plan_binding(active['plan']) is not None:
+        return clean_active.preserve(before, after)
     if active and create_resume.plan_binding(active['plan']) is not None:
         return create_resume.preserve(before, after)
     import get_notion_outbox as o

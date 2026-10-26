@@ -13,6 +13,7 @@ import get_notion_remote_journal as journal
 import get_notion_journal_runtime as checkpoints
 import get_notion_historical_active_recovery as historical_active
 import get_notion_authenticated_recovery as authenticated_recovery
+import get_notion_clean_active_resume as clean_active
 
 
 class API(transport.API):
@@ -156,6 +157,8 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
         options={} if property_manifest is None else {'property_manifest':property_manifest,
             'expected_property_manifest_sha256':property_expected,'property_schema':property_schema}
         plan=historical.prepare(publication,state,sha,snapshots,policy,manifest,expected,**options)
+    if active and clean_active.plan_binding(plan) is not None:
+        clean_active.verify_native(current,api)
     actions=Counter(row['action'] for row in plan['records'])
     reasons=Counter(row['reason'] for row in plan['records'] if row['action']=='blocked')
     report={'contract':pipeline.CONTRACT,'status':'prepared','source_mode':'historical_cohort',
@@ -201,7 +204,7 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
             # separate. No fused checkpoint or truncated/re-authored plan.
             from get_notion_single_create_admission import settle_clean_yield
             result=settle_clean_yield(e,adapter,plan,result)
-        elif (settle_row_yield is not None and getattr(row_admit,'clean_boundary_denied',False) is True
+        elif (clean_active.plan_binding(plan) is None and settle_row_yield is not None and getattr(row_admit,'clean_boundary_denied',False) is True
                 and result.get('status')=='partial' and result.get('reason')=='batch_boundary_yield'):
             result=settle_row_yield(adapter,plan,result)
         safe=e.public_report(result)
@@ -773,3 +776,41 @@ def verify_persisted_creation_receipt(current,api):
     paired=deepcopy(current['engine_state']);e.property_transaction.record_creation(paired,row,plan)
     if paired['property_receipts'].get(ident)!=current['engine_state'].get('property_receipts',{}).get(ident):e.fail('human_edit_conflict')
     return True
+
+
+def verify_clean_active_transition(local,remote,token,root,current,sha,request,*,
+                                    manifest,expected,policy_hash,writers_guard):
+    """Exact clean-active source/schema/native admission before policy-only CAS."""
+    if not clean_active.initial_or_transitioned_state_valid(current,sha):e.fail('state_changed')
+    active=current['engine_state']['journal'];plan=active['plan']
+    historical.validate(manifest,expected,apply=True)
+    if (manifest!=plan.get('historical_manifest') or expected!=plan.get('historical_manifest_sha256')
+            or not historical.creation_ids(manifest)):e.fail('approval_missing')
+    property_expected=private_input.creation_property_for(expected,required=True)
+    raw=private_input.read(remote,property_expected,contract=properties.tx.CONTRACT)
+    property_manifest=private_input.strict_capture_json(raw,256*1024)
+    if property_manifest!=plan.get('property_manifest') or property_expected!=plan.get('property_manifest_sha256'):
+        e.fail('approval_missing')
+    historical.bind_creation_properties(manifest,property_manifest,property_expected)
+    historical.require_creation_capture(current.get('historical_captures',{}),manifest,expected)
+    properties.check_dependency()
+    loader=source_loader.Loader(local,remote,token,root,policy_hash)
+    head=source_loader.entry.a.checked(local.run('rev-parse',source_loader.entry.r.MAIN_REF).decode().strip(),40)
+    loader.ancestry(manifest['source_commit'],head)
+    for source in manifest['records'].values():loader.blob(manifest['source_commit'],source['path'],e.p.MAX_NOTE)
+    publication=historical.Publication(local.vault,manifest,expected)
+    if publication.descriptor!=plan['publication']:e.fail('source_changed')
+    api=API(request,manifest['data_source_id'],sorted(manifest['records']))
+    schema=api.schema();titles=[name for name,row in schema.items() if isinstance(row,dict) and row.get('type')=='title']
+    if len(titles)!=1:e.fail('property_schema_changed')
+    policy={'data_source_id':manifest['data_source_id'],'id_property':'笔记 ID','title_property':titles[0],
+        'allow_create':True,'allow_archive':True,'format_accepted':True,'old_writer_evidence':writers_guard()}
+    if not e.p.writer_gate(policy) or policy!=plan['policy']:e.fail('writer_gate_unknown')
+    properties.tx.context(publication,schema,property_manifest,property_expected,policy)
+    historical.check_creation_titles(plan,publication,property_manifest,property_expected)
+    native=clean_active.verify_native(current,api)
+    publication.check(plan['publication'])
+    if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
+    return {'source_ancestry_verified':True,'native_verified':True,'external_writes':0,'loader':loader,'native':native}
+
+
