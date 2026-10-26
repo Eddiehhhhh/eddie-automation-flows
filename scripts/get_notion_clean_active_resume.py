@@ -419,5 +419,3 @@ def verify_successor(local,remote,loader,head,proof):
         prior=commit;base=current
     if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
     return anchor
-
-

@@ -812,5 +812,3 @@ def verify_clean_active_transition(local,remote,token,root,current,sha,request,*
     publication.check(plan['publication'])
     if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
     return {'source_ancestry_verified':True,'native_verified':True,'external_writes':0,'loader':loader,'native':native}
-
-
