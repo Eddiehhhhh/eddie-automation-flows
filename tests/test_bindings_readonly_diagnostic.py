@@ -17,9 +17,8 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-# Diagnostic CI has the separately pinned checkout. Ordinary PR CI has the
-# reviewed capsule-pin-only successor directly in this branch. Both loader
-# identities are checked byte-for-byte below; no pin normalization is allowed.
+# Diagnostic CI and ordinary PR CI both use the already-published 1e090
+# loader, whose exact bytes stay pinned below. No pin normalization is allowed.
 ORIGINAL = ROOT / 'runtime' if (ROOT / 'runtime/scripts/get_private_runtime_bindings.py').is_file() else ROOT
 SPEC = importlib.util.spec_from_file_location('diagnostic', ROOT / 'scripts/get_bindings_readonly_diagnostic.py')
 d = importlib.util.module_from_spec(SPEC)
@@ -207,6 +206,11 @@ class StaticContractTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(normal.encode()).hexdigest(),
                          '69ed7fa41b829e3ebc90eb726f0fc96f99d518284ac682f30080631bb41a30a4')
 
+    def test_observation_targets_exact_published_current_runtime(self):
+        self.assertEqual(d.RUNTIME_SHA, '1e090c7b768135ecd23dcf85dbcab93883b6c273')
+        workflow=(ROOT/'.github/workflows/cloud-readonly-acceptance.yml').read_text()
+        self.assertEqual(workflow.count('ref: '+d.RUNTIME_SHA),1)
+
     def test_workflow_default_normal_behavior_and_diagnostic_isolation(self):
         workflow=(ROOT/'.github/workflows/cloud-readonly-acceptance.yml').read_text()
         self.assertIn('default: false',workflow)
@@ -242,7 +246,7 @@ class StaticContractTests(unittest.TestCase):
 
     def test_loader_has_exact_reviewed_identity_for_checkout(self):
         raw=(ORIGINAL/'scripts/get_private_runtime_bindings.py').read_bytes()
-        expected=('a2b104cddbe11b2b8ae7518ff0e517b95cf8da2b0deec7283c931ed27dc32ad5'
+        expected=('d6e568a4e9f14cf4dc0a5b040ccf8965dbf17e3d62a2dc87a9b9d228bcadc12f'
                   if ORIGINAL==ROOT/'runtime' else
                   'd6e568a4e9f14cf4dc0a5b040ccf8965dbf17e3d62a2dc87a9b9d228bcadc12f')
         self.assertEqual(hashlib.sha256(raw).hexdigest(),expected)

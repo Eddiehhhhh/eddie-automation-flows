@@ -14,7 +14,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-RUNTIME_SHA = 'aecf535c2f264d26fccea6526a615156e6d35537'
+RUNTIME_SHA = '1e090c7b768135ecd23dcf85dbcab93883b6c273'
 REPAIR_REF = 'refs/heads/fix/get-shadow-diagnostics-20261012'
 PUBLIC_REPOSITORY = 'Eddiehhhhh/eddie-automation-flows'
 PRIVATE_API = 'https://api.github.com/repos/Eddiehhhhh/eddie-llm-wiki'
