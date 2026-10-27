@@ -37,12 +37,15 @@ class Fixture(Adapters):
            'prefix':[{'note_id':r['note_id'],'page_id':s['engine_state']['receipts'][r['note_id']]['page_id'],
                'body_receipt_sha256':digest(s['engine_state']['receipts'][r['note_id']]),'property_receipt_sha256':digest(s['engine_state']['property_receipts'][r['note_id']])} for r in rows[:6]],
            'remaining':[{'note_id':r['note_id'],'source':r['source'],'request_sha256':self.cr.request_sha(r,plan)} for r in rows[6:]]}
+        b['prior_capsule']={'commit':'a'*40,'parent':proof['anchor']['commit'],'before_tree':cp['tree'],'after_tree':'f'*40,'path':'.sync/get-notion/runtime-bindings-'+('e'*64)+'.json','blob':'e'*40,'sha256':'e'*64,'bytes':10}
+        self.bindings.MAX_BYTES=1024*1024
         self.entries=[b];ns={'deepcopy':deepcopy,'bindings':self.bindings}
         tree=ast.parse((SCRIPTS/'get_notion_clean_active_resume.py').read_text())
-        names={n.name for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}|{'TAG','KEYS','_NATIVE_SEAL','SCHEMA_EXCEPTION_SCOPE_SHA256'}
+        names={n.name for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}|{'TAG','KEYS','_NATIVE_SEAL','SCHEMA_EXCEPTION_SCOPE_SHA256','PRIOR_CAPSULE_SCOPE_SHA256'}
         extract('get_notion_clean_active_resume.py',names,ns)
         ns['target_code_sha256']=lambda:'e'*64
         ns['SCHEMA_EXCEPTION_SCOPE_SHA256']=digest([])
+        ns['PRIOR_CAPSULE_SCOPE_SHA256']=digest(b['prior_capsule'])
         b['invariant_sha256']=digest(ns['invariant'](s,b))
         self.bridge=module('get_notion_clean_active_resume',**{k:v for k,v in ns.items() if not k.startswith('__')});self.ns=ns
         self.start=s;self.binding=b;self.auth={**proof,'recovery_anchor':self.bridge.TAG};self.native_reads=[];self.native_state=s
@@ -247,6 +250,12 @@ class RealGitFixture(Fixture):
         exec(compile(ast.Module(body=[method],type_ignores=[]),'original_local_tree','exec'),ns)
         journal=module('get_notion_remote_journal',REF='refs/heads/main',STATE_PATH=self.state_path,retention=NS(LocalGit=Git,oid=oid,strict_json=json.loads),RemoteJournal=NS(_local_tree=ns['_local_tree']))
         patcher=patch.dict(sys.modules,{'get_notion_remote_journal':journal});patcher.start();self.addCleanup(patcher.stop)
+        self.register_prior_capsule(self.base)
+    def register_prior_capsule(self,parent):
+        raw=b'previous synthetic immutable capsule';sha=digest(raw);path='.sync/get-notion/runtime-bindings-'+sha+'.json'
+        commit=self.commit(self.start,parent,extra=(path,raw))
+        self.binding['prior_capsule']={'commit':commit,'parent':parent,'before_tree':self.git('rev-parse',parent+'^{tree}').decode().strip(),'after_tree':self.git('rev-parse',commit+'^{tree}').decode().strip(),'path':path,'blob':oid(raw),'sha256':sha,'bytes':len(raw)}
+        self.ns['PRIOR_CAPSULE_SCOPE_SHA256']=digest(self.binding['prior_capsule']);return commit
     def commit(self,state,parent=None,extra=None):
         run=self.git;run('read-tree','--empty') if parent is None else run('read-tree',parent)
         blob=run('hash-object','-w','--stdin',data=encoded(state)).decode().strip();run('update-index','--add','--cacheinfo','100644,'+blob+','+self.state_path)
@@ -258,10 +267,11 @@ class RealGitFixture(Fixture):
 class RealGitSuccessor(RealGitFixture):
     def test_no_state_change_returns_original_anchor(self):self.assertEqual(self.verify(),self.binding['proof']['anchor'])
     def test_exact_capsule_then_policy_only_child(self):
-        cap=self.commit(self.start,self.base,extra=(self.capsule_path,self.capsule));self.head=self.commit(self.new,cap)
+        cap=self.commit(self.start,self.binding['prior_capsule']['commit'],extra=(self.capsule_path,self.capsule));self.head=self.commit(self.new,cap)
         a=self.verify();self.assertEqual(a['commit'],self.head);self.assertEqual(a['state_sha256'],digest(self.new));self.assertEqual(self.auth['anchor']['commit'],self.base)
     def test_exact_policy_only_one_hop(self):
-        self.head=self.commit(self.new,self.base);self.assertEqual(self.verify()['commit'],self.head)
+        self.head=self.commit(self.new,self.base)
+        with self.assertRaises(Blocked):self.verify()
     def test_two_state_changes_even_restored_rejected(self):
         first=self.commit(self.new,self.base);z=deepcopy(self.new);z['sentinel'].append('tamper');bad=self.commit(z,first);self.head=self.commit(self.new,bad)
         with self.assertRaises(Blocked):self.verify()
@@ -301,7 +311,7 @@ class FiniteGitFixture(RealGitFixture):
             chain.append({'commit':commit,'parent':prior,'before_tree':before[0],'after_tree':after[0],
                           'changed_paths':len(changes),'changes_sha256':digest(changes)})
             prior=commit;before=after
-        self.binding['successor_chain']=chain;self.bridge.registry()
+        self.binding['successor_chain']=chain;self.register_prior_capsule(prior);self.bridge.registry()
     def chain(self):
         first=self.commit(self.start,self.base,extra=('Wiki/synthetic.md',b'a'))
         second=self.commit(self.start,first,extra=('Raw/05 Chat/synthetic.md',b'b'))
@@ -310,7 +320,7 @@ class FiniteGitFixture(RealGitFixture):
 class FiniteRegisteredSuccessor(FiniteGitFixture):
     def test_exact_finite_chain_then_capsule_and_policy(self):
         self.chain();self.assertEqual(self.verify(),self.binding['proof']['anchor'])
-        cap=self.commit(self.start,self.head,extra=(self.capsule_path,self.capsule))
+        cap=self.commit(self.start,self.binding['prior_capsule']['commit'],extra=(self.capsule_path,self.capsule))
         self.head=self.commit(self.new,cap);self.assertEqual(self.verify()['commit'],self.head)
     def test_shorter_prefix_is_not_registered_terminal(self):
         first,_=self.chain();self.head=first
@@ -606,3 +616,140 @@ class ExactMutableHead(unittest.TestCase):
             refs[next(iter(refs))]='f'*40
             with self.assertRaises(Blocked):ns['guard'](remote)
             with self.assertRaises(Blocked):remote.ref('refs/heads/unregistered')
+
+class ExactCapsuleHydration(RealGitFixture):
+    def hydration(self,raw=b'capsule',remote_raw=None,write_oid=None,readback=None,limit=None):
+        raw=bytes(raw);calls=[]
+        def blob(sha,size):
+            calls.append(('remote',sha,size))
+            if limit is not None:fail(limit)
+            return raw if remote_raw is None else remote_raw
+        def run(*args,data=None):
+            calls.append(('write',args,data));return ((oid(raw) if write_oid is None else write_oid)+'\n').encode()
+        def local(sha):calls.append(('readback',sha));return raw if readback is None else readback
+        self.bridge._hydrate_capsule(NS(run=run,blob=local),NS(blob=blob),oid(raw),len(raw),digest(raw),raw)
+        return calls
+    def test_remote_validation_precedes_local_write_and_readback(self):
+        calls=self.hydration();self.assertEqual([x[0] for x in calls],['remote','write','readback'])
+    def test_wrong_short_long_or_nonbytes_remote_stops_before_write(self):
+        for raw in (b'capsulf',b'capsul',b'capsules','capsule'):
+            with self.subTest(raw=raw),self.assertRaises(Blocked):self.hydration(remote_raw=raw)
+    def test_wrong_hash_object_result_or_local_readback_rejected(self):
+        for args in ({'write_oid':'f'*40},{'readback':b'wrong'}):
+            with self.assertRaises(Blocked):self.hydration(**args)
+    def test_remote_budget_failure_not_retried(self):
+        with self.assertRaisesRegex(Blocked,'request_budget'):self.hydration(limit='request_budget')
+    def test_size_invalid_zero_remote_calls(self):
+        calls=[];remote=NS(blob=lambda *a:calls.append(a))
+        for size in (True,0,-1,self.bindings.MAX_BYTES+1):
+            with self.assertRaises(Blocked):self.bridge._hydrate_capsule(None,remote,'a'*40,size,'b'*64)
+        self.assertEqual(calls,[])
+    def test_sha256_oid_and_expected_bytes_all_independent(self):
+        raw=b'capsule';calls=[];remote=NS(blob=lambda *a:raw)
+        git=NS(run=lambda *a,**k:calls.append(a))
+        for sha,h,expected in [('f'*40,digest(raw),raw),(oid(raw),'f'*64,raw),(oid(raw),digest(raw),b'other')]:
+            with self.assertRaises(Blocked):self.bridge._hydrate_capsule(git,remote,sha,len(raw),h,expected)
+        self.assertEqual(calls,[])
+    def test_missing_known_blob_is_hydrated_without_native_or_cas(self):
+        b=self.binding['prior_capsule'];raw=self.git('cat-file','blob',b['blob']);self.head=b['commit']
+        path=self.root/'.git/objects'/b['blob'][:2]/b['blob'][2:];path.unlink()
+        original=self.remote.blob;calls=[]
+        def blob(sha,size):calls.append((sha,size));return raw if sha==b['blob'] else original(sha,size)
+        self.remote.blob=blob;self.native_reads.clear()
+        self.assertEqual(self.verify(),self.binding['proof']['anchor'])
+        self.assertEqual(self.git('cat-file','blob',b['blob']),raw)
+        self.assertEqual([x for x in calls if x[0]==b['blob']],[(b['blob'],len(raw))]);self.assertEqual(self.native_reads,[])
+    def test_existing_known_blob_still_needs_exact_remote_read(self):
+        self.head=self.binding['prior_capsule']['commit'];original=self.remote.blob;calls=[]
+        def blob(sha,size):calls.append(sha);return original(sha,size)
+        self.remote.blob=blob;self.verify();self.assertEqual(calls.count(self.binding['prior_capsule']['blob']),1)
+    def test_known_edge_identity_scope_or_metadata_change_rejected(self):
+        self.head=self.binding['prior_capsule']['commit'];original=deepcopy(self.binding['prior_capsule'])
+        for key,value in [('commit','f'*40),('parent','f'*40),('before_tree','f'*40),('after_tree','f'*40),('blob','f'*40),('sha256','f'*64),('bytes',1),('path','unrelated')]:
+            self.binding['prior_capsule']=deepcopy(original);self.binding['prior_capsule'][key]=value
+            with self.subTest(key=key),self.assertRaises(Blocked):self.verify()
+        self.binding['prior_capsule']=original
+    def test_same_old_payload_other_commit_not_interchangeable(self):
+        b=self.binding['prior_capsule'];self.head=self.git('commit-tree',b['after_tree'],'-p',self.base,'-m','Another identity').decode().strip()
+        with self.assertRaises(Blocked):self.verify()
+    def test_old_capsule_changed_deleted_or_repeated_after_admission_rejects(self):
+        b=self.binding['prior_capsule']
+        for raw in (b'changed',b'previous synthetic immutable capsule'):
+            self.head=self.commit(self.start,b['commit'],extra=(b['path'],raw))
+            with self.assertRaises(Blocked):self.verify()
+        self.git('read-tree',b['commit']);self.git('update-index','--force-remove',b['path']);tree=self.git('write-tree').decode().strip()
+        self.head=self.git('commit-tree',tree,'-p',b['commit'],'-m','delete').decode().strip()
+        with self.assertRaises(Blocked):self.verify()
+    def test_current_capsule_cannot_precede_known_edge_or_repeat(self):
+        self.head=self.commit(self.start,self.base,extra=(self.capsule_path,self.capsule))
+        with self.assertRaises(Blocked):self.verify()
+        first=self.commit(self.start,self.binding['prior_capsule']['commit'],extra=(self.capsule_path,self.capsule))
+        self.head=self.commit(self.start,first,extra=(self.capsule_path,self.capsule))
+        with self.assertRaises(Blocked):self.verify()
+    def test_known_capsule_with_state_or_extra_leaf_rejected(self):
+        b=self.binding['prior_capsule'];self.head=self.commit(self.new,self.base,extra=(b['path'],b'previous synthetic immutable capsule'))
+        with self.assertRaises(Blocked):self.verify()
+        self.head=self.commit(self.start,b['commit'],extra=('unknown.txt',b'wrong'))
+        with self.assertRaises(Blocked):self.verify()
+    def test_policy_cannot_precede_new_current_capsule(self):
+        self.head=self.commit(self.new,self.binding['prior_capsule']['commit'])
+        with self.assertRaises(Blocked):self.verify()
+    def original_loader_entry(self,preloaded=False,wrong_remote=False,max_calls=2048):
+        # Original loader class and original LocalGit over synthetic real Git.
+        # Metadata-only fetch transport is an explicit no-network adapter.
+        import hashlib,json
+        from pathlib import Path
+        import get_private_preview_retention as retention
+        from test_notion_exact_ack_recovery import checked
+        j=sys.modules['get_notion_remote_journal'];j.retention=retention
+        j.MAX_STATE=32*1024*1024;j.MAX_BATCH_BYTES=64*1024*1024
+        j.checked=checked;j.REPOSITORY=retention.REPOSITORY
+        old=self.binding['prior_capsule'];self.head=self.commit(self.start,old['commit'],extra=(self.capsule_path,self.capsule))
+        blobs={sha:self.git('cat-file','blob',sha) for sha in (old['blob'],oid(self.capsule),oid(encoded(self.start)))}
+        metadata={}
+        for line in self.git('cat-file','--batch-all-objects','--batch-check=%(objectname) %(objecttype)').decode().splitlines():
+            sha,kind=line.split()
+            if kind!='tree':continue
+            entries=[]
+            for row in self.git('ls-tree','-z',sha).split(b'\0'):
+                if not row:continue
+                left,path=row.split(b'\t');mode,typ,ident=left.decode().split();r={'mode':mode,'type':typ,'sha':ident,'path':path.decode()}
+                if typ=='blob':r['size']=len(blobs[ident])
+                entries.append(r)
+            metadata[sha]=entries
+        for sha in blobs:
+            if not preloaded:(self.root/'.git/objects'/sha[:2]/sha[2:]).unlink()
+        self.git('remote','add','origin',retention.REMOTE_URL)
+        local=retention.LocalGit(self.root);fetches=[];reads=[]
+        def run(*args,**kw):
+            if 'fetch' in args:
+                self.assertIn('--filter=blob:none',args);fetches.append(args);return b''
+            return local.run(*args,**kw)
+        self.remote.local=NS(vault=self.root,run=run)
+        self.remote.metadata=lambda:{'full_name':retention.REPOSITORY,'private':True}
+        self.remote.tree_entries=lambda sha:deepcopy(metadata[sha])
+        def blob(sha,size):
+            reads.append((sha,size))
+            return b'wrong' if wrong_remote and sha==old['blob'] else blobs[sha]
+        self.remote.blob=blob
+        ns={'Path':Path,'journal':j,'codec':self.codec,'fail':fail,'CheckpointFailure':Blocked,'hashlib':hashlib}
+        extract('get_notion_journal_runtime.py',{'ExactJournalLoader'},ns)
+        loader=ns['ExactJournalLoader'](self.root,self.remote,max_calls=max_calls)
+        loader(self.head)
+        if not preloaded:
+            self.assertEqual(local.run('cat-file','--batch-check=%(objectname) %(objecttype)',data=(oid(self.capsule)+'\n').encode()),(oid(self.capsule)+' missing\n').encode())
+        self.native_reads.clear()
+        anchor=self.bridge.verify_successor(NS(vault=self.root),self.remote,loader,self.head,self.auth)
+        self.assertEqual(anchor,self.binding['proof']['anchor']);self.assertEqual(self.native_reads,[])
+        self.assertEqual(local.blob(oid(self.capsule)),self.capsule)
+        self.assertEqual([sha for sha,size in reads].count(old['blob']),1)
+        self.assertEqual([sha for sha,size in reads].count(oid(self.capsule)),1)
+        self.assertTrue(fetches)
+    def test_original_loader_blobless_entry_hydrates_both_exact_capsules(self):self.original_loader_entry()
+    def test_original_loader_preloaded_entry_still_checks_remote_both(self):self.original_loader_entry(preloaded=True)
+    def test_original_loader_wrong_capsule_remote_fails_before_native(self):
+        with self.assertRaises(Blocked):self.original_loader_entry(wrong_remote=True)
+        self.assertEqual(self.native_reads,[])
+    def test_original_loader_original_call_budget_not_bypassed(self):
+        with self.assertRaisesRegex(Blocked,'journal_loader_budget'):self.original_loader_entry(max_calls=1)
+        self.assertEqual(self.native_reads,[])

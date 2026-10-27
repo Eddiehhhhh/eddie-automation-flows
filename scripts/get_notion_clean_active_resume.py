@@ -13,9 +13,11 @@ import get_private_runtime_bindings as bindings
 TAG = 'exact_registered_clean_active_resume_v1'
 # Aggregate non-secret digest only. Exact reviewed private paths/OIDs stay private.
 SCHEMA_EXCEPTION_SCOPE_SHA256 = 'c7bce9aca55a753f4a7b202377c86e6dfab4361f0f496970fb853e9c9b864726'
+# One already-published immutable capsule edge, not a new inheritance class.
+PRIOR_CAPSULE_SCOPE_SHA256 = 'ca5ee80325f301b3de383299965bcba7f69d67c59c7b4321cb7d4690660ec718'
 KEYS = {'contract','proof','public_policy','public_policy_sha256','notion_policy_sha256',
         'plan_sha256','plan_bytes','engine_rules_sha256','manifest_sha256','property_manifest_sha256',
-        'source_commit','initial_index','record_count','prefix','remaining','invariant_sha256','target_code_sha256','successor_chain','journal_locator','schema_exceptions'}
+        'source_commit','initial_index','record_count','prefix','remaining','invariant_sha256','target_code_sha256','successor_chain','journal_locator','schema_exceptions','prior_capsule'}
 
 
 def target_material_sha256(document):
@@ -124,6 +126,14 @@ def registry():
         if (edge['parent']!=prior or edge['before_tree']!=tree or edge['commit'] in seen
                 or type(edge['changed_paths']) is not int or not 1<=edge['changed_paths']<=100000):o.fail('outbox_state_invalid')
         seen.add(edge['commit']);prior=edge['commit'];tree=edge['after_tree']
+    cap=b['prior_capsule']
+    if (not isinstance(cap,dict) or set(cap)!={'commit','parent','before_tree','after_tree','path','blob','sha256','bytes'}
+            or o.digest(cap)!=PRIOR_CAPSULE_SCOPE_SHA256):o.fail('outbox_state_invalid')
+    for key in ('commit','parent','before_tree','after_tree','blob'):c.journal.checked(cap[key],40)
+    c.journal.checked(cap['sha256'],64)
+    if (cap['parent']!=prior or cap['before_tree']!=tree or cap['commit'] in seen
+            or cap['path']!='.sync/get-notion/runtime-bindings-'+cap['sha256']+'.json'
+            or type(cap['bytes']) is not int or not 0<cap['bytes']<=bindings.MAX_BYTES):o.fail('outbox_state_invalid')
     exceptions=b['schema_exceptions']
     if not isinstance(exceptions,list) or len(exceptions)>6 or o.digest(exceptions)!=SCHEMA_EXCEPTION_SCOPE_SHA256:o.fail('outbox_state_invalid')
     pairs=set()
@@ -442,6 +452,22 @@ def preserve(before,after):
     if after!=wanted:o.fail('outbox_state_invalid')
 
 
+def _hydrate_capsule(git,remote,oid,size,sha256,expected=None):
+    """One exact, already tree-admitted blob; original transport budgets apply.
+
+    A blobless metadata fetch must not be mistaken for local blob availability.
+    Even a preexisting local blob is never a substitute for remote validation.
+    """
+    import get_notion_remote_journal as j
+    import get_notion_outbox as o
+    if type(size) is not int or not 0<size<=bindings.MAX_BYTES:o.fail('outbox_state_invalid')
+    raw=remote.blob(oid,size)
+    if (not isinstance(raw,bytes) or len(raw)!=size or o.digest(raw)!=sha256
+            or j.retention.oid(raw)!=oid or expected is not None and raw!=expected):o.fail('outbox_state_invalid')
+    if git.run('hash-object','-w','--stdin',data=raw).decode().strip()!=oid:o.fail('outbox_state_invalid')
+    if git.blob(oid)!=raw:o.fail('outbox_state_invalid')
+
+
 def verify_successor(local,remote,loader,head,proof):
     """Finite registered history, then capsule/policy-only CAS; no future inheritance."""
     from types import SimpleNamespace
@@ -467,7 +493,7 @@ def verify_successor(local,remote,loader,head,proof):
     node(head);git.run('merge-base','--is-ancestor',prior,head)
     history=git.run('rev-list','--reverse','--max-count=257',prior+'..'+head).decode().split()
     if len(history)>256:o.fail('outbox_state_invalid')
-    seen=False;capsule_seen=False;registered=b['successor_chain']
+    seen=False;capsule_seen=False;registered=b['successor_chain'];known=b['prior_capsule']
     if len(history)<len(registered):o.fail('outbox_state_invalid')
     capsule_raw=_capsule_bytes();capsule_oid=j.retention.oid(capsule_raw)
     capsule_path='.sync/get-notion/runtime-bindings-'+bindings.TRUSTED_BUNDLE_SHA256+'.json'
@@ -478,13 +504,18 @@ def verify_successor(local,remote,loader,head,proof):
         if position<len(registered):
             verify_registered_edge(registered[position],prior,base,commit,current,b['schema_exceptions'])
             if current[2].get(j.STATE_PATH)!=('100644','blob',anchor['state_blob']):o.fail('outbox_state_invalid')
+        elif position==len(registered):
+            if (commit!=known['commit'] or prior!=known['parent'] or base[0]!=known['before_tree']
+                    or current[0]!=known['after_tree'] or changed!={known['path']} or known['path'] in base[2]
+                    or current[2].get(known['path'])!=('100644','blob',known['blob'])):o.fail('outbox_state_invalid')
+            _hydrate_capsule(git,remote,known['blob'],known['bytes'],known['sha256'])
         elif j.STATE_PATH in changed:
-            if seen or changed!={j.STATE_PATH} or current[2][j.STATE_PATH]!=('100644','blob',oid) or git.blob(oid)!=target or remote.blob(oid,len(target))!=target:o.fail('outbox_state_invalid')
+            if not capsule_seen or seen or changed!={j.STATE_PATH} or current[2][j.STATE_PATH]!=('100644','blob',oid) or git.blob(oid)!=target or remote.blob(oid,len(target))!=target:o.fail('outbox_state_invalid')
             seen=True;anchor={'commit':commit,'state_blob':oid,'state_sha256':o.digest(target)}
         else:
-            if (capsule_seen or changed!={capsule_path} or capsule_path in base[2]
-                    or current[2].get(capsule_path)!=('100644','blob',capsule_oid)
-                    or git.blob(capsule_oid)!=capsule_raw or remote.blob(capsule_oid,len(capsule_raw))!=capsule_raw):o.fail('outbox_state_invalid')
+            if (capsule_seen or seen or changed!={capsule_path} or capsule_path in base[2]
+                    or current[2].get(capsule_path)!=('100644','blob',capsule_oid)):o.fail('outbox_state_invalid')
+            _hydrate_capsule(git,remote,capsule_oid,len(capsule_raw),bindings.TRUSTED_BUNDLE_SHA256,capsule_raw)
             capsule_seen=True
         prior=commit;base=current
     if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
