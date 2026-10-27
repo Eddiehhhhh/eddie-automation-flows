@@ -646,6 +646,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 anchor=create_resume.verify_successor(local,remote,loader,parent,found)
             if present and found.get('recovery_anchor') == clean_active.TAG:
                 anchor=clean_active.verify_successor(local,remote,loader,parent,found)
+                # Bind mutable reads/CAS to the just-verified finite terminal.
+                # Keep the original immutable cache/readback-generation wrapper.
+                remote.remote=clean_active.FiniteHeadRemote(remote.remote,parent,confirm)
+                confirm=remote.remote.confirm
             post_cas_binding=historical_active.prepared_binding()
             post_cas_paths=() if post_cas_binding is None else tuple(sorted({
                 path for row in post_cas_binding['known_descendants'] for path in row['changes']}))

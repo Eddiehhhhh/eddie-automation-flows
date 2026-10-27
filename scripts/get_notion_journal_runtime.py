@@ -684,11 +684,26 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
             before=latest[row['id']]
             _same_run(before,now)
             if now['run_attempt']==before['run_attempt'] and provenance.run_semantic_binding(now)!=provenance.run_semantic_binding(before):fail('journal_provenance_changed')
-        checked = 0
-        while candidates and checked < 4:
+        # This single exact registration reserves one of the original four
+        # candidate slots. Listing retention is not full log authentication.
+        locator = authenticated_recovery.clean_active.discovery_locator(policy)
+        if locator == (exclude_run_id, exclude_run_attempt): fail('journal_provenance_context')
+        if locator is not None:
+            candidates = [r for r in candidates if (r['id'],r['run_attempt']) != locator]
+        checked = 0; locator_used = False
+        while (candidates or (locator is not None and not locator_used)) and checked < 4:
             candidates.sort(key=lambda row: (provenance.timestamp(row['updated_at']),
                 row['id'], row['run_attempt']), reverse=True)
-            row = candidates.pop(0); checked += 1
+            if locator is not None and not locator_used and (checked == 3 or not candidates):
+                ident,attempt=locator
+                row=_latest_run(bounded.json('/actions/runs/'+str(ident)),policy)
+                if row['id']!=ident or row['run_attempt']!=attempt or row['status']!='completed':fail('journal_provenance_changed')
+                if ident in latest:_same_run(latest[ident],row)
+                if not authenticated_recovery.clean_active.candidate_policy(policy,row)[1]:fail('journal_provenance_changed')
+                latest[ident]=row;locator_used=True
+            else:
+                row = candidates.pop(0)
+            checked += 1
             try:
                 result = recover_anchor(bounded, run_id=row['id'], run_attempt=row['run_attempt'],
                     public_policy=policy, approved_public_policy_sha256=approved_public_policy_sha256,
@@ -788,7 +803,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 # Notion step cannot provide this policy's checkpoint. Do not
                 # spend the four log-proof slots on these negative candidates.
                 # The shared 40 physical-read / byte budgets still bound cost.
-                if str(exc) in ('journal_provenance_other_controller', 'journal_provenance_no_checkpoint'):
+                if locator is None and str(exc) in ('journal_provenance_other_controller', 'journal_provenance_no_checkpoint'):
                     checked -= 1
                 if str(exc) not in ('journal_provenance_missing', 'journal_provenance_no_checkpoint',
                                    'journal_provenance_other_controller'):
@@ -801,7 +816,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 # do not consume the caller's physical budget after success.
                 return {**result, 'candidate_runs_checked': checked, 'candidate_attempts_checked': checked,
                         'provenance_reads': bounded.requests, 'provenance_bytes': bounded.bytes}
-            if checked < 4: previous(row)
+            if checked < (3 if locator is not None else 4): previous(row)
         fail('journal_provenance_missing')
     except CheckpointFailure: raise
     except Exception: fail('journal_provenance_failed')

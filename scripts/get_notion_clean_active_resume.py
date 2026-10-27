@@ -11,9 +11,11 @@ import json
 import get_private_runtime_bindings as bindings
 
 TAG = 'exact_registered_clean_active_resume_v1'
+# Aggregate non-secret digest only. Exact reviewed private paths/OIDs stay private.
+SCHEMA_EXCEPTION_SCOPE_SHA256 = 'c7bce9aca55a753f4a7b202377c86e6dfab4361f0f496970fb853e9c9b864726'
 KEYS = {'contract','proof','public_policy','public_policy_sha256','notion_policy_sha256',
         'plan_sha256','plan_bytes','engine_rules_sha256','manifest_sha256','property_manifest_sha256',
-        'source_commit','initial_index','record_count','prefix','remaining','invariant_sha256','target_code_sha256'}
+        'source_commit','initial_index','record_count','prefix','remaining','invariant_sha256','target_code_sha256','successor_chain','journal_locator','schema_exceptions'}
 
 
 def target_material_sha256(document):
@@ -110,6 +112,35 @@ def registry():
         if set(row['source'])!={'path','blob','sha256'}:o.fail('outbox_state_invalid')
         c.journal.checked(row['source']['blob'],40);c.journal.checked(row['source']['sha256'],64)
     if len(set(ids))!=10:o.fail('outbox_state_invalid')
+    if b['journal_locator']!={'contract':'get-notion-exact-four-slot-locator-1',
+                             'recent_candidates':3,'total_candidates':4}:o.fail('outbox_state_invalid')
+    chain=b['successor_chain']
+    if not isinstance(chain,list) or len(chain)>256:o.fail('outbox_state_invalid')
+    prior=p['anchor']['commit'];tree=cp['tree'];seen={prior}
+    for edge in chain:
+        if not isinstance(edge,dict) or set(edge)!={'commit','parent','before_tree','after_tree','changes_sha256','changed_paths'}:o.fail('outbox_state_invalid')
+        for key in ('commit','parent','before_tree','after_tree'):c.journal.checked(edge[key],40)
+        c.journal.checked(edge['changes_sha256'],64)
+        if (edge['parent']!=prior or edge['before_tree']!=tree or edge['commit'] in seen
+                or type(edge['changed_paths']) is not int or not 1<=edge['changed_paths']<=100000):o.fail('outbox_state_invalid')
+        seen.add(edge['commit']);prior=edge['commit'];tree=edge['after_tree']
+    exceptions=b['schema_exceptions']
+    if not isinstance(exceptions,list) or len(exceptions)>6 or o.digest(exceptions)!=SCHEMA_EXCEPTION_SCOPE_SHA256:o.fail('outbox_state_invalid')
+    pairs=set()
+    for item in exceptions:
+        if not isinstance(item,dict) or set(item)!={'commit','path','before','after'}:o.fail('outbox_state_invalid')
+        c.journal.checked(item['commit'],40)
+        path=item['path']
+        if (item['commit'] not in seen-{p['anchor']['commit']} or not isinstance(path,str) or not path.startswith('Schema/')
+                or any(x in ('','.','..') for x in path.split('/')) or '\x00' in path or '\\' in path
+                or (item['commit'],path) in pairs):o.fail('outbox_state_invalid')
+        pairs.add((item['commit'],path))
+        for key in ('before','after'):
+            row=item[key]
+            if not isinstance(row,list) or len(row)!=3 or row[:2]!=['100644','blob']:o.fail('outbox_state_invalid')
+            c.journal.checked(row[2],40)
+        if item['before']==item['after']:o.fail('outbox_state_invalid')
+    if exceptions and (len({x['commit'] for x in exceptions})!=3 or len({x['path'] for x in exceptions})!=2):o.fail('outbox_state_invalid')
     return deepcopy(rows)
 
 
@@ -130,6 +161,41 @@ def candidate_policy(policy,run):
     b=run_binding(run.get('id'),run.get('run_attempt'))
     if b and target_code_sha256()==b['target_code_sha256'] and p.run_binding(run) in (b['proof']['run_binding'],b['proof']['latest_binding']) and idle._forward_policy(policy,b):return deepcopy(b['public_policy']),True
     return policy,False
+
+
+def discovery_locator(policy):
+    """Reserve one of FOUR slots, only for this exact independently pinned proof.
+
+    Three more recent attempts retain priority. A locator is not a checkpoint
+    and never admits a state or writes; full original proof/current/native
+    validation is still mandatory. No arbitrary run or future alias qualifies.
+    """
+    b=registry()[0]
+    if not candidate_policy(policy,b['proof']['latest_binding'])[1]:return None
+    return b['proof']['run_id'],b['proof']['run_attempt']
+
+
+def successor_changes(before,after):
+    """Canonical complete leaf diff of separately Merkle-verified trees."""
+    return [[path,before.get(path),after.get(path)] for path in sorted(set(before)|set(after))
+            if before.get(path)!=after.get(path)]
+
+
+def verify_registered_edge(edge,prior,base,commit,current,exceptions):
+    import get_notion_outbox as o
+    changes=successor_changes(base[2],current[2])
+    protected=('Raw/03 Get','.sync','AGENTS.md','Schema','Scripts','scripts','.github/workflows')
+    allowed=[[x['path'],x['before'],x['after']] for x in exceptions if x['commit']==commit]
+    # Exact aggregate scope pin is independent of the full capsule target pin.
+    # No path/OID inferred from current state can become an exception.
+    normalized=[[path,list(old) if old is not None else None,list(new) if new is not None else None] for path,old,new in changes]
+    if any(row not in normalized for row in allowed):o.fail('outbox_state_invalid')
+    if (edge['commit']!=commit or edge['parent']!=prior or current[1]!=[prior]
+            or edge['before_tree']!=base[0] or edge['after_tree']!=current[0]
+            or len(changes)!=edge['changed_paths'] or o.digest(changes)!=edge['changes_sha256']
+            or any((path==root or path.startswith(root+'/')) and [path,old,new] not in allowed
+                   for path,old,new in normalized for root in protected)):
+        o.fail('outbox_state_invalid')
 
 
 def recover_checkpoint(client,run_id,run_attempt):
@@ -377,7 +443,7 @@ def preserve(before,after):
 
 
 def verify_successor(local,remote,loader,head,proof):
-    """Only exact policy-only CAS after its confirmation was lost; no progress guess."""
+    """Finite registered history, then capsule/policy-only CAS; no future inheritance."""
     from types import SimpleNamespace
     import get_notion_remote_journal as j
     import get_notion_outbox as o
@@ -401,14 +467,18 @@ def verify_successor(local,remote,loader,head,proof):
     node(head);git.run('merge-base','--is-ancestor',prior,head)
     history=git.run('rev-list','--reverse','--max-count=257',prior+'..'+head).decode().split()
     if len(history)>256:o.fail('outbox_state_invalid')
-    seen=False;capsule_seen=False
+    seen=False;capsule_seen=False;registered=b['successor_chain']
+    if len(history)<len(registered):o.fail('outbox_state_invalid')
     capsule_raw=_capsule_bytes();capsule_oid=j.retention.oid(capsule_raw)
     capsule_path='.sync/get-notion/runtime-bindings-'+bindings.TRUSTED_BUNDLE_SHA256+'.json'
-    for commit in history:
+    for position,commit in enumerate(history):
         current=node(commit)
         if current[1]!=[prior]:o.fail('outbox_state_invalid')
         changed={k for k in set(base[2])|set(current[2]) if base[2].get(k)!=current[2].get(k)}
-        if j.STATE_PATH in changed:
+        if position<len(registered):
+            verify_registered_edge(registered[position],prior,base,commit,current,b['schema_exceptions'])
+            if current[2].get(j.STATE_PATH)!=('100644','blob',anchor['state_blob']):o.fail('outbox_state_invalid')
+        elif j.STATE_PATH in changed:
             if seen or changed!={j.STATE_PATH} or current[2][j.STATE_PATH]!=('100644','blob',oid) or git.blob(oid)!=target or remote.blob(oid,len(target))!=target:o.fail('outbox_state_invalid')
             seen=True;anchor={'commit':commit,'state_blob':oid,'state_sha256':o.digest(target)}
         else:
@@ -419,3 +489,52 @@ def verify_successor(local,remote,loader,head,proof):
         prior=commit;base=current
     if remote.ref(j.REF)!=head:o.fail('outbox_state_changed')
     return anchor
+
+
+class FiniteHeadRemote:
+    """Per-run exact-head guard for this finite continuation only.
+
+    Retains the existing transport and immutable-cache generation boundaries.
+    No foreign successor, even a non-Get one, is inherited after admission.
+    Own candidates become durable heads only after the original authenticated
+    readback and checkpoint callback succeed. Unknown writes are never retried.
+    """
+    def __init__(self,remote,head,confirm):
+        import get_notion_remote_journal as j
+        j.checked(head,40)
+        if not callable(confirm):j.codec.fail('outbox_state_invalid')
+        self.remote=remote;self.head=head;self.pending=None;self.callback=confirm
+
+    def __getattr__(self,name):return getattr(self.remote,name)
+
+    def ref(self,name):
+        import get_notion_remote_journal as j
+        if name!=j.REF:
+            import get_legacy_manual as manual
+            if name not in manual.PROTECTED:j.codec.fail('outbox_state_invalid')
+            # Original m.guard checks these exact pinned OIDs. Never broaden
+            # readable refs or replace that original protected-ref contract.
+            return self.remote.ref(name)
+        observed=j.checked(self.remote.ref(name),40)
+        if observed!=self.head and observed!=self.pending:j.codec.fail('outbox_state_changed')
+        return observed
+
+    def cas_main(self,parent,commit):
+        import get_notion_remote_journal as j
+        j.checked(parent,40);j.checked(commit,40)
+        if (self.pending is not None or parent!=self.head or commit==parent
+                or self.ref(j.REF)!=parent):j.codec.fail('outbox_state_changed')
+        self.pending=commit
+        return self.remote.cas_main(parent,commit)
+
+    def confirm(self,receipt):
+        import get_notion_remote_journal as j
+        if not isinstance(receipt,dict):j.codec.fail('outbox_state_invalid')
+        count=receipt.get('cas_attempts');commit=receipt.get('commit')
+        if type(count) is not int or count not in (0,1):j.codec.fail('outbox_state_invalid')
+        if count==0:
+            if self.pending is not None or commit!=self.head or receipt.get('parent_commit') is not None:j.codec.fail('outbox_state_changed')
+        elif self.pending is None or commit!=self.pending or receipt.get('parent_commit')!=self.head:j.codec.fail('outbox_state_changed')
+        if self.callback(receipt) is not True:return False
+        if count==1:self.head=commit;self.pending=None
+        return True
