@@ -14,6 +14,10 @@ on:
         description: Observe only the unchanged private binding loader; no migration
         type: boolean
         default: false
+      source_diagnostic_only:
+        description: Observe only the unchanged source proof; no migration
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -21,7 +25,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   verify:
-    if: inputs.diagnostic_only != true
+    if: inputs.diagnostic_only != true && inputs.source_diagnostic_only != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -42,7 +46,7 @@ jobs:
       - name: Publish only allowlisted status
         run: cat /tmp/cloud-acceptance.json >> "$GITHUB_STEP_SUMMARY"
   bindings-diagnostic:
-    if: github.event_name == 'workflow_dispatch' && inputs.diagnostic_only == true && github.ref == 'refs/heads/fix/get-shadow-diagnostics-20261012'
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnostic_only == true && inputs.source_diagnostic_only != true && github.ref == 'refs/heads/fix/get-shadow-diagnostics-20261012'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     env:
@@ -69,3 +73,32 @@ jobs:
           NOTION_MODE: canonical
           NOTION_INPUT_SHA256: ''
         run: python scripts/get_bindings_readonly_diagnostic.py
+  source-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.source_diagnostic_only == true && inputs.diagnostic_only != true && github.ref == 'refs/heads/fix/get-shadow-diagnostics-20261012'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 29f0e44a9997c8c7028acf6dba33a3dfcc463f15
+          path: runtime
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Test source diagnostic boundaries without credentials
+        run: python -m unittest discover -s tests -p 'test_source_readonly_diagnostic.py' -v
+      - name: Observe original source discovery once
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GET_SOURCE_PROOF_DIAGNOSTIC_ONLY: 'true'
+          APPLY: 'false'
+          NOTION_MODE: canonical
+          NOTION_INPUT_SHA256: ''
+        run: python scripts/get_source_readonly_diagnostic.py

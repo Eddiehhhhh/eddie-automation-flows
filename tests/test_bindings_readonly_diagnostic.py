@@ -202,7 +202,7 @@ class StaticContractTests(unittest.TestCase):
         start=normal.index('    inputs:\n',normal.index('  workflow_dispatch:\n'))
         end=normal.index('permissions:\n',start)
         normal=normal[:start]+normal[end:]
-        normal=normal.replace('    if: inputs.diagnostic_only != true\n','')
+        normal=normal.replace('    if: inputs.diagnostic_only != true && inputs.source_diagnostic_only != true\n','')
         self.assertEqual(hashlib.sha256(normal.encode()).hexdigest(),
                          '69ed7fa41b829e3ebc90eb726f0fc96f99d518284ac682f30080631bb41a30a4')
 
@@ -215,7 +215,10 @@ class StaticContractTests(unittest.TestCase):
         workflow=(ROOT/'.github/workflows/cloud-readonly-acceptance.yml').read_text()
         self.assertIn('default: false',workflow)
         before,diagnostic=workflow.split('  bindings-diagnostic:\n')
-        self.assertIn('    if: inputs.diagnostic_only != true\n',before)
+        self.assertIn('    if: inputs.diagnostic_only != true && inputs.source_diagnostic_only != true\n',before)
+        diagnostic,source_diagnostic=diagnostic.split('  source-diagnostic:\n')
+        self.assertIn('inputs.source_diagnostic_only != true',diagnostic)
+        self.assertIn('inputs.diagnostic_only != true',source_diagnostic)
         for command in ('python scripts/cloud_private_checkout.py --destination vault',
                         'python scripts/cloud_acceptance.py --vault vault --output /tmp/cloud-acceptance.json'):
             self.assertIn(command,before);self.assertNotIn(command,diagnostic)
