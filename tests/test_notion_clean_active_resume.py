@@ -9,6 +9,31 @@ import sys
 import unittest
 from test_notion_exact_ack_recovery import Adapters,Blocked,encoded,digest,oid,extract,module,record_creation,fail,SCRIPTS
 
+MIRROR_PATH='.github/state/notion-wiki-mirror-state.json'
+MIRROR_BEFORE=encoded({'generated_at':'2026-01-01T01:00:00+00:00','preserved':['synthetic']})
+MIRROR_AFTER=encoded({'generated_at':'2026-01-01T02:00:00+00:00','preserved':['synthetic']})
+
+def progress_binding(b,state,cap=None,commit='c'*40,tree='d'*40):
+    prior=b['prior_capsule'];raw=b'policy progress synthetic capsule'
+    cap=cap or {'commit':'1'*40,'parent':prior['commit'],'before_tree':prior['after_tree'],'after_tree':'2'*40,
+        'path':'.sync/get-notion/runtime-bindings-'+digest(raw)+'.json','blob':oid(raw),'sha256':digest(raw),'bytes':len(raw)}
+    current=deepcopy(state);current['policy_sha256']='6'*64
+    policy=dict(b['public_policy'],code_sha='2'*40,rules_sha256='2'*64,get_policy_sha256='6'*64)
+    p=deepcopy(b['proof']);p.update(run_id=88,checkpoint_count=2)
+    for name in ('run_binding','latest_binding'):p[name].update(id=88,head_sha='3'*40)
+    p['terminal_report'].update(execution_reason='approval_missing',external_write_attempts=0,write_state='unknown')
+    cp=dict(p['checkpoint'],run_id=88,code_sha=policy['code_sha'],rules_sha256=policy['rules_sha256'],controller_sha='3'*40,
+        public_policy_sha256=digest(policy),sequence=1,cas_attempts=1,parent_commit=cap['commit'],previous_record_sha256=None,
+        commit=commit,tree=tree,state_blob=oid(encoded(current)),state_sha256=digest(current),state_bytes=len(encoded(current)))
+    cp['record_sha256']=digest({k:v for k,v in cp.items() if k!='record_sha256'})
+    last=dict(cp,sequence=2,cas_attempts=0,parent_commit=None,previous_record_sha256=cp['record_sha256'])
+    last['record_sha256']=digest({k:v for k,v in last.items() if k!='record_sha256'});p['checkpoint']=last;p['anchor']={k:last[k] for k in ('commit','state_blob','state_sha256')}
+    return {'mirror':{'commit':'e'*40,'parent':commit,'before_tree':tree,'after_tree':'f'*40,'path':MIRROR_PATH,'mode':'100644',
+        'before':{'blob':oid(MIRROR_BEFORE),'sha256':digest(MIRROR_BEFORE),'bytes':len(MIRROR_BEFORE)},
+        'after':{'blob':oid(MIRROR_AFTER),'sha256':digest(MIRROR_AFTER),'bytes':len(MIRROR_AFTER)}},'capsule':cap,'state':{'commit':commit,'parent':cap['commit'],'before_tree':cap['after_tree'],'after_tree':tree,
+        'state_blob':oid(encoded(current)),'state_sha256':digest(current),'state_bytes':len(encoded(current)),'policy_sha256':current['policy_sha256']},
+        'proof':p,'checkpoints':[cp,last],'public_policy':policy,'public_policy_sha256':digest(policy),'notion_policy_sha256':b['notion_policy_sha256']},current
+
 class Fixture(Adapters):
     def setUp(self):
         super().setUp();self.engine.MAX_STATE=32*1024*1024
@@ -38,14 +63,17 @@ class Fixture(Adapters):
                'body_receipt_sha256':digest(s['engine_state']['receipts'][r['note_id']]),'property_receipt_sha256':digest(s['engine_state']['property_receipts'][r['note_id']])} for r in rows[:6]],
            'remaining':[{'note_id':r['note_id'],'source':r['source'],'request_sha256':self.cr.request_sha(r,plan)} for r in rows[6:]]}
         b['prior_capsule']={'commit':'a'*40,'parent':proof['anchor']['commit'],'before_tree':cp['tree'],'after_tree':'f'*40,'path':'.sync/get-notion/runtime-bindings-'+('e'*64)+'.json','blob':'e'*40,'sha256':'e'*64,'bytes':10}
+        b['policy_progress'],self.progress=progress_binding(b,s)
+        self.checkpoints.journal.MIRROR_PATH=MIRROR_PATH;self.checkpoints.journal.MAX_MIRROR_BYTES=1024*1024
         self.bindings.MAX_BYTES=1024*1024
         self.entries=[b];ns={'deepcopy':deepcopy,'bindings':self.bindings}
         tree=ast.parse((SCRIPTS/'get_notion_clean_active_resume.py').read_text())
-        names={n.name for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}|{'TAG','KEYS','_NATIVE_SEAL','SCHEMA_EXCEPTION_SCOPE_SHA256','PRIOR_CAPSULE_SCOPE_SHA256'}
+        names={n.name for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}|{'TAG','KEYS','_NATIVE_SEAL','SCHEMA_EXCEPTION_SCOPE_SHA256','PRIOR_CAPSULE_SCOPE_SHA256','POLICY_PROGRESS_SCOPE_SHA256'}
         extract('get_notion_clean_active_resume.py',names,ns)
         ns['target_code_sha256']=lambda:'e'*64
         ns['SCHEMA_EXCEPTION_SCOPE_SHA256']=digest([])
         ns['PRIOR_CAPSULE_SCOPE_SHA256']=digest(b['prior_capsule'])
+        ns['POLICY_PROGRESS_SCOPE_SHA256']=digest(b['policy_progress'])
         b['invariant_sha256']=digest(ns['invariant'](s,b))
         self.bridge=module('get_notion_clean_active_resume',**{k:v for k,v in ns.items() if not k.startswith('__')});self.ns=ns
         self.start=s;self.binding=b;self.auth={**proof,'recovery_anchor':self.bridge.TAG};self.native_reads=[];self.native_state=s
@@ -228,7 +256,7 @@ class RealGitFixture(Fixture):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
         def run(*args,data=None):return subprocess.run(['git','-C',str(self.root),*args],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout
         self.git=run;run('init','-q');run('config','user.email','synthetic@example.invalid');run('config','user.name','Synthetic')
-        self.state_path='.sync/get-notion/state.json';self.base=self.commit(self.start)
+        self.state_path='.sync/get-notion/state.json';self.base=self.commit(self.start,extra=(MIRROR_PATH,MIRROR_BEFORE))
         b=self.binding;cp=b['proof']['checkpoint'];cp.update(commit=self.base,tree=run('rev-parse',self.base+'^{tree}').decode().strip());cp['record_sha256']=digest({k:v for k,v in cp.items() if k!='record_sha256'})
         b['proof']['anchor']['commit']=self.base;self.auth={**b['proof'],'recovery_anchor':self.bridge.TAG};self.head=self.base
         self.capsule=b'synthetic immutable capsule';self.bindings.TRUSTED_BUNDLE_SHA256=digest(self.capsule)
@@ -255,7 +283,19 @@ class RealGitFixture(Fixture):
         raw=b'previous synthetic immutable capsule';sha=digest(raw);path='.sync/get-notion/runtime-bindings-'+sha+'.json'
         commit=self.commit(self.start,parent,extra=(path,raw))
         self.binding['prior_capsule']={'commit':commit,'parent':parent,'before_tree':self.git('rev-parse',parent+'^{tree}').decode().strip(),'after_tree':self.git('rev-parse',commit+'^{tree}').decode().strip(),'path':path,'blob':oid(raw),'sha256':sha,'bytes':len(raw)}
-        self.ns['PRIOR_CAPSULE_SCOPE_SHA256']=digest(self.binding['prior_capsule']);return commit
+        self.ns['PRIOR_CAPSULE_SCOPE_SHA256']=digest(self.binding['prior_capsule'])
+        raw2=b'policy progress synthetic capsule';sha2=digest(raw2);path2='.sync/get-notion/runtime-bindings-'+sha2+'.json'
+        cap2=self.commit(self.start,commit,extra=(path2,raw2))
+        progress=deepcopy(self.start);progress['policy_sha256']='6'*64
+        tail=self.commit(progress,cap2)
+        cap={'commit':cap2,'parent':commit,'before_tree':self.git('rev-parse',commit+'^{tree}').decode().strip(),
+             'after_tree':self.git('rev-parse',cap2+'^{tree}').decode().strip(),'path':path2,'blob':oid(raw2),'sha256':sha2,'bytes':len(raw2)}
+        self.binding['policy_progress'],self.progress=progress_binding(self.binding,self.start,cap,tail,self.git('rev-parse',tail+'^{tree}').decode().strip())
+        mirror=self.commit(progress,tail,extra=(MIRROR_PATH,MIRROR_AFTER))
+        self.binding['policy_progress']['mirror'].update(commit=mirror,after_tree=self.git('rev-parse',mirror+'^{tree}').decode().strip())
+        self.ns['POLICY_PROGRESS_SCOPE_SHA256']=digest(self.binding['policy_progress'])
+        self.auth={**self.binding['policy_progress']['proof'],'recovery_anchor':self.bridge.TAG};self.head=mirror
+        return commit
     def commit(self,state,parent=None,extra=None):
         run=self.git;run('read-tree','--empty') if parent is None else run('read-tree',parent)
         blob=run('hash-object','-w','--stdin',data=encoded(state)).decode().strip();run('update-index','--add','--cacheinfo','100644,'+blob+','+self.state_path)
@@ -265,10 +305,10 @@ class RealGitFixture(Fixture):
     def verify(self):return self.bridge.verify_successor(NS(vault=self.root),self.remote,lambda sha:None,self.head,self.auth)
 
 class RealGitSuccessor(RealGitFixture):
-    def test_no_state_change_returns_original_anchor(self):self.assertEqual(self.verify(),self.binding['proof']['anchor'])
+    def test_no_state_change_returns_exact_progress_anchor(self):self.assertEqual(self.verify(),self.binding['policy_progress']['proof']['anchor'])
     def test_exact_capsule_then_policy_only_child(self):
-        cap=self.commit(self.start,self.binding['prior_capsule']['commit'],extra=(self.capsule_path,self.capsule));self.head=self.commit(self.new,cap)
-        a=self.verify();self.assertEqual(a['commit'],self.head);self.assertEqual(a['state_sha256'],digest(self.new));self.assertEqual(self.auth['anchor']['commit'],self.base)
+        cap=self.commit(self.progress,self.binding['policy_progress']['mirror']['commit'],extra=(self.capsule_path,self.capsule));self.head=self.commit(self.new,cap)
+        a=self.verify();self.assertEqual(a['commit'],self.head);self.assertEqual(a['state_sha256'],digest(self.new));self.assertEqual(self.auth['anchor']['commit'],self.binding['policy_progress']['state']['commit'])
     def test_exact_policy_only_one_hop(self):
         self.head=self.commit(self.new,self.base)
         with self.assertRaises(Blocked):self.verify()
@@ -315,12 +355,12 @@ class FiniteGitFixture(RealGitFixture):
     def chain(self):
         first=self.commit(self.start,self.base,extra=('Wiki/synthetic.md',b'a'))
         second=self.commit(self.start,first,extra=('Raw/05 Chat/synthetic.md',b'b'))
-        self.register([first,second]);self.head=second;return first,second
+        self.register([first,second]);return first,second
 
 class FiniteRegisteredSuccessor(FiniteGitFixture):
     def test_exact_finite_chain_then_capsule_and_policy(self):
-        self.chain();self.assertEqual(self.verify(),self.binding['proof']['anchor'])
-        cap=self.commit(self.start,self.binding['prior_capsule']['commit'],extra=(self.capsule_path,self.capsule))
+        self.chain();self.assertEqual(self.verify(),self.binding['policy_progress']['proof']['anchor'])
+        cap=self.commit(self.progress,self.binding['policy_progress']['mirror']['commit'],extra=(self.capsule_path,self.capsule))
         self.head=self.commit(self.new,cap);self.assertEqual(self.verify()['commit'],self.head)
     def test_shorter_prefix_is_not_registered_terminal(self):
         first,_=self.chain();self.head=first
@@ -439,6 +479,7 @@ class ExactSchemaExceptions(FiniteGitFixture):
         self.base=self.commit(self.start,None,extra=(paths[0],b'old'))
         blob=self.git('hash-object','-w','--stdin',data=b'old-index').decode().strip()
         self.git('update-index','--add','--cacheinfo','100644,'+blob+','+paths[1])
+        mirror_blob=self.git('hash-object','-w','--stdin',data=MIRROR_BEFORE).decode().strip();self.git('update-index','--add','--cacheinfo','100644,'+mirror_blob+','+MIRROR_PATH)
         tree=self.git('write-tree').decode().strip();self.base=self.git('commit-tree',tree,'-m','Synthetic base').decode().strip()
         cp=self.binding['proof']['checkpoint'];cp['commit']=self.base;cp['tree']=tree;cp['record_sha256']=digest({k:v for k,v in cp.items() if k!='record_sha256'})
         self.binding['proof']['anchor']['commit']=self.base;self.auth={**self.binding['proof'],'recovery_anchor':self.bridge.TAG}
@@ -452,9 +493,9 @@ class ExactSchemaExceptions(FiniteGitFixture):
             exceptions.extend({'commit':commit,'path':path,'before':list(old),'after':list(new)}for path,old,new in changes)
             commits.append(commit);parent=commit
         self.register(commits);self.binding['schema_exceptions']=exceptions;self.ns['SCHEMA_EXCEPTION_SCOPE_SHA256']=digest(exceptions)
-        self.bridge.registry();self.head=parent;return commits,paths
+        self.bridge.registry();return commits,paths
     def test_six_exact_changes_only(self):
-        self.schema_chain();self.assertEqual(self.verify(),self.binding['proof']['anchor'])
+        self.schema_chain();self.assertEqual(self.verify(),self.binding['policy_progress']['proof']['anchor'])
     def test_changed_exception_oid_or_path_or_commit_fails_scope_pin(self):
         self.schema_chain();original=deepcopy(self.binding['schema_exceptions'])
         for change in (lambda x:x[0]['after'].__setitem__(2,'f'*40),lambda x:x[0]['before'].__setitem__(2,'f'*40),
@@ -651,16 +692,16 @@ class ExactCapsuleHydration(RealGitFixture):
             with self.assertRaises(Blocked):self.bridge._hydrate_capsule(git,remote,sha,len(raw),h,expected)
         self.assertEqual(calls,[])
     def test_missing_known_blob_is_hydrated_without_native_or_cas(self):
-        b=self.binding['prior_capsule'];raw=self.git('cat-file','blob',b['blob']);self.head=b['commit']
+        b=self.binding['prior_capsule'];raw=self.git('cat-file','blob',b['blob']);self.head=self.binding['policy_progress']['mirror']['commit']
         path=self.root/'.git/objects'/b['blob'][:2]/b['blob'][2:];path.unlink()
         original=self.remote.blob;calls=[]
         def blob(sha,size):calls.append((sha,size));return raw if sha==b['blob'] else original(sha,size)
         self.remote.blob=blob;self.native_reads.clear()
-        self.assertEqual(self.verify(),self.binding['proof']['anchor'])
+        self.assertEqual(self.verify(),self.binding['policy_progress']['proof']['anchor'])
         self.assertEqual(self.git('cat-file','blob',b['blob']),raw)
         self.assertEqual([x for x in calls if x[0]==b['blob']],[(b['blob'],len(raw))]);self.assertEqual(self.native_reads,[])
     def test_existing_known_blob_still_needs_exact_remote_read(self):
-        self.head=self.binding['prior_capsule']['commit'];original=self.remote.blob;calls=[]
+        self.head=self.binding['policy_progress']['mirror']['commit'];original=self.remote.blob;calls=[]
         def blob(sha,size):calls.append(sha);return original(sha,size)
         self.remote.blob=blob;self.verify();self.assertEqual(calls.count(self.binding['prior_capsule']['blob']),1)
     def test_known_edge_identity_scope_or_metadata_change_rejected(self):
@@ -704,8 +745,8 @@ class ExactCapsuleHydration(RealGitFixture):
         j=sys.modules['get_notion_remote_journal'];j.retention=retention
         j.MAX_STATE=32*1024*1024;j.MAX_BATCH_BYTES=64*1024*1024
         j.checked=checked;j.REPOSITORY=retention.REPOSITORY
-        old=self.binding['prior_capsule'];self.head=self.commit(self.start,old['commit'],extra=(self.capsule_path,self.capsule))
-        blobs={sha:self.git('cat-file','blob',sha) for sha in (old['blob'],oid(self.capsule),oid(encoded(self.start)))}
+        old=self.binding['prior_capsule'];self.head=self.commit(self.progress,self.binding['policy_progress']['mirror']['commit'],extra=(self.capsule_path,self.capsule))
+        blobs={sha:self.git('cat-file','blob',sha) for sha in (old['blob'],self.binding['policy_progress']['capsule']['blob'],oid(self.capsule),oid(encoded(self.start)),oid(encoded(self.progress)),oid(MIRROR_BEFORE),oid(MIRROR_AFTER))}
         metadata={}
         for line in self.git('cat-file','--batch-all-objects','--batch-check=%(objectname) %(objecttype)').decode().splitlines():
             sha,kind=line.split()
@@ -740,7 +781,7 @@ class ExactCapsuleHydration(RealGitFixture):
             self.assertEqual(local.run('cat-file','--batch-check=%(objectname) %(objecttype)',data=(oid(self.capsule)+'\n').encode()),(oid(self.capsule)+' missing\n').encode())
         self.native_reads.clear()
         anchor=self.bridge.verify_successor(NS(vault=self.root),self.remote,loader,self.head,self.auth)
-        self.assertEqual(anchor,self.binding['proof']['anchor']);self.assertEqual(self.native_reads,[])
+        self.assertEqual(anchor,self.binding['policy_progress']['proof']['anchor']);self.assertEqual(self.native_reads,[])
         self.assertEqual(local.blob(oid(self.capsule)),self.capsule)
         self.assertEqual([sha for sha,size in reads].count(old['blob']),1)
         self.assertEqual([sha for sha,size in reads].count(oid(self.capsule)),1)
@@ -753,3 +794,179 @@ class ExactCapsuleHydration(RealGitFixture):
     def test_original_loader_original_call_budget_not_bypassed(self):
         with self.assertRaisesRegex(Blocked,'journal_loader_budget'):self.original_loader_entry(max_calls=1)
         self.assertEqual(self.native_reads,[])
+
+class ExactPolicyProgress(Fixture):
+    def test_actual_kind_progress_keeps_distinct_run_checkpoint_state(self):
+        progress=self.binding['policy_progress'];p={**progress['proof'],'recovery_anchor':self.bridge.TAG}
+        self.assertTrue(self.bridge.progress_state_valid(self.progress,digest(self.progress)))
+        self.assertTrue(self.bridge.authenticated_proof_matches(p,self.binding))
+        witness=self.bridge._NativeWitness(digest(self.progress),self.binding['plan_sha256'],self.ns['_NATIVE_SEAL'])
+        self.assertEqual(self.bridge.transition_outer(self.progress,digest(self.progress),'0'*64,proof=p,native=witness),self.new)
+        self.assertEqual(progress['proof']['checkpoint_count'],2)
+        self.assertEqual([x['cas_attempts'] for x in progress['checkpoints']],[1,0])
+        self.assertEqual(progress['proof']['terminal_report']['write_state'],'unknown')
+    def test_old_and_progress_proofs_never_mix_states(self):
+        p={**self.binding['policy_progress']['proof'],'recovery_anchor':self.bridge.TAG}
+        for state,proof in ((self.start,p),(self.progress,self.auth)):
+            with self.assertRaises(Blocked):self.bridge._transition_bytes(state,digest(state),'0'*64,proof=proof)
+        for key in ('run_id','checkpoint','checkpoint_count','anchor','run_binding'):
+            mixed=deepcopy(p);mixed[key]=deepcopy(self.auth[key])
+            self.assertFalse(self.bridge.authenticated_proof_matches(mixed,self.binding))
+    def test_progress_policy_alone_never_grants_extra_state(self):
+        for change in (lambda v:v['sentinel'].append('x'),lambda v:v['engine_state']['journal'].update(index=7),
+                       lambda v:v['engine_state']['receipts'].clear(),lambda v:v['engine_state']['failures'].update(x={})):
+            s=deepcopy(self.progress);change(s);self.assertFalse(self.bridge.progress_state_valid(s,digest(s)))
+            with self.assertRaises(Blocked):self.bridge.preserve(s,self.new)
+    def test_progress_scope_pin_rejects_every_unreviewed_field(self):
+        good=deepcopy(self.binding['policy_progress'])
+        for field in good:
+            self.binding['policy_progress']=deepcopy(good);self.binding['policy_progress'][field]=None
+            with self.subTest(field=field),self.assertRaises(Blocked):self.bridge.registry()
+        self.binding['policy_progress']=good
+    def test_progress_checkpoint_failure_and_cas_semantics_even_if_scope_resealed(self):
+        good=deepcopy(self.binding['policy_progress'])
+        changes=(lambda v:v['proof']['terminal_report'].update(write_state='confirmed'),
+                 lambda v:v['proof']['terminal_report'].update(external_write_attempts=1),
+                 lambda v:v['proof']['terminal_report'].update(execution_reason='transport_read_failed'),
+                 lambda v:v['proof'].update(checkpoint_count=26),
+                 lambda v:v['proof'].update(run_id=self.auth['run_id']),
+                 lambda v:v['proof']['latest_binding'].update(run_attempt=2),
+                 lambda v:v['checkpoints'][0].update(cas_attempts=0),
+                 lambda v:v['checkpoints'][1].update(cas_attempts=1),
+                 lambda v:v['checkpoints'][1].update(parent_commit='f'*40),
+                 lambda v:v['state'].update(parent='f'*40),
+                 lambda v:v['capsule'].update(parent='f'*40))
+        for change in changes:
+            self.binding['policy_progress']=deepcopy(good);change(self.binding['policy_progress']);self.ns['POLICY_PROGRESS_SCOPE_SHA256']=digest(self.binding['policy_progress'])
+            with self.assertRaises(Blocked):self.bridge.registry()
+        self.binding['policy_progress']=good;self.ns['POLICY_PROGRESS_SCOPE_SHA256']=digest(good)
+
+class ExactPolicyProgressGit(RealGitFixture):
+    def test_old_proof_cannot_admit_actual_progress_head(self):
+        self.auth={**self.binding['proof'],'recovery_anchor':self.bridge.TAG}
+        with self.assertRaises(Blocked):self.verify()
+    def test_exact_progress_then_current_capsule_and_only_policy(self):
+        cap=self.commit(self.progress,self.head,extra=(self.capsule_path,self.capsule));self.head=self.commit(self.new,cap)
+        self.assertEqual(self.verify()['state_sha256'],digest(self.new))
+    def test_progress_state_cannot_be_skipped_or_changed(self):
+        v=self.binding['policy_progress'];self.head=v['capsule']['commit']
+        with self.assertRaises(Blocked):self.verify()
+        s=deepcopy(self.progress);s['sentinel'].append('changed');self.head=self.commit(s,v['capsule']['commit'])
+        with self.assertRaises(Blocked):self.verify()
+    def test_same_policy_bytes_other_commit_not_progress(self):
+        v=self.binding['policy_progress']['state'];self.head=self.git('commit-tree',v['after_tree'],'-p',v['parent'],'-m','different identity').decode().strip()
+        with self.assertRaises(Blocked):self.verify()
+    def test_progress_capsule_extra_leaf_or_replacement_fails(self):
+        v=self.binding['policy_progress'];self.head=self.commit(self.start,v['capsule']['commit'],extra=('unregistered',b'x'))
+        with self.assertRaises(Blocked):self.verify()
+        self.head=self.commit(self.progress,v['state']['commit'],extra=(v['capsule']['path'],b'changed'))
+        with self.assertRaises(Blocked):self.verify()
+    def test_policy_before_new_capsule_or_two_policy_changes_fails(self):
+        self.head=self.commit(self.new,self.head)
+        with self.assertRaises(Blocked):self.verify()
+        v=self.binding['policy_progress'];cap=self.commit(self.progress,v['mirror']['commit'],extra=(self.capsule_path,self.capsule));a=self.commit(self.new,cap)
+        b=self.commit(self.progress,a);self.head=self.commit(self.new,b)
+        with self.assertRaises(Blocked):self.verify()
+
+class RuntimeEmitterContract(unittest.TestCase):
+    def test_original_emitter_never_rebound_to_callback(self):
+        tree=ast.parse((SCRIPTS/'get_notion_runtime.py').read_text());run=next(n for n in tree.body if isinstance(n,ast.FunctionDef)and n.name=='run')
+        assignments=[n for n in ast.walk(run)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=='confirm'for t in n.targets)]
+        self.assertEqual(len(assignments),2)
+        self.assertTrue(any(isinstance(n.value,ast.Lambda)for n in assignments))
+        self.assertTrue(any(isinstance(n.value,ast.Call)and isinstance(n.value.func,ast.Attribute)and n.value.func.attr=='CheckpointEmitter'for n in assignments))
+        journal=[n for n in ast.walk(run)if isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr=='RemoteJournal']
+        self.assertEqual(len(journal),1);self.assertEqual(ast.unparse(next(k.value for k in journal[0].keywords if k.arg=='confirm')),'journal_confirm')
+        for name in ('capture_group','apply_group'):
+            calls=[n for n in ast.walk(run)if isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr==name]
+            self.assertEqual(len(calls),1);self.assertEqual(ast.unparse(next(k.value for k in calls[0].keywords if k.arg=='emitter')),'confirm')
+        calls=[n for n in ast.walk(run)if isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr=='Admission']
+        self.assertEqual(len(calls),1);self.assertEqual(ast.unparse(calls[0].args[3]),'confirm')
+    def test_callback_is_distinct_only_for_exact_bridge(self):
+        tree=ast.parse((SCRIPTS/'get_notion_runtime.py').read_text());run=next(n for n in tree.body if isinstance(n,ast.FunctionDef)and n.name=='run')
+        assigned=[n for n in ast.walk(run)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=='journal_confirm'for t in n.targets)]
+        self.assertEqual(sorted(ast.unparse(n.value)for n in assigned),['confirm','remote.remote.confirm'])
+        branches=[n for n in ast.walk(run)if isinstance(n,ast.If)and 'clean_active.TAG' in ast.unparse(n.test)]
+        self.assertEqual(sum('journal_confirm = remote.remote.confirm' in ast.unparse(n)for n in branches),1)
+
+class OriginalEmitterAdmission(Fixture):
+    def setup_emitter(self):
+        import io
+        from unittest.mock import patch
+        from test_notion_exact_ack_recovery import checked
+        journal=module('get_notion_remote_journal',checked=checked,codec=self.codec,MAX_STATE=32*1024*1024,
+            REF='refs/heads/main',REPOSITORY='synthetic/repo',STATE_PATH='.sync/get-notion/state.json',RECEIPT_CONTRACT='synthetic-receipt')
+        patcher=patch.dict(sys.modules,{'get_notion_remote_journal':journal});patcher.start();self.addCleanup(patcher.stop)
+        ns={'journal':journal,'codec':self.codec,'context':lambda c:c,'fail':fail}
+        extract('get_notion_journal_runtime.py',{'CheckpointEmitter','RECEIPT_KEYS','MAX_CHECKPOINTS','CONTRACT','MARKER'},ns)
+        emitter=ns['CheckpointEmitter'](io.StringIO(),context=deepcopy(self.auth['checkpoint']))
+        class Remote:
+            head='a'*40
+            def ref(self,name):return self.head
+            def cas_main(self,parent,commit):self.head=commit
+        remote=Remote();finite=self.bridge.FiniteHeadRemote(remote,remote.head,emitter)
+        def receipt(commit,parent,count):
+            return {'contract':journal.RECEIPT_CONTRACT,'repository':journal.REPOSITORY,'ref':journal.REF,'path':journal.STATE_PATH,
+                'commit':commit,'parent_commit':parent,'tree':'c'*40,'state_blob':oid(encoded(self.new)),'state_sha256':digest(self.new),
+                'state_bytes':len(encoded(self.new)),'cas_attempts':count,'readback_verified':True}
+        self.assertTrue(finite.confirm(receipt('a'*40,None,0)))
+        finite.cas_main('a'*40,'b'*40);self.assertTrue(finite.confirm(receipt('b'*40,'a'*40,1)))
+        self.assertEqual(emitter.sequence,2);self.assertIs(finite.callback,emitter)
+        self.engine.MAX_WRITE_BLOCKS=100;self.engine.p.RENDERER='synthetic'
+        plan=deepcopy(self.new['engine_state']['journal']['plan'])
+        for row in plan['records']:row['rendered']=[]
+        state=deepcopy(self.new);state['engine_state']['journal']['plan']=plan;state['engine_state']['journal']['plan_sha256']=digest(plan)
+        durable=NS(poisoned=False,new_blob_bytes=0,max_batch_bytes=64*1024*1024,commits_attempted=1,max_commits=128)
+        return emitter,finite,durable,state,plan
+    def test_original_emitter_sequence_two_admits_and_callback_method_reproduces_bug(self):
+        import get_notion_single_create_admission as admission
+        emitter,finite,durable,state,plan=self.setup_emitter()
+        real=admission.Admission(self.engine,NS(MAX_BYTES=10000),durable,emitter,max_checkpoints=1024,max_state=32*1024*1024)
+        self.assertTrue(real(state,plan))
+        wrong=admission.Admission(self.engine,NS(MAX_BYTES=10000),durable,finite.confirm,max_checkpoints=1024,max_state=32*1024*1024)
+        with self.assertRaisesRegex(Blocked,'approval_missing'):wrong(state,plan)
+    def test_real_count_budget_and_failed_flag_not_hidden(self):
+        import get_notion_single_create_admission as admission
+        emitter,finite,durable,state,plan=self.setup_emitter()
+        real=admission.Admission(self.engine,NS(MAX_BYTES=10000),durable,emitter,max_checkpoints=3,max_state=32*1024*1024)
+        self.assertFalse(real(state,plan));self.assertTrue(real.clean_boundary_denied)
+        emitter.failed=True
+        with self.assertRaisesRegex(Blocked,'approval_missing'):real(state,plan)
+
+class ExactTimestampMirror(RealGitFixture):
+    def test_exact_timestamp_mirror_returns_original208_anchor(self):
+        self.assertEqual(self.verify(),self.binding['policy_progress']['proof']['anchor'])
+    def test_same_payload_another_commit_and_second_mirror_rejected(self):
+        m=self.binding['policy_progress']['mirror']
+        self.head=self.git('commit-tree',m['after_tree'],'-p',m['parent'],'-m','another commit').decode().strip()
+        with self.assertRaises(Blocked):self.verify()
+        self.head=self.commit(self.progress,m['commit'],extra=(MIRROR_PATH,encoded({'generated_at':'2026-01-01T03:00:00+00:00','preserved':['synthetic']})))
+        with self.assertRaises(Blocked):self.verify()
+    def test_exact_mirror_pin_parent_tree_mode_path_and_leaf(self):
+        good=deepcopy(self.binding['policy_progress'])
+        for key,value in [('commit','f'*40),('parent','f'*40),('before_tree','f'*40),('after_tree','f'*40),('path','unrelated'),('mode','100755')]:
+            self.binding['policy_progress']=deepcopy(good);self.binding['policy_progress']['mirror'][key]=value
+            self.ns['POLICY_PROGRESS_SCOPE_SHA256']=digest(self.binding['policy_progress'])
+            with self.subTest(key=key),self.assertRaises(Blocked):self.verify()
+        self.binding['policy_progress']=good;self.ns['POLICY_PROGRESS_SCOPE_SHA256']=digest(good)
+    def test_extra_leaf_or_state_change_cannot_hide_in_mirror(self):
+        m=self.binding['policy_progress']['mirror']
+        self.head=self.commit(self.progress,m['commit'],extra=('unknown',b'x'))
+        with self.assertRaises(Blocked):self.verify()
+        self.head=self.commit(self.new,m['commit'])
+        with self.assertRaises(Blocked):self.verify()
+    def test_exact_transport_bytes_required_even_when_local_blob_exists(self):
+        old=self.remote.blob;m=self.binding['policy_progress']['mirror'];self.remote.blob=lambda sha,size:b'wrong' if sha==m['after']['blob'] else old(sha,size)
+        with self.assertRaises(Blocked):self.verify()
+    def test_timestamp_semantics_without_scope_shortcut(self):
+        import json
+        m=self.binding['policy_progress']['mirror']
+        cases=[{'generated_at':'2026-01-01T02:00:00+00:00','preserved':['changed']},
+               {'generated_at':'2026-01-01T02:00:00+00:00','preserved':['synthetic'],'extra':True},
+               {'generated_at':'2026-01-01T00:00:00+00:00','preserved':['synthetic']},
+               {'generated_at':'2026-01-01T02:00:00','preserved':['synthetic']},
+               {'generated_at':'invalid','preserved':['synthetic']}]
+        for value in cases:
+            raw=encoded(value);pin=deepcopy(m);pin['after']={'blob':oid(raw),'sha256':digest(raw),'bytes':len(raw)}
+            remote=NS(blob=lambda sha,size:raw if sha==oid(raw) else MIRROR_BEFORE)
+            with self.assertRaises(Blocked):self.bridge._verify_exact_mirror_delta(remote,pin)

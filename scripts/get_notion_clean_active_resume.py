@@ -15,9 +15,10 @@ TAG = 'exact_registered_clean_active_resume_v1'
 SCHEMA_EXCEPTION_SCOPE_SHA256 = 'c7bce9aca55a753f4a7b202377c86e6dfab4361f0f496970fb853e9c9b864726'
 # One already-published immutable capsule edge, not a new inheritance class.
 PRIOR_CAPSULE_SCOPE_SHA256 = 'ca5ee80325f301b3de383299965bcba7f69d67c59c7b4321cb7d4690660ec718'
+POLICY_PROGRESS_SCOPE_SHA256 = 'b04beaf4aa085de6524e9fd0928b431130bdef6e68a7f136dafdb05b6a829f1c'
 KEYS = {'contract','proof','public_policy','public_policy_sha256','notion_policy_sha256',
         'plan_sha256','plan_bytes','engine_rules_sha256','manifest_sha256','property_manifest_sha256',
-        'source_commit','initial_index','record_count','prefix','remaining','invariant_sha256','target_code_sha256','successor_chain','journal_locator','schema_exceptions','prior_capsule'}
+        'source_commit','initial_index','record_count','prefix','remaining','invariant_sha256','target_code_sha256','successor_chain','journal_locator','schema_exceptions','prior_capsule','policy_progress'}
 
 
 def target_material_sha256(document):
@@ -151,11 +152,83 @@ def registry():
             c.journal.checked(row[2],40)
         if item['before']==item['after']:o.fail('outbox_state_invalid')
     if exceptions and (len({x['commit'] for x in exceptions})!=3 or len({x['path'] for x in exceptions})!=2):o.fail('outbox_state_invalid')
+    _check_policy_progress(b)
     return deepcopy(rows)
 
 
+def _check_policy_progress(b):
+    """One authenticated, zero-native-write policy successor; never a new plan."""
+    import get_notion_outbox as o
+    import get_notion_journal_runtime as c
+    v=b['policy_progress']
+    if (not isinstance(v,dict) or set(v)!={'capsule','state','proof','checkpoints','public_policy','public_policy_sha256','notion_policy_sha256','mirror'}
+            or o.digest(v)!=POLICY_PROGRESS_SCOPE_SHA256):o.fail('outbox_state_invalid')
+    cap=v['capsule'];prior=b['prior_capsule']
+    if not isinstance(cap,dict) or set(cap)!=set(prior):o.fail('outbox_state_invalid')
+    for key in ('commit','parent','before_tree','after_tree','blob'):c.journal.checked(cap[key],40)
+    c.journal.checked(cap['sha256'],64)
+    if (cap['parent']!=prior['commit'] or cap['before_tree']!=prior['after_tree'] or cap['commit']==cap['parent']
+            or cap['path']!='.sync/get-notion/runtime-bindings-'+cap['sha256']+'.json' or cap['path']==prior['path']
+            or type(cap['bytes']) is not int or not 0<cap['bytes']<=bindings.MAX_BYTES):o.fail('outbox_state_invalid')
+    s=v['state']
+    if not isinstance(s,dict) or set(s)!={'commit','parent','before_tree','after_tree','state_blob','state_sha256','state_bytes','policy_sha256'}:o.fail('outbox_state_invalid')
+    for key in ('commit','parent','before_tree','after_tree','state_blob'):c.journal.checked(s[key],40)
+    for key in ('state_sha256','policy_sha256'):c.journal.checked(s[key],64)
+    policy=c.provenance.validate_policy(v['public_policy'],v['public_policy_sha256']);c.journal.checked(v['notion_policy_sha256'],64)
+    if (s['parent']!=cap['commit'] or s['before_tree']!=cap['after_tree'] or s['commit']==s['parent']
+            or type(s['state_bytes']) is not int or s['state_bytes']!=b['proof']['checkpoint']['state_bytes']
+            or s['policy_sha256']!=policy['get_policy_sha256'] or s['policy_sha256']==b['public_policy']['get_policy_sha256']):o.fail('outbox_state_invalid')
+    mirror=v['mirror']
+    if (not isinstance(mirror,dict) or set(mirror)!={'commit','parent','before_tree','after_tree','path','mode','before','after'}
+            or mirror['path']!=c.journal.MIRROR_PATH or mirror['mode']!='100644'
+            or mirror['parent']!=s['commit'] or mirror['before_tree']!=s['after_tree']
+            or mirror['commit'] in (mirror['parent'],cap['commit'],prior['commit'])):o.fail('outbox_state_invalid')
+    for key in ('commit','parent','before_tree','after_tree'):c.journal.checked(mirror[key],40)
+    for key in ('before','after'):
+        row=mirror[key]
+        if not isinstance(row,dict) or set(row)!={'blob','sha256','bytes'}:o.fail('outbox_state_invalid')
+        c.journal.checked(row['blob'],40);c.journal.checked(row['sha256'],64)
+        if type(row['bytes']) is not int or not 0<row['bytes']<=c.journal.MAX_MIRROR_BYTES:o.fail('outbox_state_invalid')
+    if mirror['before']['blob']==mirror['after']['blob'] or mirror['before']['bytes']!=mirror['after']['bytes']:o.fail('outbox_state_invalid')
+    p=v['proof'];run=p['run_binding'];latest=p['latest_binding']
+    report={'contract':'get-private-runtime-report-2','status':'executed','business_health_asserted':False,
+        'complete_library_claimed':False,'execution_status':'blocked','execution_reason':'approval_missing',
+        'write_state':'unknown','external_write_attempts':0,'asset_downloads':0}
+    if (p['status']!='journal_provenance_verified' or p['terminal_report']!=report
+            or p['terminal_conclusions']!={'job':'failure','notion':'failure','get':'skipped'} or p['get_step_record'] is not None
+            or p['get_run_success_claim'] is not False or p['private_readback_required'] is not True or p.get('clock_witness') is not None
+            or c.provenance.run_binding(run)!=run or c.provenance.run_binding(latest)!=latest
+            or run['event']!='workflow_dispatch' or run['status']!='completed' or run['conclusion']!='failure'
+            or latest['run_attempt']!=run['run_attempt'] or p['run_id']!=run['id'] or p['run_attempt']!=run['run_attempt']
+            or p['run_id']==b['proof']['run_id'] or type(p['checkpoint_count']) is not int or p['checkpoint_count']!=2):o.fail('outbox_state_invalid')
+    c._same_run(run,latest,cross_endpoint=True)
+    context={'run_id':p['run_id'],'run_attempt':p['run_attempt'],'code_sha':policy['code_sha'],
+        'controller_sha':run['head_sha'],'rules_sha256':policy['rules_sha256'],
+        'notion_policy_sha256':v['notion_policy_sha256'],'public_policy_sha256':v['public_policy_sha256']}
+    c.context(context);records=v['checkpoints']
+    if not isinstance(records,list) or len(records)!=2:o.fail('outbox_state_invalid')
+    for index,cp in enumerate(records):
+        if (set(cp)!=c.RECORD_KEYS or any(cp[k]!=context[k] for k in c.CONTEXT_KEYS)
+                or cp['sequence']!=index+1 or cp['cas_attempts']!=(1 if index==0 else 0)
+                or cp['parent_commit']!=(s['parent'] if index==0 else None)
+                or cp['previous_record_sha256']!=(None if index==0 else records[0]['record_sha256'])
+                or cp['readback_verified'] is not True or cp['status']!='journal_readback_verified'
+                or any(cp[k]!=s[k] for k in ('commit','state_blob','state_sha256','state_bytes')) or cp['tree']!=s['after_tree']
+                or o.digest({k:x for k,x in cp.items() if k!='record_sha256'})!=cp['record_sha256']):o.fail('outbox_state_invalid')
+    if p['checkpoint']!=records[-1] or p['anchor']!={k:s[k] for k in ('commit','state_blob','state_sha256')}:o.fail('outbox_state_invalid')
+    fixed=c.fixed_auth.parse(o.encoded(p['fixed_source_record']),context,run)
+    if fixed['mode']!='historical-apply' or fixed['selection_sha256']!=b['manifest_sha256']:o.fail('outbox_state_invalid')
+
+
+def _proof_binding(b,run_id,attempt):
+    for value in (b,b['policy_progress']):
+        p=value['proof']
+        if type(run_id) is int and p['run_id']==run_id and (attempt is None or type(attempt) is int and p['run_attempt']==attempt):return value
+    return None
+
+
 def run_binding(run_id,attempt=None):
-    rows=[b for b in registry() if type(run_id) is int and b['proof']['run_id']==run_id and (attempt is None or type(attempt) is int and b['proof']['run_attempt']==attempt)]
+    rows=[b for b in registry() if _proof_binding(b,run_id,attempt) is not None]
     return rows[0] if len(rows)==1 else None
 
 
@@ -169,7 +242,8 @@ def candidate_policy(policy,run):
     import get_notion_idle_recovery as idle
     import get_publication_provenance as p
     b=run_binding(run.get('id'),run.get('run_attempt'))
-    if b and target_code_sha256()==b['target_code_sha256'] and p.run_binding(run) in (b['proof']['run_binding'],b['proof']['latest_binding']) and idle._forward_policy(policy,b):return deepcopy(b['public_policy']),True
+    selected=None if b is None else _proof_binding(b,run.get('id'),run.get('run_attempt'))
+    if selected and target_code_sha256()==b['target_code_sha256'] and p.run_binding(run) in (selected['proof']['run_binding'],selected['proof']['latest_binding']) and idle._forward_policy(policy,selected):return deepcopy(selected['public_policy']),True
     return policy,False
 
 
@@ -212,10 +286,16 @@ def recover_checkpoint(client,run_id,run_attempt):
     import get_notion_journal_runtime as c
     b=run_binding(run_id,run_attempt)
     if not b or target_code_sha256()!=b['target_code_sha256']:c.fail('journal_provenance_other_controller')
-    result=c.recover_anchor(client,run_id=run_id,run_attempt=run_attempt,public_policy=b['public_policy'],
-        approved_public_policy_sha256=b['public_policy_sha256'],notion_policy_sha256=b['notion_policy_sha256'],
-        include_job_digest=True,include_terminal_report=True)
-    if result!=b['proof']:c.fail('journal_provenance_record')
+    selected=_proof_binding(b,run_id,run_attempt)
+    # The current checkpoint never erases authentication of the original
+    # exact six-receipt prefix. Both use this SAME bounded client and budget.
+    values=(b,selected) if selected is not b else (b,)
+    for value in values:
+        p=value['proof']
+        result=c.recover_anchor(client,run_id=p['run_id'],run_attempt=p['run_attempt'],public_policy=value['public_policy'],
+            approved_public_policy_sha256=value['public_policy_sha256'],notion_policy_sha256=value['notion_policy_sha256'],
+            include_job_digest=True,include_terminal_report=True)
+        if result!=p:c.fail('journal_provenance_record')
     return {**result,'recovery_anchor':TAG}
 
 
@@ -297,11 +377,23 @@ def initial_state_valid(state,sha):
 def initial_or_transitioned_state_valid(state,sha):
     import get_notion_outbox as o
     import get_recurring_policy_recovery as policy
-    if initial_state_valid(state,sha):return True
+    if initial_state_valid(state,sha) or progress_state_valid(state,sha):return True
     try:
         if o.digest(state)!=sha or state['policy_sha256']!=policy.current_get_policy():return False
         b=plan_binding(state['engine_state']['journal']['plan']);old=deepcopy(state);old['policy_sha256']=b['public_policy']['get_policy_sha256']
         return initial_state_valid(old,o.digest(old))
+    except Exception:return False
+
+
+def progress_state_valid(state,sha):
+    """Only the exact already-durable zero-native-write state, never its policy alone."""
+    import get_notion_outbox as o
+    try:
+        b=plan_binding(state['engine_state']['journal']['plan']);pin=b['policy_progress']['state'];raw=o.encoded(state)
+        if (o.digest(raw)!=sha or sha!=pin['state_sha256'] or len(raw)!=pin['state_bytes']
+                or o.e.p.git_blob(raw)!=pin['state_blob'] or state['policy_sha256']!=pin['policy_sha256']):return False
+        prior=deepcopy(state);prior['policy_sha256']=b['public_policy']['get_policy_sha256']
+        return initial_state_valid(prior,o.digest(prior))
     except Exception:return False
 
 
@@ -359,13 +451,19 @@ def authenticated_proof_matches(proof,binding):
                 or proof['candidate_attempts_checked']!=proof['candidate_runs_checked']
                 or not 1<=proof['provenance_reads']<=40
                 or not 1<=proof['provenance_bytes']<=provenance.MAX_TOTAL):return False
-    return {k:v for k,v in proof.items() if k not in diagnostics}=={**binding['proof'],'recovery_anchor':TAG}
+    selected=_proof_binding(binding,proof.get('run_id'),proof.get('run_attempt'))
+    return selected is not None and {k:v for k,v in proof.items() if k not in diagnostics}=={**selected['proof'],'recovery_anchor':TAG}
 
 def _transition_bytes(state,sha,new_policy,*,proof):
     import get_notion_outbox as o
     import get_recurring_policy_recovery as r
     b=plan_binding(state['engine_state']['journal']['plan'])
-    if not b or not authenticated_proof_matches(proof,b) or new_policy!=r.current_get_policy() or not initial_or_transitioned_state_valid(state,sha):o.fail('outbox_state_invalid')
+    if not b or not authenticated_proof_matches(proof,b) or new_policy!=r.current_get_policy():o.fail('outbox_state_invalid')
+    selected=_proof_binding(b,proof['run_id'],proof['run_attempt'])
+    prior=deepcopy(state)
+    if state['policy_sha256']==r.current_get_policy():prior['policy_sha256']=selected['public_policy']['get_policy_sha256']
+    valid=initial_state_valid(prior,o.digest(prior)) if selected is b else progress_state_valid(prior,o.digest(prior))
+    if o.digest(state)!=sha or not valid:o.fail('outbox_state_invalid')
     out=deepcopy(state);out['policy_sha256']=new_policy;o.check_state(out);return out
 
 
@@ -388,7 +486,7 @@ def preserve(before,after):
     if before==after:return
     if before['policy_sha256']!=after['policy_sha256']:
         wanted=deepcopy(before);wanted['policy_sha256']=policy.current_get_policy()
-        if not initial_state_valid(before,o.digest(before)) or after!=wanted:o.fail('outbox_state_invalid')
+        if not (initial_state_valid(before,o.digest(before)) or progress_state_valid(before,o.digest(before))) or after!=wanted:o.fail('outbox_state_invalid')
         return
     if before['policy_sha256']!=policy.current_get_policy():o.fail('outbox_state_invalid')
     for k in set(before)|set(after):
@@ -468,6 +566,28 @@ def _hydrate_capsule(git,remote,oid,size,sha256,expected=None):
     if git.blob(oid)!=raw:o.fail('outbox_state_invalid')
 
 
+def _verify_exact_mirror_delta(remote,mirror):
+    """One pinned already-completed timestamp-only mirror edge, never future mirrors."""
+    from datetime import datetime
+    import get_notion_remote_journal as j
+    import get_notion_outbox as o
+    values=[]
+    for key in ('before','after'):
+        pin=mirror[key];raw=remote.blob(pin['blob'],pin['bytes'])
+        if (not isinstance(raw,bytes) or len(raw)!=pin['bytes'] or o.digest(raw)!=pin['sha256']
+                or j.retention.oid(raw)!=pin['blob']):o.fail('outbox_state_invalid')
+        value=j.retention.strict_json(raw)
+        if not isinstance(value,dict) or not isinstance(value.get('generated_at'),str):o.fail('outbox_state_invalid')
+        values.append(value)
+    before,after=values
+    if (set(before)!=set(after) or before['generated_at']==after['generated_at']
+            or any(before[k]!=after[k] for k in before if k!='generated_at')):o.fail('outbox_state_invalid')
+    try:
+        times=[datetime.fromisoformat(v['generated_at'].replace('Z','+00:00')) for v in values]
+        if any(t.tzinfo is None or t.utcoffset() is None for t in times) or not times[0]<times[1]:raise ValueError()
+    except (ValueError,OverflowError):o.fail('outbox_state_invalid')
+
+
 def verify_successor(local,remote,loader,head,proof):
     """Finite registered history, then capsule/policy-only CAS; no future inheritance."""
     from types import SimpleNamespace
@@ -488,13 +608,18 @@ def verify_successor(local,remote,loader,head,proof):
     raw=git.blob(anchor['state_blob'])
     if len(raw)!=b['proof']['checkpoint']['state_bytes'] or o.digest(raw)!=anchor['state_sha256'] or j.retention.oid(raw)!=anchor['state_blob'] or remote.blob(anchor['state_blob'],len(raw))!=raw:o.fail('outbox_state_invalid')
     original=j.retention.strict_json(raw)
-    desired=_transition_bytes(original,anchor['state_sha256'],policy.current_get_policy(),proof=proof)
+    if not initial_state_valid(original,anchor['state_sha256']):o.fail('outbox_state_invalid')
+    progress=b['policy_progress'];progress_state=deepcopy(original);progress_state['policy_sha256']=progress['state']['policy_sha256']
+    progress_raw=o.encoded(progress_state)
+    if not progress_state_valid(progress_state,o.digest(progress_raw)):o.fail('outbox_state_invalid')
+    desired=deepcopy(original);desired['policy_sha256']=policy.current_get_policy()
     target=o.encoded(desired);oid=j.retention.oid(target)
     node(head);git.run('merge-base','--is-ancestor',prior,head)
     history=git.run('rev-list','--reverse','--max-count=257',prior+'..'+head).decode().split()
     if len(history)>256:o.fail('outbox_state_invalid')
     seen=False;capsule_seen=False;registered=b['successor_chain'];known=b['prior_capsule']
-    if len(history)<len(registered):o.fail('outbox_state_invalid')
+    if len(history)<len(registered)+4:o.fail('outbox_state_invalid')
+    if _proof_binding(b,proof['run_id'],proof['run_attempt'])!=progress:o.fail('outbox_state_invalid')
     capsule_raw=_capsule_bytes();capsule_oid=j.retention.oid(capsule_raw)
     capsule_path='.sync/get-notion/runtime-bindings-'+bindings.TRUSTED_BUNDLE_SHA256+'.json'
     for position,commit in enumerate(history):
@@ -509,6 +634,25 @@ def verify_successor(local,remote,loader,head,proof):
                     or current[0]!=known['after_tree'] or changed!={known['path']} or known['path'] in base[2]
                     or current[2].get(known['path'])!=('100644','blob',known['blob'])):o.fail('outbox_state_invalid')
             _hydrate_capsule(git,remote,known['blob'],known['bytes'],known['sha256'])
+        elif position==len(registered)+1:
+            cap=progress['capsule']
+            if (commit!=cap['commit'] or prior!=cap['parent'] or base[0]!=cap['before_tree']
+                    or current[0]!=cap['after_tree'] or changed!={cap['path']} or cap['path'] in base[2]
+                    or current[2].get(cap['path'])!=('100644','blob',cap['blob'])):o.fail('outbox_state_invalid')
+            _hydrate_capsule(git,remote,cap['blob'],cap['bytes'],cap['sha256'])
+        elif position==len(registered)+2:
+            st=progress['state']
+            if (commit!=st['commit'] or prior!=st['parent'] or base[0]!=st['before_tree'] or current[0]!=st['after_tree']
+                    or changed!={j.STATE_PATH} or current[2].get(j.STATE_PATH)!=('100644','blob',st['state_blob'])
+                    or git.blob(st['state_blob'])!=progress_raw or remote.blob(st['state_blob'],len(progress_raw))!=progress_raw):o.fail('outbox_state_invalid')
+            anchor={k:st[k] for k in ('commit','state_blob','state_sha256')}
+        elif position==len(registered)+3:
+            mirror=progress['mirror'];path=mirror['path']
+            if (commit!=mirror['commit'] or prior!=mirror['parent'] or base[0]!=mirror['before_tree']
+                    or current[0]!=mirror['after_tree'] or changed!={path}
+                    or base[2].get(path)!=('100644','blob',mirror['before']['blob'])
+                    or current[2].get(path)!=('100644','blob',mirror['after']['blob'])):o.fail('outbox_state_invalid')
+            _verify_exact_mirror_delta(remote,mirror)
         elif j.STATE_PATH in changed:
             if not capsule_seen or seen or changed!={j.STATE_PATH} or current[2][j.STATE_PATH]!=('100644','blob',oid) or git.blob(oid)!=target or remote.blob(oid,len(target))!=target:o.fail('outbox_state_invalid')
             seen=True;anchor={'commit':commit,'state_blob':oid,'state_sha256':o.digest(target)}

@@ -634,6 +634,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 confirm=checkpoints.CheckpointEmitter(checkpoint_stream,compact=compact_proofs,context={**execution,
                     'rules_sha256':public_policy['rules_sha256'],'notion_policy_sha256':e.digest(scope_for(public_policy)),
                     'public_policy_sha256':public_hash})
+            journal_confirm=confirm
             if present and found.get('recovery_anchor') == historical_active.PREPARED_TAG:
                 # Keep original checkpoint authority untouched; adopt only the
                 # independently verified exact prepared successor as read anchor.
@@ -649,11 +650,11 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 # Bind mutable reads/CAS to the just-verified finite terminal.
                 # Keep the original immutable cache/readback-generation wrapper.
                 remote.remote=clean_active.FiniteHeadRemote(remote.remote,parent,confirm)
-                confirm=remote.remote.confirm
+                journal_confirm=remote.remote.confirm
             post_cas_binding=historical_active.prepared_binding()
             post_cas_paths=() if post_cas_binding is None else tuple(sorted({
                 path for row in post_cas_binding['known_descendants'] for path in row['changes']}))
-            durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=confirm,
+            durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=journal_confirm,
                 post_cas_paths=post_cas_paths,post_cas_mirror=True)
             current,sha=durable.read()
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
