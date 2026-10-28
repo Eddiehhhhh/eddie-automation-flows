@@ -128,6 +128,23 @@ class Tests(unittest.TestCase):
             outer,plan=fixture();plan['records'][0][key]=value
             a=self.admission(max_commits=0)
             self.assertTrue(a(outer,plan));self.assertFalse(a.clean_boundary_denied)
+    def test_locator_partial_yield_keeps_actual_active_journal(self):
+        outer,plan=fixture();result=prefix(outer,plan);store=Store(outer)
+        a=self.admission(locator=object());before=deepcopy(outer)
+        self.assertEqual(a.settle(store,plan,result),result)
+        self.assertEqual(store.calls,0);self.assertEqual(store.outer,before)
+    def test_locator_yield_never_accepts_completed_or_unknown(self):
+        for change in ({'index':2},{'operation':{'phase':'in_flight'}}):
+            outer,plan=fixture();result=prefix(outer,plan)
+            outer['engine_state']['journal'].update(change)
+            result['state_sha256']=digest(outer['engine_state']);store=Store(outer)
+            with self.assertRaises(Blocked):self.admission(locator=object()).settle(store,plan,result)
+            self.assertEqual(store.calls,0);self.assertEqual(store.outer,outer)
+    def test_locator_stale_yield_cannot_clear_or_rebind(self):
+        outer,plan=fixture();result=prefix(outer,plan);store=Store(outer)
+        result['state_sha256']='f'*64
+        with self.assertRaises(Blocked):self.admission(locator=object()).settle(store,plan,result)
+        self.assertEqual(store.calls,0);self.assertEqual(store.outer,outer)
     def test_settle_changes_only_journal(self):
         outer,plan=fixture();result=prefix(outer,plan);before=deepcopy(outer);store=Store(outer)
         out=self.admission().settle(store,plan,result);before['engine_state']['journal']=None

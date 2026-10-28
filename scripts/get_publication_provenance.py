@@ -420,9 +420,9 @@ def effective_candidate_policy(policy, run):
     return candidate_policy, original_recovery, registered_recovery
 
 
-def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None, rejected_controllers=None, include_verified_details=False):
+def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None, rejected_controllers=None, include_verified_details=False, include_idle_checkpoint=False):
     """Prove one original successful attempt, never a later attempt's result."""
-    if type(include_verified_details) is not bool:
+    if type(include_verified_details) is not bool or type(include_idle_checkpoint) is not bool:
         fail('provenance_record')
     check_run_identity(listed, policy)
     run_id = positive(listed['id'])
@@ -439,6 +439,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
             or attempt == listed['run_attempt'] and run_semantic_binding(run) != run_semantic_binding(listed)):
         fail('provenance_run_changed')
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
+        if include_idle_checkpoint: fail('provenance_run_changed')
         return None
     candidate_policy, original_recovery, registered_recovery = effective_candidate_policy(policy, run)
     try:
@@ -453,6 +454,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
                 verified_controllers.add(controller_key)
     except ProvenanceFailure as exc:
         if str(exc) == 'provenance_controller_mismatch':
+            if include_idle_checkpoint: raise
             if rejected_controllers is not None:
                 rejected_controllers.add(controller_key)
             return None  # Historical other code is never an anchor.
@@ -463,6 +465,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         fail('provenance_job_bound')
     matches = [j for j in jobs if isinstance(j, dict) and j.get('name') == policy['job_name']]
     if not matches:
+        if include_idle_checkpoint: fail('provenance_job')
         return None  # Same fixed workflow may have a non-publication mode.
     if len(matches) != 1:
         fail('provenance_job')
@@ -476,14 +479,32 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         fail('provenance_job')
     emission = [s for s in steps if isinstance(s, dict) and s.get('name') == policy['publication_step_name']]
     if not emission or len(emission) == 1 and emission[0].get('conclusion') == 'skipped':
+        if include_idle_checkpoint:
+            # A candidate proposal may be a real historical mode whose Get
+            # step was skipped. Authenticate that precise negative; unknown
+            # controller/missing steps/changed aliases must not fall back.
+            if (len(emission) != 1 or emission[0].get('status') != 'completed'
+                    or type(emission[0].get('number')) is not int
+                    or emission[0]['number'] <= 0
+                    or not timestamp(run['created_at']) <= timestamp(job.get('started_at'))
+                        <= timestamp(job.get('completed_at')) <= timestamp(run['updated_at'])):
+                fail('provenance_job')
+            original = check_run(client.json(attempt_path), policy)
+            latest = check_run(client.json(root), policy)
+            if (run_binding(original) != run_binding(run)
+                    or latest['run_attempt'] != attempt
+                    or run_semantic_binding(latest) != run_semantic_binding(run)):
+                fail('provenance_run_changed')
+            import get_notion_journal_runtime as journal
+            journal._same_run(run, latest, cross_endpoint=True)
         return None
     if len(emission) != 1 or emission[0].get('status') != 'completed' or emission[0].get('conclusion') != 'success':
         fail('provenance_job')
     completed = timestamp(job.get('completed_at'))
     if completed > timestamp(run['updated_at']):
         fail('provenance_timestamp')
-    raw = client.logs(job['id'])
-    raw = private_proof.expand_for(client, raw, policy=candidate_policy, run=run, kinds=('publication',))
+    raw_log = client.logs(job['id'])
+    raw = private_proof.expand_for(client, raw_log, policy=candidate_policy, run=run, kinds=('publication',))
     if verified_prepare_only(raw, candidate_policy, run, job, emission[0]):
         record = None
     else:
@@ -495,6 +516,12 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     if registered_recovery:
         if record is None: fail('provenance_record')
         registered_predecessor.verify_original_record(record, job['id'], job=job, run=run)
+    prepared_idle = None
+    if include_idle_checkpoint and record is not None:
+        import get_notion_idle_rotation as rotation
+        if candidate_policy != policy: fail('provenance_controller_mismatch')
+        prepared_idle = rotation.prepare_canonical_journal(client, policy, run, job, raw_log)
+        if prepared_idle.result['get_step_record'] != record: fail('provenance_record')
     # Re-read the *original* attempt, then ensure latest is still the same run.
     # A failed/in-progress later rerun cannot erase this successful publication,
     # or inherit it: the record remains bound to the original attempt and job.
@@ -516,7 +543,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
         fail('provenance_run_changed')
     if record is None:
         return None  # Strict prepare proof was rechecked against the original attempt.
-    return {'anchor': {'commit': record['receipt_commit'], 'receipt_sha256': record['receipt_sha256']},
+    result = {'anchor': {'commit': record['receipt_commit'], 'receipt_sha256': record['receipt_sha256']},
             'receipt_sequence': record['receipt_sequence'], 'record_sha256': record['record_sha256'],
             'run_id': run_id, 'run_attempt': attempt, 'job_id': job['id'],
             'completed_at': job['completed_at'],
@@ -524,6 +551,15 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
                  'job_sha256': _history_job_sha256(job), 'record': deepcopy(record)}}
                if include_verified_details else {}),
             **({'clock_witness': clock_witness} if clock_witness is not None else {})}
+    if include_idle_checkpoint:
+        # One original canonical observation, not a dynamic-response cache:
+        # both original verifier contracts must accept the same run/job/log and
+        # the same actual final attempt/alias rereads.
+        import get_notion_idle_rotation as rotation
+        if candidate_policy != policy: fail('provenance_controller_mismatch')
+        idle = rotation.finish_canonical_journal(prepared_idle, original, current)
+        return rotation.JointCanonicalProof(result, idle, rotation._JOINT_SEAL, private=prepared_idle)
+    return result
 
 
 def _history_job_sha256(job):
@@ -646,7 +682,11 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
         if len(rows) < RUN_PAGE_SIZE:
             break
     listed.sort(key=lambda x: (timestamp(x['updated_at']), x['id']), reverse=True)
-    locator = registered_predecessor.discovery_locator(policy)
+    import get_notion_idle_rotation as rotation
+    rotation_search = rotation.source_search(client, policy, listed,
+        exclude=(exclude_run_id, exclude_run_attempt))
+    locator = (rotation_search['locator'] if rotation_search is not None
+               else registered_predecessor.discovery_locator(policy))
     if locator == (exclude_run_id, exclude_run_attempt):
         locator = None
     if locator is not None:
@@ -660,10 +700,12 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
         # The normal dynamic list remains after it; its other attempts are not
         # erased. The original attempt is charged once, never an extra slot.
         listed.insert(0, located)
+    locator_positions = {0: locator[1]} if locator is not None else {}
+    observations = {}
     found = []; checked = 0; verified_controllers = set(); rejected_controllers = set()
     checked_attempts = set()
     for position, run in enumerate(listed):
-        located_attempt = locator[1] if locator is not None and position == 0 else None
+        located_attempt = locator_positions.get(position)
         # A first attempt listed as terminal failure cannot contain a successful
         # publication. This is negative selection only, never anchor evidence.
         # Reruns remain eligible: an earlier successful attempt must not vanish.
@@ -702,9 +744,27 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             value = verified_candidate(client, run, verification_policy, run_attempt=attempt,
                                        verified_controllers=verified_controllers,
                                        rejected_controllers=rejected_controllers,
-                                       include_verified_details=capture)
+                                       include_verified_details=capture,
+                                       include_idle_checkpoint=bool(rotation_search is not None
+                                           and rotation_search['joint'] and located_attempt is not None))
+            if value is not None:
+                value = rotation.observe_source(client, policy, run, value,
+                    search=rotation_search if located_attempt is not None else None)
+                observations[(value['run_id'], value['run_attempt'])] = rotation.observation_for(client, policy, value)
             if located_attempt is not None and value is None:
-                fail('provenance_no_verified_publication')
+                if rotation_search is None or rotation_search['proposal'] is None:
+                    fail('provenance_no_verified_publication')
+                # A normally verified non-publication mode is not a rotation.
+                # Retain it as a consumed original slot. Only then locate the
+                # prior source in another slot; exceptions never use fallback.
+                prior = rotation_search['previous']
+                older = check_run_identity(client.json('/actions/runs/'+str(prior[0])), policy)
+                if older['id'] != prior[0] or older['run_attempt'] != prior[1]:
+                    fail('provenance_run_changed')
+                listed.insert(position+1, older)
+                locator_positions[position+1] = prior[1]
+                rotation_search = {**rotation_search, 'proposal': None,
+                    'joint': rotation_search['envelope']['hint']['source']['kind'] == 'authenticated_idle'}
             if value is not None:
                 if capture:
                     registration, _, _ = _history_witness_registration(policy)
@@ -729,6 +789,10 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             fail('provenance_receipt_fork')
         by_sequence[sequence] = value['anchor']
     chosen = max(found, key=lambda x: (x['receipt_sequence'], timestamp(x['completed_at']), x['run_id']))
+    dynamic_history = rotation.select_observation(client, policy, chosen,
+        observations.get((chosen['run_id'], chosen['run_attempt'])), required=rotation_search is not None)
+    if dynamic_history is not None:
+        captured_witness = dynamic_history
     return {**chosen, **({'history_witness': captured_witness} if capture_history_witness else {}), 'status': 'public_provenance_verified', 'candidate_runs_checked': checked,
             'publication_records_verified': len(found), 'new_permissions': 0, 'credentials_used': getattr(client, 'credentials_used', 0)}
 
@@ -799,8 +863,9 @@ def prepare_with_public_provenance(reader, evidence, parent, source, client, pol
     receipt = entry.read_receipt(reader, verified['anchor']['commit'], verified['anchor']['receipt_sha256'], policy['get_policy_sha256'])
     if receipt['sequence'] != verified['receipt_sequence']:
         fail('provenance_receipt_sequence')
-    history_witness = (verified.get('history_witness') or verify_history_witness(client, policy, candidate_runs_checked=verified['candidate_runs_checked'])
-        if history_witness_required(verified['anchor'], receipt) else None)
+    history_witness = verified.get('history_witness')
+    if history_witness is None and history_witness_required(verified['anchor'], receipt):
+        history_witness = verify_history_witness(client, policy, candidate_runs_checked=verified['candidate_runs_checked'])
     return entry.prepare(reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
                          anchor=verified['anchor'], bootstrap=bootstrap, trigger=trigger, history_witness=history_witness)
 

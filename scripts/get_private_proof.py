@@ -145,6 +145,20 @@ class PrivateRecords:
                 'stage':value['stage'] if value['stage'] in stages else 'binding',
                 'reason':value['reason'] if value['reason'] in reasons else 'unverified'},sort_keys=True),file=sys.stderr)
         except Exception:pass  # Reporting cannot change rejection or authority.
+        try:
+            observer=getattr(self.remote,'read_diagnostic',None)
+            detail=observer() if callable(observer) else None
+            phases={'open','read','close','deadline','validation'}
+            classes={'http','certificate','tls','timeout','connection','incomplete_read','url_error','validation','other','deadline'}
+            counts={'logical_requests','physical_attempts','response_bytes','failed_read_bound','tree_extra_used','tree_extra_limit','tree_physical_attempts'}
+            if (isinstance(detail,dict) and set(detail)==counts|{'phase','error_class','http_status'}
+                    and detail['phase'] in phases and detail['error_class'] in classes
+                    and (detail['http_status'] is None or type(detail['http_status']) is int and 100<=detail['http_status']<=599)
+                    and all(type(detail[k]) is int and 0<=detail[k]<=2**53-1 for k in counts)
+                    and detail['tree_extra_limit']==8 and detail['tree_extra_used']<=8):
+                print(json.dumps({'contract':'get-private-transport-diagnostic-1',**detail},sort_keys=True),file=sys.stderr)
+        except Exception:pass  # Observation cannot affect the original rejection.
+
     def _fixed_tree(self,tree):
         checked(tree,40);key=(REPOSITORY,tree)
         if key in self._tree_cache:return self._tree_cache[key]
@@ -212,11 +226,15 @@ class PrivateRecords:
         key=(REPOSITORY,commit)
         if key in self._node_cache:
             return deepcopy(self._node_cache[key])
-        metadata=self._read('commit',self.remote.commit,commit);tree=checked(metadata.get('tree'),40);parents=metadata.get('parents')
+        paired=getattr(self.remote,'commit_with_locator',None)
+        if callable(paired): metadata,locator=self._read('commit',paired,commit)
+        else: metadata=self._read('commit',self.remote.commit,commit);locator=None
+        tree=checked(metadata.get('tree'),40);parents=metadata.get('parents')
         if not isinstance(parents,list) or len(parents)>1:self._reject('ancestry','ancestry')
         parent=checked(parents[0],40) if parents else None
         selected=self._fixed_path_entries(tree)
         node={'commit':commit,'tree':tree,'parent':parent,'objects':selected}
+        if locator is not None: node['locator']=deepcopy(locator)
         # Cache only after every original metadata validation succeeds. The
         # three fixed journal hint fields add at most three off-chain nodes.
         # A full cache merely declines retention; it never changes validation.

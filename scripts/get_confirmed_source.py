@@ -35,8 +35,7 @@ class Loader:
         entry.a.checked(policy_hash, 64)
         self.local = local
         self.reader = outbox.BoundedSourceReader(local.vault)
-        if history_witness is not None and type(history_witness) is not entry.VerifiedHistoryWitness:
-            fail('entry_history_witness')
+        entry.check_history_witness(history_witness)
         self.history_witness = history_witness
         self.remote = remote
         # token/root retain the shared runtime adapter signature. Credentials
@@ -183,7 +182,7 @@ class Loader:
     def unchanged(self, ancestor, descendant):
         self.commit(ancestor); cursor = descendant
         expected = self.reader.source_get_tree(ancestor)
-        witness = self.history_witness
+        witness = entry.select_history_witness(self.history_witness, ancestor=ancestor)
         if witness is not None and ancestor == witness.receipt_commit:
             self.commit(witness.observed_commit)
             self.blob(ancestor, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
@@ -206,8 +205,12 @@ class Loader:
             parents = self.ancestry_metadata(cursor)
             if cursor == ancestor:
                 return
-            witness = self.history_witness
-            if witness is not None and cursor == witness.observed_commit:
+            witness = entry.select_history_witness(self.history_witness, ancestor=ancestor)
+            # A witness authenticates only its exact receipt-to-observed
+            # interval. Other requested ancestors may be inside that interval;
+            # follow their entire original chain rather than jumping over them.
+            if (witness is not None and ancestor == witness.receipt_commit
+                    and cursor == witness.observed_commit):
                 if parents != (entry.single_parent(self.reader, cursor),):
                     fail('source_chain_invalid')
                 self.commit(witness.receipt_commit)

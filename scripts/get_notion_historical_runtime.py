@@ -14,6 +14,7 @@ import get_notion_journal_runtime as checkpoints
 import get_notion_historical_active_recovery as historical_active
 import get_notion_authenticated_recovery as authenticated_recovery
 import get_notion_clean_active_resume as clean_active
+import get_notion_checkpoint_resume as checkpoint_resume
 
 
 class API(transport.API):
@@ -95,23 +96,31 @@ def creation_recovery_for(active, manifest, expected, api):
     return {'plan_sha256':digest,'note_id':row['note_id'],'page_id':binding['page_id'],
             'snapshot_sha256':e.target_sha(snapshot,row['note_id'],manifest['data_source_id'])}
 
-def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_hash,apply,writers_guard,loader=None,admit=None,verify_reused=False,row_admit=None,settle_row_yield=None,resume_admit=None):
+def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_hash,apply,writers_guard,loader=None,admit=None,verify_reused=False,row_admit=None,settle_row_yield=None,resume_admit=None,refresh_session=None):
+    refresh_capability=None
+    if refresh_session is not None:
+        refresh_capability=refresh_session.capability(manifest,expected,'apply')
+        manifest=deepcopy(refresh_capability.manifest);expected=e.digest(manifest)
     if settle_row_yield is not None and (row_admit is None or not callable(settle_row_yield)):e.fail('approval_missing')
     if resume_admit is not None and not callable(resume_admit):e.fail('approval_missing')
-    historical.validate(manifest,expected,apply=apply)
+    historical.validate(manifest,expected,apply=apply,refresh_capability=refresh_capability)
     if transport.native.sha(manifest['data_source_id'])!=transport.native.DATA_SOURCE_PIN or transport.native.sha(manifest['database_id'])!=transport.native.DATABASE_PIN: e.fail('wrong_parent')
     current,version=store.read();outbox.check_state(current)
     active=current['engine_state']['journal']
     if active is not None and (not active['plan'].get('historical_only') or active['plan'].get('historical_manifest_sha256')!=expected): e.fail('journal_busy')
     new_ids=historical.creation_ids(manifest)
-    property_expected=private_input.creation_property_for(expected,required=bool(new_ids))
+    property_expected=(e.digest(refresh_capability.properties) if refresh_capability is not None else
+        private_input.creation_property_for(expected,required=bool(new_ids)))
     property_manifest=None;property_schema=None
     if property_expected is not None:
         if not new_ids:e.fail('approval_missing')
         historical.require_creation_capture(current.get('historical_captures',{}),manifest,expected)
         properties.check_dependency()
-        raw=private_input.read(remote,property_expected,contract=properties.tx.CONTRACT)
-        property_manifest=private_input.strict_capture_json(raw,256*1024)
+        if refresh_capability is not None:
+            property_manifest=deepcopy(refresh_capability.properties)
+        else:
+            raw=private_input.read(remote,property_expected,contract=properties.tx.CONTRACT)
+            property_manifest=private_input.strict_capture_json(raw,256*1024)
         historical.bind_creation_properties(manifest,property_manifest,property_expected)
     if loader is None: loader=source_loader.Loader(local,remote,token,root,policy_hash)
     loader.commit(manifest['source_commit'])
@@ -157,6 +166,8 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
         options={} if property_manifest is None else {'property_manifest':property_manifest,
             'expected_property_manifest_sha256':property_expected,'property_schema':property_schema}
         plan=historical.prepare(publication,state,sha,snapshots,policy,manifest,expected,**options)
+    if active and checkpoint_resume.plan_binding(plan) is not None:
+        checkpoint_resume.verify_native(current,api)
     if active and clean_active.plan_binding(plan) is not None:
         clean_active.verify_native(current,api)
     actions=Counter(row['action'] for row in plan['records'])
@@ -204,7 +215,7 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
             # separate. No fused checkpoint or truncated/re-authored plan.
             from get_notion_single_create_admission import settle_clean_yield
             result=settle_clean_yield(e,adapter,plan,result)
-        elif (clean_active.plan_binding(plan) is None and settle_row_yield is not None and getattr(row_admit,'clean_boundary_denied',False) is True
+        elif (clean_active.plan_binding(plan) is None and checkpoint_resume.plan_binding(plan) is None and settle_row_yield is not None and getattr(row_admit,'clean_boundary_denied',False) is True
                 and result.get('status')=='partial' and result.get('reason')=='batch_boundary_yield'):
             result=settle_row_yield(adapter,plan,result)
         safe=e.public_report(result)
@@ -229,9 +240,13 @@ def dispatch(local,remote,token,root,store,request,*,manifest,expected,policy_ha
     return result
 
 
-def capture(local,remote,token,root,store,request,*,candidate,expected,policy_hash,apply,writers_guard,loader=None):
+def capture(local,remote,token,root,store,request,*,candidate,expected,policy_hash,apply,writers_guard,loader=None,refresh_session=None):
     """Read Notion only; retain exact native evidence in the ONE private journal."""
-    probe=historical.validate_capture(candidate,expected,apply=apply)
+    refresh_capability=None
+    if refresh_session is not None:
+        refresh_capability=refresh_session.capability(candidate,expected,'capture')
+        candidate=deepcopy(refresh_capability.candidate);expected=e.digest(candidate)
+    probe=historical.validate_capture(candidate,expected,apply=apply,refresh_capability=refresh_capability)
     new_ids=historical.creation_ids(probe)
     if new_ids and new_ids != set(candidate['records']):e.fail('approval_missing')
     current,version=store.read();outbox.check_state(current)
@@ -262,6 +277,7 @@ def capture(local,remote,token,root,store,request,*,candidate,expected,policy_ha
         if new_ids:
             if api.schema()!=native_schema:e.fail('property_schema_changed')
             saved['native_schema_evidence']=historical.native_schema_evidence(native_schema)
+        if refresh_capability is not None:saved['refresh']=deepcopy(refresh_capability.mapping)
         historical.check_captures({expected:saved})
         publication.check(publication.descriptor)
         if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
@@ -317,7 +333,7 @@ def capture_boundary(request, durable, emitter, *, notes, reused=False, refresh_
 
 
 def capture_group(local, remote, token, root, store, request, *, selection, expected,
-                  policy_hash, apply, writers_guard, durable, emitter, refresh, loader=None):
+                  policy_hash, apply, writers_guard, durable, emitter, refresh, loader=None,refresh_session=None):
     """One bounded capture session. No runtime bootstrap, new counters or writes."""
     members = private_input.validate_capture_selection(selection, expected, apply=apply)
     if expected not in historical.APPROVED_CAPTURE_GROUPS or not apply:
@@ -333,7 +349,12 @@ def capture_group(local, remote, token, root, store, request, *, selection, expe
         for candidate, member in members:
             current, last_sha = store.read(); outbox.check_state(current)
             if current['engine_state']['journal'] is not None: e.fail('journal_busy')
-            saved = current.get('historical_captures', {}).get(member)
+            effective_member=member
+            effective_candidate=candidate
+            if refresh_session is not None:
+                capability=refresh_session.capability(candidate,member,'capture')
+                effective_candidate=capability.candidate;effective_member=e.digest(effective_candidate)
+            saved = current.get('historical_captures', {}).get(effective_member)
             reused = saved is not None
             if not capture_boundary(request, durable, emitter,
                     notes=len(candidate['records']), reused=reused, refresh_pending=pending_refresh):
@@ -345,7 +366,7 @@ def capture_group(local, remote, token, root, store, request, *, selection, expe
             prior_sequence = emitter.sequence
             result = capture(local, remote, token, root, store, request,
                 candidate=candidate, expected=member, policy_hash=policy_hash,
-                apply=True, writers_guard=writers_guard, loader=loader)
+                apply=True, writers_guard=writers_guard, loader=loader,refresh_session=refresh_session)
             if (durable.poisoned or emitter.failed
                     or durable.anchor['state_sha256'] != result['outer_journal_sha256']
                     or emitter.sequence != prior_sequence + int(not reused)):
@@ -362,10 +383,10 @@ def capture_group(local, remote, token, root, store, request, *, selection, expe
             if not e.p.writer_gate({'old_writer_evidence': writers_guard()}):
                 e.fail('writer_gate_unknown')
             current, last_sha = store.read(); outbox.check_state(current)
-            observed = current.get('historical_captures', {}).get(member)
+            observed = current.get('historical_captures', {}).get(effective_member)
             if (durable.poisoned or emitter.failed
                     or current['engine_state']['journal'] is not None
-                    or observed is None or observed['candidate'] != candidate
+                    or observed is None or observed['candidate'] != effective_candidate
                     or result['outer_journal_sha256'] != last_sha
                     or e.digest(observed['manifest']) != result['manifest_sha256']
                     or e.digest(observed['snapshots']) != result['snapshot_sha256']):
@@ -809,6 +830,42 @@ def verify_clean_active_transition(local,remote,token,root,current,sha,request,*
     properties.tx.context(publication,schema,property_manifest,property_expected,policy)
     historical.check_creation_titles(plan,publication,property_manifest,property_expected)
     native=clean_active.verify_native(current,api)
+    publication.check(plan['publication'])
+    if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
+    return {'source_ancestry_verified':True,'native_verified':True,'external_writes':0,'loader':loader,'native':native}
+
+
+def verify_prepared_checkpoint_transition(local,remote,token,root,current,sha,request,*,
+                                    manifest,expected,policy_hash,writers_guard):
+    """Exact prepared-checkpoint source/schema/native admission before policy-only CAS."""
+    if not checkpoint_resume.initial_or_transitioned_state_valid(current,sha):e.fail('state_changed')
+    active=current['engine_state']['journal'];plan=active['plan']
+    historical.validate(manifest,expected,apply=True)
+    if (manifest!=plan.get('historical_manifest') or expected!=plan.get('historical_manifest_sha256')
+            or not historical.creation_ids(manifest)):e.fail('approval_missing')
+    property_expected=private_input.creation_property_for(expected,required=True)
+    raw=private_input.read(remote,property_expected,contract=properties.tx.CONTRACT)
+    property_manifest=private_input.strict_capture_json(raw,256*1024)
+    if property_manifest!=plan.get('property_manifest') or property_expected!=plan.get('property_manifest_sha256'):
+        e.fail('approval_missing')
+    historical.bind_creation_properties(manifest,property_manifest,property_expected)
+    historical.require_creation_capture(current.get('historical_captures',{}),manifest,expected)
+    properties.check_dependency()
+    loader=source_loader.Loader(local,remote,token,root,policy_hash)
+    head=source_loader.entry.a.checked(local.run('rev-parse',source_loader.entry.r.MAIN_REF).decode().strip(),40)
+    loader.ancestry(manifest['source_commit'],head)
+    for source in manifest['records'].values():loader.blob(manifest['source_commit'],source['path'],e.p.MAX_NOTE)
+    publication=historical.Publication(local.vault,manifest,expected)
+    if publication.descriptor!=plan['publication']:e.fail('source_changed')
+    api=API(request,manifest['data_source_id'],sorted(manifest['records']))
+    schema=api.schema();titles=[name for name,row in schema.items() if isinstance(row,dict) and row.get('type')=='title']
+    if len(titles)!=1:e.fail('property_schema_changed')
+    policy={'data_source_id':manifest['data_source_id'],'id_property':'笔记 ID','title_property':titles[0],
+        'allow_create':True,'allow_archive':True,'format_accepted':True,'old_writer_evidence':writers_guard()}
+    if not e.p.writer_gate(policy) or policy!=plan['policy']:e.fail('writer_gate_unknown')
+    properties.tx.context(publication,schema,property_manifest,property_expected,policy)
+    historical.check_creation_titles(plan,publication,property_manifest,property_expected)
+    native=checkpoint_resume.verify_native(current,api)
     publication.check(plan['publication'])
     if not e.p.writer_gate({'old_writer_evidence':writers_guard()}):e.fail('writer_gate_unknown')
     return {'source_ancestry_verified':True,'native_verified':True,'external_writes':0,'loader':loader,'native':native}

@@ -21,14 +21,17 @@ REVIEW_KEYS = {'source_sha256', 'review_evidence_sha256', 'destination_data_sour
 APPROVED_MANIFESTS = _private_bindings.value('get_notion_historical', 'APPROVED_MANIFESTS')
 
 
-def validate(manifest, expected, *, apply=False):
+def validate(manifest, expected, *, apply=False, refresh_capability=None):
     try:
         if not isinstance(manifest, dict) or e.digest(manifest) != expected: e.fail('approval_missing')
         keys = {'contract', 'source_commit', 'data_source_id', 'database_id',
                 'audit_sha256', 'user_scope_sha256', 'records'}
         if set(manifest) != keys or manifest['contract'] != CONTRACT: e.fail('approval_missing')
         e.p.hex_hash(expected,64)
-        if apply and expected not in APPROVED_MANIFESTS: e.fail('approval_missing')
+        if apply and expected not in APPROVED_MANIFESTS:
+            from get_notion_historical_refresh import authorize
+            authorize(refresh_capability, manifest, expected, 'apply')
+        elif refresh_capability is not None: e.fail('approval_missing')
         e.p.hex_hash(manifest['source_commit'],40)
         for key in ('audit_sha256','user_scope_sha256'): e.p.hex_hash(manifest[key],64)
         for key in ('data_source_id','database_id'):
@@ -264,10 +267,13 @@ CAPTURE_CONTRACT='get-notion-historical-capture-1'
 APPROVED_CAPTURE_SCOPES = _private_bindings.value('get_notion_historical', 'APPROVED_CAPTURE_SCOPES')
 
 
-def validate_capture(candidate,expected,*,apply=False):
+def validate_capture(candidate,expected,*,apply=False,refresh_capability=None):
     if not isinstance(candidate,dict) or e.digest(candidate)!=expected: e.fail('approval_missing')
     if candidate.get('contract')!=CAPTURE_CONTRACT: e.fail('approval_missing')
-    if apply and expected not in APPROVED_CAPTURE_SCOPES: e.fail('approval_missing')
+    if apply and expected not in APPROVED_CAPTURE_SCOPES:
+        from get_notion_historical_refresh import authorize
+        authorize(refresh_capability,candidate,expected,'capture')
+    elif refresh_capability is not None:e.fail('approval_missing')
     # Reuse all source, privacy, destination, cohort and identity bounds.
     probe=deepcopy(candidate);probe['contract']=CONTRACT
     for row in probe.get('records',{}).values():
@@ -283,8 +289,15 @@ def validate_capture(candidate,expected,*,apply=False):
 def check_captures(captures):
     if not isinstance(captures,dict) or len(captures)>250: e.fail('state_invalid')
     if len(e.encoded(captures))>16*1024*1024: e.fail('request_budget')
+    refreshed_origins=set()
     for key,value in captures.items():
-        if not isinstance(value,dict) or set(value) not in ({'candidate','manifest','snapshots'}, {'candidate','manifest','snapshots','native_schema_evidence'}): e.fail('state_invalid')
+        if not isinstance(value,dict) or set(value) not in ({'candidate','manifest','snapshots'}, {'candidate','manifest','snapshots','native_schema_evidence'}, {'candidate','manifest','snapshots','native_schema_evidence','refresh'}): e.fail('state_invalid')
+        if 'refresh' in value:
+            from get_notion_historical_refresh import check_saved
+            refresh_binding=check_saved(value)
+            origin=refresh_binding['old_capture_sha256']
+            if origin in refreshed_origins or origin in captures:e.fail('state_invalid')
+            refreshed_origins.add(origin)
         validate_capture(value['candidate'],key)
         manifest=value['manifest'];validate(manifest,e.digest(manifest))
         if set(value['snapshots'])!=set(manifest['records']): e.fail('state_invalid')

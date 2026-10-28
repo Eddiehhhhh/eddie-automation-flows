@@ -37,6 +37,9 @@ def registry():
 
 
 def candidate_policy(policy, run):
+    import get_notion_checkpoint_resume as exact
+    selected, matched = exact.source_candidate_policy(policy, run)
+    if matched: return selected, True
     import get_publication_provenance as p
     import get_notion_idle_recovery as idle
     matches = [r for r in registry() if p.run_binding(run) == r['run_binding']]
@@ -46,6 +49,8 @@ def candidate_policy(policy, run):
 
 
 def verify_original_record(record, job_id, *, job, run):
+    import get_notion_checkpoint_resume as exact
+    if exact.verify_source_record(record,job_id,job=job,run=run):return
     import get_publication_provenance as p
     import get_notion_outbox as o
     rows = [r for r in registry() if p.run_binding(run) == r['run_binding']]
@@ -66,6 +71,9 @@ def discovery_locator(policy):
     """
     import get_publication_provenance as p
     import get_notion_idle_recovery as idle
+    import get_notion_checkpoint_resume as exact
+    coordinate=exact.source_discovery_locator(policy)
+    if coordinate is not None:return coordinate
     eligible = [row for row in registry() if idle._forward_policy(policy, row)]
     if not eligible:
         return None

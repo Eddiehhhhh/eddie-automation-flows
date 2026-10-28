@@ -251,7 +251,7 @@ class StaticContractTests(unittest.TestCase):
         raw=(ORIGINAL/'scripts/get_private_runtime_bindings.py').read_bytes()
         expected=('d6e568a4e9f14cf4dc0a5b040ccf8965dbf17e3d62a2dc87a9b9d228bcadc12f'
                   if ORIGINAL==ROOT/'runtime' else
-                  '4cfc87b563314f29facaa8b6cb57624edd0a22672a1936baea94f33d867ad23c')
+                  '8f48915f627adc9b71d8964aa521f7481bc6f69639a09817cba6c645731688d7')
         self.assertEqual(hashlib.sha256(raw).hexdigest(),expected)
 
 

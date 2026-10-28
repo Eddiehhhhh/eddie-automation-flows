@@ -39,8 +39,8 @@ class BoundedSourceReader(git.OfflineGit):
 def witness_parent(reader, cursor, history_witness):
     if history_witness is None:
         return None
-    if type(history_witness) is not entry.VerifiedHistoryWitness:
-        entry.fail('entry_history_witness')
+    history_witness = entry.select_history_witness(history_witness, observed=cursor)
+    if history_witness is None: return None
     if cursor != history_witness.observed_commit:
         return None
     # Recheck the exact receipt and both Get-tree endpoints. Authority is the

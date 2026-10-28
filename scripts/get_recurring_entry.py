@@ -81,10 +81,27 @@ class VerifiedHistoryWitness:
     record_sha256: str
 
 
+def select_history_witness(value, *, ancestor=None, observed=None):
+    """Exact interval selection, never widen a witness over an unknown target."""
+    if value is None: return None
+    if type(value) is VerifiedHistoryWitness: return value
+    import get_notion_idle_rotation as rotation
+    return rotation.history_interval(value, ancestor=ancestor, observed=observed)
+
+
+def check_history_witness(value):
+    if value is None or type(value) is VerifiedHistoryWitness: return
+    import get_notion_idle_rotation as rotation
+    if type(value) is not rotation.VerifiedHistoryBundle or value.seal is not rotation._JOINT_SEAL:
+        fail('entry_history_witness')
+    rotation.VerifiedHistoryBundle(value.intervals, rotation._JOINT_SEAL)
+
+
 def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None):
     """Reject an edit-and-revert too, rather than merely comparing tip trees."""
     a.checked(ancestor, 40); a.checked(descendant, 40)
     expected = reader.source_get_tree(ancestor)
+    history_witness = select_history_witness(history_witness, ancestor=ancestor)
     if history_witness is not None:
         if type(history_witness) is not VerifiedHistoryWitness:
             fail('entry_history_witness')

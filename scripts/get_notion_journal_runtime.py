@@ -460,7 +460,7 @@ def _terminal_report(raw, notion_interval, *, completed_at=None):
 
 
 def recover_anchor(client, *, run_id, run_attempt, public_policy,
-                   approved_public_policy_sha256, notion_policy_sha256, require_success=False, include_job_digest=False, include_terminal_report=False):
+                   approved_public_policy_sha256, notion_policy_sha256, require_success=False, include_job_digest=False, include_terminal_report=False, exact_missing_binding=None):
     """Authenticate one original terminal Actions attempt, even if Notion failed.
 
     This never qualifies a failed run as Get success. Exact controller bytes
@@ -525,7 +525,11 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
             'code_sha': policy['code_sha'], 'controller_sha': run['head_sha'],
             'rules_sha256': policy['rules_sha256'], 'notion_policy_sha256': notion_policy_sha256,
             'public_policy_sha256': approved_public_policy_sha256})
-        raw = private_proof.expand_for(client, client.logs(job['id']), policy=policy, run=run, notion_policy_sha256=notion_policy_sha256)
+        raw_log = client.logs(job['id'])
+        if exact_missing_binding is not None:
+            authenticated_recovery.checkpoint_resume.check_negative_observation(
+                exact_missing_binding,policy,run,job,raw_log)
+        raw = private_proof.expand_for(client, raw_log, policy=policy, run=run, notion_policy_sha256=notion_policy_sha256)
         records, get_record = _records(raw, expected, notion_times, get_times, policy, run)
         terminal_report = _terminal_report(raw, notion_times, completed_at=notion_step.get('completed_at')) if include_terminal_report else None
         # Re-read the exact original attempt, not just the mutable run alias.
@@ -684,11 +688,26 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
             before=latest[row['id']]
             _same_run(before,now)
             if now['run_attempt']==before['run_attempt'] and provenance.run_semantic_binding(now)!=provenance.run_semantic_binding(before):fail('journal_provenance_changed')
+            # A dynamic current hint cannot be bypassed by any older exact
+            # recovery branch. Every returned checkpoint must explain the same
+            # current state under this policy; original current ancestry remains
+            # mandatory after discovery.
+            if locator_envelope is not None:
+                result.update(rotation.validate_found(locator_envelope, result))
         # This single exact registration reserves one of the original four
         # candidate slots. Listing retention is not full log authentication.
-        locator = authenticated_recovery.clean_active.discovery_locator(policy)
+        import get_notion_idle_rotation as rotation
+        locator_envelope = rotation.current_hint(client, policy)
+        locator = (tuple(locator_envelope['hint']['execution'][k]
+                         for k in ('run_id', 'run_attempt'))
+                   if locator_envelope is not None else
+                   authenticated_recovery.checkpoint_resume.discovery_locator(policy))
+        locator_module = authenticated_recovery.checkpoint_resume
+        if locator is None:
+            locator = authenticated_recovery.clean_active.discovery_locator(policy)
+            locator_module = authenticated_recovery.clean_active
         if locator == (exclude_run_id, exclude_run_attempt): fail('journal_provenance_context')
-        if locator is not None:
+        if locator is not None and locator_envelope is None:
             candidates = [r for r in candidates if (r['id'],r['run_attempt']) != locator]
         checked = 0; locator_used = False
         while (candidates or (locator is not None and not locator_used)) and checked < 4:
@@ -699,16 +718,32 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 row=_latest_run(bounded.json('/actions/runs/'+str(ident)),policy)
                 if row['id']!=ident or row['run_attempt']!=attempt or row['status']!='completed':fail('journal_provenance_changed')
                 if ident in latest:_same_run(latest[ident],row)
-                if not authenticated_recovery.clean_active.candidate_policy(policy,row)[1]:fail('journal_provenance_changed')
+                if locator_envelope is None and not locator_module.candidate_policy(policy,row)[1]:fail('journal_provenance_changed')
                 latest[ident]=row;locator_used=True
             else:
                 row = candidates.pop(0)
+                if locator_envelope is not None and (row['id'], row['run_attempt']) == locator:
+                    locator_used = True
             checked += 1
+            # Exact target-scoped evidence is selected BEFORE an otherwise
+            # deterministic mismatching-controller read. Each original
+            # attempt/job/log/alias verifier remains intact; no dynamic cache.
+            exact = authenticated_recovery.checkpoint_resume
+            if exact.negative_binding(policy,row,latest=latest[row['id']]) is not None:
+                exact.require_missing_negative(bounded,policy,row)
+                continue
+            if exact.candidate_policy(policy,row)[1]:
+                result=exact.recover_checkpoint(bounded,row['id'],row['run_attempt'])
+                match_candidate(result,row)
+                return {**result,'candidate_runs_checked':checked,'candidate_attempts_checked':checked,
+                    'provenance_reads':bounded.requests,'provenance_bytes':bounded.bytes}
             try:
                 result = recover_anchor(bounded, run_id=row['id'], run_attempt=row['run_attempt'],
                     public_policy=policy, approved_public_policy_sha256=approved_public_policy_sha256,
                     notion_policy_sha256=notion_policy_sha256)
             except CheckpointFailure as exc:
+                if locator_envelope is not None and (row['id'], row['run_attempt']) == locator:
+                    raise
                 if (str(exc) == 'journal_provenance_other_controller'
                         and authenticated_recovery.registered_run(row['id'], row['run_attempt'])
                         and authenticated_recovery.candidate_policy(policy, row)[1]):
@@ -810,6 +845,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                     raise
             else:
                 match_candidate(result,row)
+                result = rotation.validate_found(locator_envelope, result)
                 # All known candidates are ordered by original attempt time.
                 # An earlier attempt can never outrank the attempt above it.
                 # Stop as soon as the newest eligible checkpoint is verified;

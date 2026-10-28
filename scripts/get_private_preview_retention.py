@@ -24,6 +24,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import ssl
+import http.client
 
 import source_sync_pack_seed as pack_seed
 
@@ -236,7 +238,7 @@ class _TreeReadDeadline:
     nested alarm fallback is allowed. An existing alarm is never overwritten.
     """
     def __enter__(self):
-        self.locked=False;self.installed=False;self.armed=False
+        self.locked=False;self.installed=False;self.armed=False;self.deadline_expired=False
         if (threading.current_thread() is not threading.main_thread()
                 or not all(hasattr(signal,k) for k in ('SIGALRM','ITIMER_REAL','getitimer','setitimer'))
                 or not _TREE_READ_LOCK.acquire(blocking=False)):fail('remote_read_failed')
@@ -255,11 +257,14 @@ class _TreeReadDeadline:
             fail('remote_read_failed')
 
     def expired(self,signum,frame):
+        self.deadline_expired=True
         fail('remote_read_failed')
 
     def remaining(self):
         now=time.monotonic()
-        if not math.isfinite(now) or now<self.last or now>=self.deadline:fail('remote_read_failed')
+        if not math.isfinite(now) or now<self.last or now>=self.deadline:
+            self.deadline_expired=True
+            fail('remote_read_failed')
         self.last=now
         return self.deadline-now
 
@@ -282,6 +287,20 @@ def _tree_open_transient(error):
     return type(cause) in (ConnectionResetError,ConnectionAbortedError,ConnectionRefusedError,TimeoutError)
 
 
+def _read_error_class(error):
+    """Fixed enums only. Never exception text, headers, URL or private payload."""
+    if type(error) is urllib.error.HTTPError:return 'http'
+    cause=error.reason if type(error) is urllib.error.URLError else error
+    if isinstance(cause,ssl.SSLCertVerificationError):return 'certificate'
+    if isinstance(cause,ssl.SSLError):return 'tls'
+    if type(cause) is TimeoutError:return 'timeout'
+    if type(cause) in (ConnectionResetError,ConnectionAbortedError,ConnectionRefusedError):return 'connection'
+    if isinstance(cause,http.client.IncompleteRead):return 'incomplete_read'
+    if type(error) is urllib.error.URLError:return 'url_error'
+    if isinstance(error,RetentionFailure):return 'validation'
+    return 'other'
+
+
 class GitHubRemote:
     """Fixed repository, read-only REST verification and create-only Git refs."""
     def __init__(self, local, token):
@@ -291,76 +310,125 @@ class GitHubRemote:
         safe_environment(token)
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
+    def _begin_read(self):
+        if not hasattr(self,'_read_metrics'):
+            self._read_metrics={'logical_requests':0,'physical_attempts':0,'response_bytes':0,'failed_read_bound':0}
+        self._read_metrics['logical_requests']+=1
+        self._read_failure=None;self._read_error_id=None;self._read_phase='validation';self._read_status=None
+
+    def _read_error(self,error,*,phase=None,deadline=False):
+        status=error.code if type(error) is urllib.error.HTTPError else self._read_status
+        self._read_failure={'phase':'deadline' if deadline else phase or self._read_phase,
+            'error_class':'deadline' if deadline else _read_error_class(error),
+            'http_status':status if type(status) is int and 100<=status<=599 else None}
+        self._read_error_id=id(error)
+
+    def read_diagnostic(self):
+        if not isinstance(getattr(self,'_read_failure',None),dict):return None
+        # Only bounded scalar counters and fixed classifications leave transport.
+        value=dict(self._read_failure);value.update(self._read_metrics)
+        value.update(tree_extra_used=_TREE_RETRIES_USED,tree_extra_limit=_TREE_RETRY_LIMIT,
+                     tree_physical_attempts=_TREE_READ_METRICS['attempts'])
+        return value
+
     def request(self, suffix, *, missing=False, maximum=1024 * 1024):
         if isinstance(suffix,str) and re.fullmatch(r'/git/trees/[0-9a-f]{40}',suffix) and not missing:
             return self._immutable_tree_request(suffix,maximum)
+        self._begin_read()
         request = urllib.request.Request('https://api.github.com/repos/' + REPOSITORY + suffix,
             headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
                      'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'get-private-preview-retention'})
         try:
+            self._read_phase='open';self._read_metrics['physical_attempts']+=1
             with self.opener.open(request, timeout=60) as response:
-                if response.status != 200:
-                    fail('remote_read_failed')
-                data = response.read(maximum + 1)
-            if len(data) > maximum:
-                fail('remote_response_budget')
+                self._read_status=response.status
+                if response.status != 200:fail('remote_read_failed')
+                self._read_phase='read'
+                try:data = response.read(maximum + 1)
+                except Exception as error:
+                    self._read_metrics['failed_read_bound']+=maximum+1;self._read_error(error);raise
+                finally:self._read_phase='close'
+                self._read_metrics['response_bytes']+=len(data)
+            self._read_phase='validation'
+            if len(data) > maximum:fail('remote_response_budget')
             value = strict_json(data)
-            if not isinstance(value, dict):
-                fail('remote_schema_invalid')
+            if not isinstance(value, dict):fail('remote_schema_invalid')
+            self._read_failure=None
             return value
         except urllib.error.HTTPError as error:
-            status = error.code
-            error.close()
+            status = error.code;self._read_error(error)
+            try:error.close()
+            except Exception as close_error:self._read_error(close_error,phase='close');raise
             if missing and status == 404:
+                self._read_failure=None
                 return None
             fail('remote_read_failed')
-        except RetentionFailure:
+        except RetentionFailure as error:
+            if self._read_error_id!=id(error):self._read_error(error)
             raise
-        except Exception:
+        except Exception as error:
+            if self._read_error_id!=id(error):self._read_error(error)
             fail('remote_read_failed')
 
     def _immutable_tree_request(self,suffix,maximum):
         global _TREE_RETRIES_USED
+        self._begin_read()
         if (not re.fullmatch(r'/git/trees/[0-9a-f]{40}',suffix)
                 or type(maximum) is not int or not 0<maximum<=16*1024*1024):fail('remote_read_failed')
         request=urllib.request.Request('https://api.github.com/repos/'+REPOSITORY+suffix,
             headers={'Authorization':'Bearer '+self.token,'Accept':'application/vnd.github+json',
                 'X-GitHub-Api-Version':'2022-11-28','User-Agent':'get-private-preview-retention'})
+        deadline=None
         try:
+            self._read_phase='deadline'
             with _TreeReadDeadline() as deadline:
                 for attempt in range(2):
                     timeout=deadline.remaining()
                     _TREE_READ_METRICS['attempts']+=1
+                    self._read_phase='open';self._read_metrics['physical_attempts']+=1
                     try:
                         response=self.opener.open(request,timeout=timeout)
                     except Exception as error:
+                        self._read_error(error,deadline=getattr(deadline,'deadline_expired',False))
                         retry=_tree_open_transient(error)
-                        if isinstance(error,urllib.error.HTTPError):error.close()
+                        if isinstance(error,urllib.error.HTTPError):
+                            try:error.close()
+                            except Exception as close_error:self._read_error(close_error,phase='close');raise
                         deadline.remaining()
                         if not retry or attempt or _TREE_RETRIES_USED>=_TREE_RETRY_LIMIT:fail('remote_read_failed')
                         _TREE_RETRIES_USED+=1;_TREE_READ_METRICS['extra_attempts']+=1
+                        self._read_failure=None;self._read_error_id=None
                         continue
-                    # Never retry any error after open returns, including partial
-                    # bodies, close/JSON/schema failure or non-200 mock response.
+                    # Original tree-only open-stage retry policy is unchanged.
+                    # No read/close/JSON/schema failure ever retries.
                     with response:
+                        self._read_status=response.status
                         if response.status!=200:fail('remote_read_failed')
-                        # On a partial-read exception the library exposes no
-                        # byte count: conservatively charge the full bound and
-                        # abort. Never reset a byte budget to permit a retry.
                         _TREE_READ_METRICS['charged_bytes']+=maximum+1
+                        self._read_phase='read'
                         try:data=response.read(maximum+1)
-                        except Exception:
+                        except Exception as error:
                             _TREE_READ_METRICS['read_failures']+=1
-                            raise
+                            self._read_metrics['failed_read_bound']+=maximum+1
+                            self._read_error(error,deadline=getattr(deadline,'deadline_expired',False));raise
+                        finally:self._read_phase='close'
                         _TREE_READ_METRICS['read_bytes']+=len(data)
                         _TREE_READ_METRICS['charged_bytes']-=maximum+1-len(data)
-                    deadline.remaining()
+                        self._read_metrics['response_bytes']+=len(data)
+                    self._read_phase='deadline';deadline.remaining()
+                    self._read_phase='validation'
                     if len(data)>maximum:fail('remote_response_budget')
                     value=strict_json(data)
                     if not isinstance(value,dict):fail('remote_schema_invalid')
+                    self._read_failure=None
                     return value
-        except RetentionFailure:raise
-        except Exception:fail('remote_read_failed')
+        except RetentionFailure as error:
+            if getattr(deadline,'deadline_expired',False):self._read_error(error,deadline=True)
+            elif self._read_failure is None or (self._read_phase=='close' and self._read_error_id!=id(error)):self._read_error(error)
+            raise
+        except Exception as error:
+            if self._read_error_id!=id(error):self._read_error(error,deadline=getattr(deadline,'deadline_expired',False))
+            fail('remote_read_failed')
 
     def metadata(self):
         return self.request('')
@@ -376,11 +444,19 @@ class GitHubRemote:
         return checked_sha(value['object'].get('sha'))
 
     def commit(self, commit):
+        return self.commit_with_locator(commit)[0]
+
+    def commit_with_locator(self, commit):
+        # One physical immutable response, returned together; no mutable
+        # last-observation slot, extra HTTP call, or change to commit() shape.
         value = self.request('/git/commits/' + checked_sha(commit))
         if value.get('sha') != commit:
             fail('remote_commit_invalid')
-        return {'tree': checked_sha(value.get('tree', {}).get('sha')),
-                'parents': [checked_sha(p.get('sha')) for p in value.get('parents', [])]}
+        result = {'tree': checked_sha(value.get('tree', {}).get('sha')),
+                  'parents': [checked_sha(p.get('sha')) for p in value.get('parents', [])]}
+        import get_notion_idle_rotation as rotation
+        locator = rotation.commit_envelope(value, commit)
+        return result, locator
 
     def blob(self, blob, expected_size):
         value = self.request('/git/blobs/' + checked_sha(blob), maximum=2 * expected_size + 65536)

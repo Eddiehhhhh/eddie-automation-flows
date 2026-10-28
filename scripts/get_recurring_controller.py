@@ -139,10 +139,28 @@ def verify_remote(client, controller_sha, policy, *, event='schedule'):
     # Validate the caller's policy even on a cache hit. A cached blob is not
     # cached approval and cannot bless a different policy or event.
     scheduled = expected_bytes(policy)
-    cacheable = type(client) in (p.PublicGithub, p.AnonymousGithub)
-    key = (policy['workflow_path'], controller_sha)
-    cache = _VERIFIED_CONTROLLER_BYTES.get(client) if cacheable else None
-    raw = cache.get(key) if cache is not None else None
+    # Only the original bounded journal wrapper may share this invocation's
+    # already-verified immutable bytes. No duck-typed or recursive unwrapping,
+    # dynamic response caching, caller-injected envelope or cross-client reuse.
+    owner = client
+    import get_notion_journal_runtime as journal_runtime
+    if type(client) is journal_runtime._ReadBudget:
+        owner = client.client
+    cacheable = type(owner) in (p.PublicGithub, p.AnonymousGithub)
+    cache = _VERIFIED_CONTROLLER_BYTES.get(owner) if cacheable else None
+    def cache_key(raw):
+        return (p.REPOSITORY, controller_sha, policy['workflow_path'], r.oid(raw), a.sha(raw))
+    raw = None
+    if cache is not None:
+        matches = [(key, saved) for key, saved in cache.items()
+                   if key[:3] == (p.REPOSITORY, controller_sha, policy['workflow_path'])]
+        if len(matches) > 1:
+            p.fail('provenance_controller')
+        if matches:
+            key, saved = matches[0]
+            if type(saved) is not bytes or key != cache_key(saved):
+                p.fail('provenance_controller')
+            raw = saved
     if raw is None:
         value = client.json('/contents/' + policy['workflow_path'] + '?ref=' + controller_sha)
         if not isinstance(value, dict) or value.get('type') != 'file' or value.get('path') != policy['workflow_path'] or value.get('encoding') != 'base64' or type(value.get('size')) is not int or not 0 <= value['size'] <= MAX_CONTROLLER:
@@ -161,8 +179,8 @@ def verify_remote(client, controller_sha, policy, *, event='schedule'):
     if cacheable:
         if cache is None:
             cache = {}
-            _VERIFIED_CONTROLLER_BYTES[client] = cache
-        cache[key] = raw
+            _VERIFIED_CONTROLLER_BYTES[owner] = cache
+        cache[cache_key(raw)] = raw
     return controller_sha
 
 

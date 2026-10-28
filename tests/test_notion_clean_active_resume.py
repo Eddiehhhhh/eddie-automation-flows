@@ -399,6 +399,13 @@ class FiniteRegisteredSuccessor(FiniteGitFixture):
 class FourSlotDiscovery(unittest.TestCase):
     """Actual discovery control flow, explicit synthetic endpoint/proof adapters."""
     def setUp(self):
+        from unittest.mock import patch
+        # Original registered-locator policy fixture; dynamic rotation is tested separately.
+        def no_hint(envelope,result):
+            assert envelope is None
+            return result
+        disabled=patch.dict(sys.modules,{'get_notion_idle_rotation':NS(current_hint=lambda *a,**kw:None,validate_found=no_hint)})
+        disabled.start();self.addCleanup(disabled.stop)
         from datetime import datetime,timedelta,timezone
         import re
         self.error=type('SyntheticCheckpointFailure',(ValueError,),{})
@@ -428,7 +435,7 @@ class FourSlotDiscovery(unittest.TestCase):
             if self.success==run_id:return proof(next(r for r in self.rows if r['id']==run_id))
             reject('journal_provenance_other_controller')
         clean=NS(discovery_locator=lambda policy:self.locator,candidate_policy=lambda policy,row:(policy,row==self.rows[0]))
-        auth=NS(clean_active=clean,registered_run=lambda ident,attempt:(ident,attempt)==(1,1),
+        auth=NS(clean_active=clean,checkpoint_resume=NS(discovery_locator=lambda policy:None,negative_binding=lambda *a,**kw:None,candidate_policy=lambda p,r:(p,False)),registered_run=lambda ident,attempt:(ident,attempt)==(1,1),
             candidate_policy=clean.candidate_policy,recover_checkpoint=lambda client,ident,attempt:proof(self.fixed))
         noop=NS(registered_run=lambda *a:False,can_recover=lambda *a:False,OLD_RUN=-1,OLD_ATTEMPT=1,RUN10_RUN=-1,RUN10_ATTEMPT=1,RUN=-1,ATTEMPT=1)
         ns={'deepcopy':deepcopy,'re':re,'timedelta':timedelta,'CheckpointFailure':self.error,'fail':reject,
@@ -538,7 +545,7 @@ class RuntimeOldLocatorBoundary(FiniteGitFixture):
             'outbox':NS(STATE_PATH=self.state_path),'e':NS(digest=digest),'scope_for':lambda p:{},
             'historical_active':NS(PREPARED_TAG='not-matching',INFLIGHT_TAG='not-matching'),
             'authenticated_recovery':NS(TAG='not-matching'),'create_resume':NS(TAG='not-matching'),
-            'clean_active':self.bridge,'failure_diagnostic':lambda exc:{'reason':str(exc)},'safe_png_diagnostic':lambda v:{}}
+            'clean_active':self.bridge,'checkpoint_resume':NS(TAG='not-matching'),'failure_diagnostic':lambda exc:{'reason':str(exc)},'safe_png_diagnostic':lambda v:{}}
         extract('get_notion_runtime.py',{'run'},ns)
         result=ns['run']('synthetic',forbidden,lambda:True,public_policy={},approved_public_policy_sha256='a'*64,public_client=object())
         self.assertEqual(result['status'],'failed');self.assertEqual(result['stage'],'journal')
@@ -885,9 +892,11 @@ class RuntimeEmitterContract(unittest.TestCase):
     def test_callback_is_distinct_only_for_exact_bridge(self):
         tree=ast.parse((SCRIPTS/'get_notion_runtime.py').read_text());run=next(n for n in tree.body if isinstance(n,ast.FunctionDef)and n.name=='run')
         assigned=[n for n in ast.walk(run)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=='journal_confirm'for t in n.targets)]
-        self.assertEqual(sorted(ast.unparse(n.value)for n in assigned),['confirm','remote.remote.confirm'])
+        self.assertEqual(sorted(ast.unparse(n.value)for n in assigned),['confirm','remote.remote.confirm','remote.remote.confirm'])
         branches=[n for n in ast.walk(run)if isinstance(n,ast.If)and 'clean_active.TAG' in ast.unparse(n.test)]
         self.assertEqual(sum('journal_confirm = remote.remote.confirm' in ast.unparse(n)for n in branches),1)
+        exact=[n for n in ast.walk(run)if isinstance(n,ast.If)and 'checkpoint_resume.TAG' in ast.unparse(n.test)]
+        self.assertEqual(sum('journal_confirm = remote.remote.confirm' in ast.unparse(n)for n in exact),1)
 
 class OriginalEmitterAdmission(Fixture):
     def setup_emitter(self):

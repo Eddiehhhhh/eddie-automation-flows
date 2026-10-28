@@ -51,11 +51,40 @@ class Transport:
         def before_network_budget():
             if not read:raise NotDispatched(key)
             fail('request_budget')
+        def closure_budget(*,before=True):
+            reservation=getattr(self,'closure_reservation',None)
+            if reservation is None:return
+            from get_notion_idle_rotation import ClosureReservation
+            try:
+                if type(reservation) is not ClosureReservation or reservation.request is not self:
+                    raise ValueError('closure budget')
+                if reservation.active and not read:raise ValueError('closure read only')
+                reservation.check()
+            except Exception:
+                if before:before_network_budget()
+                fail('response_budget' if read else 'write_uncertain')
+        def read_body(response):
+            # Charge inside the response context: a close failure must not erase
+            # bytes already read. A bounded read which raises has an unknown
+            # partial body, conservatively charged at its entire requested bound.
+            # This changes no retry/authorization rule and never logs the body.
+            try:
+                raw=response.read(ro.MAX_RESPONSE+1)
+            except Exception:
+                self.bytes+=ro.MAX_RESPONSE+1
+                raise
+            if not isinstance(raw,bytes):
+                self.bytes+=ro.MAX_RESPONSE+1
+                fail('malformed_response' if read else 'write_uncertain')
+            self.bytes+=len(raw)
+            return raw
         if data is not None and len(data)>(16384 if read else 500000):before_network_budget()
         for attempt in range(3 if read else 1):
+            closure_budget()
             if self.attempts>=2000 or self.clock()>=self.deadline:before_network_budget()
             if self.last is not None:self.sleep(max(0,.4-(self.clock()-self.last)))
             if self.clock()>=self.deadline:before_network_budget()
+            closure_budget()
             self.last=self.clock();self.attempts+=1
             req=urllib.request.Request('https://api.notion.com/v1'+path,data=data,method=method,headers={'Authorization':'Bearer '+self._token,'Notion-Version':VERSION,'Content-Type':'application/json'})
             if not read:self.attempted.add(key)
@@ -66,8 +95,8 @@ class Transport:
                     if observed_status not in (200,201):
                         if read:fail('read_api_failed',observed_status)
                         raise WriteFailure('permission_denied' if observed_status in (401,403) else 'write_uncertain',observed_status,key)
-                    raw=response.read(ro.MAX_RESPONSE+1)
-                self.bytes+=len(raw)
+                    raw=read_body(response)
+                closure_budget(before=False)
                 if len(raw)>ro.MAX_RESPONSE or self.bytes>ro.MAX_HTTP_BYTES:fail('response_budget' if read else 'write_uncertain')
                 try:result=strict_capture_json(raw,ro.MAX_RESPONSE)
                 except Exception:fail('malformed_response' if read else 'write_uncertain')
@@ -79,7 +108,9 @@ class Transport:
                 if not read:
                     exc.close()
                     raise WriteFailure('permission_denied' if status in (401,403) else 'write_uncertain',status,key) from None
-                raw=exc.read(ro.MAX_RESPONSE+1);exc.close();self.bytes+=len(raw)
+                try:raw=read_body(exc)
+                finally:exc.close()
+                closure_budget(before=False)
                 if len(raw)>ro.MAX_RESPONSE or self.bytes>ro.MAX_HTTP_BYTES:fail('response_budget')
                 try:err=strict_capture_json(raw,ro.MAX_RESPONSE)
                 except Exception:err={}

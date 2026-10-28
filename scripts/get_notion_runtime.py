@@ -36,6 +36,8 @@ import get_notion_historical_active_recovery as historical_active
 import get_notion_authenticated_recovery as authenticated_recovery
 import get_notion_create_resume as create_resume
 import get_notion_clean_active_resume as clean_active
+import get_notion_checkpoint_resume as checkpoint_resume
+import get_notion_idle_rotation as idle_rotation
 import get_notion_idle_recovery as idle_recovery
 import get_notion_blocked_idle_recovery as blocked_idle
 import get_notion_run16_recovery as run16_recovery
@@ -602,6 +604,11 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         if fixed_source:
             stage='source'
             fixed_auth.reserve_publication_slot(client, public_policy, execution)
+        elif apply and idle_rotation.enabled(public_policy):
+            # The current run's Get publication is not terminal idle authority.
+            # Authenticate the prior coordinate under the same original cap.
+            stage='source'
+            fixed_auth.reserve_publication_slot(client, public_policy, execution)
         if expected_parent is not None and parent!=expected_parent:fail('notion_source_changed')
         initial_get_tree=remote.source_get_tree(parent)
         with tempfile.TemporaryDirectory(prefix='get-notion-runtime-',dir=work) as folder:
@@ -645,6 +652,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 anchor=authenticated_recovery.verify_successor(local,remote,loader,parent,found)
             if present and found.get('recovery_anchor') == create_resume.TAG:
                 anchor=create_resume.verify_successor(local,remote,loader,parent,found)
+            if present and found.get('recovery_anchor') == checkpoint_resume.TAG:
+                anchor=checkpoint_resume.verify_successor(local,remote,loader,parent,found)
+                remote.remote=checkpoint_resume.FiniteHeadRemote(remote.remote,parent,confirm)
+                journal_confirm=remote.remote.confirm
             if present and found.get('recovery_anchor') == clean_active.TAG:
                 anchor=clean_active.verify_successor(local,remote,loader,parent,found)
                 # Bind mutable reads/CAS to the just-verified finite terminal.
@@ -655,7 +666,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             post_cas_paths=() if post_cas_binding is None else tuple(sorted({
                 path for row in post_cas_binding['known_descendants'] for path in row['changes']}))
             durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=journal_confirm,
-                post_cas_paths=post_cas_paths,post_cas_mirror=True)
+                post_cas_paths=post_cas_paths,post_cas_mirror=True,
+                require_locator=bool(apply and idle_rotation.enabled(public_policy)))
             current,sha=durable.read()
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
                 fail('notion_state_anchor')
@@ -669,11 +681,27 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             authenticated_recovery.check_mode(current, found if present else {}, historical_manifest,
                 approved_historical_manifest_sha256, (property_manifest, historical_capture))
             historical_bridge_loader=None
+            if apply and idle_rotation.enabled(public_policy):
+                durable.rotation_required=True
+                if not present or idle_rotation.install_locator(client, public_policy, execution, current, found,
+                        durable, request, writers_guard=guarded_writers) is not True:
+                    fail('rotation_not_installed')
+                if (type(durable.locator) is not idle_rotation.JournalLocator
+                        or durable.rotation_required is not True
+                        or durable.locator.reservation is not getattr(request,'closure_reservation',None)
+                        or durable.locator.reservation.request is not request
+                        or not hasattr(durable,'history_witness')):
+                    fail('rotation_not_installed')
+                history_witness=durable.history_witness
+            refresh_session=None
             if fixed_source:
                 # No old active-plan bridge or journal-selected source fallback.
                 fixed_auth.check_state(current, found if present else {})
+                if apply and idle_rotation.enabled(public_policy):
+                    import get_notion_historical_refresh as historical_refresh
+                    refresh_session=historical_refresh.prepare(durable,fixed_selection,current,parent,public_policy,local,remote,token,root)
                 historical_bridge_loader=fixed_auth.verify_sources(local, remote, token, root, parent,
-                    fixed_selection, public_policy['get_policy_sha256'])
+                    fixed_selection, public_policy['get_policy_sha256'], refresh_session=refresh_session)
                 source_guard(parent); writers_guard()
                 fixed_auth.emit(checkpoint_stream, {**execution,
                     'rules_sha256':public_policy['rules_sha256'],
@@ -684,7 +712,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             # Canonical immutable history proof must complete before an own
             # policy-transition CAS changes the private proof resolver's head.
             # Keep the same client, budgets and every original witness check.
-            if all(mode is None for mode in modes) and public_policy is not None and provenance.HISTORY_WITNESS is not None:
+            if all(mode is None for mode in modes) and history_witness is None and public_policy is not None and provenance.HISTORY_WITNESS is not None:
                 history_witness = provenance.verify_history_witness(client, public_policy,
                     candidate_runs_checked=found.get('candidate_runs_checked', 0) if present else 0)
             # The separate authenticated idle predecessor bridge is deliberately
@@ -698,6 +726,15 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if present and found.get('recovery_anchor')==blocked_idle.TAG:
                 candidate=blocked_idle.transition_outer(current,sha,
                     public_policy['get_policy_sha256'],proof=found)
+                write_possible=apply
+                if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                else:store=ReadOnlyStore(candidate);current,sha=store.read()
+            if present and found.get('recovery_anchor') == checkpoint_resume.TAG:
+                bridge_materialized=historical_runtime.verify_prepared_checkpoint_transition(local,remote,token,root,current,sha,request,
+                    manifest=historical_manifest,expected=approved_historical_manifest_sha256,
+                    policy_hash=public_policy['get_policy_sha256'],writers_guard=guarded_writers)
+                historical_bridge_loader=bridge_materialized['loader']
+                candidate=checkpoint_resume.transition_outer(current,sha,public_policy['get_policy_sha256'],proof=found,native=bridge_materialized['native'])
                 write_possible=apply
                 if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
                 else:store=ReadOnlyStore(candidate);current,sha=store.read()
@@ -778,11 +815,11 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     result=historical_runtime.capture_group(local,remote,token,root,store,request,
                         selection=historical_capture,expected=approved_historical_capture_sha256,
                         policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,
-                        durable=durable,emitter=confirm,refresh=capture_refresh,loader=historical_bridge_loader)
+                        durable=durable,emitter=confirm,refresh=capture_refresh,loader=historical_bridge_loader,refresh_session=refresh_session)
                 else:
                     result=historical_runtime.capture(local,remote,token,root,store,request,
                         candidate=historical_capture,expected=approved_historical_capture_sha256,
-                        policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,loader=historical_bridge_loader)
+                        policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,loader=historical_bridge_loader,refresh_session=refresh_session)
                     capture_refresh()
                 result.update(journal_commits=durable.commits_attempted,source_parent=parent,
                     notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
@@ -811,7 +848,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     policy_hash=public_policy['get_policy_sha256'],apply=apply,writers_guard=guarded_writers,
                     loader=historical_bridge_loader,row_admit=create_admission,
                     settle_row_yield=create_admission.settle if create_admission is not None else None,
-                    resume_admit=create_admission.prepared_resume if create_admission is not None else None)
+                    resume_admit=create_admission.prepared_resume if create_admission is not None else None,refresh_session=refresh_session)
                 source_guard()
                 if apply and durable.anchor['state_blob'] is not None:
                     verified,verified_sha=durable.read()

@@ -8,6 +8,7 @@ from copy import deepcopy
 import get_private_runtime_bindings as bindings
 import get_notion_create_resume as create_resume
 import get_notion_clean_active_resume as clean_active
+import get_notion_checkpoint_resume as checkpoint_resume
 
 TAG = 'authenticated_unknown_append_v1'
 
@@ -54,6 +55,8 @@ def _append_run_binding(run_id, attempt=None):
 
 
 def run_binding(run_id, attempt=None):
+    exact = checkpoint_resume.run_binding(run_id, attempt)
+    if exact is not None: return exact
     exact = clean_active.run_binding(run_id, attempt)
     if exact is not None: return exact
     old = _append_run_binding(run_id, attempt)
@@ -63,6 +66,8 @@ def run_binding(run_id, attempt=None):
 
 
 def plan_binding(plan):
+    exact = checkpoint_resume.plan_binding(plan)
+    if exact is not None: return exact
     exact = clean_active.plan_binding(plan)
     if exact is not None: return exact
     old = _append_plan_binding(plan)
@@ -76,6 +81,8 @@ def registered_run(run_id, attempt=None):
 
 
 def candidate_policy(policy, run):
+    if checkpoint_resume.run_binding(run.get("id"), run.get("run_attempt")) is not None:
+        return checkpoint_resume.candidate_policy(policy, run)
     if clean_active.run_binding(run.get("id"), run.get("run_attempt")) is not None:
         return clean_active.candidate_policy(policy, run)
     if create_resume.run_binding(run.get("id"), run.get("run_attempt")) is not None:
@@ -100,6 +107,8 @@ def candidate_policy(policy, run):
 
 
 def recover_checkpoint(client, run_id, run_attempt):
+    if checkpoint_resume.run_binding(run_id, run_attempt) is not None:
+        return checkpoint_resume.recover_checkpoint(client, run_id, run_attempt)
     if clean_active.run_binding(run_id, run_attempt) is not None:
         return clean_active.recover_checkpoint(client, run_id, run_attempt)
     if create_resume.run_binding(run_id, run_attempt) is not None:
@@ -147,6 +156,8 @@ def exact_hold_present(engine):
 
 
 def allows(plan, journal):
+    if checkpoint_resume.plan_binding(plan) is not None:
+        return checkpoint_resume.allows(plan, journal)
     """Dispatch exact create registrations; retain original append verifier."""
     if clean_active.plan_binding(plan) is not None:
         return clean_active.allows(plan, journal)
@@ -225,6 +236,8 @@ def isolate_outer(state, sha, new_policy):
 
 def check_mode(state, found, manifest, expected, other_modes):
     active = state['engine_state']['journal']
+    if found.get('recovery_anchor') == checkpoint_resume.TAG or (active and checkpoint_resume.plan_binding(active['plan']) is not None):
+        return checkpoint_resume.check_mode(state, found, manifest, expected, other_modes)
     if found.get('recovery_anchor') == clean_active.TAG or (active and clean_active.plan_binding(active['plan']) is not None):
         return clean_active.check_mode(state, found, manifest, expected, other_modes)
     if found.get('recovery_anchor') == create_resume.TAG or (active and create_resume.plan_binding(active['plan']) is not None):
@@ -320,6 +333,8 @@ def transition_manifest(manifest, expected, plan):
 def preserve(before, after):
     """CAS-level monotonicity in addition to external checkpoint authentication."""
     active = before['engine_state']['journal']
+    if active and checkpoint_resume.plan_binding(active['plan']) is not None:
+        return checkpoint_resume.preserve(before, after)
     if active and clean_active.plan_binding(active['plan']) is not None:
         return clean_active.preserve(before, after)
     if active and create_resume.plan_binding(active['plan']) is not None:

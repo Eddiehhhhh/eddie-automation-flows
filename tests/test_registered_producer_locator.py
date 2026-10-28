@@ -135,7 +135,13 @@ class API:
 class LocatorTests(unittest.TestCase):
     def setUp(self): self.p = load_runtime()
     def discover(self, api, **kw):
-        with patch.object(self.p.registered_predecessor, 'discovery_locator', return_value=(1001, 1)):
+        # Explicit pre-rotation policy adapter; no private capsule in public CI.
+        # Joint/marked-CAS rotation is exercised by separate original probes.
+        disabled=SimpleNamespace(source_search=lambda *a,**kw:None,
+            observe_source=lambda client,policy,run,value,**kw:value,
+            observation_for=lambda *a,**kw:None,select_observation=lambda *a,**kw:None)
+        with patch.object(self.p.registered_predecessor, 'discovery_locator', return_value=(1001, 1)), \
+                patch.dict('sys.modules', {'get_notion_idle_rotation':disabled}):
             return self.p.discover(api, policy(self.p), **kw)
     def test_historical_9_and_95_use_only_four_original_slots(self):
         for count in (9, 95):
@@ -216,7 +222,7 @@ class LocatorTests(unittest.TestCase):
         node = next(n for n in ast.parse(source.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == 'discovery_locator')
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), module.__dict__)
         idle = SimpleNamespace(_forward_policy=lambda policy, row: row['compatible'])
-        with patch.dict('sys.modules', {'get_publication_provenance': p, 'get_notion_idle_recovery': idle}):
+        with patch.dict('sys.modules', {'get_publication_provenance': p, 'get_notion_idle_recovery': idle, 'get_notion_checkpoint_resume':SimpleNamespace(source_discovery_locator=lambda policy:None)}):
             self.assertEqual(module.discovery_locator(policy(p)), (1002, 1))
             module.registry = lambda: []
             self.assertIsNone(module.discovery_locator(policy(p)))

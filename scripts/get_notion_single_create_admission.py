@@ -180,6 +180,21 @@ class Admission:
     def settle(self, store, plan, result):
         try:
             if self.durable.poisoned or self.emitter.failed:self.engine.fail('journal_failed')
+            if getattr(self.durable,'locator',None) is not None:
+                # The bounded current-commit locator can retain this active
+                # boundary. Do not clear a partial batch merely to refresh a
+                # search slot, and never call it idle or completely accepted.
+                if result.get('status')!='partial' or result.get('reason')!='batch_boundary_yield':
+                    raise ValueError('not a clean budget yield')
+                state,version=store.read();self.engine.check_state(state)
+                journal=state['journal']
+                if (version!=self.engine.digest(state) or version!=result['state_sha256']
+                        or journal is None or journal['plan']!=plan
+                        or journal['plan_sha256']!=self.engine.digest(plan)
+                        or journal['operation'] is not None
+                        or not 0<=journal['index']<len(plan['records'])):
+                    raise ValueError('not an active clean boundary')
+                return result
             return settle_clean_yield(self.engine,store,plan,result)
         except self.engine.Blocked:raise
         except Exception:self.engine.fail('journal_failed')

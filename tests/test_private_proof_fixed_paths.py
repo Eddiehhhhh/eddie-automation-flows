@@ -93,7 +93,10 @@ class FixedPathTests(unittest.TestCase):
     def rejection(self,reason=None):
         stream=io.StringIO()
         with contextlib.redirect_stderr(stream),self.assertRaisesRegex(p.PrivateProofError,'^private_proof_unverified$'):self.resolve()
-        event=json.loads(stream.getvalue());self.assertEqual(set(event),{'contract','stage','reason'})
+        events=[json.loads(line)for line in stream.getvalue().splitlines()];self.assertIn(len(events),(1,2));event=events[0];self.assertEqual(set(event),{'contract','stage','reason'})
+        if len(events)==2:
+            self.assertEqual(events[1]['contract'],'get-private-transport-diagnostic-1')
+            self.assertEqual(set(events[1]),{'contract','phase','error_class','http_status','logical_requests','physical_attempts','response_bytes','failed_read_bound','tree_extra_used','tree_extra_limit','tree_physical_attempts'})
         self.assertEqual(event['contract'],'get-private-proof-diagnostic-1')
         if reason:self.assertEqual(event['reason'],reason)
         for secret in ('token','private-path','https:','synthetic secret',HEAD,p.PATHS['publication']):self.assertNotIn(secret,stream.getvalue())

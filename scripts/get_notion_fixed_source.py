@@ -41,6 +41,7 @@ def check_state(current, found):
     import get_notion_authenticated_recovery as authenticated_recovery
     import get_notion_create_resume as create_resume
     import get_notion_clean_active_resume as clean_active
+    import get_notion_checkpoint_resume as checkpoint_resume
     import get_recurring_policy_recovery as policy_recovery
     tag=found.get('recovery_anchor')
     active=current['engine_state']['journal']
@@ -50,7 +51,9 @@ def check_state(current, found):
         and active_recovery.allows(active['plan'],active))
     exact_new = bool(active and authenticated_recovery.allows(active['plan'], active))
     exact_create = bool(active and create_resume.allows(active['plan'],active))
-    if tag == clean_active.TAG:
+    if tag == checkpoint_resume.TAG:
+        if not active or not checkpoint_resume.initial_or_transitioned_state_valid(current,e.digest(current)):e.fail('journal_busy')
+    elif tag == clean_active.TAG:
         if not active or not clean_active.initial_or_transitioned_state_valid(current,e.digest(current)):e.fail('journal_busy')
     elif tag == create_resume.TAG:
         if not exact_create: e.fail('journal_busy')
@@ -62,7 +65,7 @@ def check_state(current, found):
         if not (exact or exact_new) or (tag is None and current['policy_sha256']!=policy_recovery.current_get_policy()):e.fail('journal_busy')
 
 
-def verify_sources(local, remote, token, root, parent, selection, policy_hash):
+def verify_sources(local, remote, token, root, parent, selection, policy_hash, *, refresh_session=None):
     """Before first CAS: reviewed digest, original blobs, ancestry and fresh tree.
 
     Loader performs Git-only reads. Each member retains the original 10-note
@@ -71,10 +74,19 @@ def verify_sources(local, remote, token, root, parent, selection, policy_hash):
     """
     import get_confirmed_source as source
     mode, _, members = selection
-    loader = source.Loader(local, remote, token, root, policy_hash)
+    loader = source.Loader(local, remote, token, root, policy_hash) if refresh_session is None else refresh_session.loader
+    if refresh_session is not None:
+        from get_notion_historical_refresh import Session
+        if type(refresh_session) is not Session or refresh_session.selection != selection:e.fail('approval_missing')
     for value, expected in members:
         inputs.anchor_for(expected)
-        probe = h.validate_capture(value, expected, apply=True) if mode == 'historical-capture' else h.validate(value, expected, apply=True)
+        capability = None
+        if refresh_session is not None:
+            kind = 'capture' if mode == 'historical-capture' else 'apply'
+            capability = refresh_session.capability(value, expected, kind)
+            value = capability.candidate if kind == 'capture' else capability.manifest
+            expected = e.digest(value)
+        probe = h.validate_capture(value, expected, apply=True, refresh_capability=capability) if mode == 'historical-capture' else h.validate(value, expected, apply=True, refresh_capability=capability)
         loader.ancestry(value['source_commit'], parent)
         for row in value['records'].values(): loader.blob(value['source_commit'], row['path'], e.p.MAX_NOTE)
         publication = h.Publication(local.vault, probe, e.digest(probe))

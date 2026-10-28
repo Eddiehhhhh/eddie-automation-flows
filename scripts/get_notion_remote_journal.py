@@ -152,7 +152,7 @@ class RemoteJournal:
     """
     def __init__(self, root, remote, *, anchor, load_commit, guard, confirm,
                  max_commits=MAX_COMMITS, max_batch_bytes=MAX_BATCH_BYTES,
-                 poll_attempts=6, sleep=time.sleep, post_cas_paths=(), post_cas_mirror=False):
+                 poll_attempts=6, sleep=time.sleep, post_cas_paths=(), post_cas_mirror=False, locator=None, require_locator=False):
         self._timing = timing.Timer()
         self.poisoned = False
         self._png_not_dispatched = None
@@ -181,6 +181,15 @@ class RemoteJournal:
         if type(post_cas_mirror) is not bool:
             raise JournalFailure('state_invalid', stage='anchor')
         self.post_cas_mirror = post_cas_mirror
+        if locator is not None:
+            import get_notion_idle_rotation as rotation
+            if type(locator) is not rotation.JournalLocator:
+                raise JournalFailure('state_invalid', stage='anchor')
+        self.locator = locator
+        if type(require_locator) is not bool:
+            raise JournalFailure('state_invalid', stage='anchor')
+        self.rotation_required = require_locator
+        self._locator_message = None
         self.mirror_read_bytes = 0
         self.post_cas_paths = frozenset(post_cas_paths)
         self.anchor = deepcopy(anchor)
@@ -475,8 +484,14 @@ class RemoteJournal:
                 raise JournalFailure(stage='prepare')
             env.update(GIT_AUTHOR_NAME='Get journal', GIT_AUTHOR_EMAIL='get-journal@users.noreply.github.com',
                        GIT_COMMITTER_NAME='Get journal', GIT_COMMITTER_EMAIL='get-journal@users.noreply.github.com')
+            message = self._locator_message or 'Persist private Notion transaction journal'
+            if self._locator_message is not None:
+                # Exact UTC reconstruction is part of the private locator's OID
+                # check. No changed tree, state byte, or additional commit.
+                stamp = str(int(time.time())) + ' +0000'
+                env.update(GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp)
             commit = checked(self.local.run('commit-tree', tree_oid, '-p', parent,
-                '-m', 'Persist private Notion transaction journal', env=env).decode().strip(), 40)
+                '-m', message, env=env).decode().strip(), 40)
         if self.local.run('rev-list', '--parents', '-n', '1', commit).decode().split() != [commit, parent]:
             raise JournalFailure(stage='prepare')
         return commit, tree_oid, blob, wanted
@@ -509,6 +524,7 @@ class RemoteJournal:
             self._post_cas_head(receipt['commit'])
         else:
             self._head(receipt['commit'])
+        if getattr(self,'locator',None) is not None: self.locator.confirmed(receipt)
         self.anchor = {key: receipt[key] for key in ('commit', 'state_blob', 'state_sha256')}
         return deepcopy(value), receipt['state_sha256']
 
@@ -565,6 +581,10 @@ class RemoteJournal:
         attempted = False
         try:
             checked(expected_sha, 64)
+            if getattr(self,'rotation_required',False):
+                import get_notion_idle_rotation as rotation
+                if type(getattr(self,'locator',None)) is not rotation.JournalLocator:
+                    raise JournalFailure('state_invalid',stage='guard')
             if png_expired is not None:
                 import get_notion_png_expired_recovery as expired
                 parent, old_tree, before, old_value, digest, old_blob, old_data = self._current(recheck=False)
@@ -606,6 +626,9 @@ class RemoteJournal:
             if (self.commits_attempted >= self.max_commits
                     or self.new_blob_bytes + added_bytes > self.max_batch_bytes):
                 raise JournalFailure('request_budget', stage='budget')
+            self._locator_message = (self.locator.prepare(old_value, value, data, parent)
+                                     if getattr(self,'locator',None) is not None else None)
+            if self._locator_message is not None: self._head(parent)
             commit, tree_oid, blob, wanted = self._build(parent, before, data)
             self._head(parent)
             self.stage = 'cas'
