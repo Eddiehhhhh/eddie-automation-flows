@@ -632,6 +632,34 @@ def verify_history_witness(client, policy, *, candidate_runs_checked):
     return _history_witness_from_verified(value, verified)
 
 
+def select_verified_publication(client, policy, found, observations, *, rotation_required):
+    """Choose a complete receipt first, then its own authenticated producer.
+
+    All candidates have already passed the original verifier. A newer ordinary
+    publication of the SAME receipt is not evidence of an idle lineage change.
+    Never fall back to an older sequence, copy a seal between runs, hide a fork,
+    or weaken select_observation's exact policy/run/record binding checks.
+    """
+    import get_notion_idle_rotation as rotation
+    by_sequence = {}
+    for value in found:
+        sequence = value['receipt_sequence']
+        if sequence in by_sequence and by_sequence[sequence] != value['anchor']:
+            fail('provenance_receipt_fork')
+        by_sequence[sequence] = value['anchor']
+    chosen = max(found, key=lambda x: (x['receipt_sequence'], timestamp(x['completed_at']), x['run_id']))
+    if rotation_required:
+        same_receipt = [value for value in found
+                        if value['receipt_sequence'] == chosen['receipt_sequence']
+                        and value['anchor'] == chosen['anchor']
+                        and observations.get((value['run_id'], value['run_attempt'])) is not None]
+        if same_receipt:
+            chosen = max(same_receipt, key=lambda x: (timestamp(x['completed_at']), x['run_id']))
+    history = rotation.select_observation(client, policy, chosen,
+        observations.get((chosen['run_id'], chosen['run_attempt'])), required=rotation_required)
+    return chosen, history
+
+
 def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, reserve_next_run=False, capture_history_witness=False):
     """Four candidate slots; one may locate an already registered producer.
 
@@ -782,15 +810,8 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             break
     if not found:
         fail('provenance_no_verified_publication')
-    by_sequence = {}
-    for value in found:
-        sequence = value['receipt_sequence']
-        if sequence in by_sequence and by_sequence[sequence] != value['anchor']:
-            fail('provenance_receipt_fork')
-        by_sequence[sequence] = value['anchor']
-    chosen = max(found, key=lambda x: (x['receipt_sequence'], timestamp(x['completed_at']), x['run_id']))
-    dynamic_history = rotation.select_observation(client, policy, chosen,
-        observations.get((chosen['run_id'], chosen['run_attempt'])), required=rotation_search is not None)
+    chosen, dynamic_history = select_verified_publication(client, policy, found,
+        observations, rotation_required=rotation_search is not None)
     if dynamic_history is not None:
         captured_witness = dynamic_history
     return {**chosen, **({'history_witness': captured_witness} if capture_history_witness else {}), 'status': 'public_provenance_verified', 'candidate_runs_checked': checked,

@@ -57,7 +57,7 @@ def load_runtime():
         '_PublicGithub', 'PublicGithub', 'parse_record', 'verified_prepare_only',
         'check_run_origin', 'check_run_identity', 'check_run', 'run_identity',
         'run_binding', 'run_semantic_binding', 'effective_candidate_policy',
-        'verified_candidate', 'discover'}
+        'verified_candidate', 'select_verified_publication', 'discover'}
     constants = {'REPOSITORY', 'API', 'CONTRACT', 'MARKER', 'MAX_JSON', 'MAX_LOG',
         'MAX_TOTAL', 'MAX_REQUESTS', 'MAX_RUN_PAGES', 'RUN_PAGE_SIZE',
         'MAX_CANDIDATES', 'MAX_SECONDS', 'RECORD_KEYS'}
