@@ -18,6 +18,7 @@ import iteration_incremental_audit
 import iteration_source_discovery
 from iteration_public_state import public_state
 import workspace_intake_report
+from iteration_public_state import public_state
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))

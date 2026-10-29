@@ -4,11 +4,221 @@ Status: Draft review. No production schedule, private-vault checkout, publicatio
 
 ## Current bounded entry
 
+### Existing private pair (no Get list discovery)
+
+The explicit `existing_sample` workflow mode / `--sample-existing` selects one
+`plain_text` and one `recorder_audio`/`recorder_flash_audio` note from the existing
+private `Raw/03 Get/03 State/manifest.json`. It sorts eligible relative paths in
+the existing `03 纯文本记录` and `99 录音卡笔记` categories and freezes the first
+of each type before either pass. Voice-input folders are not recording-card
+samples. No actual IDs, titles, private
+commit SHA, paths or contents belong in this public repository or workflow inputs.
+
+The already-existing `PRIVATE_VAULT_TOKEN` is used only for five fixed-host GitHub
+reads: verify the repository remains private, pin `main` to a commit, read the
+existing manifest, and read two selected Markdown files at that same commit.
+The manifest is limited to 2 MiB / 5,000 entries; each Markdown is limited to
+2 MiB. Reads reject redirects and environment proxies, have a 20-second hard
+deadline and 10-second socket timeout, and do not retry. The documented GitHub
+raw Contents media type handles the existing manifest above 1 MiB. There is no
+vault clone, private repository write, new manifest, new secret or new grant.
+
+The two Markdown files seed a private temporary shadow at their existing paths.
+Headers must agree with manifest string IDs and raw note types. A temporary,
+owner-readable-only pair file then selects exactly two Get details per pass,
+with zero Get list calls. A string `note_id` is authoritative over a potentially
+rounded numeric `id` alias; conflicting string aliases are rejected. Returned
+IDs, types and content fields must match. The private-vault token is removed
+from the Get subprocess environment. Existing bounded Get retries and attachment
+budgets remain unchanged; audio/video remain links, never binary downloads.
+
+Both passes use the same pair. The safe summary reports `sample_pages_limit: 0`,
+`seeded_existing_notes: 2`, and `legacy_paths_preserved`, alongside the existing
+two-pass hashes/mtimes and counters. A disappeared ID, wrong type, missing
+transcript, unavailable/oversized private index, malformed header or failed asset
+fails closed; it does not silently choose replacement notes or page the source.
+All selected content and identity metadata are deleted with the temporary folder.
+
+This proves only the two selected notes and old-path reuse when the real run
+passes. The private index can be stale; it is sample discovery, not completeness
+evidence. Synthetic transcript and layout tests are not real-source acceptance.
+Production still requires full-source, real-asset, single-writer and destination
+readback evidence. The production Get workflow remains untouched and disabled.
+
+Validation: `python3 -m unittest discover -s tests -v`; targeted regressions are
+in `tests/test_source_sync_sample.py`. They cover strict string identity, zero
+list discovery, two details, old paths, original transcript boundaries, link-only
+audio, repeat idempotence, pinned private reads, byte/entry caps, redirects,
+malformed sources and private-output redaction.
+
 `.github/workflows/source-sync-shadow.yml` is manual only. Its default `sample` mode reads at most two Get list pages (configurable to one, two or three), selects at most one `plain_text` note and one `recorder_audio` or `recorder_flash_audio` note, fetches at most two details, and repeats the same bounded sample in a fresh private temporary directory. If both types are not present within the page cap, it fails without claiming success. No source content enters the public checkout, artifact or log.
 
 Sample mode caps Get list and detail responses at 2 MiB each, all attachment descriptors at two, and downloaded image/file assets at two, 2 MiB each and 4 MiB per pass, even if broader command-line limits are supplied. Audio/video bodies are skipped. HTTPS redirects, public-IP resolution, TLS hostname checks, path traversal, symlink and timeout rules still apply. The workflow caps each sample command at 12 minutes. A failed asset fetch or pending transcription fails the run; a prior complete recording Markdown is never replaced by a pending response.
 
 The result explicitly says `scope: sample`, `source_complete: false`, and `status: sample_ok` only when both bounded reads produce identical file hashes and mtimes. Its receipt also has `scope: sample` and `complete: false`. A sample is **not** evidence of complete Get enumeration, historical edit coverage or production readiness. The fixed output allowlist contains only mode, counts and status. Raw details, original transcripts, note IDs, titles, attachment URLs and credentials stay in the temporary directory and are deleted with it.
+
+On failure, the workflow now publishes a fixed `stage` and `error_code` plus bounded counts when known. These classify the failure without echoing child stdout, stderr, exception text or source fields. A missing or malformed private report becomes `invalid_report`; an unrecognized child failure becomes `unknown_failure`. A diagnostic narrows the next investigation but does not itself prove which private source value caused the failure.
+
+Existing-pair runs also compare the two bounded raw-cache objects in memory. The
+public report includes only fixed field-group change counts, whether content and
+the original transcript stayed equal, and a count of audio URLs whose query alone
+changed. No URL, value, private field name, hash, ID or path is exposed. These diagnostics do not relax the exact hash-and-mtime acceptance test.
+Known signing refreshes are handled by the narrow retention policy below;
+unrecognized query changes and real source edits continue to fail repeat acceptance.
+
+### Bounded complete-list inventory before migration replay
+
+The explicit `inventory` workflow choice runs `source_sync_inventory.py`. It
+verifies the existing private repository, pins its main commit, and reads only
+its bounded metadata manifest (three GitHub reads). The current source list is
+then enumerated with a hard 300-page / 5,000-unique-note ceiling, 2 MiB per API
+response, 64 MiB total API response bytes including retried API responses, and a
+10-minute workflow command limit. These caps leave growth room above the existing
+private-index scale; a cap is not permission to truncate and claim completeness.
+One extra byte may be read solely to detect an exceeded byte boundary.
+
+The inventory does not call the Get detail endpoint or download binary assets.
+Incidental content present in list responses is discarded with each page; only
+ID sets and the private path mapping remain in memory. It does not write notes,
+state or remote data. Private IDs, paths, source fields, API cursors and credentials
+are never printed or uploaded. The stdout publisher uses a fixed allowlist of
+counts and statuses. Non-numeric local IDs and missing-ID records are counted
+separately for preservation, never treated as Get API IDs. Duplicate API identities
+or manifest paths, malformed paths, cursor cycles, repeated IDs, missing terminal
+pagination or exceeded limits fail closed.
+
+A successful result is `inventory_ok`, `enumeration_complete: true`, with counts
+for source IDs, overlap with the prior API index, new API IDs, and prior IDs not
+seen in the current enumeration. An absent prior ID is not a deletion instruction.
+Every inventory result remains `source_complete: false` and `published: false`:
+list completeness is not detail completeness, full existing-vault path replay,
+attachment transfer, or destination publication/readback acceptance. The existing
+`full` mode still starts empty and lacks these migration guarantees; do not use it
+as evidence that the old vault has been safely migrated.
+
+### Pinned old-path map and a real binary sample
+
+`migration_check` is the bounded next gate after inventory, not a full migration.
+It pins the private repository commit, walks only the root/Raw/Get Git trees,
+and validates the Get tree and manifest using seven bounded metadata reads.
+Trees are capped at 6,000 entries and 256 MiB declared prior blob bytes, with
+2 MiB maximum tree/manifest responses (1 MiB for parent trees). Symlinks,
+submodules, unsafe paths, Unicode/case path aliases and missing indexed paths
+fail closed. Private object IDs and paths never reach the public report.
+
+Every existing Markdown path gets an explicitly synthetic placeholder in a
+temporary directory. The actual identity resolver must preserve all indexed API
+paths despite a changed candidate title/date and avoid overwriting occupied
+paths. Non-API IDs, missing-ID records and unindexed Markdown remain reserved.
+This tests the complete manifest-to-path mapping only: placeholders are not
+evidence that every real old Markdown header/body is valid or migrated.
+
+At most three indexed image-note candidates are inspected, then one selected
+note is read again: at most four Get detail calls, 2 MiB per response and 12 MiB
+aggregate response bytes including API-level retries. No list re-enumeration is
+needed. A candidate must have one or two supported image/file descriptors only.
+The selected real old Markdown is read at the pinned commit (2 MiB cap), checked
+against the Git blob hash/size and its actual identity header before replay.
+
+The binary check uses the production asset, URL-retention, Markdown and atomic
+storage helpers, not the full sync CLI. Each pass downloads fresh URLs with a
+2 MiB per-file / 4 MiB per-pass / two-asset ceiling. Two passes therefore permit
+at most 8 MiB of successful assets; three bounded transport attempts per asset
+bound body reads to 24 MiB plus 12 overflow-detection bytes. Existing per-attempt
+30-second limits and redirect/SSRF restrictions remain. The command stops after
+12 minutes. No audio/video bodies are downloaded. No new receipt or published
+watermark is written, and failed acquisition cannot change note/cache manifests.
+Successful assets are read back and checked for size/hash/MIME and rendered local
+links. Both whole temporary-tree hashes and mtimes must match on the repeat;
+all unselected placeholders must remain unchanged. Private temporary files are
+removed and only allowlisted aggregate evidence is emitted.
+
+Even success says `full_existing_body_replay: false`, `source_complete: false`
+and `published: false`. Full real-header/body replay, the inventory's absent old
+API identity, all source details, private destination readback and single-writer
+cutover remain separate gates. A failed bounded candidate must be diagnosed,
+not silently bypassed by an unbounded search or larger download.
+
+### Bounded real Get subtree seeding by exact blob objects
+
+`pack_seed` tests a narrower alternative to normal sparse checkout. Cone-mode
+sparse checkout includes files in ancestor directories, and blobless clones
+still retrieve repository tree metadata; neither alone proves Get-only transfer.
+The seed instead reuses the pinned, validated Get tree manifest, then requests
+only its known blob OIDs from the same repository's Git upload-pack. It requests
+protocol v2, accepts the standard smart-HTTP service preamble, and can use legacy
+smart HTTP only when the server explicitly advertises reachable-SHA wants and
+bounded sideband support. It never assumes access to unadvertised blob objects.
+The existing runner token is used in memory on that fixed HTTPS repository only;
+there are no credential helpers, token files, authenticated child processes,
+redirects, environment proxies, remotes or persistent authorization changes.
+
+A first request must prove exact-object support with one Get Markdown blob of
+at most 64 KiB (2 MiB probe-pack cap). Only then is one whole Get blob pack requested:
+at most 6,000 files/objects, 128 MiB pack payload, 129 MiB framed response, 32 MiB
+per expanded blob and 256 MiB total seeded files. A fetch has a five-minute
+deadline; the whole command stops at 15 minutes. No full-clone or larger-pack
+fallback is allowed. Rejected wants, unexpected sections/URIs, unsupported
+protocol, excess object count or any limit cause failure, not a complete claim.
+
+An isolated empty Git object store indexes the pack with strict validation,
+1 GiB child memory, 300 MiB child file-size and 120-second CPU limits. The complete
+object-name/type/size set must exactly equal the requested pinned Get blob set.
+Every expanded file is SHA-1 Git-blob verified before use, and no checkout,
+filter, hook, submodule or source content is executed. Aggregate temporary disk
+is bounded by the pack, verified object-output and 256 MiB target limits (under
+1 GiB); all private data is removed with the job's temporary directory.
+
+The full real Markdown tree is then scanned by the actual identity resolver and
+all prior manifest API paths must match. This establishes real baseline bytes
+and headers, unlike the earlier placeholders. It still does not fetch current
+Get details, publish the destination, advance any receipt, or establish a safe
+production cutover. Only aggregate counts/flags are emitted, never object IDs,
+paths, source contents or credentials.
+
+Protocol and behavior references: [Git protocol v2](https://git-scm.com/docs/gitprotocol-v2),
+[Git sparse-checkout semantics](https://git-scm.com/docs/sparse-checkout.html),
+[GitHub partial clone behavior](https://github.blog/open-source/git/get-up-to-speed-with-partial-clone-and-shallow-clone/).
+
+### Expiring attachment links and exact repeats
+
+The [real parameter diagnostic](https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38260739263)
+confirmed one attachment `url` changed only `Expires` and `Signature`, with a
+stable `OSSAccessKeyId`, no unknown query keys, and at least one day of remaining
+validity. The three names and Unix-second expiry follow the
+[OSS V1 signed URL contract](https://www.alibabacloud.com/help/en/oss/developer-reference/ddd-signatures-to-urls).
+Public reports contain only allowlisted parameter names and coarse validity
+counts, never their values, hosts, paths or source IDs.
+
+`source_sync_urls.py` recognizes only credential-free HTTPS URLs containing
+exactly one of each of those three parameters. It never strips query parameters
+or reconstructs a URL. A previous complete URL is retained only when its exact
+location and signer match, it remains valid for more than 12 hours, the newly
+returned expiry is no earlier, every source field and attachment descriptor
+(including unknown fields, IDs and order) is otherwise identical, and the acquired
+asset results are identical. Unknown query parameters, other signing schemes,
+malformed or short-lived URLs are not normalized.
+
+Image/file acquisition always uses the newly returned URL before retention is
+considered. Changed bytes at the same location have a different content hash
+and cannot be hidden by URL retention. Audio/video remain link-only, so their
+binary contents are not verified; their source fields and descriptors must match.
+A signer, path, content, transcript, timestamp, descriptor or binary change adopts
+the complete fresh source response. At 12 hours remaining or less, the current
+URL replaces the prior one in Markdown, private raw-cache and private attachment
+manifest together. No stale URL is pinned indefinitely. Refresh requires another
+successful sync; this is not an always-live link service or evidence that an old
+signature has not been independently revoked.
+
+The private raw-cache is now a retained source snapshot: all source content is
+preserved, but an unexpired signing URL may come from a previous response under
+this policy. It is not an audit log of the latest transport/signature metadata.
+No extra private artifacts or URL maps are published. `attachment_urls_reused`
+reports per-pass bounded counts so a stable retained snapshot is not mistaken for
+proof that the source signing parameters themselves stayed identical. Exact
+whole-tree hash and mtime comparison, fixed-pair bounds and old-path checks remain
+unchanged. Expiry-driven refresh is intentional and may fail a repeat comparison
+if the refresh boundary is crossed between its two reads.
 
 The `full` workflow choice and `verify_shadow_repeat.py --full` remain available for future explicit full-library acceptance. They are never the default. Full mode still fails closed on incomplete pagination, malformed details, pending transcription or asset budgets; it does not publish. Full acceptance is separately limited to 55 minutes per command. A successful full shadow is still not a production cutover.
 
@@ -29,3 +239,106 @@ The new sample tests cover page/detail bounds, asset budgets, output scope, priv
 Before a production cutover, verify a real ordinary body and recording original at both boundaries, a real image/file CDN response within an approved transfer budget, full-list completeness and historical edits, duplicate-ID migration, and single-writer private remote publication with content and state readback. Keep existing workflows in their current state until that acceptance is complete.
 
 Evidence: https://github.com/Eddiehhhhh/eddie-automation-flows/actions/runs/38205977952 is a successful bounded credential/detail probe. It reports one 20-note page, a recording detail, an original transcript field and one attachment URL; it did not find an ordinary note in that first page or validate transcript boundaries or binary downloads.
+
+
+## Real-baseline bounded full replay (explicit `full_replay` only)
+
+This gate seeds the same pinned, exact Get blob set already verified by `pack_seed`,
+then independently enumerates and reads the entire current Get API source twice.
+It uses the production `persist_details` function for Markdown, raw cache, attachment
+manifest, pending state and local receipt writes. Neither the private source repository
+nor production is written. Every old identity keeps its original path; every old file
+outside enumerated-note Markdown/cache/manifest and pending/receipt state must retain
+its exact hash and mtime. That includes non-API, missing-ID, unenumerated, manual-index
+and old attachment files. New identities cannot take occupied paths. The entire second
+output tree must match first-pass hashes and mtimes exactly, with zero note writes.
+Real source edits are failures requiring diagnosis, never normalized into success.
+Each detail must also have the same `updated_at` value as its list entry. A missing
+list update value or a list/detail mismatch stops the replay before note writes;
+the public report exposes only `list_detail_mismatch`, never the value or note ID.
+
+Bounds are based on the observed 1,932 source IDs / 97 pages and 1,917 indexed prior
+API notes. Each pass permits at most 2,500 notes, 150 terminal-proven pages, 2 MiB per
+API response and 256 MiB total API body bytes. Details are fetched with three workers
+in 64-note segments, with private same-run JSON checkpoints. API retries consume the
+same reserved response allowance; reservations include overflow sentinels. The maximum
+is 5,000 logical detail calls plus 300 list calls across both passes; existing API
+transport retry limit is five attempts per logical call. Checkpoints are never uploaded
+to public artifacts/caches and do not imply cross-run recovery.
+
+Per pass, images/files are bounded to 256 distinct download URLs, 25 MiB per file,
+200 MiB successful storage and 200 MiB actual body transfer including failed/retried
+attempts. Every downloaded binary is read back and hash/size checked. Audio/video/link
+records remain remote-only and are counted; their binary contents are not validated.
+Unsupported nonempty images/files/resources collections stop the gate rather than
+being silently omitted. Source API pending transcripts also prevent success.
+
+The runner job is capped at 120 minutes, external command at 115 minutes, and the
+replay phase at 110 minutes. Byte/page/count/time limits fail closed. No production
+watermark or publish occurs. Normal/handled exits remove all private temporary files;
+forced timeout destroys the ephemeral runner, with no private artifacts retained.
+Only fixed aggregate counts, booleans and fixed failure categories reach public logs.
+`source_complete=true` is possible only for a successful ephemeral full replay; it
+never means publication or production cutover. The old `full` empty-directory mode is
+not a migration acceptance gate.
+
+
+
+### Full replay failure observability
+
+Full replay reuses the sync CLI's fixed API failure categories instead of hiding
+all terminal API failures behind `source_failed`: `api_auth`, `api_rate_limited`,
+`api_transport`, `api_rejected`, `api_redirect`, and `response_limit`. Malformed
+JSON/encoding and known invalid response framing/pagination report
+`response_invalid`; fixed identity validation remains `identity`. Existing replay,
+asset and budget failures retain their original categories.
+
+An HTTP status is published only as a bounded integer (400–599), extracted from
+the sync helper's exact locally generated HTTP failure message, and only alongside
+an appropriate API category. Unknown list/detail exceptions retain `source_failed`
+with an allowlisted coarse Python failure kind; exception names, messages, nested
+causes, response bodies, headers, note IDs and URLs are never published. No actual
+retry count is claimed because the existing API helper does not expose one.
+
+This is diagnostic-only: no note is skipped, no failure becomes success, and no
+request, concurrency, retry, timeout, transfer, publication or cleanup policy is
+changed. The API still attempts at most five times per logical request: HTTP 429
+and API code 10202 use the existing response-directed delay (default 10 seconds),
+while retryable HTTP 5xx and transport errors wait five seconds. A logical detail
+failure still aborts before assets and note writes. The successful-detail counter
+reflects concurrent completion order and must not be interpreted as the index or
+identity of the failing note. Synthetic diagnostic tests cannot recover the cause
+of an older run whose private error was already discarded.
+### Full replay request pacing and rate-limit stops
+
+Only the real full-replay CLI opts into a shared request policy. Other sync
+callers retain their existing request behavior. Both passes, list pages, detail
+workers and all retries share starts spaced at least one second apart. This is
+a conservative operating policy, not a claimed official QPS allowance. Three
+workers can have requests in flight, but cannot independently burst retries.
+HTTP 429 and API rate errors use shared 60/120/240/480-second backoff plus bounded
+0–5-second jitter, with the existing maximum five attempts. A longer server
+Retry-After (seconds or timezone-aware HTTP date) is honored; a wait that reaches
+the remaining 110-minute replay deadline fails closed instead of being shortened.
+Locks are released while waiting and all workers recheck stop/deadline each second.
+The workflow's 115-minute command / 120-minute job bounds remain unchanged.
+
+The official same-host OpenAPI reference describes error.reason values:
+qps_global, qps_bucket, quota_day, quota_month, not_member. Only these fixed
+strings (or unknown) may reach aggregate output. Quota/day/month or nonmembership
+stops all queued calls immediately; already in-flight requests may finish. No
+credential rotation, bypass, extra endpoint or skipped record is introduced.
+429 error bodies are privately read up to 8192 bytes plus an overflow sentinel,
+charged to the existing response budget, and never logged. Oversized/malformed
+bodies yield unknown, not raw text. API code 42900 without a reason also stops
+rather than repeatedly probing a quota. An observed HTTP 429 alone cannot prove
+which quota period or QPS limit applies.
+
+Official reference: https://doc.biji.com/docs/WOxgwObNNiyMHWk1dl0cJqSxnEd
+The separate open-api.biji.com knowledge-recall API is a different host/product;
+its published 2 QPS / 5000-per-day figures are not applied here. Example quota
+numbers in the same-host docs are not this account's measured allowance.
+At the observed 1940 notes, two passes need 3880 detail + 194 list requests:
+about 68 minutes of start-spacing budget, plus response, retry and asset time.
+This is not a completion guarantee; exhaustion remains a failed incomplete run.
+Temporary first-pass writes, if any, are never published to the original vault.

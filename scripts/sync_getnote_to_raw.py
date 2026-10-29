@@ -18,9 +18,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from source_sync_assets import AssetStore
+from source_sync_assets import AssetError, AssetStore
+from source_sync_urls import read_previous, stabilize_attachment_urls
 from source_sync_store import IdentityIndex, source_id, attachment_manifest, json_text
 from source_sync_store import write_if_changed as atomic_write
+from source_sync_sample import FixedSampleError, load_pair, validate_detail
 from probe_getnote_auth import NoRedirect, RedirectBlocked
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -93,7 +95,7 @@ def json_loads_tolerant(text: str) -> Any:
     return json.JSONDecoder(strict=False).decode(text)
 
 
-def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None) -> Any:
+def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max_response_bytes=None, response_budget=None, request_policy=None, capture_raw=False) -> Any:
     if path not in (LIST_PATH, DETAIL_PATH):
         raise ValueError("unsupported Get API path")
     query = urllib.parse.urlencode(params)
@@ -114,29 +116,105 @@ def api_get(path: str, params: Dict[str, str], api_key: str, client_id: str, max
         urllib.request.HTTPSHandler(context=ssl.create_default_context()),
     )
     for attempt in range(5):
+        if request_policy is not None:
+            request_policy.before_request()
+        read_limit = max_response_bytes
+        if response_budget is not None:
+            read_limit = response_budget.read_limit(read_limit)
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with opener.open(req, timeout=30) as resp:
-                raw = resp.read(max_response_bytes + 1) if max_response_bytes is not None else resp.read()
-                if max_response_bytes is not None and len(raw) > max_response_bytes:
-                    raise RuntimeError("Get response byte limit reached")
-                body = raw.decode("utf-8", errors="replace")
-            data = json_loads_tolerant(body)
+                if response_budget is None:
+                    raw = resp.read(read_limit + 1) if read_limit is not None else resp.read()
+                    if read_limit is not None and len(raw) > read_limit:
+                        raise RuntimeError("Get response byte limit reached")
+                else:
+                    declared = getattr(resp, 'headers', {}).get('Content-Length')
+                    try:
+                        expected = int(declared) if declared is not None else None
+                    except (ValueError, TypeError):
+                        raise RuntimeError("invalid Get response length") from None
+                    if expected is not None and (expected < 0 or expected > read_limit):
+                        raise RuntimeError("Get response byte limit reached")
+                    chunks, size = [], 0
+                    while True:
+                        remaining = read_limit - size + 1
+                        try:
+                            chunk = resp.read1(min(65536, remaining))
+                        except http.client.IncompleteRead as error:
+                            response_budget.consume(len(error.partial))
+                            raise
+                        response_budget.consume(len(chunk))
+                        size += len(chunk)
+                        if size > read_limit:
+                            raise RuntimeError("Get response byte limit reached")
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    if expected is not None and size != expected:
+                        raise RuntimeError("incomplete Get response body")
+                    raw = b"".join(chunks)
+                body = None if capture_raw else raw.decode("utf-8", errors="replace")
+            if capture_raw:
+                from get_mirror_incremental_replay import strict_capture_json
+                data = strict_capture_json(raw)
+            else:
+                data = json_loads_tolerant(body)
             if isinstance(data, dict) and data.get("success") is False:
                 err = data.get("error") or {}
                 code = err.get("code")
+                if request_policy is not None and code in (10202, 42900, 10201):
+                    request_policy.rate_limited(attempt, data=data)
+                    continue
                 if code == 10202 and attempt < 4:
                     retry_after = data.get("rate_limit", {}).get("retry_after", 10)
                     time.sleep(int(retry_after))
                     continue
                 raise RuntimeError(f"GetNote API error {code}")
-            return data
+            return raw if capture_raw else data
+        except http.client.IncompleteRead:
+            if not capture_raw:raise
+            if capture_raw and attempt < 4:
+                time.sleep(5)
+                continue
+            raise RuntimeError("GetNote incomplete body") from None
+        except RuntimeError as error:
+            if capture_raw and str(error) == "incomplete Get response body" and attempt < 4:
+                time.sleep(5)
+                continue
+            raise
         except RedirectBlocked:
             raise RuntimeError("GetNote redirect blocked") from None
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 exc.close()
                 raise RuntimeError("GetNote redirect blocked") from None
+            if exc.code == 429 and request_policy is not None:
+                # Never publish the body. Read at most 8 KiB + overflow sentinel,
+                # inside the existing byte allowance; retain only fixed reason.
+                try:
+                    size = min(8193, read_limit + 1) if read_limit is not None else 8193
+                    try:
+                        raw = exc.read(size)
+                    except http.client.IncompleteRead as error:
+                        if response_budget is not None:
+                            response_budget.consume(len(error.partial))
+                        raise
+                    if response_budget is not None:
+                        response_budget.consume(len(raw))
+                    if read_limit is not None and len(raw) > read_limit:
+                        raise RuntimeError("Get response byte limit reached")
+                    data = None
+                    if len(raw) <= 8192:
+                        try:
+                            data = json.loads(raw)
+                        except (ValueError, UnicodeError):
+                            pass
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                finally:
+                    exc.close()
+                request_policy.rate_limited(attempt, retry_after, data, 429)
+                continue
             if exc.code == 429 and attempt < 4:
                 retry_after = exc.headers.get("Retry-After")
                 exc.close()
@@ -167,7 +245,7 @@ def fetch_note_list(api_key, client_id, max_pages=None, pagination="cursor"):
     return [note for _, batch, _ in fetch_note_pages(api_key, client_id, max_pages, pagination) for note in batch]
 
 
-def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor"):
+def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor", progress=None):
     """Read at most three list pages and select one ordinary plus one recording.
 
     This intentionally does not establish source enumeration completeness.
@@ -178,6 +256,8 @@ def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor"):
     read_pages = 0
     for _, batch, _ in fetch_note_pages(api_key, client_id, None, pagination, max_response_bytes=2 * 1024 * 1024):
         read_pages += 1
+        if progress is not None:
+            progress['sample_pages_read'] = read_pages
         for item in batch:
             kind = item.get("note_type")
             if kind == "plain_text":
@@ -191,7 +271,7 @@ def fetch_bounded_sample(api_key, client_id, max_pages=2, pagination="cursor"):
     return [selected["ordinary"], selected["recording"]], read_pages
 
 
-def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", max_response_bytes=None):
+def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", max_response_bytes=None, response_budget=None, request_policy=None):
     """Official cursor contract, plus explicit plugin since_id compatibility.
 
     Never use time order to infer completeness. Caps and cursor cycles fail closed.
@@ -201,7 +281,12 @@ def fetch_note_pages(api_key, client_id, max_pages=None, pagination="cursor", ma
     page = 0
     while True:
         params = {pagination: cursor} if cursor is not None else ({"since_id": "0"} if pagination == "since_id" else {})
-        data = api_get(LIST_PATH, params, api_key, client_id, max_response_bytes=max_response_bytes)
+        options = {"max_response_bytes": max_response_bytes}
+        if response_budget is not None:
+            options["response_budget"] = response_budget
+        if request_policy is not None:
+            options["request_policy"] = request_policy
+        data = api_get(LIST_PATH, params, api_key, client_id, **options)
         payload = data.get("data", data)
         batch = payload if isinstance(payload, list) else next((payload[k] for k in ("notes", "list", "records", "items") if k in payload), None)
         if not isinstance(batch, list) or any(not isinstance(n, dict) for n in batch):
@@ -521,9 +606,58 @@ def transcription_pending(note):
     return note.get("note_type") in {"recorder_audio", "recorder_flash_audio"} and not (isinstance(original, str) and original.strip())
 
 
-def main() -> int:
+def persist_details(details, assets_by_id, index, scope="full", progress=None, metadata_only=False, read_pages=None, dry_run=False):
+    """Shared production persistence; callers must finish bounded acquisition first."""
+    progress = {} if progress is None else progress
+    changed = 0
+    urls_reused = 0
+    pending = []
+    progress['stage'] = 'write'
+    for note in details:
+        nid = note_id_from(note)
+        if transcription_pending(note):
+            pending.append(nid)
+        if metadata_only:
+            continue
+        # Do not replace a previously complete recording with a transient pending response.
+        import hashlib
+        cache_id = hashlib.sha256(nid.encode()).hexdigest()
+        cache_path = STATE_DIR / "raw-cache" / (cache_id + ".json")
+        path = output_path_for(note, index)
+        # A migration may have Markdown but no new raw-cache. Treat any existing
+        # note as authoritative until a complete original is available; do not
+        # infer incompleteness from cache absence or a particular heading style.
+        if transcription_pending(note) and path.exists():
+            continue
+        manifest_path = STATE_DIR / "attachments" / (cache_id + ".json")
+        note, note_assets, reused = stabilize_attachment_urls(
+            note, assets_by_id[nid], read_previous(cache_path, ROOT),
+            read_previous(manifest_path, ROOT))
+        urls_reused += reused
+        changed += write_if_changed(path, render_note(note, note_assets, path))
+        progress['written_or_changed'] = changed
+        # Audio stays remote; downloaded images/files and raw descriptors stay private.
+        write_if_changed(cache_path, json_text(note))
+        write_if_changed(manifest_path, json_text(dict(attachment_manifest(note), assets=note_assets)))
+    if not metadata_only:
+        progress['stage'] = 'receipt'
+        write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
+        # This receipt is committed with the data; it is NOT a published watermark.
+        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "scope": scope, "enumerated": len(details), "complete": scope == "full" and not pending, "pending": len(pending)}))
+    print(json.dumps({"scope": scope, "source_complete": scope == "full" and not pending,
+                      "sample_pages": read_pages, "fetched": len(details), "written_or_changed": changed,
+                      "attachment_urls_reused": urls_reused,
+                      "pending": len(pending), "complete": scope == "full" and not pending, "dry_run": dry_run}))
+    return 2 if pending else 0
+
+
+
+def main(progress=None) -> int:
+    progress = progress if progress is not None else {}
+    progress['stage'] = 'configuration'
     parser = argparse.ArgumentParser(description="Reconcile Get notes; explicit private VAULT_ROOT required")
     parser.add_argument("--sample", action="store_true", help="Bounded two-note shadow; never proves full-source completeness")
+    parser.add_argument("--sample-pair", type=Path, help="Private fixed-pair file; requires --sample and skips list discovery")
     parser.add_argument("--sample-pages", type=int, default=2, help="Sample list pages, 1-3; default 2")
     parser.add_argument("--max-pages", type=int)
     parser.add_argument("--workers", type=int, default=3)
@@ -538,16 +672,26 @@ def main() -> int:
     args = parser.parse_args()
     if args.sample and (not 1 <= args.sample_pages <= 3 or args.max_pages is not None):
         parser.error("sample requires 1-3 sample pages and cannot use --max-pages")
+    if args.sample_pair is not None and not args.sample:
+        raise FixedSampleError("fixed pair requires sample")
     if not os.environ.get("VAULT_ROOT"):
         raise RuntimeError("explicit private VAULT_ROOT required")
     api_key, client_id = load_credentials()
     # Full mode reconciles all details; sample mode caps list and detail requests.
-    if args.sample:
-        summaries, read_pages = fetch_bounded_sample(api_key, client_id, args.sample_pages, args.pagination)
+    progress['stage'] = 'list'
+    fixed_pair = load_pair(args.sample_pair) if args.sample_pair is not None else None
+    if fixed_pair is not None:
+        summaries, read_pages = fixed_pair, 0
+    elif args.sample:
+        summaries, read_pages = fetch_bounded_sample(api_key, client_id, args.sample_pages,
+                                                     args.pagination, progress=progress)
     else:
         summaries = fetch_note_list(api_key, client_id, args.max_pages, args.pagination)
         read_pages = None
+    if read_pages is not None:
+        progress['sample_pages_read'] = read_pages
     details = []
+    progress['stage'] = 'detail'
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = {executor.submit(fetch_note_detail, note_id_from(n), api_key, client_id,
                                    2 * 1024 * 1024 if args.sample else None): note_id_from(n) for n in summaries}
@@ -558,10 +702,15 @@ def main() -> int:
                 for pending_future in futures:
                     pending_future.cancel()
                 raise
+            if fixed_pair is not None:
+                expected = next(n for n in fixed_pair if n["note_id"] == futures[future])
+                validate_detail(detail, expected)
             if note_id_from(detail) != futures[future] or not isinstance(detail.get("content"), str):
                 raise RuntimeError("Get detail identity/content validation failed")
             details.append(detail)
+            progress['details_fetched'] = len(details)
     details.sort(key=note_id_from)
+    progress['stage'] = 'validation'
     if args.sample:
         attachment_count = 0
         for note in details:
@@ -575,6 +724,7 @@ def main() -> int:
     index = IdentityIndex(RAW_DIR, "getnote", "note_id", boundary=ROOT)
     # Finish bounded asset acquisition before touching notes or run receipts.
     assets_by_id = {}
+    progress['stage'] = 'assets'
     if not args.dry_run and not args.metadata_only:
         store = AssetStore(
             RAW_DIR,
@@ -584,37 +734,54 @@ def main() -> int:
         )
         for note in details:
             assets_by_id[note_id_from(note)] = store.materialize(note)
-    changed = 0
-    pending = []
-    for note in details:
-        nid = note_id_from(note)
-        if transcription_pending(note):
-            pending.append(nid)
-        if args.dry_run or args.metadata_only:
-            continue
-        # Do not replace a previously complete recording with a transient pending response.
-        import hashlib
-        cache_id = hashlib.sha256(nid.encode()).hexdigest()
-        cache_path = STATE_DIR / "raw-cache" / (cache_id + ".json")
-        path = output_path_for(note, index)
-        # A migration may have Markdown but no new raw-cache. Treat any existing
-        # note as authoritative until a complete original is available; do not
-        # infer incompleteness from cache absence or a particular heading style.
-        if transcription_pending(note) and path.exists():
-            continue
-        changed += write_if_changed(path, render_note(note, assets_by_id[nid], path))
-        # Audio stays remote; downloaded images/files and raw descriptors stay private.
-        write_if_changed(cache_path, json_text(note))
-        write_if_changed(STATE_DIR / "attachments" / (cache_id + ".json"), json_text(dict(attachment_manifest(note), assets=assets_by_id[nid])))
-    if not args.dry_run and not args.metadata_only:
-        write_if_changed(STATE_DIR / "pending.json", json_text({"source_system": "getnote", "pending_ids": pending}))
-        # This receipt is committed with the data; it is NOT a published watermark.
-        write_if_changed(STATE_DIR / "receipt.json", json_text({"source_system": "getnote", "scope": "sample" if args.sample else "full", "enumerated": len(details), "complete": not args.sample and not pending, "pending": len(pending)}))
-    print(json.dumps({"scope": "sample" if args.sample else "full", "source_complete": not args.sample and not pending,
-                      "sample_pages": read_pages, "fetched": len(details), "written_or_changed": changed,
-                      "pending": len(pending), "complete": not args.sample and not pending, "dry_run": args.dry_run}))
-    return 2 if pending else 0
+            progress['assets_downloaded'] = len(store.memo)
+    return persist_details(details, assets_by_id, index, "sample" if args.sample else "full",
+                           progress, args.dry_run or args.metadata_only, read_pages, args.dry_run)
+
+
+def safe_error_code(stage, error):
+    """Map only known local failures to fixed public codes; never echo exception text."""
+    if isinstance(error, FixedSampleError):
+        return "fixed_sample_invalid"
+    message = str(error)
+    if stage == 'configuration' and isinstance(error, SystemExit):
+        return 'missing_credentials'
+    if message == 'GetNote redirect blocked':
+        return 'api_redirect'
+    if message in ('GetNote HTTP 401', 'GetNote HTTP 403'):
+        return 'api_auth'
+    if message == 'GetNote HTTP 429' or message == 'GetNote API error 10202':
+        return 'api_rate_limited'
+    if message.startswith('GetNote HTTP ') or message.startswith('GetNote API error '):
+        return 'api_rejected'
+    if message == 'GetNote transport failed':
+        return 'api_transport'
+    if message == 'Get response byte limit reached':
+        return 'response_limit'
+    if stage == 'list' and message == 'bounded sample lacks ordinary or recording note':
+        return 'sample_types_missing'
+    if stage == 'validation' and message == 'sample attachment count limit reached':
+        return 'attachment_limit'
+    if stage == 'assets' and isinstance(error, AssetError):
+        return 'asset_failure'
+    return 'unexpected'
+
+
+def run_cli():
+    progress = {}
+    try:
+        return main(progress)
+    except (Exception, SystemExit) as error:
+        stage = progress.get('stage', 'configuration')
+        report = {'status': 'failed', 'stage': stage,
+                  'error_code': safe_error_code(stage, error)}
+        for key in ('sample_pages_read', 'details_fetched', 'assets_downloaded', 'written_or_changed'):
+            value = progress.get(key)
+            if type(value) is int and 0 <= value <= 1000000:
+                report[key] = value
+        print(json.dumps(report))
+        return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_cli())
