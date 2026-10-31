@@ -235,11 +235,15 @@ class ProtectedOriginalTests(unittest.TestCase):
         self.assertEqual(self.fx.children[self.target][2]['paragraph']['rich_text'][0]['text']['content'],'manual edit during partial generation')
 
     def test_credential_snapshot_is_held_without_publishing_the_secret(self):
-        credential='ghp_'+'A'*36
-        self.fx.append(self.target,[m.paragraph_block(credential)])
-        self.assertEqual(self.run_bulk()['held'],1)
-        self.assertNotIn(credential,self.fx.remote.read_text())
-        self.assertEqual(self.fx.sends,[])
+        for prefix in ['ghp_','ntn_','secret_']:
+            with self.subTest(prefix=prefix):
+                before=copy.deepcopy(self.fx.children[self.target])
+                credential=prefix+'A'*40
+                self.fx.append(self.target,[m.paragraph_block(credential)])
+                self.assertEqual(self.run_bulk()['held'],1)
+                self.assertNotIn(credential,self.fx.remote.read_text())
+                self.assertEqual(self.fx.sends,[])
+                self.fx.children[self.target]=before
 
 
 if __name__=='__main__':unittest.main()
