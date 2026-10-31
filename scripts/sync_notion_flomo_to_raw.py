@@ -28,6 +28,7 @@ import cloud_private_checkout as private_checkout
 
 STAGE = Path('Raw/02 Notion/01 Databases/碎片中心/flomo-stage')
 STATE = Path('.github/state/notion-flomo-sync-state.json')
+CURRENT_BASE = Path('Raw/01 Flomo/云端')
 MAX_ASSET_BYTES = 50 * 1024 * 1024
 CREDENTIAL_SHAPE = re.compile(
     r'(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}'
@@ -61,10 +62,17 @@ def memo_id(page):
     return values[0]
 
 
+def current_artifact(root, path):
+    base = root / CURRENT_BASE
+    return path == base / 'index.md' or any(path.is_relative_to(base / area)
+        for area in ('版本', 'legacy-evidence', '_assets'))
+
+
 def local_inventory(root):
     paths = defaultdict(list)
     no_id = []
     for path in sorted((root / 'Raw/01 Flomo').rglob('*.md')):
+        if current_artifact(root, path): continue
         if path.is_symlink(): raise ValueError('local_symlink')
         parts = path.read_text(encoding='utf-8').split('---', 2)
         match = re.search(r'^memo_id:\s*["\x27]?([^"\x27\s]+)', parts[1], re.M) if len(parts) == 3 else None
@@ -166,7 +174,7 @@ def materialize_assets(value, files, downloader):
     return result
 
 
-def render_record(page, blocks, mid, local_paths):
+def render_record(page, blocks, mid, local_paths, *, embed_images=False):
     cache = {}
     def register(rows):
         for row in rows:
@@ -184,7 +192,7 @@ def render_record(page, blocks, mid, local_paths):
                 'notion_last_edited_time': page.get('last_edited_time'),
                 'tags': properties.get('Tags', []), 'notion_properties': properties,
                 'local_existing_paths': local_paths, 'stage_only': True}
-    body = '\n'.join(notion.render_blocks('', blocks, children_loader=lambda key, ident: cache[ident]))
+    body = '\n'.join(notion.render_blocks('', blocks, children_loader=lambda key, ident: cache[ident], embed_images=embed_images))
     return (notion.render_frontmatter(metadata) + '\n\n' + body + '\n').encode()
 
 
@@ -255,7 +263,7 @@ def writer_lock(root):
 
 
 def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset,
-        original_source_enabled=False, original_signing_suffix=None):
+        original_source_enabled=False, original_signing_suffix=None, current_export_enabled=False):
     if apply:
         private_checkout.verify_private_checkout(root, os.environ.get('PRIVATE_VAULT_TOKEN'))
         with writer_lock(root):
@@ -268,6 +276,10 @@ def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=dow
                     max_pages=max_pages, downloader=downloader)
                 result['original_source'] = supplement
                 result['complete'] = result['complete'] and supplement['complete']
+            if current_export_enabled:
+                import flomo_cloud_current as current
+                result['formal_current'] = current.export(root)
+                result['complete'] = result['complete'] and result['formal_current']['complete']
             return result
     return stage(root, database_id, api_key, max_pages=max_pages, downloader=downloader)
 
@@ -456,7 +468,8 @@ def verify_remote_state(root):
     state = safe_path(root, STATE)
     import flomo_original_source as original
     supplement = safe_path(root / STAGE, original.STATE)
-    if not state.exists() and not supplement.exists(): return False
+    import flomo_cloud_current as current
+    if not state.exists() and not supplement.exists() and not (root / current.STATE).exists(): return False
     raw = state.read_bytes() if state.exists() else None
     expected = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() if raw is not None else None
     def git(*args):
@@ -494,6 +507,7 @@ def verify_remote_state(root):
                 if digest(content) != expected_sha or tree.get(str(STAGE / relative)) != content_blob:
                     raise ValueError('private_state_readback_failed')
         if supplement.read_bytes() != data: raise ValueError('state_changed')
+    current.verify_remote(root, git)
     if (state.read_bytes() if state.exists() else None) != raw: raise ValueError('state_changed')
     return True
 
@@ -511,7 +525,7 @@ def main():
         config = json.loads(args.config.read_bytes())
         if config.get('version') != 1 or not isinstance(config.get('database_id'), str):
             parser.error('invalid private source configuration')
-        if type(config.get('original_source_enabled', False)) is not bool:
+        if any(type(config.get(key, False)) is not bool for key in ('original_source_enabled','current_export_enabled')):
             parser.error('invalid original source configuration')
         args.database_id = config['database_id']
     if args.verify_remote_state:
@@ -523,7 +537,8 @@ def main():
     result = run(Path(os.environ['VAULT_ROOT']), args.database_id, notion.load_notion_api_key(),
                  apply=args.apply, max_pages=args.max_pages,
                  original_source_enabled=config.get('original_source_enabled', False),
-                 original_signing_suffix=os.environ.get('FLOMO_WEB_SIGNING_SUFFIX'))
+                 original_signing_suffix=os.environ.get('FLOMO_WEB_SIGNING_SUFFIX'),
+                 current_export_enabled=config.get('current_export_enabled', False))
     print(json.dumps({key: result[key] for key in ('notion_pages', 'flomo_ids', 'flomo_source_pages', 'written', 'unchanged', 'pending',
         'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete')}))
     return 0 if result['complete'] or not args.apply else 2

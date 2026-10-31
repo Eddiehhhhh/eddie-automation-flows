@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 import build_observatory_frontend
 import iteration_incremental_audit
+import flomo_cloud_current
 import iteration_source_discovery
 from iteration_public_state import public_state
 import workspace_intake_report
@@ -381,12 +382,16 @@ def source_root_for_cubox() -> tuple[Path | None, str]:
     return None, "missing"
 
 
-def entries_in_range(base: Path | None, source: str, start: date, end: date) -> list[Entry]:
+def entries_in_range(base: Path | None, source: str, start: date, end: date, *, flomo_selection=None) -> list[Entry]:
     if base is None or not base.exists():
         return []
     items: list[Entry] = []
+    selection = (flomo_selection if flomo_selection is not None else flomo_cloud_current.active_selection(ROOT)) if source == 'flomo' else None
     for path in iter_markdown_files(base):
+        if path.is_relative_to(ROOT / flomo_cloud_current.shared.STAGE): continue
+        if selection is not None and not flomo_cloud_current.eligible_path(ROOT,path,selection): continue
         entry = entry_from_path(path, source)
+        if entry.frontmatter.get('stage_only','').lower() == 'true': continue
         if entry.evidence_date and start <= entry.evidence_date <= end:
             items.append(entry)
     items.sort(key=lambda item: (item.evidence_date or date.min, item.rel_path))
@@ -706,7 +711,8 @@ def build_source_snapshot(
     end: date,
     mode: str,
 ) -> dict[str, Any]:
-    flomo_window_entries = entries_in_range(RAW_DIR / "01 Flomo", "flomo", start, end)
+    flomo_selection = flomo_cloud_current.active_selection(ROOT)
+    flomo_window_entries = entries_in_range(RAW_DIR / "01 Flomo", "flomo", start, end, flomo_selection=flomo_selection)
     notion_window_entries = entries_in_range(RAW_DIR / "02 Notion", "notion", start, end)
     get_window_entries = entries_in_range(RAW_DIR / "03 Get", "get", start, end)
     cubox_root, cubox_mode = source_root_for_cubox()
@@ -716,7 +722,7 @@ def build_source_snapshot(
     exact_start, exact_end = (start, end) if mode == "weekly" else (target, target)
     return {
         "flomo": {
-            "entries": entries_in_range(RAW_DIR / "01 Flomo", "flomo", exact_start, exact_end),
+            "entries": entries_in_range(RAW_DIR / "01 Flomo", "flomo", exact_start, exact_end, flomo_selection=flomo_selection),
             "window_entries": flomo_window_entries,
         },
         "notion": {
