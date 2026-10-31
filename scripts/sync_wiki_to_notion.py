@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from cloud_private_checkout import verify_private_checkout
 from dataclasses import dataclass
 from pathlib import Path
@@ -322,18 +323,23 @@ def notion_request(
 def retrieve_block_children(api_key: str, block_id: str) -> List[Dict[str, Any]]:
     children: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
+    seen_cursors = set()
     while True:
         params = {"page_size": "100"}
         if cursor:
             params["start_cursor"] = cursor
         query = urllib.parse.urlencode(params)
         response = notion_request(api_key, "GET", f"/blocks/{normalize_notion_id(block_id)}/children?{query}")
-        children.extend(response.get("results", []))
-        if not response.get("has_more"):
+        results = response.get("results")
+        if not isinstance(results, list) or any(not isinstance(block, dict) for block in results) or type(response.get("has_more")) is not bool:
+            raise MirrorHeld("incomplete block pagination")
+        children.extend(results)
+        if response["has_more"] is False:
             break
         cursor = response.get("next_cursor")
-        if not cursor:
-            break
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise MirrorHeld("incomplete block pagination")
+        seen_cursors.add(cursor)
     return children
 
 
@@ -803,9 +809,9 @@ def directory_page_blocks(path: str) -> List[Dict[str, Any]]:
     return [paragraph_block(line) for line in lines]
 
 
-def file_page_blocks(source_root: Path, path: str) -> List[Dict[str, Any]]:
+def file_page_blocks(source_root: Path, path: str, markdown: Optional[str] = None) -> List[Dict[str, Any]]:
     source_block = quote_block(f"来源路径：{path}")
-    body = markdown_to_blocks((source_root / path).read_text(encoding="utf-8"))
+    body = markdown_to_blocks((source_root / path).read_text(encoding="utf-8") if markdown is None else markdown)
     return [source_block, divider_block(), *body] if body else [source_block]
 
 
@@ -998,7 +1004,8 @@ def block_identity(block: Dict[str, Any]) -> str:
 
 
 def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequence[Dict[str, Any]],
-                   target_id: Optional[str] = None, baseline: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                   target_id: Optional[str] = None, baseline: Optional[Sequence[Dict[str, Any]]] = None,
+                   context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Checkpoint one explicit batch; this does not enable automatic mirror writes."""
     if kind not in {"create", "append"} or not operation_id or not blocks or len(blocks) > 100:
         raise MirrorHeld("invalid intent")
@@ -1024,6 +1031,8 @@ def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequenc
               "expected": [block_identity(block) for block in blocks],
               "baseline": [{"id": block["id"], "hash": block_identity(block)} for block in baseline or []],
               "status": "prepared", "retry_allowed": False}
+    if context is not None:
+        intent["context"] = context
     intents[operation_id] = intent
     persist_private_state(state)
     return intent
@@ -1049,26 +1058,201 @@ def recover_intent(api_key: str, intent: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "held", "reason": "missing_managed_baseline", "retry_allowed": False}
         children = retrieve_block_children(api_key, target)
         baseline = intent["baseline"]
+        if any(block.get("has_children") for block in children):
+            return {"status": "held", "reason": "nested_content_requires_review", "retry_allowed": False}
         observed = [{"id": block.get("id"), "hash": block_identity(block)} for block in children[:len(baseline)]]
         if observed != baseline:
             return {"status": "held", "reason": "human_or_target_change", "retry_allowed": False}
         children = children[len(baseline):]
+    if any(block.get("has_children") for block in children):
+        return {"status": "held", "reason": "nested_content_requires_review", "retry_allowed": False}
     if [block_identity(block) for block in children] != intent.get("expected"):
         return {"status": "held", "reason": "partial_or_modified", "retry_allowed": False}
     return {"status": "verified", "target_id": target, "retry_allowed": False}
 
 
-def recover_intents(api_key: str) -> Dict[str, int]:
+def recover_intents(api_key: str, persist: bool = False) -> Dict[str, int]:
+    if persist:
+        require_published_state()
     state = load_state()
     counts = {"verified": 0, "held": int(state.get("write_outcome", {}).get("retry_allowed") is False)}
-    for intent in (state.get("write_intents") or {}).values():
-        outcome = recover_intent(api_key, intent)
+    for operation, intent in (state.get("write_intents") or {}).items():
+        if intent.get("status") == "verified":
+            counts["already_verified"] = counts.get("already_verified", 0) + 1
+            continue
+        outcome = finalize_intent(api_key, operation) if persist else recover_intent(api_key, intent)
         counts[outcome["status"]] += 1
     return counts
 
 
+def require_published_state() -> None:
+    """Do not trust locally finalized state after a failed private publication."""
+    try:
+        verify_private_checkout(ROOT, os.environ.get("PRIVATE_VAULT_TOKEN", ""))
+        relative = STATE_PATH.resolve().relative_to(ROOT.resolve()).as_posix()
+        committed = subprocess.run(["git", "-C", str(ROOT), "show", "HEAD:" + relative], capture_output=True, timeout=15)
+        local = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15)
+        remote = subprocess.run(["git", "-C", str(ROOT), "ls-remote", "origin", "refs/heads/main"], capture_output=True, text=True, timeout=60)
+        if committed.returncode or committed.stdout != STATE_PATH.read_bytes() or local.returncode or remote.returncode or remote.stdout.split()[:1] != [local.stdout.strip()]:
+            raise ValueError("unpublished state")
+    except Exception:
+        raise MirrorHeld("private state requires published remote readback") from None
+
+
+def _send_once(api_key: str, method: str, path: str, payload: Dict[str, Any]) -> None:
+    """Only execute_revision calls this, after its dispatched checkpoint is remote."""
+    if not ((method == "POST" and path == "/pages") or (method == "PATCH" and re.fullmatch(r"/blocks/[0-9a-f-]{36}/children", path))):
+        raise MirrorHeld("unsupported mutation endpoint")
+    request = urllib.request.Request(BASE_URL + path, method=method,
+        headers={"Authorization": "Bearer " + api_key, "Notion-Version": NOTION_VERSION,
+                 "Content-Type": "application/json"},
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.loads(response.read())
+        if not isinstance(result, dict) or result.get("object") == "error":
+            raise ValueError("invalid receipt")
+    except (OSError, ValueError) as exc:
+        raise UnknownWrite("single attempt outcome requires readback") from exc
+
+
+def _baseline(blocks: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
+    if any(not block.get("id") or block.get("has_children") for block in blocks):
+        raise MirrorHeld("managed baseline incomplete or nested content requires review")
+    return [{"id": block["id"], "hash": block_identity(block)} for block in blocks]
+
+
+def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
+    """Read targets again and durably record success; never issue a Notion write."""
+    state = load_state()
+    intent = state["write_intents"][operation_id]
+    outcome = recover_intent(api_key, intent)
+    if outcome["status"] != "verified":
+        return outcome
+    target = outcome["target_id"]
+    observed = retrieve_block_children(api_key, target)
+    baseline = _baseline(observed)
+    expected = intent["baseline"] + [{"id": block["id"], "hash": block_identity(block)}
+                                    for block in observed[len(intent["baseline"]):]]
+    if baseline != expected or [block_identity(block) for block in observed[len(intent["baseline"]):]] != intent["expected"]:
+        return {"status": "held", "reason": "target_changed_during_readback", "retry_allowed": False}
+    context = intent.get("context")
+    if not context:
+        raise MirrorHeld("legacy intent lacks source binding; readback only")
+    if intent.get("status") == "verified":
+        return outcome
+    intent.update(status="verified", target_id=target, verified_baseline=baseline)
+    entry = state.setdefault("entries", {}).setdefault(context["entry_key"], {})
+    entry.update(page_id=target, parent_page_id=intent["parent_id"], managed_block_baseline=baseline)
+    if context["final_batch"]:
+        entry.update(signature=context["source_signature"], type="file")
+    persist_private_state(state)
+    return outcome
+
+
+def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allow_new: bool = False, expected_signature: Optional[str] = None) -> Dict[str, int]:
+    """Explicit one-source append-only execution; old signature-only entries stay held."""
+    if Path(relative).as_posix() != relative or ".." in Path(relative).parts:
+        raise MirrorHeld("source path must be canonical")
+    require_published_state()
+    source = ROOT / relative
+    if source.is_symlink() or not source.resolve().is_relative_to(ROOT.resolve()) or not source.is_file():
+        raise MirrorHeld("source path invalid")
+    include, exclude = load_patterns(argparse.Namespace(include_json=None, exclude_json=None))
+    if not is_included(relative, include, exclude):
+        raise MirrorHeld("source outside mirror scope")
+    content = source.read_bytes()
+    snapshot = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15)
+    original = subprocess.run(["git", "-C", str(ROOT), "show", "HEAD:" + relative], capture_output=True, timeout=15)
+    if snapshot.returncode or original.returncode or original.stdout != content:
+        raise MirrorHeld("source must match the private committed snapshot")
+    frozen_markdown = content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    signature = sha256_text(frozen_markdown)
+    if expected_signature is not None and signature != expected_signature:
+        raise MirrorHeld("reviewed source version changed")
+    secret = state_secret()
+    key = state_entry_key(relative, secret)
+    state = load_state()
+    entry = previous_entry_for_path(state.get("entries", {}), relative, secret)
+    has_entry = key in state.get("entries", {}) or relative in state.get("entries", {})
+    if has_entry and (not entry.get("page_id") or "managed_block_baseline" not in entry):
+        raise MirrorHeld("legacy source lacks managed identity and baseline")
+    if state.get("write_outcome", {}).get("retry_allowed") is False:
+        raise MirrorHeld("legacy unknown write requires review")
+    if any(item.get("status") != "verified" for item in (state.get("write_intents") or {}).values()):
+        raise MirrorHeld("unresolved intent requires explicit recovery")
+    if entry.get("signature") == signature:
+        if _baseline(retrieve_block_children(api_key, entry["page_id"])) != entry["managed_block_baseline"]:
+            raise MirrorHeld("human changes retained; baseline review required")
+        return {"verified_batches": 0, "skipped": 1}
+    owner = os.environ.get("GITHUB_RUN_ID") or os.environ.get("CODEX_THREAD_ID")
+    if not owner:
+        raise MirrorHeld("write owner unavailable")
+    blocks = file_page_blocks(ROOT, relative, markdown=frozen_markdown)
+    chunks = [blocks[index:index + 97] for index in range(0, len(blocks), 97)]
+    verified = 0
+    for index, chunk in enumerate(chunks):
+        state = load_state()
+        entry = previous_entry_for_path(state.get("entries", {}), relative, secret)
+        operation = sha256_text(json.dumps([key, signature, index], separators=(",", ":")))
+        existing = (state.get("write_intents") or {}).get(operation)
+        if existing:
+            if existing.get("status") != "verified":
+                raise MirrorHeld("existing attempt requires explicit recovery; no resend")
+            verified += 1
+            continue
+        target = entry.get("page_id")
+        parent = entry.get("parent_page_id") or parent_id
+        if not parent:
+            raise MirrorHeld("explicit parent binding unavailable")
+        if not UUID_RE.fullmatch(normalize_notion_id(parent)) or (target and not UUID_RE.fullmatch(normalize_notion_id(target))):
+            raise MirrorHeld("target binding requires valid Notion IDs")
+        kind = "append" if target else "create"
+        if kind == "create":
+            if not allow_new or index != 0:
+                raise MirrorHeld("new source requires explicit create authorization")
+            if source.stem in list_child_pages(api_key, parent):
+                raise MirrorHeld("existing titled target cannot be adopted or duplicated")
+            baseline = []
+        else:
+            baseline = retrieve_block_children(api_key, target)
+            if _baseline(baseline) != entry.get("managed_block_baseline"):
+                raise MirrorHeld("human changes retained; baseline review required")
+        desired = [paragraph_block("eddie-mirror-operation:" + operation),
+                   heading_block(2, "同步版本 " + signature[:12] + f" · {index + 1}/{len(chunks)}"),
+                   *chunk, paragraph_block("eddie-mirror-end:" + operation)]
+        payload = {"children": desired}
+        if kind == "create":
+            payload.update(parent={"type": "page_id", "page_id": normalize_notion_id(parent)},
+                           properties={"title": {"title": [{"type": "text", "text": {"content": source.stem}}]}})
+        context = {"entry_key": key, "source_path": relative, "source_signature": signature,
+                   "source_snapshot": snapshot.stdout.strip(), "final_batch": index == len(chunks) - 1,
+                   "batch_index": index, "batch_count": len(chunks), "owner": owner,
+                   "request": payload, "method": "POST" if kind == "create" else "PATCH",
+                   "path": "/pages" if kind == "create" else f"/blocks/{normalize_notion_id(target)}/children"}
+        prepare_intent(operation, kind, parent, desired, target, baseline, context=context)
+        state = load_state()
+        intent = state["write_intents"][operation]
+        intent["status"] = "dispatched"
+        persist_private_state(state)
+        try:
+            _send_once(api_key, context["method"], context["path"], payload)
+        except UnknownWrite:
+            state = load_state()
+            state["write_intents"][operation]["status"] = "unknown_write"
+            persist_private_state(state)
+            raise MirrorHeld("unknown outcome retained; explicit recovery required")
+        if finalize_intent(api_key, operation)["status"] != "verified":
+            raise MirrorHeld("target readback held; no duplicate request permitted")
+        verified += 1
+    return {"verified_batches": verified, "skipped": 0}
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--execute-request", help="Opaque UUID for one reviewed request in private mirror state.")
+    parser.add_argument("--execute-revision", help="Explicit source path for guarded append-only execution.")
+    parser.add_argument("--allow-new-page", action="store_true", help="Permit a genuinely new source under the explicit parent; never adopt legacy entries.")
+    parser.add_argument("--persist-recovery", action="store_true", help="Persist conclusively verified recovery in the private mirror state.")
     parser.add_argument("--recover-intents", action="store_true", help="Read targets for existing private intents; no Notion or state writes.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve and plan changes without writing Notion or state.")
     parser.add_argument("--plan-only", action="store_true", help="Only enumerate local files and directories.")
@@ -1088,8 +1272,35 @@ def parse_args() -> argparse.Namespace:
 
 def _main() -> int:
     args = parse_args()
+    if args.persist_recovery and (not args.recover_intents or args.dry_run or args.plan_only):
+        raise MirrorHeld("persist recovery requires explicit recovery mode")
+    if (args.execute_request or args.execute_revision) and (args.recover_intents or args.dry_run or args.plan_only or args.full_sync or args.include_json or args.exclude_json):
+        raise MirrorHeld("execution cannot be combined with read-only modes")
+    if args.execute_request:
+        if args.execute_revision or args.allow_new_page:
+            raise MirrorHeld("private request cannot be overridden")
+        try:
+            if uuid.UUID(args.execute_request).version != 4:
+                raise ValueError("not an opaque request UUID")
+            request = load_state()["execution_request"]
+            if request["request_id"] != args.execute_request or type(request["allow_new_page"]) is not bool:
+                raise ValueError("request mismatch")
+            if not isinstance(request["source_signature"], str) or not re.fullmatch(r"[0-9a-f]{64}", request["source_signature"]):
+                raise ValueError("source version missing")
+            if not isinstance(request["source_path"], str) or not isinstance(request["parent_page_id"], str):
+                raise ValueError("invalid source binding")
+        except (ValueError, KeyError, TypeError):
+            raise MirrorHeld("reviewed private execution request unavailable") from None
+        counts = execute_revision(load_notion_api_key(), request["source_path"], request["parent_page_id"],
+                                  request["allow_new_page"], expected_signature=request["source_signature"])
+        print(json.dumps({"status": "revision_verified", "counts": counts}))
+        return 0
+    if args.execute_revision:
+        counts = execute_revision(load_notion_api_key(), args.execute_revision, args.parent_page_id, args.allow_new_page)
+        print(json.dumps({"status": "revision_verified", "counts": counts}))
+        return 0
     if args.recover_intents:
-        counts = recover_intents(load_notion_api_key())
+        counts = recover_intents(load_notion_api_key(), persist=args.persist_recovery)
         print(json.dumps({"status": "recovery_readback", "counts": counts}))
         return 2 if counts["held"] else 0
     generated_at = now()
@@ -1165,12 +1376,12 @@ def _main() -> int:
         if args.dry_run:
             pass
         else:
-            next_entries[root_entry_key] = {"type": "root", "signature": ROOT_SIGNATURE}
+            next_entries[root_entry_key] = {**previous_entry_for_path(previous_entries, ".", state_key_secret), "type": "root", "signature": ROOT_SIGNATURE}
     else:
         root_changed = args.full_sync or previous_entry_for_path(previous_entries, ".", state_key_secret).get("signature") != ROOT_SIGNATURE
         if root_changed and not args.dry_run:
             replace_page_content(api_key, root_page_id, root_blocks)
-        next_entries[root_entry_key] = {"type": "root", "signature": ROOT_SIGNATURE}
+        next_entries[root_entry_key] = {**previous_entry_for_path(previous_entries, ".", state_key_secret), "type": "root", "signature": ROOT_SIGNATURE}
 
     created_count = 1 if root_created else 0
     updated_count = 0
@@ -1183,7 +1394,7 @@ def _main() -> int:
         desired_blocks = blocks_for_node(source_root, node, args.root_title)
         page_id, created = ensure_page(parent_id, node.title, icon_for_node(node.kind))
         resolved_page_ids[node.path] = page_id
-        next_entries[state_entry_key(node.path, state_key_secret)] = {"type": node.kind, "signature": node.signature}
+        next_entries[state_entry_key(node.path, state_key_secret)] = {**previous_entry_for_path(previous_entries, node.path, state_key_secret), "type": node.kind, "signature": node.signature}
 
         if created:
             created_count += 1
@@ -1239,7 +1450,7 @@ def main() -> int:
     try:
         return _main()
     except UnknownWrite:
-        if "--recover-intents" in sys.argv:
+        if "--recover-intents" in sys.argv and "--persist-recovery" not in sys.argv:
             print(json.dumps({"status": "recovery_held", "retry_allowed": False}))
             return 2
         # Reuse the existing state, preserving source cursors. Persisting this

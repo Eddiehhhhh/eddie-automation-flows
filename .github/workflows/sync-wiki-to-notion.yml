@@ -6,6 +6,21 @@ on:
     - cron: "15 */6 * * *"
   workflow_dispatch:
     inputs:
+      revision_request:
+        description: "Opaque UUID of a reviewed request in the existing private mirror state"
+        required: false
+        default: ""
+        type: string
+      recover_intents:
+        description: "Read target outcomes without issuing Notion writes"
+        required: false
+        default: false
+        type: boolean
+      persist_recovery:
+        description: "Commit conclusively verified recovery to private state"
+        required: false
+        default: false
+        type: boolean
       dry_run:
         description: "Resolve changes without writing Notion or state"
         required: false
@@ -41,6 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       NOTION_WIKI_MIRROR_PARENT_PAGE_ID: ${{ secrets.NOTION_WIKI_MIRROR_PARENT_PAGE_ID }}
       NOTION_WIKI_MIRROR_PARENT_PAGE_TITLE: ${{ secrets.NOTION_WIKI_MIRROR_PARENT_PAGE_TITLE }}
@@ -61,6 +77,8 @@ jobs:
           path: vault
           fetch-depth: 1
           sparse-checkout: |
+            AGENTS.md
+            README.md
             Wiki
             Schema
             .github/state
@@ -71,27 +89,40 @@ jobs:
 
       - name: Sync protected wiki content to Notion
         shell: bash
+        env:
+          REVISION_REQUEST: ${{ inputs.revision_request }}
+          WIKI_PATH_PREFIX: ${{ inputs.path_prefix }}
+          WIKI_LIMIT: ${{ inputs.limit }}
         run: |
           set -euo pipefail
           args=()
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ -n "$REVISION_REQUEST" ]]; then
+              args+=(--execute-request "$REVISION_REQUEST")
+            fi
+            if [[ "${{ inputs.recover_intents }}" == "true" ]]; then
+              args+=(--recover-intents)
+            fi
+            if [[ "${{ inputs.persist_recovery }}" == "true" ]]; then
+              args+=(--persist-recovery)
+            fi
             if [[ "${{ inputs.dry_run }}" == "true" ]]; then
               args+=(--dry-run)
             fi
             if [[ "${{ inputs.full_sync }}" == "true" ]]; then
               args+=(--full-sync)
             fi
-            if [[ -n "${{ inputs.path_prefix }}" ]]; then
-              args+=(--path-prefix "${{ inputs.path_prefix }}")
+            if [[ -n "$WIKI_PATH_PREFIX" ]]; then
+              args+=(--path-prefix "$WIKI_PATH_PREFIX")
             fi
-            if [[ "${{ inputs.limit }}" != "0" ]]; then
-              args+=(--limit "${{ inputs.limit }}")
+            if [[ "$WIKI_LIMIT" != "0" ]]; then
+              args+=(--limit "$WIKI_LIMIT")
             fi
           fi
           python scripts/run_private_command.py --label "Wiki to Notion sync" -- python scripts/sync_wiki_to_notion.py "${args[@]}"
 
-      - name: Commit public-safe mirror state
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+      - name: Commit private mirror state
+        if: ${{ github.event_name != 'workflow_dispatch' || (inputs.dry_run == false && inputs.recover_intents == false) }}
         shell: bash
         run: |
           set -euo pipefail
