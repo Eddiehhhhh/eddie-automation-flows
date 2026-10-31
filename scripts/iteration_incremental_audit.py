@@ -109,6 +109,10 @@ def candidate_from_file(path: Path, source: str, start: date, end: date) -> Cand
     if "_assets" in path.parts or "Asserts" in path.parts:
         return None
 
+    # Registered capture evidence is never a fact candidate, even when its
+    # full frontmatter extends beyond the bounded reader or lacks the marker.
+    if path.is_relative_to(ROOT / "Raw/02 Notion/01 Databases/碎片中心/flomo-stage"):
+        return None
     text = read_text_head(path)
     fields = parse_frontmatter(text)
     if fields.get("stage_only", "").lower() == "true":

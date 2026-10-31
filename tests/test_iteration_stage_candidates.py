@@ -42,6 +42,27 @@ class StageCandidateTests(unittest.TestCase):
                 self.assertIsNone(audit.candidate_from_file(path, 'Raw/02 Notion/', date(2026,11,1), date(2026,11,1)))
                 date_parser.assert_not_called()
 
+    def test_registered_stage_path_excludes_long_frontmatter_before_reading(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(audit, 'ROOT', Path(folder)):
+            root = Path(folder)
+            stage = root / 'Raw/02 Notion/01 Databases/碎片中心/flomo-stage'
+            for relative in ('current/memo.md', 'versions/memo/old/memo.md',
+                             'versions/memo/indexes/index.md', 'README.md'):
+                path = stage / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('---\nproperties: "' + 'x' * 13000 + '"\nstage_only: true\n---\nEvidence.\n')
+                with mock.patch.object(audit, 'read_text_head', side_effect=AssertionError('must exclude before read')):
+                    self.assertIsNone(audit.candidate_from_file(path, 'Raw/02 Notion/', date(2026,11,1), date(2026,11,1)))
+
+    def test_other_notion_notes_and_similar_folder_names_remain_candidates(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(audit, 'ROOT', Path(folder)):
+            for relative in ('Raw/02 Notion/01 Databases/碎片中心/pages/memo.md',
+                             'Raw/02 Notion/01 Databases/碎片中心/flomo-stage-extra/memo.md'):
+                path = Path(folder) / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('---\ncreated_at: 2026-11-01\n---\nOrdinary source.\n')
+                self.assertIsNotNone(audit.candidate_from_file(path, 'Raw/02 Notion/', date(2026,11,1), date(2026,11,1)))
+
     def test_explicit_false_remains_eligible(self):
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(audit, 'ROOT', Path(folder)):
             path = Path(folder) / 'synthetic.md'
