@@ -1580,6 +1580,8 @@ def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
     intent.update(status="verified", target_id=target, verified_baseline=baseline)
     entry = state.setdefault("entries", {}).setdefault(context["entry_key"], {})
     entry.update(page_id=target, parent_page_id=intent["parent_id"], managed_block_baseline=baseline)
+    if context.get("preserved_target_ref"):
+        entry["preserved_target_version"] = context["preserved_target_ref"]
     if context["final_batch"]:
         entry.update(signature=context["source_signature"], type=context.get("node_kind", "file"), render_version=context.get("render_version", "legacy-v1"),
                      revision_generation=context.get("revision_generation", 0), source_snapshot=context["source_snapshot"])
@@ -1644,6 +1646,7 @@ def execute_node_blocks(api_key: str, node: Node, blocks: List[Dict[str, Any]], 
     if state.get("write_outcome", {}).get("retry_allowed") is False:
         raise MirrorHeld("legacy unknown write requires review")
     assert_intent_fence(state, key, entry.get("page_id"))
+    require_known_or_protected_binding(state, key, entry)
     if entry.get("signature") == signature and entry.get("render_version", "legacy-v1") == render_version:
         if _baseline(retrieve_block_tree(api_key, entry["page_id"])) != entry["managed_block_baseline"]:
             raise MirrorHeld("human changes retained; baseline review required")
@@ -1702,9 +1705,15 @@ def execute_node_blocks(api_key: str, node: Node, blocks: List[Dict[str, Any]], 
                    "batch_index": index, "batch_count": len(chunks), "owner": owner,
                    "request": payload, "method": "POST" if kind == "create" else "PATCH",
                    "path": "/pages" if kind == "create" else f"/blocks/{normalize_notion_id(target)}/children"}
+        if entry.get("preserve_target_content") is True:
+            context["preserved_target"] = preserved_target_snapshot(api_key, relative, entry, baseline)
         prepare_intent(operation, kind, parent, desired, target, baseline, context=context)
+        prepared_revision = private_checkpoint_revision() if context.get("preserved_target") else None
         state = load_state()
         intent = state["write_intents"][operation]
+        if prepared_revision:
+            intent["context"]["preserved_target_ref"] = {"commit": prepared_revision, "operation_id": operation,
+                "snapshot_hash": context["preserved_target"]["snapshot_hash"]}
         intent["status"] = "dispatched"
         persist_private_state(state)
         if budget is not None:
@@ -1771,6 +1780,125 @@ def _bulk_sources(request: Dict[str, Any]) -> Tuple[str, List[Node], Dict[str, s
     return snapshot, nodes, markdown
 
 
+def require_known_or_protected_binding(state: Dict[str, Any], key: str, entry: Dict[str, Any]) -> None:
+    if entry.get("signature") is not None or entry.get("preserve_target_content") is True or not entry.get("page_id"):
+        return
+    owned = any(intent.get("status") == "verified" and intent.get("target_id") == entry["page_id"]
+                and intent.get("context", {}).get("entry_key") == key for intent in (state.get("write_intents") or {}).values())
+    if not owned:
+        raise MirrorHeld("unknown source binding requires explicit preservation identity")
+
+
+def verify_protected_original(api_key: str, relative: str, entry: Dict[str, Any], blocks: Sequence[Dict[str, Any]]) -> None:
+    """An unknown source signature is not authority; verify the original page identity."""
+    if entry.get("preserve_target_content") is not True:
+        return
+    proof = entry.get("original_identity") or {}
+    if (proof.get("source_path") != relative or proof.get("parent_page_id") != entry.get("parent_page_id")
+            or proof.get("title") != Path(relative).name or not proof.get("creator_id") or not proof.get("source_quote_id")):
+        raise MirrorHeld("protected original identity evidence incomplete")
+    state = load_state()
+    root = previous_entry_for_path(state.get("entries", {}), ".", state_secret())
+    if not root.get("page_id") or root["page_id"] != proof.get("mirror_root_id"):
+        raise MirrorHeld("protected original mirror root changed")
+    verify_page_binding(api_key, entry["page_id"], entry["parent_page_id"], proof["title"])
+    root_meta = get_page(api_key, root["page_id"])
+    page = get_page(api_key, entry["page_id"])
+    if (root_meta.get("created_by", {}).get("id") != proof["creator_id"] or page.get("created_by", {}).get("id") != proof["creator_id"]
+            or root_meta.get("archived") or root_meta.get("in_trash") or root_meta.get("parent", {}).get("page_id") != root.get("parent_page_id")
+            or page.get("archived") or page.get("in_trash") or page.get("parent", {}).get("page_id") != entry["parent_page_id"]
+            or page_title_from_page(page) != proof["title"]):
+        raise MirrorHeld("protected original creator or parent changed")
+    quote = next((b for b in blocks if b.get("id") == proof["source_quote_id"] and b.get("type") == "quote"), None)
+    text = "".join(part.get("text", {}).get("content", part.get("plain_text", "")) for part in (quote or {}).get("quote", {}).get("rich_text", []))
+    if text != "来源路径：" + relative:
+        raise MirrorHeld("protected original source quote changed")
+    entry_key = state_entry_key(relative, state_secret())
+    assert_intent_fence(state, entry_key, entry["page_id"])
+    pending = list(blocks)
+    has_marker = False
+    while pending:
+        block = pending.pop()
+        kind = block.get("type")
+        content = block.get(kind) or {}
+        pending.extend(content.get("children", []))
+        if kind != "paragraph":
+            continue
+        value = "".join(part.get("text", {}).get("content", part.get("plain_text", "")) for part in content.get("rich_text", []))
+        for prefix in ("eddie-mirror-operation:", "eddie-mirror-end:"):
+            if not value.startswith(prefix):
+                continue
+            has_marker = True
+            operation = value[len(prefix):]
+            intent = (state.get("write_intents") or {}).get(operation) or {}
+            if (intent.get("status") != "verified" or intent.get("target_id") != entry["page_id"]
+                    or (intent.get("context") or {}).get("entry_key") != entry_key):
+                raise MirrorHeld("protected original has an unbound operation marker")
+    if entry.get("signature") is None and not entry.get("revision_generation") and not entry.get("preserved_target_version"):
+        original = entry.get("preserved_original") or {}
+        original_blocks = original.get("blocks")
+        if (has_marker or original.get("target_page_id") != entry["page_id"] or original.get("parent_page_id") != entry["parent_page_id"]
+                or original.get("title") != proof["title"] or type(original.get("source_signature_known")) is not bool
+                or (original.get("source_signature_known") and not re.fullmatch(r"[0-9a-f]{64}", str(original.get("source_signature", ""))))
+                or not isinstance(original_blocks, list) or _baseline(original_blocks) != original.get("baseline")):
+            raise MirrorHeld("unknown original version was not fully preserved")
+
+
+def preserved_target_snapshot(api_key: str, relative: str, entry: Dict[str, Any], blocks: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """A private snapshot is actual target evidence, never an invented Git source version."""
+    verify_protected_original(api_key, relative, entry, blocks)
+    # Native binary URLs expire. Require an existing pinned private-Git blob as well.
+    from notion_private_assets import CREDENTIAL_SHAPE, canonical_native_file, prepare, AssetHeld
+    encoded = json.dumps(blocks, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    if (len(api_key) > 16 and api_key.encode() in encoded) or CREDENTIAL_SHAPE.search(encoded):
+        raise MirrorHeld("protected target snapshot contains potential credentials")
+    assets = load_state().get("assets") or {}
+    binary_refs: Dict[str, Any] = {}
+    pending = list(blocks)
+    while pending:
+        block = pending.pop()
+        kind = block.get("type")
+        value = block.get(kind) or {}
+        pending.extend(value.get("children", []))
+        if kind == "unsupported":
+            raise MirrorHeld("protected target contains unreadable block content")
+        if kind not in {"file", "image", "pdf", "audio", "video"} or value.get("type") != "file":
+            continue
+        try:
+            actual = canonical_native_file(block)
+        except AssetHeld:
+            raise MirrorHeld("protected native file could not be preserved") from None
+        receipt = assets.get(actual["sha256"]) or {}
+        if (receipt.get("sha256") != actual["sha256"] or receipt.get("size") != actual["size"]
+                or not re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("source_blob", "")))
+                or not re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("source_commit", "")))):
+            raise MirrorHeld("protected native file lacks durable private blob")
+        try:
+            pinned = prepare(ROOT, receipt["source_commit"], receipt.get("source_path"))
+        except AssetHeld:
+            raise MirrorHeld("protected native file private blob unavailable") from None
+        if pinned.blob != receipt["source_blob"] or pinned.sha256 != actual["sha256"] or len(pinned.data) != actual["size"]:
+            raise MirrorHeld("protected native file private blob mismatch")
+        ancestry = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", receipt["source_commit"], "HEAD"], capture_output=True, timeout=15)
+        if ancestry.returncode:
+            raise MirrorHeld("protected native file private blob not in checkpoint history")
+        binary_refs[block["id"]] = {key: receipt[key] for key in ("sha256", "size", "source_blob", "source_commit", "source_path")}
+    snapshot = {"kind": "observed_notion_target_version", "source_signature": None,
+                "target_page_id": entry["page_id"], "parent_page_id": entry["parent_page_id"], "source_path": relative,
+                "blocks": list(blocks), "baseline": _baseline(blocks), "durable_binary_refs": binary_refs}
+    snapshot["snapshot_hash"] = sha256_text(json.dumps(snapshot, sort_keys=True, ensure_ascii=False))
+    return snapshot
+
+
+def private_checkpoint_revision() -> str:
+    """Call only after publication acknowledgement; point at the committed full snapshot."""
+    require_published_state()
+    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15)
+    if head.returncode or not re.fullmatch(r"[0-9a-f]{40}", head.stdout.strip()):
+        raise MirrorHeld("private preservation checkpoint unavailable")
+    return head.stdout.strip()
+
+
 def _adopt_bulk_target(api_key: str, node: Node, parent: str, desired: List[Dict[str, Any]]) -> bool:
     """Bind only a unique original page with source/body evidence; never rewrite it."""
     state = load_state()
@@ -1781,9 +1909,12 @@ def _adopt_bulk_target(api_key: str, node: Node, parent: str, desired: List[Dict
     candidates = list_child_pages(api_key, parent)
     target = candidates.get(node.title)
     if entry.get("page_id"):
+        require_known_or_protected_binding(state, key, entry)
         if target != entry["page_id"]:
             raise MirrorHeld("original page moved, renamed or duplicated")
         verify_page_binding(api_key, target, parent, node.title)
+        if entry.get("preserve_target_content") is True:
+            verify_protected_original(api_key, node.path, entry, retrieve_block_tree(api_key, target))
         return True
     if not target:
         # A formerly known source cannot silently be replaced when its page is missing.
@@ -1805,6 +1936,25 @@ def _adopt_bulk_target(api_key: str, node: Node, parent: str, desired: List[Dict
     return True
 
 
+def published_preservation_matches(ref: Dict[str, Any], snapshot: Dict[str, Any]) -> bool:
+    """Only discard a duplicate after reading its exact prepared snapshot from Git."""
+    try:
+        if not re.fullmatch(r"[0-9a-f]{40}", str(ref.get("commit", ""))):
+            return False
+        body = {key: value for key, value in snapshot.items() if key != "snapshot_hash"}
+        digest = sha256_text(json.dumps(body, sort_keys=True, ensure_ascii=False))
+        if digest != snapshot.get("snapshot_hash") or digest != ref.get("snapshot_hash"):
+            return False
+        relative = STATE_PATH.resolve().relative_to(ROOT.resolve()).as_posix()
+        receipt = subprocess.run(["git", "-C", str(ROOT), "show", ref["commit"] + ":" + relative], capture_output=True, timeout=30)
+        if receipt.returncode:
+            return False
+        old = json.loads(receipt.stdout)["write_intents"][ref["operation_id"]]
+        return old.get("status") == "prepared" and old.get("context", {}).get("preserved_target") == snapshot
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return False
+
+
 def compact_verified_intents(state: Dict[str, Any], receipt_commit: str) -> None:
     """Remove only redundant, already-verified payload copies; Git retains original receipts."""
     if not re.fullmatch(r"[0-9a-f]{40}", receipt_commit):
@@ -1820,6 +1970,10 @@ def compact_verified_intents(state: Dict[str, Any], receipt_commit: str) -> None
             intent.pop(name, None)
         if isinstance(intent.get("context"), dict):
             intent["context"].pop("request", None)
+            ref = intent["context"].get("preserved_target_ref") or {}
+            snapshot = intent["context"].get("preserved_target")
+            if snapshot and published_preservation_matches(ref, snapshot):
+                intent["context"].pop("preserved_target", None)
 
 
 def retain_human_append(api_key: str, node: Node) -> None:
@@ -1831,6 +1985,17 @@ def retain_human_append(api_key: str, node: Node) -> None:
         observed = [block for block in observed if block.get("type") != "child_page"]
     baseline = _baseline(observed)
     previous = entry["managed_block_baseline"]
+    if entry.get("preserve_target_content") is True and baseline != previous:
+        snapshot = preserved_target_snapshot(api_key, node.path, entry, observed)
+        entry["preserved_observation"] = snapshot
+        if baseline[:len(previous)] != previous:
+            generations = [intent.get("context", {}).get("revision_generation", 0) for intent in (state.get("write_intents") or {}).values()
+                           if intent.get("status") == "verified" and intent.get("context", {}).get("entry_key") == key]
+            entry.update(signature=None, render_version="unknown-original", revision_generation=max([entry.get("revision_generation", 0), *generations]))
+        entry["managed_block_baseline"] = baseline
+        state["entries"][key] = entry
+        persist_private_state(state)
+        return
     if baseline[:len(previous)] != previous:
         raise MirrorHeld("existing content modified; preserved for review")
     if len(baseline) > len(previous):
