@@ -219,11 +219,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Preview target files without writing.")
     parser.add_argument("--max-pages", type=int, default=0, help="Limit the number of movie pages to process.")
+    parser.add_argument('--original-source-only',action='store_true',help='Capture complete originals through the existing private source writer; leave summaries untouched.')
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.original_source_only:
+        import json
+        import sync_notion_sources_to_raw as complete_source
+        report=complete_source.run_douban_source(ROOT,load_notion_api_key(),apply=not args.dry_run,max_pages=args.max_pages or None)
+        print(json.dumps({key:report[key] for key in ('written','unchanged','selected_scope_complete','soft_exit')}))
+        if not report['selected_scope_complete']:raise SystemExit(2)
+        return
     api_key = load_notion_api_key()
 
     database_id = os.environ.get("DOUBAN_DATABASE_ID")

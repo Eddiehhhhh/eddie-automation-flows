@@ -26,6 +26,7 @@ from typing import Any
 
 import sync_notion_flomo_to_raw as flomo_stage
 import sync_notehelper_messages_to_raw as notehelper_messages
+import sync_notion_sources_to_raw as complete_sources
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -185,7 +186,7 @@ def scan_directory(base: Path, source: str) -> list[Violation]:
     """Scan a source directory and return naming violations."""
     violations: list[Violation] = []
     for path in sorted(base.rglob("*.md")):
-        if flomo_stage.current_artifact(ROOT,path) or path.is_relative_to(ROOT/notehelper_messages.BASE): continue
+        if flomo_stage.current_artifact(ROOT,path) or path.is_relative_to(ROOT/notehelper_messages.BASE) or any(path.is_relative_to(ROOT/base) for base in (complete_sources.BASE,complete_sources.DOUBAN_BASE)): continue
         if path.is_symlink():
             continue
         name = path.name
@@ -223,7 +224,7 @@ def scan_directory(base: Path, source: str) -> list[Violation]:
 
 def fix_violation(v: Violation) -> bool:
     """Rename a single file to its expected clean name. Returns True if changed."""
-    if flomo_stage.current_artifact(ROOT,v.path) or v.path.is_relative_to(ROOT/notehelper_messages.BASE): return False
+    if flomo_stage.current_artifact(ROOT,v.path) or v.path.is_relative_to(ROOT/notehelper_messages.BASE) or any(v.path.is_relative_to(ROOT/base) for base in (complete_sources.BASE,complete_sources.DOUBAN_BASE)): return False
     if not v.expected:
         return False
 

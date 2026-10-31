@@ -7,6 +7,21 @@ on:
     - cron: "20 7 * * *"
   workflow_dispatch:
     inputs:
+      notion_sources_only:
+        description: "Run only the private complete original source adapters"
+        required: false
+        type: boolean
+        default: false
+      notion_source_key:
+        description: "One configured original source key, or douban; empty rotates configured sources"
+        required: false
+        type: string
+        default: ""
+      notion_source_max_pages:
+        description: "Maximum original pages to attempt within the private time/request budgets"
+        required: false
+        type: string
+        default: "50"
       messages_only:
         description: "Run only the private notehelper message collector"
         required: false
@@ -70,9 +85,13 @@ jobs:
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
       VAULT_ROOT: ${{ github.workspace }}/vault
     steps:
+      - name: Record private writer persistence deadline
+        run: |
+          echo "NOTION_SOURCE_JOB_DEADLINE=$(( $(date +%s) + 2380 ))" >> "$GITHUB_ENV"
+
       - name: Validate manual source selection
         id: source_selection
-        if: ${{ github.event_name == 'workflow_dispatch' && ((inputs.messages_only && (inputs.flomo_stage_only || inputs.raw16_only || inputs.full_sync)) || (inputs.flomo_stage_only && inputs.full_sync) || (inputs.raw16_only && (inputs.flomo_stage_only || inputs.full_sync))) }}
+        if: ${{ github.event_name == 'workflow_dispatch' && ((inputs.notion_sources_only && (inputs.messages_only || inputs.flomo_stage_only || inputs.raw16_only || inputs.full_sync)) || (inputs.notion_source_key != '' && !inputs.notion_sources_only) || (inputs.messages_only && (inputs.flomo_stage_only || inputs.raw16_only || inputs.full_sync)) || (inputs.flomo_stage_only && inputs.full_sync) || (inputs.raw16_only && (inputs.flomo_stage_only || inputs.full_sync))) }}
         run: |
           echo "Choose one source-only mode per run."
           exit 1
@@ -97,7 +116,7 @@ jobs:
           python-version: "3.11"
 
       - name: Sync podcast notes
-        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
+        if: ${{ !inputs.notion_sources_only && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
@@ -115,19 +134,19 @@ jobs:
           fi
 
       - name: Sync workout daily notes
-        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
+        if: ${{ !inputs.notion_sources_only && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
         run: |
           set -euo pipefail
           python scripts/run_private_command.py --label "workout sync" -- python scripts/sync_notion_workout_daily_to_raw.py
 
       - name: Sync douban books
-        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
+        if: ${{ !inputs.notion_sources_only && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
         run: |
           set -euo pipefail
           python scripts/run_private_command.py --label "douban sync" -- python scripts/sync_notion_douban_to_raw.py
 
       - name: Commit Raw updates
-        if: ${{ success() && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
+        if: ${{ !inputs.notion_sources_only && success() && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
         run: |
           target_ref="${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref_name }}"
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
@@ -140,7 +159,7 @@ jobs:
 
       - name: Read private flomo stage configuration
         id: flomo_config
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.raw16_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.flomo_stage_only) }}
+        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.raw16_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.flomo_stage_only) }}
         continue-on-error: true
         run: |
           python - <<'PYTHON'
@@ -162,7 +181,7 @@ jobs:
       - name: Require requested flomo stage configuration
         id: flomo_requested
         continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.flomo_stage_only && steps.flomo_config.outputs.enabled != 'true' }}
+        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.flomo_stage_only && steps.flomo_config.outputs.enabled != 'true' }}
         run: |
           echo "Private flomo stage configuration is not enabled."
           exit 1
@@ -212,7 +231,7 @@ jobs:
 
       - name: Read private article source configuration
         id: raw16_config
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.raw16_only) }}
+        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.raw16_only) }}
         continue-on-error: true
         run: |
           python - <<'PYTHON'
@@ -232,7 +251,7 @@ jobs:
       - name: Require requested article configuration
         id: raw16_requested
         continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.raw16_only && steps.raw16_config.outputs.enabled != 'true' }}
+        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.raw16_only && steps.raw16_config.outputs.enabled != 'true' }}
         run: |
           echo "Private article source configuration is not enabled."
           exit 1
@@ -278,13 +297,13 @@ jobs:
       - name: Read private message source configuration
         id: messages_config
         continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && (github.event_name == 'schedule' || inputs.messages_only) }}
+        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && (github.event_name == 'schedule' || inputs.messages_only) }}
         run: python scripts/sync_notehelper_messages_to_raw.py --check-config
 
       - name: Require requested message configuration
         id: messages_requested
         continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.messages_only && steps.messages_config.outputs.enabled != 'true' }}
+        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.messages_only && steps.messages_config.outputs.enabled != 'true' }}
         run: |
           echo "Private message configuration is not enabled."
           exit 1
@@ -326,4 +345,77 @@ jobs:
         if: ${{ !cancelled() && (steps.messages_config.outcome == 'failure' || steps.messages_requested.outcome == 'failure' || steps.messages_sync.outcome == 'failure' || steps.messages_commit.outcome == 'failure' || steps.messages_readback.outcome == 'failure') }}
         run: |
           echo "Message capture is incomplete; inspect private coverage and readback."
+          exit 2
+
+      - name: Read private complete source configuration
+        id: sources_config
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && inputs.notion_source_key != 'douban' && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
+        run: python scripts/sync_notion_sources_to_raw.py --check-config
+
+      - name: Read private complete film source configuration
+        id: film_source_config
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && (inputs.notion_source_key == '' || inputs.notion_source_key == 'douban') && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
+        run: python scripts/sync_notion_sources_to_raw.py --check-douban-config
+
+      - name: Require requested complete source configuration
+        id: sources_requested
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.notion_sources_only && ((inputs.notion_source_key == 'douban' && steps.film_source_config.outputs.enabled != 'true') || (inputs.notion_source_key != 'douban' && steps.sources_config.outputs.enabled != 'true')) }}
+        run: |
+          echo "Requested private original source adapter is not enabled."
+          exit 1
+
+      - name: Capture complete Notion originals privately
+        id: sources_sync
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.sources_config.outcome == 'success' && steps.sources_config.outputs.enabled == 'true' }}
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_SOURCE_KEY: ${{ inputs.notion_source_key || '' }}
+          NOTION_SOURCE_MAX_PAGES: ${{ inputs.notion_source_max_pages || '50' }}
+        run: |
+          args=(--apply --max-pages "$NOTION_SOURCE_MAX_PAGES")
+          if test -n "$NOTION_SOURCE_KEY"; then args+=(--source-key "$NOTION_SOURCE_KEY"); fi
+          python scripts/run_private_command.py --label "Complete original Notion sources" -- \
+            python scripts/sync_notion_sources_to_raw.py "${args[@]}"
+
+      - name: Capture complete film originals through existing caller
+        id: film_source_sync
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.film_source_config.outcome == 'success' && steps.film_source_config.outputs.enabled == 'true' }}
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_SOURCE_MAX_PAGES: ${{ inputs.notion_source_max_pages || '50' }}
+        run: |
+          python scripts/run_private_command.py --label "Complete original film source" -- \
+            python scripts/sync_notion_douban_to_raw.py --original-source-only --max-pages "$NOTION_SOURCE_MAX_PAGES"
+
+      - name: Persist complete originals and durable progress
+        id: sources_commit
+        if: ${{ !cancelled() && (steps.sources_sync.outcome == 'success' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'success' || steps.film_source_sync.outcome == 'failure') }}
+        run: |
+          paths=()
+          for item in "Raw/02 Notion/云端原文" ".github/state/notion-sources-sync-state.json" "Raw/14 豆瓣影视/云端原文" ".github/state/notion-douban-source-state.json"; do
+            if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
+          done
+          if test "${#paths[@]}" -gt 0; then
+            python scripts/commit_private_vault.py --all --ref main \
+              --message "Persist complete private Notion originals and progress" "${paths[@]}"
+          fi
+
+      - name: Verify complete original source remote state
+        id: sources_readback
+        if: ${{ !cancelled() && steps.sources_commit.outcome == 'success' }}
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          python scripts/run_private_command.py --label "Complete original source readback" -- \
+            python scripts/sync_notion_sources_to_raw.py --verify-remote-state
+
+      - name: Report incomplete original source capture
+        if: ${{ !cancelled() && (steps.sources_config.outcome == 'failure' || steps.film_source_config.outcome == 'failure' || steps.sources_requested.outcome == 'failure' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'failure' || steps.sources_commit.outcome == 'failure' || steps.sources_readback.outcome == 'failure') }}
+        run: |
+          echo "Complete original source capture is partial; inspect private coverage, soft budgets and remote readback."
           exit 2
