@@ -18,6 +18,7 @@ from pathlib import Path
 
 import iteration_source_discovery
 import flomo_cloud_current
+import sync_notehelper_messages_to_raw as notehelper_messages
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -121,6 +122,7 @@ def candidate_from_file(path: Path, source: str, start: date, end: date, *, flom
     selection = flomo_selection if flomo_selection is not None else flomo_cloud_current.active_selection(ROOT)
     relative = rel(path) if path.is_relative_to(ROOT) else ''
     if not flomo_cloud_current.eligible_path(ROOT,path,selection): return None
+    if not notehelper_messages.eligible_path(ROOT,path): return None
     text = read_text_head(path)
     fields = parse_frontmatter(text)
     if fields.get("stage_only", "").lower() == "true":

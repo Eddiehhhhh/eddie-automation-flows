@@ -254,7 +254,7 @@ class WorkflowTests(unittest.TestCase):
             expression=steps[name].split('        if: ${{ ',1)[1].split(' }}',1)[0]
             expression=expression.replace('!cancelled()','not cancelled()')
             expression=re.sub(r'!inputs\.', 'not inputs.', expression).replace('&&','and').replace('||','or')
-            return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(raw16_only=raw,flomo_stage_only=flomo,full_sync=full),
+            return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(raw16_only=raw,flomo_stage_only=flomo,full_sync=full,messages_only=False),
                 'github':SimpleNamespace(event_name=event),'cancelled':lambda:cancelled,'success':lambda:True})
         config='Read private article source configuration'
         self.assertTrue(allowed(config));self.assertTrue(allowed(config,raw=True,event='workflow_dispatch'))
