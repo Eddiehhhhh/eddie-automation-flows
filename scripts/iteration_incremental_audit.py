@@ -12,10 +12,12 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import iteration_source_discovery
+import flomo_cloud_current
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -103,7 +105,7 @@ def priority_for(source: str, path: Path, note_type: str | None) -> tuple[str, s
     return "normal", "incremental source evidence"
 
 
-def candidate_from_file(path: Path, source: str, start: date, end: date) -> Candidate | None:
+def candidate_from_file(path: Path, source: str, start: date, end: date, *, flomo_selection=None) -> Candidate | None:
     if path.suffix.lower() != ".md":
         return None
     if "_assets" in path.parts or "Asserts" in path.parts:
@@ -116,6 +118,9 @@ def candidate_from_file(path: Path, source: str, start: date, end: date) -> Cand
     articles = ROOT / 'Raw/16 笔记同步助手/云端原文'
     if path.is_relative_to(articles / 'versions') or path == articles / 'index.md':
         return None
+    selection = flomo_selection if flomo_selection is not None else flomo_cloud_current.active_selection(ROOT)
+    relative = rel(path) if path.is_relative_to(ROOT) else ''
+    if not flomo_cloud_current.eligible_path(ROOT,path,selection): return None
     text = read_text_head(path)
     fields = parse_frontmatter(text)
     if fields.get("stage_only", "").lower() == "true":
@@ -124,8 +129,12 @@ def candidate_from_file(path: Path, source: str, start: date, end: date) -> Cand
         ("created_at", fields.get("created_at")),
         ("updated_at", fields.get("updated_at")),
         ("date", fields.get("date")),
+        ("source_evidence_updated_at", fields.get("source_evidence_updated_at")),
+        ("current_exported_at", fields.get("current_exported_at")),
         ("path", path.as_posix()),
     ]
+    if relative in selection['edited']:
+        date_fields.insert(0, ('mtime_weak', datetime.fromtimestamp(path.stat().st_mtime, SHANGHAI).isoformat()))
     for field, raw_value in date_fields:
         found = parse_date(raw_value)
         if found and start <= found <= end:
@@ -176,6 +185,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
     candidates: list[Candidate] = []
     per_source_counts: dict[str, int] = {}
 
+    flomo_selection = flomo_cloud_current.active_selection(ROOT)
     for item in discovery["sources"]:
         source = item["path"]
         if not item["exists"] or item.get("source_status") == "archive-only":
@@ -185,7 +195,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
         for path in source_path.rglob("*.md"):
             if not path.is_file():
                 continue
-            candidate = candidate_from_file(path, source, start, end)
+            candidate = candidate_from_file(path, source, start, end, flomo_selection=flomo_selection)
             if candidate:
                 source_candidates.append(candidate)
         source_candidates.sort(key=lambda c: (c.priority != "high", c.evidence_date or "", c.path))
@@ -206,6 +216,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
             "per_source": per_source_counts,
         },
         "candidates": [asdict(c) for c in candidates],
+        "flomo_current_verification": {"selected": len(flomo_selection["current"]), "superseded_legacy": len(flomo_selection["superseded"]), "held_count": len(flomo_selection["held"]), "held_reasons": dict(Counter(flomo_selection["held"].values()))},
         "notes": [
             "mtime_weak means date metadata was absent; do not promote without reading the file.",
             "each discovered source is scanned recursively, so new files and subfolders under it are automatically included.",
