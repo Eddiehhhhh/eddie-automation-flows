@@ -995,6 +995,8 @@ def block_identity(block: Dict[str, Any]) -> str:
         for key, item in value.items():
             if key in {"plain_text", "href"} or (key == "color" and item == "default") or (key == "link" and item is None):
                 continue
+            if (key == "is_toggleable" and item is False) or (key == "icon" and item is None) or (key == "caption" and item == []):
+                continue
             if key == "annotations" and item == {"bold": False, "italic": False, "strikethrough": False, "underline": False, "code": False, "color": "default"}:
                 continue
             result[key] = clean(item)
@@ -1211,7 +1213,7 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
         if kind == "create":
             if not allow_new or index != 0:
                 raise MirrorHeld("new source requires explicit create authorization")
-            if source.stem in list_child_pages(api_key, parent):
+            if source.name in list_child_pages(api_key, parent):
                 raise MirrorHeld("existing titled target cannot be adopted or duplicated")
             baseline = []
         else:
@@ -1224,7 +1226,7 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
         payload = {"children": desired}
         if kind == "create":
             payload.update(parent={"type": "page_id", "page_id": normalize_notion_id(parent)},
-                           properties={"title": {"title": [{"type": "text", "text": {"content": source.stem}}]}})
+                           properties={"title": {"title": [{"type": "text", "text": {"content": source.name}}]}})
         context = {"entry_key": key, "source_path": relative, "source_signature": signature,
                    "source_snapshot": snapshot.stdout.strip(), "final_batch": index == len(chunks) - 1,
                    "batch_index": index, "batch_count": len(chunks), "owner": owner,
