@@ -48,6 +48,32 @@ class PrivateCheckoutTests(unittest.TestCase):
                 c.checkout(Path(folder)/'vault')
             run.assert_not_called()
 
+    def test_existing_checkout_identity_visibility_and_push_url_are_required(self):
+        from types import SimpleNamespace
+        private = 'https://github.com/Eddiehhhhh/eddie-llm-wiki.git'
+        public = 'https://github.com/Eddiehhhhh/eddie-automation-flows.git'
+        for origins, metadata, error, good in [
+            ([private, private], {'private':True,'full_name':c.REPOSITORY}, None, True),
+            ([public, public], {}, None, False),
+            ([private, public], {}, None, False),
+            ([private, private + '\n' + public], {}, None, False),
+            ([private, private + '\n' + private], {}, None, False),
+            ([private + '\n' + private, private], {}, None, False),
+            (['', private], {}, None, False),
+            ([private, private], {'private':False,'full_name':c.REPOSITORY}, None, False),
+            ([private, private], {'private':True,'full_name':'other/repo'}, None, False),
+            ([private, private], {}, TimeoutError('PRIVATE_SENTINEL'), False),
+        ]:
+            with self.subTest(origins=origins, metadata=metadata), tempfile.TemporaryDirectory() as tmp, mock.patch.object(c.subprocess,'run',side_effect=[SimpleNamespace(returncode=0,stdout=x) for x in origins]) as run, mock.patch.object(c,'verify_private_repository', return_value=metadata, side_effect=error):
+                if good:
+                    c.verify_private_checkout(Path(tmp), 'synthetic')
+                else:
+                    with self.assertRaises(ValueError) as held:
+                        c.verify_private_checkout(Path(tmp), 'synthetic')
+                    self.assertEqual(str(held.exception), 'Private checkout verification failed')
+                self.assertTrue(all('--all' in call.args[0] for call in run.call_args_list))
+                self.assertEqual(list(Path(tmp).iterdir()), [])
+
 
 if __name__ == '__main__':
     unittest.main()
