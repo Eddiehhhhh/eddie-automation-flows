@@ -113,6 +113,33 @@ class ArticlesTests(unittest.TestCase):
                 version=self.root/articles.BASE/'versions';self.assertFalse(version.exists())
                 if (self.root/articles.STATE).exists():self.assertEqual(self.state()['pages'],{})
 
+    def test_notion_account_key_shape_is_held(self):
+        self.body=blocks('ntn_'+'A'*45)
+        self.assertEqual(self.run_sync()['held'][PID],'potential_credential_in_source')
+        self.assertFalse((self.root/articles.BASE/'versions').exists())
+
+    def test_partial_failure_preserves_successful_object_receipt(self):
+        second='55555555-5555-5555-5555-555555555555'
+        self.rows.append({**page(),'id':second})
+        self.api['notion_request'].side_effect=lambda key,method,path:deepcopy(next(row for row in self.rows if path.endswith(row['id'])))
+        calls=[]
+        def download(url):
+            calls.append(url)
+            if len(calls)==1:raise ValueError('incomplete_asset')
+            return b'asset'
+        result=self.run_sync(downloader=download)
+        self.assertFalse(result['complete']);self.assertEqual(result['written'],1)
+        self.assertEqual(set(self.state()['pages']),{second})
+        self.assertEqual(result['held'],{PID:'incomplete_asset'})
+
+    def test_cli_suppresses_private_error_details(self):
+        output=io.StringIO()
+        with mock.patch.object(sys,'argv',['collector','--verify-remote-state']), mock.patch.dict(os.environ,{'VAULT_ROOT':str(self.root)}), \
+             mock.patch.object(articles,'verify_remote_state',side_effect=ValueError('private content /sensitive-path')), \
+             mock.patch('sys.stdout',output):
+            self.assertEqual(articles.main(),2)
+        self.assertNotIn('sensitive',output.getvalue());self.assertNotIn('private content',output.getvalue())
+
     def test_current_human_edits_are_held(self):
         self.run_sync();path=self.root/articles.BASE/(PID+'.md');path.write_text('User edited')
         self.rows[0]['last_edited_time']='2026-11-02T00:00:00Z'

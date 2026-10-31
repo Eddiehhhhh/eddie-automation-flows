@@ -16,11 +16,13 @@ import sync_notion_flomo_to_raw as shared
 BASE = Path('Raw/16 笔记同步助手/云端原文')
 STATE = Path('.github/state/notion-articles-sync-state.json')
 CONFIG = Path('.github/state/notion-articles-config.json')
+NOTION_KEY = re.compile(r'(?<![A-Za-z0-9_])(?:ntn_[A-Za-z0-9]{40,}|secret_[A-Za-z0-9]{32,})(?![A-Za-z0-9_])')
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
 
 def reject(raw):
-    if shared.CREDENTIAL_SHAPE.search(raw.decode('utf-8', errors='ignore')):
+    text = raw.decode('utf-8', errors='ignore')
+    if shared.CREDENTIAL_SHAPE.search(text) or NOTION_KEY.search(text):
         raise ValueError('potential_credential_in_source')
 
 
@@ -126,8 +128,8 @@ def collect(root, database_id, api_key, apply, downloader):
     # All source metadata and legacy ownership is checked before the first write.
     reject(shared.encoded(rows))
     inventory = legacy_inventory(root)
-    if state.get('legacy_files') and state['legacy_files'] != inventory:
-        raise ValueError('legacy_inventory_changed')
+    # Legacy notes are reader-owned. Snapshot their current bytes, never freeze
+    # Eddie's future edits or write any of those paths.
     state['legacy_files'] = inventory
     report = {'pages': len(rows), 'written': 0, 'unchanged': 0, 'pending': 0, 'held': {},
         'notion_writes': 0, 'legacy_preserved': len(inventory), 'uncovered_daily_input': True}
