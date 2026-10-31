@@ -134,8 +134,10 @@ and post-write verification, not a claim of server-side compare-and-swap.
 pass can finish that in-flight operation after the soft deadline. Continue
 manual passes over the finite initial manifest until deferred count is zero;
 do not wait one day per small batch. The same executor then handles actual source
-increments. Counts and exact held paths remain in existing private state; public
-output contains aggregate counts only.
+increments. A pass with deferred nodes, held objects or held assets reports
+`bulk_incomplete` and exits 2; only a fully drained verified pass reports
+`bulk_verified` with exit 0. Counts and exact held paths remain in existing
+private state; public output contains aggregate counts only.
 
 A context-bound unknown outcome fences its original source/target and dependent
 children. Unrelated branches can proceed. Legacy unknown outcomes without an

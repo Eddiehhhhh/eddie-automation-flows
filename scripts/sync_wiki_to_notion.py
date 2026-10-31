@@ -1917,8 +1917,9 @@ def _main() -> int:
         if args.execute_request or args.execute_revision or args.allow_new_page or args.recover_intents or args.persist_recovery or args.dry_run or args.plan_only or args.full_sync or args.include_json or args.exclude_json or args.path_prefix or args.limit:
             raise MirrorHeld("bulk execution cannot be overridden")
         counts = execute_bulk(load_notion_api_key(), args.bulk_request)
-        print(json.dumps({"status": "bulk_readback", "counts": counts}))
-        return 2 if counts["held"] or counts["assets_held"] else 0
+        incomplete = any(counts[name] for name in ("held", "assets_held", "deferred"))
+        print(json.dumps({"status": "bulk_incomplete" if incomplete else "bulk_verified", "counts": counts}))
+        return 2 if incomplete else 0
     if args.persist_recovery and (not args.recover_intents or args.dry_run or args.plan_only):
         raise MirrorHeld("persist recovery requires explicit recovery mode")
     if (args.execute_request or args.execute_revision) and (args.recover_intents or args.dry_run or args.plan_only or args.full_sync or args.include_json or args.exclude_json):

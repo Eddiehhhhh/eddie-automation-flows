@@ -1,5 +1,6 @@
 """Bounded hierarchy execution against a synthetic Git and persistent Notion server."""
 import copy
+import io
 import importlib.util
 import json
 import os
@@ -395,6 +396,20 @@ class BulkTests(unittest.TestCase):
         sends=len(self.sends)
         self.assertEqual(m.execute_bulk('synthetic',REQUEST)['held'],0)
         self.assertEqual(len(self.sends),sends)
+
+    def test_bounded_cli_deferred_is_explicit_incomplete_and_nonzero(self):
+        self.legacy_root()
+        state=m.load_state();state['bulk_request']['max_batches']=1;self.persist(state)
+        output=io.StringIO()
+        with mock.patch.object(sys,'argv',['sync_wiki_to_notion.py','--bulk-request',REQUEST]),mock.patch.object(m,'load_notion_api_key',return_value='synthetic'),mock.patch('sys.stdout',output):
+            self.assertEqual(m.main(),2)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result['status'],'bulk_incomplete')
+        self.assertGreater(result['counts']['deferred'],0)
+        self.assertEqual(result['counts']['held'],0)
+        self.assertEqual(result['counts']['assets_held'],0)
+        self.assertNotIn(OUTER,output.getvalue())
+        self.assertNotIn('Wiki/a.md',output.getvalue())
 
     def test_failed_checkpoint_aborts_before_any_other_source(self):
         self.legacy_root()
