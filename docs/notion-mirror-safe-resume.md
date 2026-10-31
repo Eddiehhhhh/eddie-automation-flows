@@ -269,3 +269,45 @@ upgrade invalidates an older partial scan once, so unchanged source hashes befor
 a saved cursor cannot hide a required format correction. Ordinary state commits
 or source insertions still do not reset that cursor. Rescanning does not rewrite
 plain or short-code pages whose actual rendered content is unchanged.
+
+## Protecting original pages whose source version is unknown
+
+A reviewed existing page may use `signature: null` only with explicit
+`preserve_target_content: true`, complete `original_identity` and a full private
+`preserved_original` snapshot. Null means unknown, not an empty source or an
+already delivered Git version. Without preservation identity or a verified owned
+in-flight history, a null binding stays held.
+
+Identity requires the original mirror root, unique parent/title binding, the
+original source-quote block and exact path text, matching original creators,
+and no foreign or unresolved operation markers. A cursor or content hash alone
+cannot grant authority. The same protection can apply to a proven historical
+Git source with interleaved manual additions: retain its real old signature and
+all extra blocks, rather than relabeling it as unknown.
+
+For every protected append, the existing prepared intent contains the complete
+actual pre-append block tree, baseline and snapshot hash. Its private commit must
+be acknowledged before a dispatched checkpoint stores the fixed preservation
+reference and the one allowed send occurs. Finalization records that immutable
+Git reference. Compaction removes a duplicate protected snapshot only after
+reading the exact prepared snapshot back from its Git pin; inaccessible pins
+keep the raw cache. Unknown receipts always keep their original raw snapshots.
+
+New manual additions are privately preserved before baseline extension. A
+manual replacement/reorder is also preserved as an observed target version;
+current confirmed Git content is appended as another version, never used to
+replace or delete the manual version. A manual change during a partial source
+starts a new full generation instead of reusing incomplete verified fragments.
+Known owned markers permit bounded continuation; unknown markers hold.
+
+Native manual files need a durable matching private-Git binary reference in
+addition to their temporary Notion URL. Potential credentials, missing durable
+binary evidence or insufficient identity hold the object; these are preservation
+requirements, not file-type exclusions. The initial reviewed text-only targets
+must still receive real production checkpoint/readback acceptance before being
+reported as restored.
+
+Notion has no CAS. A target change after the checkpoint can still cause readback
+to hold; the automation keeps the private before-version and never retries the
+write blindly or overwrites the competing content. No new confirmation queue,
+state file, page replacement, schedule or external storage is introduced.
