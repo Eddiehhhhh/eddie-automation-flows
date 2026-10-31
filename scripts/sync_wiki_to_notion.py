@@ -6,8 +6,9 @@ Public GitHub state stays privacy-safe:
 - no Notion URLs
 - no mirrored page content
 
-The script resolves Notion child pages by title on each run, then creates or
-updates only pages whose local content hash changed.
+Automatic Notion mutations are held pending a reviewed intent executor.
+Private intent checkpoints and read-only recovery reuse the existing mirror state.
+Source hashes alone cannot protect edits made concurrently in Notion.
 """
 
 from __future__ import annotations
@@ -23,12 +24,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from cloud_private_checkout import verify_private_checkout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -251,12 +254,23 @@ def normalize_notion_id(value: str) -> str:
     return f"{token[0:8]}-{token[8:12]}-{token[12:16]}-{token[16:20]}-{token[20:32]}"
 
 
+class MirrorHeld(RuntimeError):
+    """The mirror needs review and must not report a successful sync."""
+
+
+class UnknownWrite(MirrorHeld):
+    """A non-idempotent request may have reached Notion; never retry blindly."""
+
+
 def notion_request(
     api_key: str,
     method: str,
     path: str,
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if method.upper() != "GET" and not (method.upper() == "POST" and path == "/search"):
+        raise MirrorHeld("Notion mirror mutation disabled pending reviewed intent executor")
+    non_idempotent = (method.upper() == "POST" and path != "/search") or (method.upper() == "PATCH" and path.endswith("/children"))
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Notion-Version": NOTION_VERSION,
@@ -274,7 +288,12 @@ def notion_request(
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
-            return json.loads(body) if body else {}
+            try:
+                return json.loads(body) if body else {}
+            except ValueError as exc:
+                if non_idempotent:
+                    raise UnknownWrite("non-idempotent write response unreadable; target recovery required") from exc
+                raise
         except urllib.error.HTTPError as exc:
             last_error = exc
             body = exc.read().decode("utf-8", errors="replace")
@@ -282,6 +301,8 @@ def notion_request(
                 retry_after = exc.headers.get("Retry-After")
                 time.sleep(int(retry_after) if retry_after and retry_after.isdigit() else 10)
                 continue
+            if 500 <= exc.code < 600 and non_idempotent:
+                raise UnknownWrite("non-idempotent write returned a server error; target recovery required") from exc
             if 500 <= exc.code < 600 and attempt < 4:
                 time.sleep(5)
                 continue
@@ -289,6 +310,8 @@ def notion_request(
             raise RuntimeError(f"Notion API {method} {path} failed ({exc.code}): {message}") from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_error = exc
+            if non_idempotent:
+                raise UnknownWrite("non-idempotent write response lost; target recovery required") from exc
             if attempt < 4:
                 time.sleep(5)
                 continue
@@ -829,8 +852,8 @@ def create_page(
         payload["children"] = children[:100]
     response = notion_request(api_key, "POST", "/pages", payload)
     page_id = normalize_notion_id(str(response.get("id") or ""))
-    if not page_id:
-        raise RuntimeError(f"Failed to create Notion page {title!r}")
+    if not UUID_RE.fullmatch(page_id):
+        raise UnknownWrite("create response lacks a verified page ID; target recovery required")
     if children and len(children) > 100:
         append_blocks(api_key, page_id, children[100:])
     return page_id
@@ -867,17 +890,7 @@ def append_blocks(api_key: str, page_id: str, blocks: Sequence[Dict[str, Any]]) 
 
 
 def replace_page_content(api_key: str, page_id: str, blocks: Sequence[Dict[str, Any]]) -> None:
-    existing = retrieve_block_children(api_key, page_id)
-    for block in existing:
-        # Keep nested child pages in place. The blocks API cannot archive them,
-        # and directory/root pages rely on those children to preserve structure.
-        if block.get("type") == "child_page":
-            continue
-        block_id = block.get("id")
-        if block_id:
-            archive_block(api_key, str(block_id))
-    if blocks:
-        append_blocks(api_key, page_id, blocks)
+    raise MirrorHeld("needs_review: destructive page replacement is disabled")
 
 
 def load_patterns(args: argparse.Namespace) -> Tuple[List[str], List[str]]:
@@ -923,8 +936,9 @@ def save_state(
     counts: Dict[str, int],
 ) -> None:
     payload = {
+        **load_state(),
         "source_system": source_mode,
-        "scope": "public-safe",
+        "scope": "private-state",
         "generated_at": format_time(generated_at),
         "root_title": root_title,
         "parent_page_title": parent_title,
@@ -937,8 +951,125 @@ def save_state(
     write_json(STATE_PATH, payload)
 
 
+def persist_private_state(state: Dict[str, Any]) -> None:
+    """Publish the existing private state before allowing any Notion request."""
+    try:
+        verify_private_checkout(ROOT, os.environ.get("PRIVATE_VAULT_TOKEN", ""))
+    except Exception:
+        raise MirrorHeld("checkpoint repository verification failed") from None
+    relative = STATE_PATH.resolve().relative_to(ROOT.resolve()).as_posix()
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "diff", "--cached", "--quiet"], capture_output=True,
+    )
+    if result.returncode != 0:
+        raise MirrorHeld("private checkpoint requires an empty staging area")
+    write_json(STATE_PATH, state)
+    commit = Path(__file__).with_name("commit_private_vault.py")
+    result = subprocess.run(
+        ["python3", str(Path(__file__).with_name("run_bounded.py")), "--timeout-seconds", "180",
+         "python3", str(commit), "--vault", str(ROOT), "--message", "Checkpoint Notion mirror intent",
+         "--path", relative], capture_output=True, timeout=190,
+    )
+    if result.returncode:
+        raise MirrorHeld("private checkpoint publication failed")
+    local = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15)
+    remote = subprocess.run(["git", "-C", str(ROOT), "ls-remote", "origin", "refs/heads/main"], capture_output=True, text=True, timeout=60)
+    if local.returncode or remote.returncode or remote.stdout.split()[:1] != [local.stdout.strip()]:
+        raise MirrorHeld("private checkpoint remote readback failed")
+
+
+def block_identity(block: Dict[str, Any]) -> str:
+    """Compare content, including human formatting, without Notion response metadata."""
+    def clean(value: Any) -> Any:
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {}
+        for key, item in value.items():
+            if key in {"plain_text", "href"} or (key == "color" and item == "default") or (key == "link" and item is None):
+                continue
+            if key == "annotations" and item == {"bold": False, "italic": False, "strikethrough": False, "underline": False, "code": False, "color": "default"}:
+                continue
+            result[key] = clean(item)
+        return result
+    kind = block.get("type")
+    return sha256_text(json.dumps({"type": kind, "content": clean(block.get(kind, {}))}, sort_keys=True, ensure_ascii=False))
+
+
+def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequence[Dict[str, Any]],
+                   target_id: Optional[str] = None, baseline: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Checkpoint one explicit batch; this does not enable automatic mirror writes."""
+    if kind not in {"create", "append"} or not operation_id or not blocks or len(blocks) > 100:
+        raise MirrorHeld("invalid intent")
+    state = load_state()
+    intents = state.setdefault("write_intents", {})
+    if operation_id in intents:
+        raise MirrorHeld("intent already exists; readback recovery required")
+    if any(item.get("status") != "verified" for item in intents.values()):
+        raise MirrorHeld("unresolved intent requires recovery")
+    if state.get("write_outcome", {}).get("retry_allowed") is False:
+        raise MirrorHeld("legacy unknown write requires review")
+    marker = "eddie-mirror-operation:" + operation_id
+    if kind == "create" and block_identity(blocks[0]) != block_identity(paragraph_block(marker)):
+        raise MirrorHeld("create requires a unique operation marker")
+    if kind == "append" and (not target_id or baseline is None or any(not item.get("id") for item in baseline)):
+        raise MirrorHeld("append requires managed target identity and complete block baseline")
+    if kind == "append":
+        expected_baseline = [{"id": block["id"], "hash": block_identity(block)} for block in baseline or []]
+        if not any(entry.get("page_id") == target_id and entry.get("managed_block_baseline") == expected_baseline
+                   for entry in (state.get("entries") or {}).values()):
+            raise MirrorHeld("old target lacks recorded management identity and content baseline")
+    intent = {"kind": kind, "parent_id": parent_id, "target_id": target_id, "marker": marker,
+              "expected": [block_identity(block) for block in blocks],
+              "baseline": [{"id": block["id"], "hash": block_identity(block)} for block in baseline or []],
+              "status": "prepared", "retry_allowed": False}
+    intents[operation_id] = intent
+    persist_private_state(state)
+    return intent
+
+
+def recover_intent(api_key: str, intent: Dict[str, Any]) -> Dict[str, Any]:
+    """Read only. Ambiguous, partial, and human-modified targets stay held."""
+    if intent.get("kind") == "create":
+        candidates = []
+        for block in retrieve_block_children(api_key, intent["parent_id"]):
+            if block.get("type") != "child_page":
+                continue
+            target = str(block.get("id") or "")
+            children = retrieve_block_children(api_key, target)
+            if children and block_identity(children[0]) == block_identity(paragraph_block(intent["marker"])):
+                candidates.append((target, children))
+        if len(candidates) != 1:
+            return {"status": "held", "reason": "target_not_unique", "retry_allowed": False}
+        target, children = candidates[0]
+    else:
+        target = intent.get("target_id")
+        if not target or "baseline" not in intent:
+            return {"status": "held", "reason": "missing_managed_baseline", "retry_allowed": False}
+        children = retrieve_block_children(api_key, target)
+        baseline = intent["baseline"]
+        observed = [{"id": block.get("id"), "hash": block_identity(block)} for block in children[:len(baseline)]]
+        if observed != baseline:
+            return {"status": "held", "reason": "human_or_target_change", "retry_allowed": False}
+        children = children[len(baseline):]
+    if [block_identity(block) for block in children] != intent.get("expected"):
+        return {"status": "held", "reason": "partial_or_modified", "retry_allowed": False}
+    return {"status": "verified", "target_id": target, "retry_allowed": False}
+
+
+def recover_intents(api_key: str) -> Dict[str, int]:
+    state = load_state()
+    counts = {"verified": 0, "held": int(state.get("write_outcome", {}).get("retry_allowed") is False)}
+    for intent in (state.get("write_intents") or {}).values():
+        outcome = recover_intent(api_key, intent)
+        counts[outcome["status"]] += 1
+    return counts
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--recover-intents", action="store_true", help="Read targets for existing private intents; no Notion or state writes.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve and plan changes without writing Notion or state.")
     parser.add_argument("--plan-only", action="store_true", help="Only enumerate local files and directories.")
     parser.add_argument("--full-sync", action="store_true", help="Rewrite mirrored page content even when hashes are unchanged.")
@@ -955,8 +1086,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def _main() -> int:
     args = parse_args()
+    if args.recover_intents:
+        counts = recover_intents(load_notion_api_key())
+        print(json.dumps({"status": "recovery_readback", "counts": counts}))
+        return 2 if counts["held"] else 0
     generated_at = now()
     include_patterns, exclude_patterns = load_patterns(args)
     source_root, source_paths, temp_source_dir, source_mode = resolve_source_paths(include_patterns, exclude_patterns)
@@ -993,8 +1128,12 @@ def main() -> int:
 
     api_key = load_notion_api_key()
     state = load_state()
+    if state.get("write_outcome", {}).get("retry_allowed") is False:
+        raise MirrorHeld("needs_review: unresolved unknown write requires target recovery")
+    if any(item.get("status") != "verified" for item in (state.get("write_intents") or {}).values()):
+        raise MirrorHeld("needs_review: unresolved intent requires target recovery")
     previous_entries = state.get("entries") or {}
-    next_entries: Dict[str, Dict[str, Any]] = {}
+    next_entries: Dict[str, Dict[str, Any]] = dict(previous_entries)
     state_key_secret = state_secret()
 
     parent_page_id = resolve_parent_page_id(api_key, args.parent_page_id, args.parent_page_title)
@@ -1014,10 +1153,8 @@ def main() -> int:
             pseudo_id = f"dryrun::{parent_id}::{title}"
             children[title] = pseudo_id
             return pseudo_id, True
-        page_id = create_page(api_key, parent_id, title, icon, children=blocks)
-        child_cache.pop(parent_id, None)
-        get_children(parent_id)
-        return page_id, True
+        # No durable write-intent checkpoint exists in this mirror yet.
+        raise MirrorHeld("needs_review: new page creation requires a durable write receipt")
 
     root_blocks = blocks_for_node(source_root, nodes[0], args.root_title)
     root_page_id, root_created = ensure_page(parent_page_id, args.root_title, icon_for_node("root"), root_blocks if not args.dry_run else None)
@@ -1063,7 +1200,6 @@ def main() -> int:
         updated_count += 1
         if args.dry_run:
             continue
-        update_page_title(api_key, page_id, node.title)
         replace_page_content(api_key, page_id, desired_blocks)
 
     if not args.dry_run:
@@ -1097,6 +1233,25 @@ def main() -> int:
     if temp_source_dir is not None:
         temp_source_dir.cleanup()
     return 0
+
+
+def main() -> int:
+    try:
+        return _main()
+    except UnknownWrite:
+        if "--recover-intents" in sys.argv:
+            print(json.dumps({"status": "recovery_held", "retry_allowed": False}))
+            return 2
+        # Reuse the existing state, preserving source cursors. Persisting this
+        # file to the private vault on failure still needs workflow coordination.
+        state = load_state()
+        state["write_outcome"] = {"status": "unknown_write", "retry_allowed": False}
+        persist_private_state(state)
+        print(json.dumps({"status": "unknown_write", "retry_allowed": False}))
+        return 2
+    except MirrorHeld as exc:
+        print(json.dumps({"status": "needs_review", "reason": str(exc)}))
+        return 2
 
 
 if __name__ == "__main__":
