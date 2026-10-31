@@ -197,3 +197,25 @@ available. Local Markdown/Obsidian/HTML references and recursive HTML/CSS/JSON b
 dependencies are inventoried from fixed Git bytes. HTML base rewriting, malformed
 bundles and read/depth/count budgets remain explicit holds; dynamic JavaScript
 resource construction is not executed or claimed as complete bundle discovery.
+
+## Rich-text run coalescing during intent recovery
+
+Notion can return a long code block as one text run after receiving several
+same-attribute runs. Intent readback first uses the existing exact hashes. On a
+mismatch it may normalize adjacent text runs only when the original privately
+checkpointed `context.request.children` is still present and its unchanged
+canonical hashes agree with the saved `expected` hashes. Text, links, meaningful
+annotations and all other properties must then agree after coalescing.
+
+This compatibility check applies to both initial create/append recovery and the
+second read in finalization. Before/after target baselines still use the existing
+`block_identity`; no historical baseline hash migration, target mutation or
+write retry is needed. Missing/tampered payloads, changed human prefixes, true
+text/style/link changes and incomplete targets remain held.
+
+
+The page-batch budget counts actual single-send attempts immediately after the
+remote dispatched checkpoint and before sending. Unknown/rejected writes consume
+an attempt too; reused verified history does not. `attempted_batches` reports
+this separately from verified receipts, so failures cannot expand a bounded pass
+past its requested number of attempts.
