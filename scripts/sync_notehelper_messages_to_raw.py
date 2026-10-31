@@ -202,7 +202,7 @@ def render(node, downloader):
     reject(markdown)
     files[str(directory/'source.json')] = source
     files[str(current)] = markdown
-    return {'current_path':str(current),'files':{p:sha(raw) for p,raw in files.items()},
+    return {'title':title,'current_path':str(current),'files':{p:sha(raw) for p,raw in files.items()},
         'resources': resources,'source_saved_at':created,'source_updated_at':updated}, files
 
 
@@ -245,6 +245,21 @@ def collect(root, token, *, apply=False, fetcher=api_page, downloader=shared.dow
                     'owned_message_content_edited','stage_edited','missing_message_source_time','ambiguous_message_source_time',
                     'asset_http_403','asset_http_404','asset_http_429','unsupported_message_image_shape','unsafe_asset_url','unsafe_asset_address','incomplete_asset'}
                 held[ident]=reason if reason in allowed else 'message_capture_failed'
+        index_path=shared.safe_path(root,BASE/'index.md')
+        existing=index_path.read_bytes() if index_path.exists() else None
+        index=('---\nstage_only: true\n---\n\n# 笔记同步助手云端消息\n\n'
+            '旧日报保留；以下链接只指向每条消息当前的可读版本。\n\n' +
+            '\n'.join('- [' + str(record.get('title',Path(record['current_path']).stem)).replace('\n',' ').replace('[','\\[').replace(']','\\]') +
+                '](' + urllib.parse.quote(record['current_path'],safe='/._-') + ') · ' + record['source_saved_at']
+                for ident,record in sorted(candidate['messages'].items()))+'\n').encode()
+        reject(index)
+        if existing is not None and sha(existing)!=candidate.get('index_sha256') and existing!=index:
+            held['index']='message_index_edited'
+        elif apply:
+            if (index_path.read_bytes() if index_path.exists() else None)!=existing:
+                raise ValueError('message_index_changed')
+            shared.atomic_write(index_path,index)
+            candidate['index_sha256']=sha(index)
         candidate['coverage']={**proof,'observed':len(nodes),'captured':written,'held':held,
             'capture_complete':not held,'legacy_merge_status':'unmerged_legacy_preserved',
             'legacy_files':legacy_inventory(root)}
@@ -269,7 +284,7 @@ def verify_remote(root):
     def git(*args):return subprocess.run(['git','-C',str(root),*args],check=True,capture_output=True,text=True,timeout=30).stdout.strip()
     git('fetch','origin','main')
     path=shared.safe_path(root,STATE);raw=path.read_bytes();state=json.loads(raw)
-    files={str(STATE):sha(raw)}
+    files={str(STATE):sha(raw),str(BASE/'index.md'):state['index_sha256']}
     for record in state['messages'].values():
         for version in record['versions'].values():files.update({str(BASE/rel):digest for rel,digest in version.items()})
     for relative,expected in files.items():

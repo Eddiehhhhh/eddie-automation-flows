@@ -50,6 +50,9 @@ class Messages(unittest.TestCase):
         try:
             git('remote','add','origin',str(remote));git('push','-q','origin','main')
             self.assertTrue(m.verify_remote(self.root))
+            index=self.root/m.BASE/'index.md';index_raw=index.read_bytes();index.write_bytes(b'changed index')
+            with self.assertRaisesRegex(ValueError,'message_remote_readback_failed'):m.verify_remote(self.root)
+            index.write_bytes(index_raw)
             asset=self.root/m.BASE/self.state()['messages']['synthetic-message']['resources'][0]['path'];asset.write_bytes(b'changed')
             with self.assertRaisesRegex(ValueError,'message_remote_readback_failed'):m.verify_remote(self.root)
         finally:
@@ -65,6 +68,19 @@ class Messages(unittest.TestCase):
         self.assertEqual(request.full_url,m.ENDPOINT);self.assertEqual(request.get_header('X-api-key'),'synthetic-not-valid')
         self.assertEqual(json.loads(request.data)['variables']['query'],m.PREFIX)
         self.assertEqual(request.method,'POST')
+
+    def test_current_index_only_state_current_and_manual_hold(self):
+        self.collect([node()],apply=True);first=self.state()['messages']['synthetic-message']['current_path']
+        self.collect([node(content='新版')],apply=True);state=self.state();current=state['messages']['synthetic-message']['current_path']
+        index=self.root/m.BASE/'index.md';text=index.read_text()
+        import urllib.parse
+        self.assertIn('stage_only: true',text);self.assertIn(urllib.parse.quote(current,safe='/._-'),text)
+        self.assertNotIn(urllib.parse.quote(first,safe='/._-'),text);self.assertEqual(m.sha(index.read_bytes()),state['index_sha256'])
+        self.assertFalse(m.eligible_path(self.root,index))
+        index.write_text('人工入口');before=index.read_bytes()
+        report=self.collect([node(content='第三版')],apply=True)
+        self.assertFalse(report['capture_complete']);self.assertEqual(report['held']['index'],'message_index_edited')
+        self.assertEqual(index.read_bytes(),before)
 
     def test_source_edit_keeps_versions_and_upstream_absence(self):
         self.collect([node()],apply=True);old=self.state()['messages']['synthetic-message']['current_path']
