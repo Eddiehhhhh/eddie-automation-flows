@@ -54,6 +54,19 @@ def clean_title(text: str) -> str:
     return value
 
 
+FAILURE_CODES = frozenset({
+    "credential_unavailable", "authentication_failed", "rate_limited", "http_error",
+    "network_error", "invalid_json", "mcp_request_error", "mcp_tool_error",
+    "content_unavailable", "empty_content_rejected", "config_invalid", "unknown",
+})
+
+
+class SyncFailure(RuntimeError):
+    def __init__(self, code: str):
+        self.code = code if code in FAILURE_CODES else "unknown"
+        super().__init__(self.code)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -85,9 +98,7 @@ def load_token() -> str:
             if candidate:
                 return candidate
 
-    raise RuntimeError(
-        "Tencent Docs token not found. Set TENCENT_DOCS_TOKEN or provide ~/.mcporter/credentials.json."
-    )
+    raise SyncFailure("credential_unavailable")
 
 
 def mcp_call(tool_name: str, arguments: dict[str, Any], token: str) -> dict[str, Any]:
@@ -112,37 +123,37 @@ def mcp_call(tool_name: str, arguments: dict[str, Any], token: str) -> dict[str,
         method="POST",
     )
     try:
-        with request.urlopen(req) as resp:
+        with request.urlopen(req, timeout=60) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:  # pragma: no cover
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"MCP HTTP error {exc.code}: {detail}") from exc
+        code = "authentication_failed" if exc.code in (401, 403) else "rate_limited" if exc.code == 429 else "http_error"
+        raise SyncFailure(code) from exc
 
     if body.get("error"):
-        raise RuntimeError(f"MCP request failed for {tool_name}")
+        raise SyncFailure("mcp_request_error")
     result = body.get("result") or {}
     if result.get("isError") or result.get("error"):
-        raise RuntimeError(f"MCP tool failed for {tool_name}")
+        raise SyncFailure("mcp_tool_error")
     structured = result.get("structuredContent")
     if isinstance(structured, dict):
         if structured.get("error"):
-            raise RuntimeError(f"MCP tool failed for {tool_name}")
+            raise SyncFailure("mcp_tool_error")
         return structured
     blocks = result.get("content") or []
     if blocks and isinstance(blocks[0], dict) and "text" in blocks[0]:
         parsed = json.loads(blocks[0]["text"])
         if not isinstance(parsed, dict) or parsed.get("error"):
-            raise RuntimeError(f"MCP tool failed for {tool_name}")
+            raise SyncFailure("mcp_tool_error")
         return parsed
     if isinstance(result, dict):
         return result
-    raise RuntimeError(f"Unexpected MCP response for {tool_name}: {body}")
+    raise SyncFailure("mcp_tool_error")
 
 
 def load_config(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("Config root must be an object.")
+        raise SyncFailure("config_invalid")
     payload.setdefault("search_keywords", [])
     payload.setdefault("pinned_files", [])
     payload.setdefault("ignore_file_ids", [])
@@ -319,7 +330,7 @@ def sync_target(
     file_id = target["file_id"]
     fetch_result = mcp_call("get_content", {"file_id": file_id}, token)
     if fetch_result.get("error") or not isinstance(fetch_result.get("content"), str):
-        raise RuntimeError("Tencent Docs content unavailable; preserving existing document")
+        raise SyncFailure("content_unavailable")
     content = fetch_result["content"]
     raw_title = target.get("title") or file_id
     title = clean_title(raw_title) or raw_title
@@ -347,7 +358,7 @@ def sync_target(
     if previous is not None:
         old_body = FRONTMATTER_RE.sub("", previous, count=1).strip()
         if old_body and not clean_content(title, content):
-            raise RuntimeError("Tencent Docs returned empty content; preserving nonempty document")
+            raise SyncFailure("empty_content_rejected")
     # Fetch dates describe observations, not changes to the source document.
     def without_fetch_date(text: str) -> str:
         return FRONTMATTER_RE.sub(
@@ -407,5 +418,21 @@ def main() -> int:
     return 0
 
 
+def cli() -> int:
+    try:
+        return main()
+    except Exception as exc:
+        code = "unknown"
+        if isinstance(exc, SyncFailure):
+            code = exc.code if exc.code in FAILURE_CODES else "unknown"
+        elif isinstance(exc, json.JSONDecodeError):
+            code = "invalid_json"
+        elif isinstance(exc, (error.URLError, TimeoutError)):
+            code = "network_error"
+        json.dump({"status": "failed", "failure_code": code}, sys.stdout)
+        sys.stdout.write("\n")
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())
