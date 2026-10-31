@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -257,6 +258,10 @@ def normalize_notion_id(value: str) -> str:
 
 class MirrorHeld(RuntimeError):
     """The mirror needs review and must not report a successful sync."""
+
+    def __init__(self, reason: str, code: str = "held"):
+        self.code = code if code in {"held", "checkpoint_helper_unavailable", "checkpoint_publication_failed", "checkpoint_timeout"} else "held"
+        super().__init__(reason)
 
 
 class UnknownWrite(MirrorHeld):
@@ -957,8 +962,34 @@ def save_state(
     write_json(STATE_PATH, payload)
 
 
+def _run_checkpoint(command: Sequence[str]) -> int:
+    """Bound the helper and all child Git processes without exposing output."""
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except OSError:
+        raise MirrorHeld("private checkpoint could not start", "checkpoint_publication_failed") from None
+    try:
+        process.communicate(timeout=180)
+        return process.returncode
+    except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        raise MirrorHeld("private checkpoint timed out", "checkpoint_timeout") from None
+
+
 def persist_private_state(state: Dict[str, Any]) -> None:
     """Publish the existing private state before allowing any Notion request."""
+    commit = Path(__file__).with_name("commit_private_vault.py")
+    if not commit.is_file():
+        raise MirrorHeld("private checkpoint helper unavailable", "checkpoint_helper_unavailable")
     try:
         verify_private_checkout(ROOT, os.environ.get("PRIVATE_VAULT_TOKEN", ""))
     except Exception:
@@ -970,14 +1001,12 @@ def persist_private_state(state: Dict[str, Any]) -> None:
     if result.returncode != 0:
         raise MirrorHeld("private checkpoint requires an empty staging area")
     write_json(STATE_PATH, state)
-    commit = Path(__file__).with_name("commit_private_vault.py")
-    result = subprocess.run(
-        ["python3", str(Path(__file__).with_name("run_bounded.py")), "--timeout-seconds", "180",
-         "python3", str(commit), "--vault", str(ROOT), "--message", "Checkpoint Notion mirror intent",
-         "--path", relative], capture_output=True, timeout=190,
+    result = _run_checkpoint(
+        [sys.executable, str(commit), "--vault", str(ROOT), "--message", "Checkpoint Notion mirror intent",
+         "--path", relative],
     )
-    if result.returncode:
-        raise MirrorHeld("private checkpoint publication failed")
+    if result:
+        raise MirrorHeld("private checkpoint publication failed", "checkpoint_publication_failed")
     local = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15)
     remote = subprocess.run(["git", "-C", str(ROOT), "ls-remote", "origin", "refs/heads/main"], capture_output=True, text=True, timeout=60)
     if local.returncode or remote.returncode or remote.stdout.split()[:1] != [local.stdout.strip()]:
@@ -1463,7 +1492,7 @@ def main() -> int:
         print(json.dumps({"status": "unknown_write", "retry_allowed": False}))
         return 2
     except MirrorHeld as exc:
-        print(json.dumps({"status": "needs_review", "reason": str(exc)}))
+        print(json.dumps({"status": "needs_review", "failure_code": exc.code, "reason": str(exc)}))
         return 2
 
 

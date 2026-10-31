@@ -119,7 +119,7 @@ jobs:
               args+=(--limit "$WIKI_LIMIT")
             fi
           fi
-          python scripts/run_private_command.py --label "Wiki to Notion sync" -- python scripts/sync_wiki_to_notion.py "${args[@]}"
+          python scripts/run_private_command.py --label "Wiki to Notion sync" --stdout-file /tmp/notion-mirror-result.json -- python scripts/sync_wiki_to_notion.py "${args[@]}"
 
       - name: Commit private mirror state
         if: ${{ github.event_name != 'workflow_dispatch' || (inputs.dry_run == false && inputs.recover_intents == false) }}
@@ -128,3 +128,25 @@ jobs:
           set -euo pipefail
           python scripts/commit_private_vault.py --message "Sync wiki mirror state to Notion" \
             --path ".github/state/notion-wiki-mirror-state.json"
+
+      - name: Report safe mirror failure code
+        if: ${{ failure() }}
+        run: |
+          python - <<'PYDIAG'
+          import json
+          from pathlib import Path
+
+          allowed = {"held", "checkpoint_helper_unavailable", "checkpoint_publication_failed", "checkpoint_timeout"}
+          code = "held"
+          try:
+              path = Path("/tmp/notion-mirror-result.json")
+              if path.stat().st_size <= 1024:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+                  if (isinstance(payload, dict) and payload.get("status") == "needs_review"
+                          and isinstance(payload.get("failure_code"), str)
+                          and payload["failure_code"] in allowed):
+                      code = payload["failure_code"]
+          except (OSError, ValueError):
+              pass
+          print("Notion mirror failure_code=" + code)
+          PYDIAG
