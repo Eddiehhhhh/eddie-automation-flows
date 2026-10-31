@@ -59,7 +59,7 @@ class SafetyCandidateTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())['status'],'unknown_write')
 
     def run_mirror(self, previous, children, nodes=None):
-        args=SimpleNamespace(recover_intents=False,path_prefix=None,limit=0,plan_only=False,root_title='fixture',parent_page_title='fixture',parent_page_id='parent',dry_run=False,full_sync=False)
+        args=SimpleNamespace(execute_request=None,execute_revision=None,allow_new_page=False,persist_recovery=False,recover_intents=False,path_prefix=None,limit=0,plan_only=False,root_title='fixture',parent_page_title='fixture',parent_page_id='parent',dry_run=False,full_sync=False)
         nodes=nodes or [m.Node('.',None,'fixture','root',m.ROOT_SIGNATURE)]
         patches={'parse_args':args,'load_patterns':([],[]),'resolve_source_paths':(Path('/tmp'),[],None,'fixture'),'build_nodes':nodes,'load_notion_api_key':'fixture','load_state':previous,'state_secret':None,'resolve_parent_page_id':'parent','blocks_for_node':[]}
         with contextlib.ExitStack() as stack:
@@ -68,6 +68,13 @@ class SafetyCandidateTests(unittest.TestCase):
             create=stack.enter_context(patch.object(m,'create_page'));title=stack.enter_context(patch.object(m,'update_page_title'))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             rc=m.main();create.assert_not_called();title.assert_not_called();return rc
+
+    def test_legacy_noop_preserves_existing_management_metadata(self):
+        metadata={'signature':m.ROOT_SIGNATURE,'page_id':'root','managed_block_baseline':[]}
+        with patch.object(m,'save_state') as save:
+            self.assertEqual(self.run_mirror({'entries':{'.':metadata}},{'parent':{'fixture':'root'}}),0)
+        self.assertEqual(save.call_args.kwargs['entries']['.']['page_id'],'root')
+        self.assertEqual(save.call_args.kwargs['entries']['.']['managed_block_baseline'],[])
 
     def test_new_page_held_before_create_without_durable_receipt(self):
         self.assertEqual(self.run_mirror({},{}),2)
