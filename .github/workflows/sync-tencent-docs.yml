@@ -78,3 +78,29 @@ jobs:
         run: |
           python scripts/commit_private_vault.py --message "Sync Tencent Docs to Raw" \
             --path "Raw/06 TencentDocs" --path ".github/state/tencent-docs-sync-last-run.json"
+
+      - name: Report safe sync failure code
+        if: ${{ failure() }}
+        run: |
+          python - <<'PYDIAG'
+          import json
+          from pathlib import Path
+
+          allowed = {
+              "credential_unavailable", "authentication_failed", "rate_limited", "http_error",
+              "network_error", "invalid_json", "mcp_request_error", "mcp_tool_error",
+              "content_unavailable", "empty_content_rejected", "config_invalid", "unknown",
+          }
+          code = "unknown"
+          try:
+              path = Path("/tmp/tencent-docs-sync-result.json")
+              if path.stat().st_size <= 1024:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+                  if (isinstance(payload, dict) and payload.get("status") == "failed"
+                          and isinstance(payload.get("failure_code"), str)
+                          and payload["failure_code"] in allowed):
+                      code = payload["failure_code"]
+          except (OSError, ValueError):
+              pass
+          print("Tencent Docs sync failure_code=" + code)
+          PYDIAG

@@ -51,6 +51,12 @@ class TencentIntegrityTests(unittest.TestCase):
                 self.assertTrue(sync.sync_target(target, mapping, "2000-01-02", "synthetic")[1])
                 self.assertIn("changed body", path.read_text())
 
+    def test_mcp_request_has_bounded_timeout(self):
+        with mock.patch.object(sync.request, "urlopen", side_effect=TimeoutError("synthetic")) as opened:
+            with self.assertRaises(TimeoutError):
+                sync.mcp_call("get_content", {"file_id": "synthetic"}, "synthetic")
+            self.assertEqual(opened.call_args.kwargs["timeout"], 60)
+
     def test_partial_batch_failure_does_not_emit_success_payload(self):
         import contextlib
         from types import SimpleNamespace
@@ -59,6 +65,44 @@ class TencentIntegrityTests(unittest.TestCase):
         with mock.patch.object(sync, "parse_args", return_value=SimpleNamespace(config="synthetic")), mock.patch.object(sync, "load_config", return_value={}), mock.patch.object(sync, "existing_file_map", return_value={}), mock.patch.object(sync, "collect_targets", return_value=targets), mock.patch.object(sync, "load_token", return_value="synthetic"), mock.patch.object(sync, "sync_target", side_effect=[("其他/a.md", True, "其他"), RuntimeError("source unavailable")]), contextlib.redirect_stdout(output), self.assertRaises(RuntimeError):
             sync.main()
         self.assertEqual(output.getvalue(), "")
+
+    def test_cli_failure_diagnostics_are_allowlisted_and_private(self):
+        import contextlib
+        for failure, expected in [
+            (sync.SyncFailure("empty_content_rejected"), "empty_content_rejected"),
+            (RuntimeError("PRIVATE_SENTINEL https://private.example/id"), "unknown"),
+            (TimeoutError("PRIVATE_SENTINEL"), "network_error"),
+            (json.JSONDecodeError("PRIVATE_SENTINEL", "PRIVATE_SENTINEL", 0), "invalid_json"),
+        ]:
+            output = io.StringIO()
+            with mock.patch.object(sync, "main", side_effect=failure), contextlib.redirect_stdout(output):
+                self.assertEqual(sync.cli(), 1)
+            self.assertEqual(json.loads(output.getvalue()), {"status": "failed", "failure_code": expected})
+            self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
+
+    def test_workflow_failure_diagnostic_rejects_private_or_malformed_payload(self):
+        import subprocess
+        import textwrap
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/sync-tencent-docs.yml").read_text()
+        step = workflow.split("      - name: Report safe sync failure code\n", 1)[1]
+        self.assertIn("if: ${{ failure() }}", step)
+        script = textwrap.dedent(step.split("python - <<'PYDIAG'\n", 1)[1].rsplit("          PYDIAG", 1)[0])
+        for payload, expected in [
+            ('{"status":"failed","failure_code":"rate_limited","private":"PRIVATE_SENTINEL"}', "rate_limited"),
+            ('{"status":"failed","failure_code":"PRIVATE_SENTINEL"}', "unknown"),
+            ('{"status":"PRIVATE_SENTINEL","failure_code":"rate_limited"}', "unknown"),
+            ('PRIVATE_SENTINEL malformed json', "unknown"),
+            ('{"status":"failed","failure_code":[]}', "unknown"),
+            ('[]', "unknown"),
+            ('PRIVATE_SENTINEL' * 200, "unknown"),
+        ]:
+            with tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "result.json"
+                source.write_text(payload)
+                result = subprocess.run([sys.executable, "-c", script.replace("/tmp/tencent-docs-sync-result.json", str(source))], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "Tencent Docs sync failure_code=" + expected + "\n")
+                self.assertEqual(result.stderr, "")
 
     def test_valid_new_empty_source_is_allowed_and_remains_noop(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sync, "RAW_ROOT", Path(tmp)), mock.patch.object(sync, "mcp_call", return_value={"content": "", "error": None}):
