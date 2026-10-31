@@ -36,7 +36,8 @@ class NotionPvsRecoveryTests(unittest.TestCase):
                BASE.replace('/p/','/p/not-an-id-')+'?pvs=204']
         for url in cases:
             with self.subTest(url=url):
-                self.assertFalse(m.intent_expected_matches(intent(block(url)),[block(BASE)]))
+                actual_url=url.split('?')[0] if '?' in url else BASE
+                self.assertFalse(m.intent_expected_matches(intent(block(url)),[block(actual_url)]))
         for change in ['id','host','text','bold','color','fragment','extra_link_property']:
             observed=block(BASE);run=observed['paragraph']['rich_text'][0]
             if change=='id':run['text']['link']['url']=BASE[:-1]+'b'
