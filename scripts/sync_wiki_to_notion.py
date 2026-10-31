@@ -348,6 +348,24 @@ def retrieve_block_children(api_key: str, block_id: str) -> List[Dict[str, Any]]
     return children
 
 
+def retrieve_block_tree(api_key: str, target: str, seen: Optional[set] = None, depth: int = 0) -> List[Dict[str, Any]]:
+    """Read every nested block before trusting a content hash, including table cells."""
+    seen = set() if seen is None else seen
+    if target in seen or depth > 32 or len(seen) >= 10000:
+        raise MirrorHeld("nested target pagination incomplete")
+    seen.add(target)
+    blocks = retrieve_block_children(api_key, target)
+    for block in blocks:
+        kind = block.get("type")
+        if not isinstance(kind, str) or not isinstance(block.get(kind), dict):
+            raise MirrorHeld("target block payload incomplete")
+        if block.get("has_children") and kind not in {"child_page", "child_database"}:
+            if not block.get("id"):
+                raise MirrorHeld("nested target identity unavailable")
+            block[kind]["children"] = retrieve_block_tree(api_key, block["id"], seen, depth + 1)
+    return blocks
+
+
 def rich_text_plain_text(parts: Sequence[Dict[str, Any]]) -> str:
     return "".join(part.get("plain_text", "") for part in parts if isinstance(part, dict))
 
@@ -546,7 +564,7 @@ def resolve_source_paths(
     return ROOT, tracked_markdown_paths(include_patterns, exclude_patterns), None, "git_tracked_repo"
 
 
-def build_nodes(paths: Sequence[str], source_root: Path) -> List[Node]:
+def build_nodes(paths: Sequence[str], source_root: Path, signatures: Optional[Dict[str, str]] = None) -> List[Node]:
     nodes: Dict[str, Node] = {
         ".": Node(path=".", parent_path=None, title=DEFAULT_ROOT_TITLE, kind="root", signature=ROOT_SIGNATURE)
     }
@@ -574,7 +592,7 @@ def build_nodes(paths: Sequence[str], source_root: Path) -> List[Node]:
             parent_path=parent_path,
             title=file_path.name,
             kind="file",
-            signature=file_signature(source_root / path),
+            signature=signatures[path] if signatures is not None else file_signature(source_root / path),
         )
 
     def sort_key(node: Node) -> Tuple[int, int, str]:
@@ -796,6 +814,65 @@ def markdown_to_blocks(markdown: str) -> List[Dict[str, Any]]:
     return blocks
 
 
+def native_markdown_to_blocks(markdown: str) -> List[Dict[str, Any]]:
+    """Preserve the established renderer, adding real tables outside fenced code."""
+    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks: List[Dict[str, Any]] = []
+    pending: List[str] = []
+    fenced = False
+    index = 0
+    def cells(line: str) -> List[str]:
+        return [v.strip().replace("\\|", "|") for v in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+    def flush() -> None:
+        if pending:
+            blocks.extend(markdown_to_blocks("\n".join(pending)))
+            pending.clear()
+    while index < len(lines):
+        line = lines[index]
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        divider = cells(lines[index + 1]) if index + 1 < len(lines) else []
+        is_table = not fenced and "|" in line and len(divider) > 1 and all(re.fullmatch(r":?-{3,}:?", v) for v in divider)
+        if not is_table:
+            pending.append(line); index += 1; continue
+        flush()
+        rows = [cells(line)]
+        index += 2
+        while index < len(lines) and "|" in lines[index] and lines[index].strip():
+            rows.append(cells(lines[index])); index += 1
+        width = max(len(row) for row in rows)
+        header = rows[0] + [""] * (width - len(rows[0]))
+        # Keep every table create below the children limit, repeating the header for readable continuation.
+        for offset in range(0, max(1, len(rows) - 1), 80):
+            subset = [header, *rows[1 + offset:81 + offset]]
+            children = [{"object": "block", "type": "table_row", "table_row": {
+                "cells": [text_rich_text(cell) for cell in row + [""] * (width - len(row))]}} for row in subset]
+            blocks.append({"object": "block", "type": "table", "table": {
+                "table_width": width, "has_column_header": True, "has_row_header": False, "children": children}})
+    flush()
+    return blocks
+
+
+def payload_chunks(blocks: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Respect top-level, recursive block and encoded request-size bounds."""
+    chunks: List[List[Dict[str, Any]]] = []
+    chunk: List[Dict[str, Any]] = []
+    count, size = 3, 4096  # operation marker, version heading, end marker and envelope
+    def weight(block: Dict[str, Any]) -> int:
+        return 1 + sum(weight(child) for child in block.get(block.get("type"), {}).get("children", []))
+    for block in blocks:
+        block_count = weight(block)
+        encoded_size = len(json.dumps(block, ensure_ascii=False).encode("utf-8"))
+        if block_count > 900 or encoded_size > 440000:
+            raise MirrorHeld("source block exceeds safe request size")
+        if chunk and (len(chunk) >= 97 or count + block_count > 900 or size + encoded_size > 440000):
+            chunks.append(chunk); chunk = []; count, size = 3, 4096
+        chunk.append(block); count += block_count; size += encoded_size
+    if chunk:
+        chunks.append(chunk)
+    return chunks
+
+
 def root_page_blocks(root_title: str) -> List[Dict[str, Any]]:
     lines = [
         f"这个页面由 GitHub workflow 自动维护，用来镜像 `{root_title}` 对应的本地 Markdown 结构。",
@@ -1013,6 +1090,256 @@ def persist_private_state(state: Dict[str, Any]) -> None:
         raise MirrorHeld("private checkpoint remote readback failed")
 
 
+_ASSET_READBACK_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_SOURCE_TREE_CACHE: Dict[str, set] = {}
+
+
+def source_tree_paths(snapshot: str) -> set:
+    if snapshot not in _SOURCE_TREE_CACHE:
+        result = subprocess.run(["git", "-C", str(ROOT), "ls-tree", "-rz", snapshot], capture_output=True, timeout=30)
+        if result.returncode:
+            raise MirrorHeld("source reference tree unavailable")
+        _SOURCE_TREE_CACHE[snapshot] = {row.split(b"\t", 1)[1].decode("utf-8") for row in result.stdout.split(b"\0") if row and row.split()[0] in {b"100644", b"100755"}}
+    return _SOURCE_TREE_CACHE[snapshot]
+
+
+
+def asset_block_identity(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    kind = block.get("type")
+    if kind not in {"file", "image", "pdf", "audio", "video"}:
+        return None
+    payload = block.get(kind) or {}
+    mode = payload.get("type")
+    if mode not in {"file_upload", "file"}:
+        return None
+    import notion_private_assets as assets
+    receipts = (load_state().get("assets") or {}).values()
+    caption = "".join(part.get("text", {}).get("content", part.get("plain_text", "")) for part in payload.get("caption", []))
+    if not caption.startswith("来源附件："):
+        # Retain human files by their actual bytes, without claiming a Git source binding.
+        if mode == "file_upload":
+            raise MirrorHeld("native upload lacks verified private source binding")
+        url = payload.get("file", {}).get("url", "")
+        cache_key = ("human-native-file", url)
+        try:
+            if cache_key not in _ASSET_READBACK_CACHE:
+                _ASSET_READBACK_CACHE[cache_key] = assets.canonical_native_file(block)
+        except assets.AssetHeld:
+            raise MirrorHeld("human native file readback held") from None
+        return {"asset": _ASSET_READBACK_CACHE[cache_key], "caption": payload.get("caption", []), "name": payload.get("name", "")}
+    path = caption[len("来源附件："):]
+    matches = [r for r in receipts if r.get("source_path") == path or any(path in versions for versions in r.get("sources", {}).values())]
+    if mode == "file_upload":
+        matches = [r for r in matches if r.get("upload_id") == payload.get("file_upload", {}).get("id")]
+    else:
+        url = payload.get("file", {}).get("url", "")
+        cache_key = ("native-file", url)
+        try:
+            if cache_key not in _ASSET_READBACK_CACHE:
+                _ASSET_READBACK_CACHE[cache_key] = assets.canonical_native_file(block)
+        except assets.AssetHeld:
+            raise MirrorHeld("native asset binary readback held") from None
+        observed = _ASSET_READBACK_CACHE[cache_key]
+        matches = [r for r in matches if r.get("sha256") == observed["sha256"] and r.get("size") == observed["size"]]
+    if len(matches) != 1 or matches[0].get("phase") != "verified":
+        raise MirrorHeld("native asset binding ambiguous or unavailable")
+    receipt = matches[0]
+    # This private receipt was pinned to the Git blob before upload; old receipt bytes
+    # remain authoritative after a depth-one runner loses earlier source Git objects.
+    identity = {"type": kind, "sha256": receipt["sha256"], "size": receipt["size"], "content_type": receipt["content_type"]}
+    canonical = {"asset": identity, "caption": payload.get("caption", [])}
+    if kind == "file":
+        canonical["name"] = payload.get("name", receipt["filename"])
+    return canonical
+
+
+def bundle_references(text: str, suffix: str) -> List[str]:
+    """Inventory local HTML/CSS/JSON dependencies; no code or network resources execute."""
+    refs: List[str] = []
+    if suffix in {".html", ".htm"}:
+        from html.parser import HTMLParser
+        class References(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                values = dict(attrs)
+                if tag == "base":
+                    raise ValueError("HTML base requires review")
+                for name in ("src", "href", "poster"):
+                    if values.get(name):
+                        refs.append(values[name])
+                if values.get("srcset"):
+                    refs.extend(value.strip().split()[0] for value in values["srcset"].split(",") if value.strip())
+        parser = References()
+        parser.feed(text)
+    if suffix in {".html", ".htm", ".css"}:
+        refs.extend(match[1].strip().strip("\"'") for match in re.finditer(r"url\(([^)]+)\)", text))
+        refs.extend(match[1] for match in re.finditer(r"@import\s+[\"']([^\"']+)[\"']", text))
+    if suffix == ".json":
+        def strings(value):
+            if isinstance(value, str):
+                refs.append(value)
+            elif isinstance(value, list):
+                for item in value:
+                    strings(item)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    strings(item)
+        strings(json.loads(text))
+    return list(dict.fromkeys(ref for ref in refs if ref and not ref.startswith("#") and not urllib.parse.urlsplit(ref).scheme))
+
+
+def render_native_source(api_key: str, relative: str, markdown: str, snapshot: str, deadline: Optional[float] = None) -> Tuple[List[Dict[str, Any]], str, Dict[str, int]]:
+    """Link to original private objects; attach only verified pinned binary uploads."""
+    import posixpath
+    import notion_private_assets as assets
+    statuses: Dict[str, str] = {}
+    attachments: List[Dict[str, Any]] = []
+    counts = {"assets_ready": 0, "assets_held": 0, "assets_fallback": 0}
+    state = load_state()
+    known = state.get("entries") or {}
+    paths = source_tree_paths(snapshot)
+    def resolve(target: str, source: Optional[str] = None) -> Optional[str]:
+        value = urllib.parse.unquote(target.split("#", 1)[0].strip().strip("<>"))
+        if not value or urllib.parse.urlsplit(value).scheme or value.startswith("/") or "\\" in value:
+            return None
+        path = posixpath.normpath(posixpath.join(posixpath.dirname(source or relative), value))
+        if path.startswith("../") or path == "..":
+            return None
+        for candidate in [path, value, path + ".md", value + ".md"]:
+            if candidate in paths:
+                return candidate
+        if "/" not in value:
+            candidates = [p for p in paths if Path(p).stem == value and p.endswith(".md")]
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
+    def link(label: str, target: str, embed: bool = False, source: Optional[str] = None, depth: int = 0) -> str:
+        if (deadline is not None and time.monotonic() >= deadline) or depth > 16 or len(statuses) >= 1000:
+            raise MirrorHeld("source asset traversal budget exhausted")
+        parsed = urllib.parse.urlsplit(target)
+        if parsed.scheme in {"https", "http"} and parsed.hostname and not parsed.username and not parsed.password:
+            return "[" + label + "](" + target + ")"
+        path = resolve(target, source)
+        if path is None:
+            if target.startswith("#"):
+                url = assets.private_git_link(ROOT, snapshot, relative)
+                return "[" + label + "](" + url + target + ")" if url else label
+            counts["assets_held"] += 1
+            statuses[target] = "reference_held"
+            return label + "（来源引用待核验）"
+        if path.endswith(".md"):
+            entry = previous_entry_for_path(known, path, state_secret())
+            fallback = assets.private_git_link(ROOT, snapshot, path)
+            if fallback:
+                fallback = fallback.replace("/blob/" + snapshot + "/", "/blob/main/", 1)
+            url = "https://www.notion.so/" + entry["page_id"].replace("-", "") if entry.get("page_id") else fallback
+            return "[" + label + "](" + url + ")" if url else label
+        try:
+            asset = assets.prepare(ROOT, snapshot, path)
+        except assets.AssetHeld as exc:
+            counts["assets_held"] += 1
+            statuses[path] = "source_held"
+            if exc.code == "source_read_budget":
+                fallback = assets.private_git_link(ROOT, snapshot, path)
+                if fallback:
+                    counts["assets_fallback"] += 1
+                    # A source-read budget is not a file-type exclusion or an upload success.
+                    return "[" + label + "（原文件）](" + fallback.replace("/blob/" + snapshot + "/", "/blob/main/", 1) + ")"
+            return label + "（来源引用待核验）"
+        fallback = asset.fallback_url
+        if path not in statuses:
+            statuses[path] = "processing"
+            def checkpoint(receipt: Dict[str, Any]) -> None:
+                current = load_state()
+                existing = current.setdefault("assets", {}).get(asset.sha256)
+                if existing != receipt:
+                    current["assets"][asset.sha256] = receipt
+                    persist_private_state(current)
+            result = assets.publish(asset, api_key, checkpoint, prior_receipt=load_state().get("assets", {}).get(asset.sha256))
+            # The module deliberately suppresses callback exceptions; never turn a failed publication into a fallback write.
+            require_published_state()
+            if result["reason"] == "asset_checkpoint_failed":
+                raise MirrorHeld("asset checkpoint publication failed", "checkpoint_publication_failed")
+            # Preserve a fixed original-file link even when a quota/size hold occurs before upload.
+            checkpoint(result["receipt"])
+            if result["status"] == "ready":
+                block = result["block"]
+                block[block["type"]]["caption"] = text_rich_text("来源附件：" + path)
+                attachments.append(block)
+                statuses[path] = "ready"
+                counts["assets_ready"] += 1
+            else:
+                statuses[path] = "held:" + result["reason"]
+                counts["assets_held"] += 1
+                if fallback:
+                    counts["assets_fallback"] += 1
+            suffix = Path(path).suffix.lower()
+            if suffix in {".html", ".htm", ".css", ".json"}:
+                if len(asset.data) > 1024 * 1024:
+                    counts["assets_held"] += 1
+                    statuses[path + "#dependencies"] = "bundle_read_budget"
+                else:
+                    try:
+                        text = asset.data.decode("utf-8")
+                        refs = bundle_references(text, suffix)
+                    except (UnicodeDecodeError, ValueError):
+                        counts["assets_held"] += 1
+                        statuses[path + "#dependencies"] = "bundle_unreadable"
+                        refs = []
+                    for child in refs:
+                        if suffix == ".json" and resolve(child, path) is None:
+                            continue  # JSON strings are not intrinsically file references.
+                        child_label = link(Path(child).name or child, child, source=path, depth=depth + 1)
+                        attachments.append(paragraph_block("依赖文件：" + child_label))
+        receipt = load_state().get("assets", {}).get(asset.sha256, {})
+        pin = receipt.get("source_commit")
+        if fallback and isinstance(pin, str) and re.fullmatch(r"[0-9a-f]{40}", pin):
+            fallback = fallback.replace("/blob/" + snapshot + "/", "/blob/" + pin + "/", 1)
+        return "[" + label + "](" + fallback + ")" if fallback else label + "（附件待核验）"
+    # Fenced examples remain literal and do not trigger uploads.
+    pieces = re.split(r"(```[\s\S]*?```)", markdown)
+    for index in range(0, len(pieces), 2):
+        text = re.sub(r"(!?)\[([^\]\n]+)\]\(([^)\n]+)\)", lambda match: link(match[2], match[3], bool(match[1])), pieces[index])
+        text = re.sub(r"(!?)\[\[([^\]\n]+)\]\]", lambda match: link(match[2].split("|", 1)[-1], match[2].split("|", 1)[0], bool(match[1])), text)
+        if re.search(r"<(?:img|a|video|audio|source|link)\b", text, re.IGNORECASE):
+            try:
+                references = bundle_references(text, ".html")
+            except ValueError:
+                references = []
+                counts["assets_held"] += 1
+                statuses["html-source"] = "bundle_unreadable"
+            for target in references:
+                attachments.append(paragraph_block("引用文件：" + link(Path(target).name or target, target)))
+        pieces[index] = text
+    blocks = native_markdown_to_blocks("".join(pieces))
+    def rich_links(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        output: List[Dict[str, Any]] = []
+        for part in parts:
+            content = part.get("text", {}).get("content", "")
+            offset = 0
+            for match in re.finditer(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", content):
+                output.extend(text_rich_text(content[offset:match.start()]))
+                output.extend({"type": "text", "text": {"content": chunk, "link": {"url": match[2]}}} for chunk in chunk_text(match[1]))
+                offset = match.end()
+            output.extend(text_rich_text(content[offset:]))
+        return output
+    def convert(block: Dict[str, Any]) -> None:
+        kind = block["type"]
+        payload = block[kind]
+        if kind != "code" and "rich_text" in payload:
+            payload["rich_text"] = rich_links(payload["rich_text"])
+        if kind == "table_row":
+            payload["cells"] = [rich_links(cell) for cell in payload["cells"]]
+        for child in payload.get("children", []):
+            convert(child)
+    for block in [*blocks, *attachments]:
+        convert(block)
+    rendered = [quote_block("来源路径：" + relative), divider_block(), *blocks, *attachments] if blocks or attachments else [quote_block("来源路径：" + relative)]
+    legacy = file_page_blocks(ROOT, relative, markdown)
+    rendered_hashes = [block_identity(block) for block in rendered]
+    version = "legacy-v1" if rendered_hashes == [block_identity(block) for block in legacy] else "native-v1:" + sha256_text(json.dumps(rendered_hashes))
+    return rendered, version, counts
+
+
 def block_identity(block: Dict[str, Any]) -> str:
     """Compare content, including human formatting, without Notion response metadata."""
     def clean(value: Any) -> Any:
@@ -1020,6 +1347,9 @@ def block_identity(block: Dict[str, Any]) -> str:
             return [clean(item) for item in value]
         if not isinstance(value, dict):
             return value
+        kind = value.get("type")
+        if isinstance(kind, str) and isinstance(value.get(kind), dict) and (value.get("object") == "block" or "id" in value):
+            return {"type": kind, "content": clean(value[kind])}
         result = {}
         for key, item in value.items():
             if key in {"plain_text", "href"} or (key == "color" and item == "default") or (key == "link" and item is None):
@@ -1031,7 +1361,8 @@ def block_identity(block: Dict[str, Any]) -> str:
             result[key] = clean(item)
         return result
     kind = block.get("type")
-    return sha256_text(json.dumps({"type": kind, "content": clean(block.get(kind, {}))}, sort_keys=True, ensure_ascii=False))
+    asset_content = asset_block_identity(block)
+    return sha256_text(json.dumps({"type": kind, "content": clean(asset_content if asset_content is not None else block.get(kind, {}))}, sort_keys=True, ensure_ascii=False))
 
 
 def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequence[Dict[str, Any]],
@@ -1044,8 +1375,7 @@ def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequenc
     intents = state.setdefault("write_intents", {})
     if operation_id in intents:
         raise MirrorHeld("intent already exists; readback recovery required")
-    if any(item.get("status") != "verified" for item in intents.values()):
-        raise MirrorHeld("unresolved intent requires recovery")
+    assert_intent_fence(state, (context or {}).get("entry_key"), target_id)
     if state.get("write_outcome", {}).get("retry_allowed") is False:
         raise MirrorHeld("legacy unknown write requires review")
     marker = "eddie-mirror-operation:" + operation_id
@@ -1077,7 +1407,7 @@ def recover_intent(api_key: str, intent: Dict[str, Any]) -> Dict[str, Any]:
             if block.get("type") != "child_page":
                 continue
             target = str(block.get("id") or "")
-            children = retrieve_block_children(api_key, target)
+            children = retrieve_block_tree(api_key, target)
             if children and block_identity(children[0]) == block_identity(paragraph_block(intent["marker"])):
                 candidates.append((target, children))
         if len(candidates) != 1:
@@ -1087,18 +1417,20 @@ def recover_intent(api_key: str, intent: Dict[str, Any]) -> Dict[str, Any]:
         target = intent.get("target_id")
         if not target or "baseline" not in intent:
             return {"status": "held", "reason": "missing_managed_baseline", "retry_allowed": False}
-        children = retrieve_block_children(api_key, target)
+        children = retrieve_block_tree(api_key, target)
         baseline = intent["baseline"]
-        if any(block.get("has_children") for block in children):
-            return {"status": "held", "reason": "nested_content_requires_review", "retry_allowed": False}
         observed = [{"id": block.get("id"), "hash": block_identity(block)} for block in children[:len(baseline)]]
         if observed != baseline:
             return {"status": "held", "reason": "human_or_target_change", "retry_allowed": False}
         children = children[len(baseline):]
-    if any(block.get("has_children") for block in children):
-        return {"status": "held", "reason": "nested_content_requires_review", "retry_allowed": False}
     if [block_identity(block) for block in children] != intent.get("expected"):
         return {"status": "held", "reason": "partial_or_modified", "retry_allowed": False}
+    context = intent.get("context") or {}
+    if context.get("title"):
+        try:
+            verify_page_binding(api_key, target, intent["parent_id"], context["title"])
+        except MirrorHeld:
+            return {"status": "held", "reason": "target_binding_changed", "retry_allowed": False}
     return {"status": "verified", "target_id": target, "retry_allowed": False}
 
 
@@ -1134,8 +1466,16 @@ def _send_once(api_key: str, method: str, path: str, payload: Dict[str, Any]) ->
     """Only execute_revision calls this, after its dispatched checkpoint is remote."""
     if not ((method == "POST" and path == "/pages") or (method == "PATCH" and re.fullmatch(r"/blocks/[0-9a-f-]{36}/children", path))):
         raise MirrorHeld("unsupported mutation endpoint")
+    def has_upload(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(has_upload(item) for item in value)
+        return isinstance(value, dict) and (value.get("type") == "file_upload" or any(has_upload(item) for item in value.values()))
+    version = NOTION_VERSION
+    if has_upload(payload):
+        from notion_private_assets import NOTION_VERSION as upload_version
+        version = upload_version
     request = urllib.request.Request(BASE_URL + path, method=method,
-        headers={"Authorization": "Bearer " + api_key, "Notion-Version": NOTION_VERSION,
+        headers={"Authorization": "Bearer " + api_key, "Notion-Version": version,
                  "Content-Type": "application/json"},
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     try:
@@ -1148,7 +1488,15 @@ def _send_once(api_key: str, method: str, path: str, payload: Dict[str, Any]) ->
 
 
 def _baseline(blocks: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
-    if any(not block.get("id") or block.get("has_children") for block in blocks):
+    def complete(block: Dict[str, Any]) -> bool:
+        kind = block.get("type")
+        if not block.get("id"):
+            return False
+        if block.get("has_children") and kind not in {"child_page", "child_database"}:
+            children = block.get(kind, {}).get("children")
+            return isinstance(children, list) and all(complete(child) for child in children)
+        return True
+    if not all(complete(block) for block in blocks):
         raise MirrorHeld("managed baseline incomplete or nested content requires review")
     return [{"id": block["id"], "hash": block_identity(block)} for block in blocks]
 
@@ -1157,11 +1505,13 @@ def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
     """Read targets again and durably record success; never issue a Notion write."""
     state = load_state()
     intent = state["write_intents"][operation_id]
+    if intent.get("status") == "verified" and intent.get("receipt_compacted"):
+        return {"status": "verified", "target_id": intent["target_id"], "retry_allowed": False}
     outcome = recover_intent(api_key, intent)
     if outcome["status"] != "verified":
         return outcome
     target = outcome["target_id"]
-    observed = retrieve_block_children(api_key, target)
+    observed = retrieve_block_tree(api_key, target)
     baseline = _baseline(observed)
     expected = intent["baseline"] + [{"id": block["id"], "hash": block_identity(block)}
                                     for block in observed[len(intent["baseline"]):]]
@@ -1176,7 +1526,8 @@ def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
     entry = state.setdefault("entries", {}).setdefault(context["entry_key"], {})
     entry.update(page_id=target, parent_page_id=intent["parent_id"], managed_block_baseline=baseline)
     if context["final_batch"]:
-        entry.update(signature=context["source_signature"], type="file")
+        entry.update(signature=context["source_signature"], type=context.get("node_kind", "file"), render_version=context.get("render_version", "legacy-v1"),
+                     revision_generation=context.get("revision_generation", 0), source_snapshot=context["source_snapshot"])
     persist_private_state(state)
     return outcome
 
@@ -1201,6 +1552,33 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
     signature = sha256_text(frozen_markdown)
     if expected_signature is not None and signature != expected_signature:
         raise MirrorHeld("reviewed source version changed")
+    node = Node(relative, None, source.name, "file", signature)
+    blocks = file_page_blocks(ROOT, relative, markdown=frozen_markdown)
+    return execute_node_blocks(api_key, node, blocks, parent_id, allow_new, snapshot.stdout.strip())
+
+
+def assert_intent_fence(state: Dict[str, Any], entry_key: Optional[str], target: Optional[str]) -> None:
+    """Unknown legacy outcomes fence globally; identified outcomes fence their object."""
+    if state.get("write_outcome", {}).get("retry_allowed") is False:
+        raise MirrorHeld("legacy unknown write requires review")
+    for intent in (state.get("write_intents") or {}).values():
+        if intent.get("status") == "verified":
+            continue
+        context = intent.get("context") or {}
+        if not entry_key or not context.get("entry_key") or context["entry_key"] == entry_key or (target and intent.get("target_id") == target):
+            raise MirrorHeld("object has an unresolved write; read-only recovery required")
+
+
+def verify_page_binding(api_key: str, target: str, parent: str, title: str) -> None:
+    page = get_page(api_key, target)
+    relation = page.get("parent") or {}
+    if page.get("archived") or page.get("in_trash") or relation.get("type") != "page_id" or normalize_notion_id(str(relation.get("page_id", ""))) != normalize_notion_id(parent) or page_title_from_page(page) != title:
+        raise MirrorHeld("original page identity or parent changed")
+
+
+def execute_node_blocks(api_key: str, node: Node, blocks: List[Dict[str, Any]], parent_id: Optional[str],
+                        allow_new: bool, snapshot: str, budget: Optional[Dict[str, Any]] = None, render_version: str = "legacy-v1") -> Dict[str, int]:
+    relative, signature = node.path, node.signature
     secret = state_secret()
     key = state_entry_key(relative, secret)
     state = load_state()
@@ -1210,22 +1588,28 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
         raise MirrorHeld("legacy source lacks managed identity and baseline")
     if state.get("write_outcome", {}).get("retry_allowed") is False:
         raise MirrorHeld("legacy unknown write requires review")
-    if any(item.get("status") != "verified" for item in (state.get("write_intents") or {}).values()):
-        raise MirrorHeld("unresolved intent requires explicit recovery")
-    if entry.get("signature") == signature:
-        if _baseline(retrieve_block_children(api_key, entry["page_id"])) != entry["managed_block_baseline"]:
+    assert_intent_fence(state, key, entry.get("page_id"))
+    if entry.get("signature") == signature and entry.get("render_version", "legacy-v1") == render_version:
+        if _baseline(retrieve_block_tree(api_key, entry["page_id"])) != entry["managed_block_baseline"]:
             raise MirrorHeld("human changes retained; baseline review required")
         return {"verified_batches": 0, "skipped": 1}
     owner = os.environ.get("GITHUB_RUN_ID") or os.environ.get("CODEX_THREAD_ID")
     if not owner:
         raise MirrorHeld("write owner unavailable")
-    blocks = file_page_blocks(ROOT, relative, markdown=frozen_markdown)
-    chunks = [blocks[index:index + 97] for index in range(0, len(blocks), 97)]
+    chunks = payload_chunks(blocks)
+    generation = entry.get("revision_generation", 0) + 1
+    old_contexts = [i.get("context", {}) for i in (state.get("write_intents") or {}).values()
+                    if i.get("context", {}).get("entry_key") == key and i.get("context", {}).get("source_signature") == signature
+                    and i.get("context", {}).get("render_version", "legacy-v1") == render_version]
+    legacy_partial = old_contexts and not any(c.get("final_batch") for c in old_contexts) and all("revision_generation" not in c for c in old_contexts)
     verified = 0
     for index, chunk in enumerate(chunks):
+        if budget is not None and (budget["remaining"] <= 0 or time.monotonic() >= budget["deadline"]):
+            return {"verified_batches": verified, "skipped": 0, "deferred": 1}
         state = load_state()
         entry = previous_entry_for_path(state.get("entries", {}), relative, secret)
-        operation = sha256_text(json.dumps([key, signature, index], separators=(",", ":")))
+        identity = [key, signature, index] if legacy_partial and render_version == "legacy-v1" else [key, signature, render_version, generation, index]
+        operation = sha256_text(json.dumps(identity, separators=(",", ":")))
         existing = (state.get("write_intents") or {}).get(operation)
         if existing:
             if existing.get("status") != "verified":
@@ -1242,11 +1626,13 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
         if kind == "create":
             if not allow_new or index != 0:
                 raise MirrorHeld("new source requires explicit create authorization")
-            if source.name in list_child_pages(api_key, parent):
+            if node.title in list_child_pages(api_key, parent):
                 raise MirrorHeld("existing titled target cannot be adopted or duplicated")
             baseline = []
         else:
-            baseline = retrieve_block_children(api_key, target)
+            if budget is not None:
+                verify_page_binding(api_key, target, parent, node.title)
+            baseline = retrieve_block_tree(api_key, target)
             if _baseline(baseline) != entry.get("managed_block_baseline"):
                 raise MirrorHeld("human changes retained; baseline review required")
         desired = [paragraph_block("eddie-mirror-operation:" + operation),
@@ -1255,9 +1641,9 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
         payload = {"children": desired}
         if kind == "create":
             payload.update(parent={"type": "page_id", "page_id": normalize_notion_id(parent)},
-                           properties={"title": {"title": [{"type": "text", "text": {"content": source.name}}]}})
+                           properties={"title": {"title": [{"type": "text", "text": {"content": node.title}}]}})
         context = {"entry_key": key, "source_path": relative, "source_signature": signature,
-                   "source_snapshot": snapshot.stdout.strip(), "final_batch": index == len(chunks) - 1,
+                   "source_snapshot": snapshot, "node_kind": node.kind, "title": node.title if budget is not None else None, "render_version": render_version, "revision_generation": generation, "final_batch": index == len(chunks) - 1,
                    "batch_index": index, "batch_count": len(chunks), "owner": owner,
                    "request": payload, "method": "POST" if kind == "create" else "PATCH",
                    "path": "/pages" if kind == "create" else f"/blocks/{normalize_notion_id(target)}/children"}
@@ -1276,10 +1662,234 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
         if finalize_intent(api_key, operation)["status"] != "verified":
             raise MirrorHeld("target readback held; no duplicate request permitted")
         verified += 1
+        if budget is not None:
+            budget["remaining"] -= 1
     return {"verified_batches": verified, "skipped": 0}
+
+def _bulk_sources(request: Dict[str, Any]) -> Tuple[str, List[Node], Dict[str, str]]:
+    """Freeze one committed source revision; private checkpoint commits may then advance HEAD."""
+    include, exclude = request.get("include_patterns"), request.get("exclude_patterns")
+    if not isinstance(include, list) or not include or not isinstance(exclude, list) or any(not isinstance(v, str) or not v for v in include + exclude):
+        raise MirrorHeld("approved bulk scope unavailable")
+    revision = "HEAD" if request.get("follow_source_changes") is True else request.get("source_snapshot")
+    if not isinstance(revision, str) or (revision != "HEAD" and not re.fullmatch(r"[0-9a-f]{40}", revision)):
+        raise MirrorHeld("approved source snapshot unavailable")
+    result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", revision + "^{commit}"], capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        # A depth-one clean runner may not retain the earlier state checkpoint parent.
+        # The exact reviewed per-source signatures below still have to match HEAD.
+        result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD^{commit}"], capture_output=True, text=True, timeout=15)
+        if result.returncode:
+            raise MirrorHeld("source snapshot unavailable")
+    snapshot = result.stdout.strip()
+    tree = subprocess.run(["git", "-C", str(ROOT), "ls-tree", "-rz", snapshot], capture_output=True, timeout=30)
+    if tree.returncode:
+        raise MirrorHeld("source tree unavailable")
+    markdown: Dict[str, str] = {}
+    for record in tree.stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        path = raw_path.decode("utf-8")
+        if not path.endswith(".md") or not is_included(path, include, exclude):
+            continue
+        if metadata.split()[0] not in {b"100644", b"100755"} or Path(path).as_posix() != path or ".." in Path(path).parts:
+            raise MirrorHeld("source is not a regular canonical file")
+        local = ROOT / path
+        if local.is_symlink() or not local.resolve().is_relative_to(ROOT.resolve()):
+            raise MirrorHeld("source path escapes checkout")
+        blob = subprocess.run(["git", "-C", str(ROOT), "show", snapshot + ":" + path], capture_output=True, timeout=15)
+        if blob.returncode:
+            raise MirrorHeld("source bytes unavailable")
+        # The existing renderer reads local bytes only after this exact Git comparison.
+        if local.exists() and (not local.is_file() or local.read_bytes() != blob.stdout):
+            raise MirrorHeld("source checkout differs from committed snapshot")
+        markdown[path] = blob.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    if not markdown:
+        raise MirrorHeld("empty bulk scope cannot imply successful migration")
+    if request.get("follow_source_changes") is not True:
+        reviewed = request.get("sources")
+        actual = [{"path": path, "signature": sha256_text(text)} for path, text in sorted(markdown.items())]
+        if reviewed != actual:
+            raise MirrorHeld("reviewed bulk source manifest changed")
+    nodes = build_nodes(sorted(markdown), ROOT, signatures={path: sha256_text(text) for path, text in markdown.items()})
+    return snapshot, nodes, markdown
+
+
+def _adopt_bulk_target(api_key: str, node: Node, parent: str, desired: List[Dict[str, Any]]) -> bool:
+    """Bind only a unique original page with source/body evidence; never rewrite it."""
+    state = load_state()
+    key = state_entry_key(node.path, state_secret())
+    entry = previous_entry_for_path(state.get("entries", {}), node.path, state_secret())
+    assert_intent_fence(state, key, entry.get("page_id"))
+    # Full parent pagination is mandatory even for a previously managed identity.
+    candidates = list_child_pages(api_key, parent)
+    target = candidates.get(node.title)
+    if entry.get("page_id"):
+        if target != entry["page_id"]:
+            raise MirrorHeld("original page moved, renamed or duplicated")
+        verify_page_binding(api_key, target, parent, node.title)
+        return True
+    if not target:
+        # A formerly known source cannot silently be replaced when its page is missing.
+        if entry:
+            raise MirrorHeld("legacy original page not found")
+        return False
+    verify_page_binding(api_key, target, parent, node.title)
+    observed = retrieve_block_tree(api_key, target)
+    body = [b for b in observed if b.get("type") != "child_page"] if node.kind != "file" else observed
+    if entry.get("signature") not in {None, node.signature}:
+        raise MirrorHeld("legacy source changed before original baseline adoption")
+    if [block_identity(b) for b in body[:len(desired)]] != [block_identity(b) for b in desired]:
+        raise MirrorHeld("original page source/body evidence incomplete")
+    # Additional human blocks are retained as part of the observed baseline.
+    adopted = {**entry, "page_id": target, "parent_page_id": parent, "type": node.kind,
+               "signature": node.signature, "managed_block_baseline": _baseline(body)}
+    state.setdefault("entries", {})[key] = adopted
+    persist_private_state(state)
+    return True
+
+
+def compact_verified_intents(state: Dict[str, Any], receipt_commit: str) -> None:
+    """Remove only redundant, already-verified payload copies; Git retains original receipts."""
+    if not re.fullmatch(r"[0-9a-f]{40}", receipt_commit):
+        raise MirrorHeld("verified receipt history pin unavailable")
+    for intent in (state.get("write_intents") or {}).values():
+        if intent.get("status") != "verified" or intent.get("receipt_compacted"):
+            continue
+        proof = {name: intent.get(name) for name in ("expected", "baseline", "verified_baseline")}
+        intent["receipt_hash"] = sha256_text(json.dumps(proof, sort_keys=True, ensure_ascii=False))
+        intent["receipt_compacted"] = True
+        intent["receipt_commit"] = receipt_commit
+        for name in proof:
+            intent.pop(name, None)
+        if isinstance(intent.get("context"), dict):
+            intent["context"].pop("request", None)
+
+
+def retain_human_append(api_key: str, node: Node) -> None:
+    state = load_state()
+    key = state_entry_key(node.path, state_secret())
+    entry = previous_entry_for_path(state.get("entries", {}), node.path, state_secret())
+    observed = retrieve_block_tree(api_key, entry["page_id"])
+    if node.kind != "file":
+        observed = [block for block in observed if block.get("type") != "child_page"]
+    baseline = _baseline(observed)
+    previous = entry["managed_block_baseline"]
+    if baseline[:len(previous)] != previous:
+        raise MirrorHeld("existing content modified; preserved for review")
+    if len(baseline) > len(previous):
+        entry["managed_block_baseline"] = baseline
+        state["entries"][key] = entry
+        persist_private_state(state)
+
+
+def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int]:
+    """One bounded pass over the approved hierarchy; use the same entry for cron and initial catch-up."""
+    require_published_state()
+    _ASSET_READBACK_CACHE.clear()
+    _SOURCE_TREE_CACHE.clear()
+    state = load_state()
+    request = state.get("bulk_request") or {}
+    try:
+        request_id = request["request_id"]
+        if uuid.UUID(request_id).version != 4 or request.get("enabled") is not True or (opaque_id is not None and opaque_id != request_id):
+            raise ValueError("unapproved request")
+        parent = normalize_notion_id(request["parent_page_id"])
+        if not UUID_RE.fullmatch(parent):
+            raise ValueError("invalid parent")
+        # Configuration is private; public callers cannot override scope, parent or budgets.
+        max_batches = request.get("max_batches", 100)
+        max_seconds = request.get("max_seconds", 900)
+        if type(max_batches) is not int or not 1 <= max_batches <= 1000 or type(max_seconds) is not int or not 1 <= max_seconds <= 1200:
+            raise ValueError("invalid budget")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise MirrorHeld("approved private bulk request unavailable") from None
+    assert_intent_fence(state, "bulk-preflight", None)
+    snapshot, nodes, markdown = _bulk_sources(request)
+    root_title = state.get("root_title") or DEFAULT_ROOT_TITLE
+    nodes[0] = Node(".", None, root_title, "root", ROOT_SIGNATURE)
+    budget = {"remaining": max_batches, "deadline": time.monotonic() + max_seconds}
+    counts = {"total": len(nodes), "verified": 0, "adopted": 0, "skipped": 0, "held": 0, "deferred": 0, "verified_batches": 0, "assets_ready": 0, "assets_held": 0, "assets_fallback": 0}
+    resolved: Dict[str, str] = {}
+    held: Dict[str, str] = {}
+    for index, node in enumerate(nodes):
+        if time.monotonic() >= budget["deadline"] or budget["remaining"] <= 0:
+            counts["deferred"] += len(nodes) - index
+            break
+        parent_id = parent if node.kind == "root" else resolved.get(node.parent_path or ".")
+        if not parent_id:
+            held[node.path] = "parent_held"
+            counts["held"] += 1
+            continue
+        state = load_state()
+        previous = previous_entry_for_path(state.get("entries", {}), node.path, state_secret())
+        blocks = file_page_blocks(ROOT, node.path, markdown[node.path]) if node.kind == "file" else blocks_for_node(ROOT, node, root_title)
+        try:
+            if node.kind != "root":
+                ancestor = previous_entry_for_path(state.get("entries", {}), node.parent_path or ".", state_secret())
+                ancestor_title = root_title if node.parent_path == "." else Path(node.parent_path or ".").name
+                verify_page_binding(api_key, parent_id, ancestor["parent_page_id"], ancestor_title)
+            adopted = _adopt_bulk_target(api_key, node, parent_id, blocks)
+            current = previous_entry_for_path(load_state().get("entries", {}), node.path, state_secret())
+            if adopted and not previous.get("page_id"):
+                counts["adopted"] += 1
+            if adopted:
+                retain_human_append(api_key, node)
+                current = previous_entry_for_path(load_state().get("entries", {}), node.path, state_secret())
+            if node.kind != "file" and adopted:
+                # Child pages evolve independently of the directory's own retained human header.
+                observed = [b for b in retrieve_block_tree(api_key, current["page_id"]) if b.get("type") != "child_page"]
+                if _baseline(observed) != current["managed_block_baseline"]:
+                    raise MirrorHeld("directory human content changed; retained for review")
+                result = {"verified_batches": 0, "skipped": 1}
+            else:
+                render_version = "legacy-v1"
+                if node.kind == "file":
+                    blocks, render_version, asset_counts = render_native_source(api_key, node.path, markdown[node.path], snapshot, budget["deadline"])
+                    for name, value in asset_counts.items():
+                        counts[name] += value
+                result = execute_node_blocks(api_key, node, blocks, parent_id, True, snapshot, budget, render_version)
+            counts["verified_batches"] += result["verified_batches"]
+            if result.get("deferred"):
+                counts["deferred"] += len(nodes) - index
+                break
+            current = previous_entry_for_path(load_state().get("entries", {}), node.path, state_secret())
+            resolved[node.path] = current["page_id"]
+            counts["verified"] += 1
+            counts["skipped"] += result["skipped"]
+        except MirrorHeld as exc:
+            require_published_state()
+            # A checkpoint failure fences the runner, not just the current source.
+            if exc.code != "held":
+                raise
+            held[node.path] = "object_held"
+            counts["held"] += 1
+        except (RuntimeError, urllib.error.URLError):
+            # Read/pagination failures never justify create or loss of an existing binding.
+            held[node.path] = "read_held"
+            counts["held"] += 1
+    state = load_state()
+    manifest_hash = sha256_text(json.dumps([[n.path, n.signature] for n in nodes], ensure_ascii=False))
+    old_progress = state.get("bulk_progress") or {}
+    progress = {"request_id": request_id, "source_snapshot": old_progress.get("source_snapshot", snapshot) if old_progress.get("manifest_hash") == manifest_hash else snapshot,
+                "manifest_hash": manifest_hash, "counts": counts, "held": held}
+    before_compaction = json.dumps(state, sort_keys=True, ensure_ascii=False)
+    require_published_state()
+    receipt_head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15)
+    if receipt_head.returncode:
+        raise MirrorHeld("verified receipt history pin unavailable")
+    compact_verified_intents(state, receipt_head.stdout.strip())
+    if old_progress != progress or json.dumps(state, sort_keys=True, ensure_ascii=False) != before_compaction:
+        state["bulk_progress"] = progress
+        persist_private_state(state)
+    return counts
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--execute-bulk", action="store_true", help="Consume the approved private bulk scope with bounded work.")
+    parser.add_argument("--bulk-request", help="Opaque UUID of the approved private bulk request.")
     parser.add_argument("--execute-request", help="Opaque UUID for one reviewed request in private mirror state.")
     parser.add_argument("--execute-revision", help="Explicit source path for guarded append-only execution.")
     parser.add_argument("--allow-new-page", action="store_true", help="Permit a genuinely new source under the explicit parent; never adopt legacy entries.")
@@ -1303,6 +1913,13 @@ def parse_args() -> argparse.Namespace:
 
 def _main() -> int:
     args = parse_args()
+    if getattr(args, "execute_bulk", False) or getattr(args, "bulk_request", None):
+        if args.execute_request or args.execute_revision or args.allow_new_page or args.recover_intents or args.persist_recovery or args.dry_run or args.plan_only or args.full_sync or args.include_json or args.exclude_json or args.path_prefix or args.limit:
+            raise MirrorHeld("bulk execution cannot be overridden")
+        counts = execute_bulk(load_notion_api_key(), args.bulk_request)
+        incomplete = any(counts[name] for name in ("held", "assets_held", "deferred"))
+        print(json.dumps({"status": "bulk_incomplete" if incomplete else "bulk_verified", "counts": counts}))
+        return 2 if incomplete else 0
     if args.persist_recovery and (not args.recover_intents or args.dry_run or args.plan_only):
         raise MirrorHeld("persist recovery requires explicit recovery mode")
     if (args.execute_request or args.execute_revision) and (args.recover_intents or args.dry_run or args.plan_only or args.full_sync or args.include_json or args.exclude_json):
