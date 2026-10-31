@@ -118,13 +118,22 @@ def mcp_call(tool_name: str, arguments: dict[str, Any], token: str) -> dict[str,
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"MCP HTTP error {exc.code}: {detail}") from exc
 
+    if body.get("error"):
+        raise RuntimeError(f"MCP request failed for {tool_name}")
     result = body.get("result") or {}
+    if result.get("isError") or result.get("error"):
+        raise RuntimeError(f"MCP tool failed for {tool_name}")
     structured = result.get("structuredContent")
     if isinstance(structured, dict):
+        if structured.get("error"):
+            raise RuntimeError(f"MCP tool failed for {tool_name}")
         return structured
     blocks = result.get("content") or []
     if blocks and isinstance(blocks[0], dict) and "text" in blocks[0]:
-        return json.loads(blocks[0]["text"])
+        parsed = json.loads(blocks[0]["text"])
+        if not isinstance(parsed, dict) or parsed.get("error"):
+            raise RuntimeError(f"MCP tool failed for {tool_name}")
+        return parsed
     if isinstance(result, dict):
         return result
     raise RuntimeError(f"Unexpected MCP response for {tool_name}: {body}")
@@ -309,7 +318,9 @@ def sync_target(
 ) -> tuple[str, bool, str]:
     file_id = target["file_id"]
     fetch_result = mcp_call("get_content", {"file_id": file_id}, token)
-    content = str(fetch_result.get("content") or "")
+    if fetch_result.get("error") or not isinstance(fetch_result.get("content"), str):
+        raise RuntimeError("Tencent Docs content unavailable; preserving existing document")
+    content = fetch_result["content"]
     raw_title = target.get("title") or file_id
     title = clean_title(raw_title) or raw_title
     source_url = target.get("url") or f"https://docs.qq.com/doc/{file_id}"
@@ -325,8 +336,6 @@ def sync_target(
         destination = RAW_ROOT / folder / f"{sanitize_filename(title)}.md"
 
     destination = ensure_unique_path(destination, file_id, existing_paths)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
     rendered = render_markdown(
         source_url=source_url,
         file_id=file_id,
@@ -335,8 +344,19 @@ def sync_target(
         body=clean_content(title, content),
     )
     previous = destination.read_text(encoding="utf-8") if destination.exists() else None
-    changed = previous != rendered
+    if previous is not None:
+        old_body = FRONTMATTER_RE.sub("", previous, count=1).strip()
+        if old_body and not clean_content(title, content):
+            raise RuntimeError("Tencent Docs returned empty content; preserving nonempty document")
+    # Fetch dates describe observations, not changes to the source document.
+    def without_fetch_date(text: str) -> str:
+        return FRONTMATTER_RE.sub(
+            lambda match: re.sub(r"^fetched_at:.*\n", "", match.group(0), flags=re.MULTILINE),
+            text, count=1,
+        )
+    changed = previous is None or without_fetch_date(previous) != without_fetch_date(rendered)
     if changed:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(rendered, encoding="utf-8")
     existing_paths[file_id] = destination
     relative = destination.relative_to(RAW_ROOT).as_posix()
