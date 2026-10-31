@@ -1849,17 +1849,73 @@ def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int
     root_title = state.get("root_title") or DEFAULT_ROOT_TITLE
     nodes[0] = Node(".", None, root_title, "root", ROOT_SIGNATURE)
     budget = {"remaining": max_batches, "deadline": time.monotonic() + max_seconds}
+    signatures = {node.path: node.signature for node in nodes}
+    old_progress = state.get("bulk_progress") or {}
+    continuing = old_progress.get("request_id") == request_id and old_progress.get("cycle_complete") is False
+    fenced_keys = {(intent.get("context") or {}).get("entry_key") for intent in (state.get("write_intents") or {}).values() if intent.get("status") != "verified"}
+    fenced_targets = {intent.get("target_id") for intent in (state.get("write_intents") or {}).values() if intent.get("status") != "verified"}
+    def still_bound(path: str, signature: str) -> bool:
+        entry = previous_entry_for_path(state.get("entries", {}), path, state_secret())
+        return bool(entry.get("page_id") and entry.get("parent_page_id") and "managed_block_baseline" in entry
+                    and entry.get("signature") == signature and state_entry_key(path, state_secret()) not in fenced_keys
+                    and entry["page_id"] not in fenced_targets)
+    seen = {path: signature for path, signature in (old_progress.get("cycle_verified") or {}).items()
+            if continuing and signatures.get(path) == signature and still_bound(path, signature)}
+    held = {path: reason for path, reason in (old_progress.get("held") or {}).items() if continuing and path in signatures}
+    if continuing:
+        for path in old_progress.get("cycle_verified") or {}:
+            entry = previous_entry_for_path(state.get("entries", {}), path, state_secret())
+            if path in signatures and (state_entry_key(path, state_secret()) in fenced_keys or entry.get("page_id") in fenced_targets):
+                held[path] = "object_held"
+    cycle_assets = {path: value for path, value in (old_progress.get("cycle_assets") or {}).items() if path in seen}
     counts = {"total": len(nodes), "verified": 0, "adopted": 0, "skipped": 0, "held": 0, "deferred": 0, "verified_batches": 0, "assets_ready": 0, "assets_held": 0, "assets_fallback": 0}
     resolved: Dict[str, str] = {}
-    held: Dict[str, str] = {}
-    for index, node in enumerate(nodes):
+    by_path = {node.path: node for node in nodes}
+    def order(node: Node) -> Tuple[int, int, str]:
+        return (0, 0, ".") if node.kind == "root" else (len(Path(node.path).parts), 0 if node.kind == "directory" else 1, node.path)
+    cursor = old_progress.get("next_order") if continuing else None
+    if cursor is not None and (not isinstance(cursor, list) or len(cursor) != 3 or type(cursor[0]) is not int or type(cursor[1]) is not int or not isinstance(cursor[2], str)):
+        raise MirrorHeld("private bulk cursor invalid")
+    start = next((index for index, node in enumerate(nodes) if cursor is None or order(node) >= tuple(cursor)), len(nodes))
+    next_index = len(nodes)
+    def mark_held(path: str, reason: str) -> None:
+        seen.pop(path, None)
+        cycle_assets.pop(path, None)
+        held[path] = reason
+    def ancestor_id(path: str) -> Optional[str]:
+        if path in resolved:
+            return resolved[path]
+        node = by_path.get(path)
+        if not node or node.kind == "file" or path in held:
+            return None
+        current_state = load_state()
+        entry = previous_entry_for_path(current_state.get("entries", {}), path, state_secret())
+        try:
+            if not entry.get("page_id") or "managed_block_baseline" not in entry or entry.get("type") != node.kind:
+                raise MirrorHeld("ancestor lacks verified management binding")
+            assert_intent_fence(current_state, state_entry_key(path, state_secret()), entry["page_id"])
+            expected_parent = parent if node.kind == "root" else ancestor_id(node.parent_path or ".")
+            if not expected_parent or entry.get("parent_page_id") != expected_parent:
+                raise MirrorHeld("ancestor parent binding changed")
+            verify_page_binding(api_key, entry["page_id"], expected_parent, node.title)
+            if list_child_pages(api_key, expected_parent).get(node.title) != entry["page_id"]:
+                raise MirrorHeld("ancestor original identity no longer unique")
+            resolved[path] = entry["page_id"]
+            return entry["page_id"]
+        except MirrorHeld:
+            mark_held(path, "ancestor_held")
+            return None
+        except (RuntimeError, urllib.error.URLError):
+            mark_held(path, "ancestor_read_held")
+            return None
+    for index in range(start, len(nodes)):
+        node = nodes[index]
         if time.monotonic() >= budget["deadline"] or budget["remaining"] <= 0:
-            counts["deferred"] += len(nodes) - index
+            next_index = index
             break
-        parent_id = parent if node.kind == "root" else resolved.get(node.parent_path or ".")
+        parent_id = parent if node.kind == "root" else ancestor_id(node.parent_path or ".")
         if not parent_id:
-            held[node.path] = "parent_held"
-            counts["held"] += 1
+            mark_held(node.path, "parent_held")
             continue
         state = load_state()
         previous = previous_entry_for_path(state.get("entries", {}), node.path, state_secret())
@@ -1886,34 +1942,37 @@ def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int
                 render_version = "legacy-v1"
                 if node.kind == "file":
                     blocks, render_version, asset_counts = render_native_source(api_key, node.path, markdown[node.path], snapshot, budget["deadline"])
-                    for name, value in asset_counts.items():
-                        counts[name] += value
                 result = execute_node_blocks(api_key, node, blocks, parent_id, True, snapshot, budget, render_version)
             counts["verified_batches"] += result["verified_batches"]
             if result.get("deferred"):
-                counts["deferred"] += len(nodes) - index
+                next_index = index
                 break
             current = previous_entry_for_path(load_state().get("entries", {}), node.path, state_secret())
             resolved[node.path] = current["page_id"]
-            counts["verified"] += 1
+            seen[node.path] = node.signature
+            held.pop(node.path, None)
+            if node.kind == "file":
+                cycle_assets[node.path] = asset_counts
             counts["skipped"] += result["skipped"]
         except MirrorHeld as exc:
             require_published_state()
             # A checkpoint failure fences the runner, not just the current source.
             if exc.code != "held":
                 raise
-            held[node.path] = "object_held"
-            counts["held"] += 1
+            mark_held(node.path, "object_held")
         except (RuntimeError, urllib.error.URLError):
             # Read/pagination failures never justify create or loss of an existing binding.
-            held[node.path] = "read_held"
-            counts["held"] += 1
+            mark_held(node.path, "read_held")
     counts["attempted_batches"] = max_batches - budget["remaining"]
     state = load_state()
+    counts.update(verified=len(seen), held=len(held), deferred=max(0, len(nodes) - len(seen) - len(held)))
+    for name in ("assets_ready", "assets_held", "assets_fallback"):
+        counts[name] = sum(value.get(name, 0) for value in cycle_assets.values())
     manifest_hash = sha256_text(json.dumps([[n.path, n.signature] for n in nodes], ensure_ascii=False))
-    old_progress = state.get("bulk_progress") or {}
     progress = {"request_id": request_id, "source_snapshot": old_progress.get("source_snapshot", snapshot) if old_progress.get("manifest_hash") == manifest_hash else snapshot,
-                "manifest_hash": manifest_hash, "counts": counts, "held": held}
+                "manifest_hash": manifest_hash, "counts": counts, "held": held,
+                "next_order": list(order(nodes[next_index])) if next_index < len(nodes) else None,
+                "cycle_complete": next_index == len(nodes), "cycle_verified": seen, "cycle_assets": cycle_assets}
     before_compaction = json.dumps(state, sort_keys=True, ensure_ascii=False)
     require_published_state()
     receipt_head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15)

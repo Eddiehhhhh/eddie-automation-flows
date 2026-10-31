@@ -198,6 +198,36 @@ dependencies are inventoried from fixed Git bytes. HTML base rewriting, malforme
 bundles and read/depth/count budgets remain explicit holds; dynamic JavaScript
 resource construction is not executed or claimed as complete bundle discovery.
 
+## Resuming a bounded scan without starving later objects
+
+The existing private `bulk_progress` now retains `next_order`, `cycle_verified`
+and per-file `cycle_assets`. The ordering key is depth, directory/file order and
+private source path. The next pass resumes at the saved ordering key rather than
+rechecking the unchanged prefix. Insertions before that position do not restart
+the scan; a removed next object advances to the next surviving ordering key.
+A partial multi-batch source retains its own position until it finishes.
+
+Skipped ancestors are resolved on demand from already-managed original IDs,
+with parent/title uniqueness and pending-intent checks. Missing, moved, renamed,
+ambiguous or unknown ancestors hold their dependent subtree. Ancestor lookup
+does not create a replacement or grant authority from a cursor alone. Current
+entry identities/baselines and source signatures are still required before
+retaining a prior cycle verification.
+
+At the end of a cycle, the following invocation starts again from the beginning
+for new increments and target checks. Source changes or new objects before a
+saved position remain unverified/deferred until that next cycle; they cannot be
+counted as delivered merely because earlier source bytes were checked. Frozen
+initial requests retain their exact source-manifest guard. Contextual unknown
+outcomes and previous asset failures remain visible across passes; a cursor
+cannot turn them into a completed result. No new queue, state file, schedule or
+public path parameter is introduced.
+
+`total`, `verified`, `held` and `deferred` describe current-cycle coverage.
+`adopted`, `skipped` and `verified_batches` describe work in this invocation.
+A legacy progress record without a cursor begins one new full scan. All existing
+checkpoint, single-attempt and incomplete-exit requirements remain in force.
+
 ## Rich-text run coalescing during intent recovery
 
 Notion can return a long code block as one text run after receiving several
