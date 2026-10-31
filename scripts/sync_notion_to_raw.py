@@ -218,32 +218,52 @@ def paginate_database(
     sorts: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterable[Dict[str, Any]]:
     cursor: Optional[str] = None
+    seen = set()
     while True:
         response = query_database(api_key, database_id, filter_obj=filter_obj, start_cursor=cursor, sorts=sorts)
-        for item in response.get("results", []):
+        if (not isinstance(response, dict) or not isinstance(response.get("results"), list)
+                or type(response.get("has_more")) is not bool
+                or any(not isinstance(item, dict) for item in response["results"])):
+            raise RuntimeError("Notion database pagination shape is incomplete")
+        next_cursor = response.get("next_cursor")
+        if response["has_more"]:
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen:
+                raise RuntimeError("Notion database pagination cursor is incomplete or repeated")
+            seen.add(next_cursor)
+        elif next_cursor is not None:
+            raise RuntimeError("Notion database pagination terminal cursor is inconsistent")
+        for item in response["results"]:
             yield item
-        if not response.get("has_more"):
+        if not response["has_more"]:
             break
-        cursor = response.get("next_cursor")
-        if not cursor:
-            break
+        cursor = next_cursor
 
 
 def retrieve_block_children(api_key: str, block_id: str) -> List[Dict[str, Any]]:
     children: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
+    seen = set()
     while True:
         params = {"page_size": "100"}
         if cursor:
             params["start_cursor"] = cursor
         query = urllib.parse.urlencode(params)
         response = notion_request(api_key, "GET", f"/blocks/{normalize_notion_id(block_id)}/children?{query}")
-        children.extend(response.get("results", []))
-        if not response.get("has_more"):
+        if (not isinstance(response, dict) or not isinstance(response.get("results"), list)
+                or type(response.get("has_more")) is not bool
+                or any(not isinstance(item, dict) for item in response["results"])):
+            raise RuntimeError("Notion block pagination shape is incomplete")
+        next_cursor = response.get("next_cursor")
+        if response["has_more"]:
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen:
+                raise RuntimeError("Notion block pagination cursor is incomplete or repeated")
+            seen.add(next_cursor)
+        elif next_cursor is not None:
+            raise RuntimeError("Notion block pagination terminal cursor is inconsistent")
+        children.extend(response["results"])
+        if not response["has_more"]:
             break
-        cursor = response.get("next_cursor")
-        if not cursor:
-            break
+        cursor = next_cursor
     return children
 
 
@@ -679,6 +699,10 @@ def render_page_markdown(
         parts.extend(relation_block)
     parts.append("## 正文")
     parts.append("")
+    if include_body:
+        blocks = retrieve_block_children(api_key, str(page["id"]))
+        parts.extend(render_blocks(api_key, blocks))
+        parts.append("")
     for group in ["输入", "输出", "身心/环境", "情绪/关系", "财务", "其他"]:
         relation_map = reading_sections.get(group) or {}
         relation_names = [
@@ -895,7 +919,7 @@ def merge_database_state(
     database_key: str,
     database_meta: Dict[str, Any],
     synced_count: int,
-    last_sync_at: dt.datetime,
+    last_sync_at: Optional[dt.datetime],
     page_map: Optional[Dict[str, Any]] = None,
     full_sync: bool = False,
 ) -> Dict[str, Any]:
@@ -903,8 +927,9 @@ def merge_database_state(
     entry = databases.setdefault(database_key, {})
     entry.update(database_meta)
     entry["synced_page_count"] = synced_count
-    entry["last_sync_at"] = format_time(last_sync_at)
-    if full_sync:
+    if last_sync_at is not None:
+        entry["last_sync_at"] = format_time(last_sync_at)
+    if full_sync and last_sync_at is not None:
         entry["last_full_sync_at"] = format_time(last_sync_at)
     if page_map is not None:
         entry["pages"] = page_map
@@ -1637,6 +1662,7 @@ def sync_database(
 
     synced_rows: List[Dict[str, Any]] = []
     synced_count = 0
+    truncated = False
     page_map = (local_state.get("databases") or {}).get(db_local_key, {}).get("pages", {}) or {}
 
     for page in paginate_database(api_key, database_id, filter_obj=filter_obj, sorts=sorts):
@@ -1696,9 +1722,11 @@ def sync_database(
                 }
         synced_count += 1
         if args.max_pages and synced_count >= args.max_pages:
+            truncated = True
             break
 
-    last_sync_at = generated_at if cutoff is None else max(cutoff, generated_at)
+    # A capped newest-first sample cannot prove older changes were consumed.
+    last_sync_at = None if truncated else max(cutoff or generated_at, generated_at)
 
     if args.export_body and not args.dry_run:
         local_state = merge_database_state(
@@ -1731,6 +1759,7 @@ def sync_database(
         "date_property": date_prop,
         "page_count": synced_count,
         "sample_limit": args.max_pages or 0,
+        "status": "partial" if truncated else "synced",
         "updated_at": format_time(last_sync_at),
         "export_body": bool(args.export_body),
         "page_rows": synced_rows,
@@ -1743,6 +1772,8 @@ def write_logs(
     results: List[Dict[str, Any]],
     args: argparse.Namespace,
 ) -> None:
+    if args.dry_run:
+        return
     PUBLIC_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = PUBLIC_LOG_DIR / f"{generated_at.strftime('%Y-%m-%d')}-notion-sync.md"
     lines = [
