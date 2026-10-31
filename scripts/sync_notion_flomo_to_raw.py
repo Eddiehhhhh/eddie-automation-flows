@@ -57,6 +57,7 @@ def memo_id(page):
     values = urllib.parse.parse_qs(parsed.query).get('memo_id', [])
     if len(values) != 1 or not re.fullmatch(r'[A-Za-z0-9_-]{1,120}', values[0]):
         raise ValueError('invalid_memo_identity')
+    if CREDENTIAL_SHAPE.search(values[0]): raise ValueError('potential_credential_in_source')
     return values[0]
 
 
@@ -224,6 +225,8 @@ def immutable_write(path, raw):
 def prior_files(prior):
     result = dict(prior.get('files', {}))
     for files in prior.get('versions', {}).values(): result.update(files)
+    for source in prior.get('source_pages', {}).values(): result.update(prior_files(source))
+    for files in prior.get('variant_indexes', {}).values(): result.update(files)
     return result
 
 
@@ -259,86 +262,181 @@ def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=dow
     return stage(root, database_id, api_key, max_pages=max_pages, downloader=downloader)
 
 
+def source_fingerprints(page, blocks):
+    def body(rows):
+        return [{'type': row['type'], 'payload': row.get(row['type'], {}),
+                 'children': body(row.get('_children', []))} for row in rows]
+    properties = {name: {'type': prop['type'], 'value': prop.get(prop['type'])}
+                  for name, prop in page['properties'].items()
+                  if prop.get('type') not in {'created_time', 'last_edited_time', 'created_by', 'last_edited_by', 'button'}}
+    return digest(encoded(body(blocks))), digest(encoded(properties))
+
+
+def saved_fingerprints(root, mid, source):
+    if source.get('body_content_sha256') and source.get('properties_content_sha256'):
+        return source['body_content_sha256'], source['properties_content_sha256']
+    snapshot = next(rel for rel in source['files'] if rel.endswith('/' + mid + '.json'))
+    raw = safe_path(root / STAGE, snapshot).read_bytes()
+    reject_credentials(raw)
+    value = json.loads(raw)
+    return source_fingerprints(value['page'], value['blocks'])
+
+
+def variant_index(root, mid, group, observed):
+    sources = group.get('source_pages', {})
+    lines = [notion.render_frontmatter({'source_system': 'flomo', 'memo_id': mid,
+             'stage_only': True, 'source_page_ids': sorted(sources)}), '',
+             '# 同一 memo 的 Notion 来源版本', '',
+             '以下来源并列保留；仅供核对，不代表已合并或已确认事实。', '']
+    for number, ident in enumerate(sorted(set(sources) | set(observed)), 1):
+        source = sources.get(ident)
+        if source:
+            note = next(rel for rel in source['files'] if rel.endswith('/' + mid + '.md'))
+            target = Path(note).relative_to(Path('versions') / mid)
+            lines.append(f'- [来源 {number}](../{target.as_posix()})' +
+                         ('（当前集合未再观察到；保留历史）' if ident not in observed else ''))
+        else:
+            lines.append(f'- 来源 {number}：尚待完整抓取。')
+    raw = ('\n'.join(lines) + '\n').encode()
+    relative = str(Path('versions') / mid / 'indexes' / (digest(raw) + '.md'))
+    immutable_write(safe_path(root / STAGE, relative), raw)
+    return relative, {relative: digest(raw)}
+
+
 def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset):
     if max_pages < 0: raise ValueError('invalid_limit')
     local, no_id = local_inventory(root)
     rows = list(notion.paginate_database(api_key, database_id))
     groups = defaultdict(list)
     page_ids = set()
+    identity_holds = {}
     for row in rows:
         if (not isinstance(row.get('id'), str) or row['id'] in page_ids
                 or notion.parse_time(row.get('last_edited_time')) is None):
             raise ValueError('incomplete_page_inventory')
         page_ids.add(row['id'])
-        mid = memo_id(row)
+        try: mid = memo_id(row)
+        except ValueError as exc:
+            if str(exc) != 'potential_credential_in_source': raise
+            identity_holds['page::' + row['id']] = 'potential_credential_in_source'
+            continue
         if mid: groups[mid].append(row)
     state_path = safe_path(root, STATE)
     original_state = state_path.read_bytes() if state_path.exists() else None
     state = json.loads(original_state) if original_state else {'version': 1, 'pages': {}}
     if state.get('version') != 1 or not isinstance(state.get('pages'), dict): raise ValueError('invalid_state')
+    owners = {}
+    for mid, prior in state['pages'].items():
+        identities = set(prior.get('source_pages', {}))
+        if prior.get('notion_page_id'): identities.add(prior['notion_page_id'])
+        for ident in identities:
+            if ident in owners and owners[ident] != mid: raise ValueError('invalid_state')
+            owners[ident] = mid
+    def persist(candidate):
+        nonlocal state, original_state
+        if (state_path.read_bytes() if state_path.exists() else None) != original_state:
+            raise ValueError('state_changed')
+        raw = encoded(candidate)
+        atomic_write(state_path, raw)
+        state, original_state = candidate, raw
     report = {'notion_pages': len(rows), 'flomo_ids': len(groups),
+              'flomo_source_pages': sum(len(pages) for pages in groups.values()),
               'duplicate_ids': {mid: [p['id'] for p in pages] for mid, pages in groups.items() if len(pages) > 1},
               'notion_only': sorted(set(groups) - set(local)), 'local_only': sorted(set(local) - set(groups)),
               'local_duplicate_ids': {mid: paths for mid, paths in local.items() if len(paths) > 1},
-              'local_no_id': no_id, 'attempted': 0, 'written': 0, 'unchanged': 0, 'pending': 0, 'held': {}}
+              'local_no_id': no_id, 'attempted': 0, 'written': 0, 'unchanged': 0, 'pending': 0, 'held': identity_holds,
+              'variant_groups': {}, 'unmerged_variant_groups': {}, 'stage_only': True,
+              'fact_promotion_allowed': False}
+    errors = {'stage_edited', 'source_changed_during_read', 'state_changed', 'source_identity_changed',
+              'incomplete_asset', 'incomplete_relation', 'unsupported_block', 'block_cycle',
+              'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source'}
     for mid, pages in groups.items():
-        if len(pages) != 1:
-            report['held'][mid] = 'duplicate_notion_identity'
-            continue
-        page = pages[0]
-        prior = state['pages'].get(mid, {})
-        if prior and prior.get('notion_page_id') != page['id']:
-            report['held'][mid] = 'source_identity_changed'
-            continue
-        current = prior.get('last_edited_time') == page.get('last_edited_time') and bool(prior.get('files'))
-        if current:
-            current = all((safe_path(root / STAGE, rel).is_file()
-                           and digest(safe_path(root / STAGE, rel).read_bytes()) == sha)
-                          for rel, sha in prior_files(prior).items())
-        prior_changed = prior and any(not safe_path(root / STAGE, rel).is_file()
-            or digest(safe_path(root / STAGE, rel).read_bytes()) != sha
-            for rel, sha in prior_files(prior).items())
-        if prior_changed:
+        group = state['pages'].get(mid, {})
+        grouped = len(pages) > 1 or 'source_pages' in group or bool(group.get('notion_page_id')
+                    and group['notion_page_id'] != pages[0]['id'])
+        if group and any(not safe_path(root / STAGE, rel).is_file()
+                or digest(safe_path(root / STAGE, rel).read_bytes()) != sha
+                for rel, sha in prior_files(group).items()):
             report['held'][mid] = 'stage_edited'
             continue
-        if current:
-            report['unchanged'] += 1
-            continue
-        if not apply or (max_pages and report['attempted'] >= max_pages):
-            report['pending'] += 1
-            continue
-        report['attempted'] += 1
-        try:
-            complete = checked_page(api_key, page)
-            blocks = block_tree(api_key, page['id'])
-            reject_credentials(encoded({'page': complete, 'blocks': blocks}))
-            files = {}
-            material = materialize_assets({'page': complete, 'blocks': blocks}, files, downloader)
-            files[mid + '.md'] = render_record(material['page'], material['blocks'], mid, local.get(mid, []))
-            reject_credentials(files[mid + '.md'])
-            files[mid + '.json'] = encoded({'page': complete, 'blocks': blocks,
-                                          'materialized': material})
-            latest = notion.notion_request(api_key, 'GET', '/pages/' + page['id'])
-            if latest.get('last_edited_time') != page.get('last_edited_time'):
-                raise ValueError('source_changed_during_read')
-            if (state_path.read_bytes() if state_path.exists() else None) != original_state:
-                raise ValueError('state_changed')
-            version, hashes = apply_record(root, mid, files, prior)
-            state['pages'][mid] = {'notion_page_id': page['id'],
-                                   'last_edited_time': page.get('last_edited_time'), 'current_version': version,
-                                   'files': hashes, 'versions': {**prior.get('versions', {}), version: hashes}}
-            if (state_path.read_bytes() if state_path.exists() else None) != original_state:
-                raise ValueError('state_changed')
-            original_state = encoded(state)
-            atomic_write(state_path, original_state)
-            report['written'] += 1
-        except Exception as exc:
-            # Never print URLs, content, credentials or source exception text.
-            code = str(exc)
-            report['held'][mid] = code if code in {'stage_edited', 'source_changed_during_read', 'state_changed',
-                'incomplete_asset', 'incomplete_relation', 'unsupported_block', 'block_cycle',
-                'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source'} else 'source_or_stage_failed'
-    report['complete'] = not report['held'] and not report['pending']
+        for page in pages:
+            ident = page['id']
+            failure_key = mid + '::' + ident if grouped else mid
+            group = state['pages'].get(mid, {})
+            sources = dict(group.get('source_pages', {}))
+            if grouped and group.get('notion_page_id') and group['notion_page_id'] not in sources:
+                sources[group['notion_page_id']] = {key: deepcopy(value) for key, value in group.items()
+                                                   if key not in {'source_pages', 'variant_indexes', 'current_variant_index'}}
+            prior = sources.get(ident, {}) if grouped else group
+            if (ident in owners and owners[ident] != mid) or (prior and prior.get('notion_page_id') != ident):
+                report['held'][failure_key] = 'source_identity_changed'
+                continue
+            if prior.get('last_edited_time') == page.get('last_edited_time') and prior.get('files'):
+                report['unchanged'] += 1
+                continue
+            if not apply or (max_pages and report['attempted'] >= max_pages):
+                report['pending'] += 1
+                continue
+            report['attempted'] += 1
+            try:
+                complete = checked_page(api_key, page)
+                blocks = block_tree(api_key, ident)
+                reject_credentials(encoded({'page': complete, 'blocks': blocks}))
+                files = {}
+                material = materialize_assets({'page': complete, 'blocks': blocks}, files, downloader)
+                files[mid + '.md'] = render_record(material['page'], material['blocks'], mid, local.get(mid, []))
+                reject_credentials(files[mid + '.md'])
+                files[mid + '.json'] = encoded({'page': complete, 'blocks': blocks, 'materialized': material})
+                latest = notion.notion_request(api_key, 'GET', '/pages/' + ident)
+                if latest.get('last_edited_time') != page.get('last_edited_time'):
+                    raise ValueError('source_changed_during_read')
+                if (state_path.read_bytes() if state_path.exists() else None) != original_state:
+                    raise ValueError('state_changed')
+                version, hashes = apply_record(root, mid, files, prior)
+                body_sha, properties_sha = source_fingerprints(complete, blocks)
+                receipt = {'notion_page_id': ident, 'last_edited_time': page.get('last_edited_time'),
+                           'current_version': version, 'files': hashes,
+                           'versions': {**prior.get('versions', {}), version: hashes},
+                           'body_content_sha256': body_sha, 'properties_content_sha256': properties_sha}
+                candidate = deepcopy(state)
+                if grouped:
+                    sources[ident] = receipt
+                    candidate['pages'][mid] = {**group, 'source_pages': sources}
+                else: candidate['pages'][mid] = receipt
+                persist(candidate)
+                owners[ident] = mid
+                report['written'] += 1
+            except Exception as exc:
+                code = str(exc)
+                report['held'][failure_key] = code if code in errors else 'source_or_stage_failed'
+        if grouped:
+            group = state['pages'].get(mid, {})
+            sources = group.get('source_pages', {})
+            observed = sorted(page['id'] for page in pages)
+            if sources:
+                try:
+                    fingerprints = {ident: saved_fingerprints(root, mid, record) for ident, record in sources.items()}
+                    bodies = len({pair[0] for pair in fingerprints.values()})
+                    properties = len({pair[1] for pair in fingerprints.values()})
+                    info = {'source_page_ids': sorted(sources), 'observed_source_page_ids': observed,
+                            'body_variant_count': bodies, 'properties_variant_count': properties,
+                            'capture_complete': all(ident in sources and sources[ident]['last_edited_time'] == page['last_edited_time']
+                                for ident, page in ((page['id'], page) for page in pages))}
+                    report['variant_groups'][mid] = info
+                    if bodies > 1 or properties > 1: report['unmerged_variant_groups'][mid] = info
+                    if apply:
+                        relative, hashes = variant_index(root, mid, group, observed)
+                        candidate = deepcopy(state)
+                        candidate['pages'][mid] = {**group, 'current_variant_index': relative,
+                            'variant_indexes': {**group.get('variant_indexes', {}), digest(encoded(hashes)): hashes}}
+                        if candidate != state: persist(candidate)
+                except Exception as exc:
+                    code = str(exc)
+                    report['held'][mid + '::variant_index'] = code if code in errors else 'source_or_stage_failed'
+    report['capture_complete'] = not report['held'] and not report['pending']
+    report['complete'] = report['capture_complete']
+    report['unmerged_variant_group_count'] = len(report['unmerged_variant_groups'])
+    report['semantic_merge_complete'] = report['capture_complete'] and not report['unmerged_variant_groups']
     if apply: atomic_write(safe_path(root, STAGE / 'coverage.json'), encoded(report))
     return report
 
@@ -396,7 +494,8 @@ def main():
     if not args.database_id or not os.environ.get('VAULT_ROOT'): parser.error('database ID and VAULT_ROOT required')
     result = run(Path(os.environ['VAULT_ROOT']), args.database_id, notion.load_notion_api_key(),
                  apply=args.apply, max_pages=args.max_pages)
-    print(json.dumps({key: result[key] for key in ('notion_pages', 'flomo_ids', 'written', 'unchanged', 'pending', 'complete')}))
+    print(json.dumps({key: result[key] for key in ('notion_pages', 'flomo_ids', 'flomo_source_pages', 'written', 'unchanged', 'pending',
+        'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete')}))
     return 0 if result['complete'] or not args.apply else 2
 
 

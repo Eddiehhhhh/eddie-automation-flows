@@ -45,8 +45,9 @@ earlier ordinary-source failures do not prevent flomo processing, while every
 flomo start/persist gate explicitly refuses cancellation. Missing configuration
 defaults off. The stage step may exit partial, but the workflow first commits its scoped
 Raw02 output and per-ID state using the existing private publisher, then reports
-the incomplete result as a failed job. A held duplicate cannot erase completed
-objects or turn the entire bridge green. Publication failure remains a failure;
+the incomplete result as a failed job. A held or pending source cannot erase completed objects. All source variants
+can finish capture while divergent content remains explicitly unmerged in the
+private report; this does not claim the overall system migration is complete. Publication failure remains a failure;
 a following scoped readback fetches private main and verifies the state Git blob
 against committed HEAD and actual state bytes, requires the same staged-content
 subtree on remote main, and checks every state-referenced content hash against
@@ -78,8 +79,22 @@ assets and stable IDs; this script deliberately cannot perform that promotion.
 
 ## Failure and cutover conditions
 
-- Multiple Notion pages with one memo ID are held. No title/date winner is
-  chosen. Local-only memos are retained; source absence never authorizes deletion.
+- Capture identity is `(memo_id, notion_page_id)`. Multiple Notion pages are
+  preserved separately under the existing immutable version directories; no
+  title/date winner is chosen. A collection index links all captured variants
+  and marks observed pages still pending. Exact copies retain every page's
+  original JSON and receipt as well. Local-only memos are retained; source
+  absence never authorizes deletion.
+- Existing ordinary memo receipts remain unchanged. Only multi-page identities
+  add `source_pages`, with one current version/history per original page, plus
+  `current_variant_index` and retained immutable index versions. If an ordinary
+  memo later gains another Notion page, its original receipt and old files are
+  preserved. A page disappearing from the active listing retains its snapshot.
+- `capture_complete` (and compatibility field `complete`) means every observed
+  source page was captured/read back with no pending/held operation.
+  `unmerged_variant_groups` and `semantic_merge_complete` independently report
+  divergent bodies/properties. Complete capture does not select a canonical
+  variant or authorize fact promotion: `fact_promotion_allowed` remains false.
 - Apply verifies both origin fetch/push destinations and fresh GitHub private
   repository identity using `cloud_private_checkout.verify_private_checkout`
   before any filesystem write. The shared helper must land before this candidate.
@@ -112,8 +127,11 @@ explicit investigation, not exclusion from scope or silent omission.
 Stage Markdown is marked `stage_only: true`. Both current snapshots and immutable
 historical versions are capture/reconciliation evidence, not independent fact
 sources or additional memory candidates. The shared
-`iteration_incremental_audit.candidate_from_file` excludes them before date or
-mtime selection, even when their full body and timestamps are present. The
+`iteration_incremental_audit.candidate_from_file` first excludes the exact
+registered flomo-stage subtree before reading frontmatter or considering dates
+and mtime. This covers current records, immutable variants/indexes and README
+files even with frontmatter exceeding the 12000-character reader. Other Notion
+notes are not excluded; the general `stage_only` marker remains active elsewhere. The
 canonical `Raw/01 Flomo/` note remains eligible under the ordinary rules.
 `cloud_weekly_bundle.py` and the manual `run_iteration_pipeline.py` consume this
 shared audit. This filter does not enable any daily or weekly schedule.

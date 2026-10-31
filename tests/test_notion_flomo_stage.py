@@ -60,9 +60,11 @@ class StageTests(unittest.TestCase):
         self.mocks = mocks
         self.addCleanup(lambda: self.assertEqual(self.old.read_bytes(), self.original))
 
-    def record_path(self, mid='YWJj', suffix='.md'):
+    def record_path(self, mid='YWJj', suffix='.md', page_id=None):
         state = json.loads((self.root / bridge.STATE).read_text())
-        files = state['pages'][mid]['files']
+        record = state['pages'][mid]
+        if page_id is not None: record = record['source_pages'][page_id]
+        files = record['files']
         return self.root / bridge.STAGE / next(p for p in files if p.endswith('/' + mid + suffix))
 
     def run_sync(self, **kwargs):
@@ -225,12 +227,197 @@ class StageTests(unittest.TestCase):
         self.run_sync(apply=True)
         self.assertIn('Nested', self.record_path().read_text())
 
-    def test_duplicate_identity_is_held_without_any_source_body_read(self):
+    def test_identical_duplicate_sources_keep_both_receipts_without_a_winner(self):
         self.rows.append(page(ident='page-two'))
         result = self.run_sync(apply=True)
-        self.assertEqual(result['held'], {'YWJj': 'duplicate_notion_identity'})
-        self.assertFalse(bool(list((self.root / bridge.STAGE).rglob('YWJj.md'))))
-        self.mocks['retrieve_block_children'].assert_not_called()
+        self.assertEqual(result['held'], {})
+        self.assertEqual(result['written'], 2)
+        self.assertTrue(result['capture_complete'])
+        self.assertEqual(result['unmerged_variant_group_count'], 0)
+        record = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        self.assertNotIn('notion_page_id', record)
+        self.assertEqual(set(record['source_pages']), {'page-one', 'page-two'})
+        for ident in record['source_pages']:
+            value = json.loads(self.record_path(suffix='.json', page_id=ident).read_text())
+            self.assertEqual(value['page']['id'], ident)
+        index = self.root / bridge.STAGE / record['current_variant_index']
+        self.assertIn('stage_only: true', index.read_text())
+        self.assertEqual(index.read_text().count('[来源 '), 2)
+
+    def test_distinct_duplicate_bodies_and_properties_remain_separate_variants(self):
+        second = page(ident='page-two', title='Other original title')
+        second['properties']['Tags']['multi_select'] = [{'name': 'other/tag'}]
+        self.rows.append(second)
+        self.mocks['retrieve_block_children'].side_effect = [[block('Original A')], [block('Original B')]]
+        result = self.run_sync(apply=True)
+        self.assertTrue(result['capture_complete'])
+        self.assertFalse(result['semantic_merge_complete'])
+        self.assertFalse(result['fact_promotion_allowed'])
+        self.assertEqual(result['unmerged_variant_group_count'], 1)
+        self.assertIn('Original A', self.record_path(page_id='page-one').read_text())
+        self.assertIn('Original B', self.record_path(page_id='page-two').read_text())
+        self.assertNotEqual(self.record_path(page_id='page-one').parent, self.record_path(page_id='page-two').parent)
+
+    def test_duplicate_batch_limit_resumes_each_page_without_repeating_prior_source(self):
+        self.rows.append(page(ident='page-two'))
+        result = self.run_sync(apply=True, max_pages=1)
+        self.assertEqual((result['written'], result['pending']), (1, 1))
+        first = self.record_path(page_id='page-one')
+        original = first.read_bytes()
+        self.mocks['retrieve_block_children'].reset_mock()
+        result = self.run_sync(apply=True, max_pages=1)
+        self.assertEqual((result['written'], result['unchanged'], result['pending']), (1, 1, 0))
+        self.assertEqual(first.read_bytes(), original)
+        self.assertEqual(self.mocks['retrieve_block_children'].call_count, 1)
+
+    def test_ordinary_memo_becoming_duplicate_preserves_old_receipt_and_history(self):
+        self.run_sync(apply=True)
+        before = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        before_path = self.record_path()
+        before_bytes = before_path.read_bytes()
+        self.rows.append(page(ident='page-two'))
+        result = self.run_sync(apply=True)
+        after = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        self.assertEqual(result['unchanged'], 1)
+        self.assertEqual(result['written'], 1)
+        self.assertEqual(after['source_pages']['page-one'], before)
+        self.assertTrue(all(after[key] == value for key, value in before.items()))
+        self.assertEqual(before_path.read_bytes(), before_bytes)
+        # A former source disappearing from the active set does not erase it.
+        self.rows = [self.rows[1]]
+        self.run_sync(apply=True)
+        after = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        self.assertEqual(set(after['source_pages']), {'page-one', 'page-two'})
+        self.assertIn('保留历史', (self.root / bridge.STAGE / after['current_variant_index']).read_text())
+
+    def test_duplicate_source_edit_preserves_both_previous_and_other_page_versions(self):
+        self.rows.append(page(ident='page-two'))
+        self.run_sync(apply=True)
+        before = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']['source_pages']
+        old_path = self.record_path(page_id='page-one')
+        old_bytes = old_path.read_bytes()
+        self.rows[0]['last_edited_time'] = '2026-11-02T00:00:00Z'
+        self.mocks['retrieve_block_children'].return_value = [block('Revised source A')]
+        self.run_sync(apply=True)
+        after = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']['source_pages']
+        self.assertEqual(after['page-two'], before['page-two'])
+        self.assertEqual(old_path.read_bytes(), old_bytes)
+        self.assertEqual(len(after['page-one']['versions']), 2)
+
+    def test_credential_in_one_duplicate_does_not_block_the_other_source(self):
+        self.rows.append(page(ident='page-two'))
+        self.mocks['retrieve_block_children'].side_effect = [[block('sk-' + 'A' * 36)], [block('Safe source')]]
+        result = self.run_sync(apply=True)
+        self.assertEqual(result['held'], {'YWJj::page-one': 'potential_credential_in_source'})
+        self.assertEqual(result['written'], 1)
+        record = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        self.assertEqual(set(record['source_pages']), {'page-two'})
+        self.assertEqual(len(list((self.root / bridge.STAGE).rglob('YWJj.json'))), 1)
+
+    def test_duplicate_asset_bytes_and_links_remain_owned_by_each_source(self):
+        self.rows.append(page(ident='page-two'))
+        def image(name):
+            return {'id': name, 'type': 'image', 'has_children': False,
+                    'image': {'type': 'external', 'external': {'url': 'https://files.invalid/' + name + '.png'}}}
+        self.mocks['retrieve_block_children'].side_effect = [[image('asset-a')], [image('asset-b')]]
+        result = self.run_sync(apply=True, downloader=lambda url: url.rsplit('/', 1)[-1].encode())
+        self.assertTrue(result['capture_complete'])
+        record = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        self.assertEqual(sum('/assets/' in rel for rel in bridge.prior_files(record)), 2)
+        for ident in record['source_pages']:
+            note = self.record_path(page_id=ident)
+            self.assertIn('assets/', note.read_text())
+            self.assertEqual(len(list((note.parent / 'assets').iterdir())), 1)
+
+    def test_failed_source_state_write_does_not_pollute_the_other_receipt_and_can_resume(self):
+        self.rows.append(page(ident='page-two'))
+        real_write = bridge.atomic_write
+        failed = False
+        def write(path, raw):
+            nonlocal failed
+            if path == self.root / bridge.STATE and not failed:
+                failed = True
+                raise OSError('synthetic atomic state failure')
+            return real_write(path, raw)
+        with mock.patch.object(bridge, 'atomic_write', side_effect=write):
+            result = self.run_sync(apply=True)
+        self.assertEqual(result['written'], 1)
+        self.assertEqual(set(result['held']), {'YWJj::page-one'})
+        record = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        self.assertEqual(set(record['source_pages']), {'page-two'})
+        result = self.run_sync(apply=True)
+        self.assertEqual((result['written'], result['unchanged']), (1, 1))
+        self.assertTrue(result['capture_complete'])
+
+    def test_legacy_550_ordinary_receipts_remain_value_identical(self):
+        legacy = {}
+        old_rows = []
+        for number in range(550):
+            mid = 'legacy' + str(number)
+            current = page(mid, 'old-page-' + str(number))
+            old_rows.append(current)
+            files = {mid + '.md': b'---\nstage_only: true\n---\nLegacy source\n',
+                     mid + '.json': bridge.encoded({'page': current, 'blocks': [block('Legacy source')]})}
+            version, hashes = bridge.apply_record(self.root, mid, files, {})
+            legacy[mid] = {'notion_page_id': current['id'], 'last_edited_time': current['last_edited_time'],
+                           'current_version': version, 'files': hashes, 'versions': {version: hashes}}
+        bridge.atomic_write(self.root / bridge.STATE, bridge.encoded({'version': 1, 'pages': legacy}))
+        self.rows = [*old_rows, page(), page(ident='page-two')]
+        result = self.run_sync(apply=True)
+        self.assertEqual((result['unchanged'], result['written']), (550, 2))
+        after = json.loads((self.root / bridge.STATE).read_text())['pages']
+        self.assertTrue(all(after[mid] == record for mid, record in legacy.items()))
+
+    def test_variant_index_is_excluded_from_fact_candidates(self):
+        import datetime
+        import iteration_incremental_audit as audit
+        self.rows.append(page(ident='page-two'))
+        self.run_sync(apply=True)
+        record = json.loads((self.root / bridge.STATE).read_text())['pages']['YWJj']
+        index = self.root / bridge.STAGE / record['current_variant_index']
+        self.assertIsNone(audit.candidate_from_file(index, 'Raw/02 Notion/', datetime.date(2020, 1, 1), datetime.date(2030, 1, 1)))
+
+    def test_variant_remote_readback_requires_every_source_and_index(self):
+        self.rows.append(page(ident='page-two'))
+        self.run_sync(apply=True)
+        raw = (self.root / bridge.STATE).read_bytes()
+        expected = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+        record = json.loads(raw)['pages']['YWJj']
+        paths = bridge.prior_files(record)
+        self.assertEqual(len(paths), 5)
+        for omitted in [None, record['current_variant_index'], next(rel for rel in paths if rel.endswith('.json'))]:
+            def git(args, **kwargs):
+                if 'ls-tree' not in args: return SimpleNamespace(returncode=0, stdout=expected)
+                rows = []
+                for rel in paths:
+                    if rel == omitted: continue
+                    data = (self.root / bridge.STAGE / rel).read_bytes()
+                    sha = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+                    rows.append('100644 blob ' + sha + '\t' + str(bridge.STAGE / rel) + '\0')
+                return SimpleNamespace(returncode=0, stdout=''.join(rows))
+            with self.subTest(omitted=omitted), mock.patch.object(bridge.subprocess, 'run', side_effect=git):
+                if omitted is None: self.assertTrue(bridge.verify_remote_state(self.root))
+                else:
+                    with self.assertRaisesRegex(ValueError, 'private_state_readback_failed'):
+                        bridge.verify_remote_state(self.root)
+
+    def test_account_key_in_claimed_memo_identity_never_leaks_to_report(self):
+        sample = 'ghp_' + 'A' * 36
+        self.rows = [page(sample, 'bad-page'), page('ZGVm', 'good-page')]
+        result = self.run_sync(apply=True)
+        self.assertEqual(result['written'], 1)
+        self.assertEqual(result['held'], {'page::bad-page': 'potential_credential_in_source'})
+        self.assertNotIn(sample, bridge.encoded(result).decode())
+        self.assertNotIn(sample, (self.root / bridge.STATE).read_text())
+
+    def test_full_source_pagination_failure_prevents_any_object_capture(self):
+        def incomplete(*args):
+            yield page()
+            raise RuntimeError('incomplete source listing')
+        self.mocks['paginate_database'].side_effect = incomplete
+        with self.assertRaises(RuntimeError): self.run_sync(apply=True)
+        self.assertFalse((self.root / bridge.STAGE).exists())
+        self.assertFalse((self.root / bridge.STATE).exists())
 
     def test_unchanged_run_uses_existing_content_identity(self):
         self.run_sync(apply=True)
