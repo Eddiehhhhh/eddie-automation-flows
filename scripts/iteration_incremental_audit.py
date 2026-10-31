@@ -111,6 +111,8 @@ def candidate_from_file(path: Path, source: str, start: date, end: date) -> Cand
 
     text = read_text_head(path)
     fields = parse_frontmatter(text)
+    if fields.get("stage_only", "").lower() == "true":
+        return None
     date_fields = [
         ("created_at", fields.get("created_at")),
         ("updated_at", fields.get("updated_at")),
@@ -203,6 +205,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
             "Get voice/recorder candidates should be read before judging personal state.",
             "source_delta is read from the previous iteration-source-discovery snapshot when available.",
             "archive-only retired sources remain discoverable but are excluded from active candidates.",
+            "stage_only snapshots and versions are excluded; discovery file counts still include these physical files.",
             "directory tree additions/removals are reported through source_delta as added_dirs and removed_dirs.",
         ],
     }

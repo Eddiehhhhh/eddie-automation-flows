@@ -106,3 +106,19 @@ explicit investigation, not exclusion from scope or silent omission.
   executor's identity and a genuine Mac-off increment; complete Raw01 promotion
   protection and retrieval registration; then stop local capture and switch the
   single cloud writer. Obsidian Git syncing remains enabled.
+
+## Iteration candidate boundary
+
+Stage Markdown is marked `stage_only: true`. Both current snapshots and immutable
+historical versions are capture/reconciliation evidence, not independent fact
+sources or additional memory candidates. The shared
+`iteration_incremental_audit.candidate_from_file` excludes them before date or
+mtime selection, even when their full body and timestamps are present. The
+canonical `Raw/01 Flomo/` note remains eligible under the ordinary rules.
+`cloud_weekly_bundle.py` and the manual `run_iteration_pipeline.py` consume this
+shared audit. This filter does not enable any daily or weekly schedule.
+
+`iteration_source_discovery` intentionally counts physical files and Markdown
+files, including staging versions. Those counts measure inventory, not active
+candidates or unique facts. Only the incremental audit candidate counts apply
+the stage filter; no inventory entries are removed or hidden.
