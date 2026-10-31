@@ -1500,6 +1500,8 @@ def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequenc
 
 def recover_intent(api_key: str, intent: Dict[str, Any]) -> Dict[str, Any]:
     """Read only. Ambiguous, partial, and human-modified targets stay held."""
+    if intent.get("unicode_preservation"):
+        return recover_unicode_preservation(api_key, intent)
     if intent.get("kind") == "create":
         candidates = []
         for block in retrieve_block_children(api_key, intent["parent_id"]):
@@ -1614,7 +1616,8 @@ def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
     baseline = _baseline(observed)
     expected = intent["baseline"] + [{"id": block["id"], "hash": block_identity(block)}
                                     for block in observed[len(intent["baseline"]):]]
-    if baseline != expected or not intent_expected_matches(intent, observed[len(intent["baseline"]):]):
+    qualified = intent.get("unicode_preservation") and recover_unicode_preservation(api_key, intent, observed).get("status") == "verified"
+    if baseline != expected or (not qualified and not intent_expected_matches(intent, observed[len(intent["baseline"]):])):
         return {"status": "held", "reason": "target_changed_during_readback", "retry_allowed": False}
     context = intent.get("context")
     if not context:
@@ -1624,9 +1627,16 @@ def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
     intent.update(status="verified", target_id=target, verified_baseline=baseline)
     entry = state.setdefault("entries", {}).setdefault(context["entry_key"], {})
     entry.update(page_id=target, parent_page_id=intent["parent_id"], managed_block_baseline=baseline)
+    if qualified:
+        intent["unicode_preservation"]["phase"] = "verified"
+        entry["fidelity"] = {"mode": "source_attachment_complete", "operation_id": operation_id,
+                             "source_signature": context["source_signature"], "render_version": context.get("render_version", "legacy-v1"),
+                             "asset": intent["unicode_preservation"]["asset"]}
     if context.get("preserved_target_ref"):
         entry["preserved_target_version"] = context["preserved_target_ref"]
     if context["final_batch"]:
+        if not qualified and (entry.get("fidelity") or {}).get("source_signature") != context["source_signature"]:
+            entry.pop("fidelity", None)
         entry.update(signature=context["source_signature"], type=context.get("node_kind", "file"), render_version=context.get("render_version", "legacy-v1"),
                      revision_generation=context.get("revision_generation", 0), source_snapshot=context["source_snapshot"])
     persist_private_state(state)
@@ -1656,6 +1666,301 @@ def execute_revision(api_key: str, relative: str, parent_id: Optional[str], allo
     node = Node(relative, None, source.name, "file", signature)
     blocks = file_page_blocks(ROOT, relative, markdown=frozen_markdown)
     return execute_node_blocks(api_key, node, blocks, parent_id, allow_new, snapshot.stdout.strip())
+
+
+def unicode_deletion_matches(intent: Dict[str, Any], actual: Sequence[Dict[str, Any]]) -> bool:
+    """Evidence for a preservation transition, never a general success comparison."""
+    expected = (intent.get("context") or {}).get("request", {}).get("children")
+    if not isinstance(expected, list) or len(expected) != len(actual) or [block_identity(b) for b in expected] != intent.get("expected"):
+        return False
+    deleted = [0]
+    def equal(a: Any, b: Any, path: str, paragraph: bool) -> bool:
+        if type(a) is not type(b):
+            return False
+        if a == b:
+            return True
+        if isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys():
+            return all(equal(a[k], b[k], path + "/" + k, paragraph) for k in a)
+        if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+            return all(equal(x, y, path + "/" + str(n), paragraph) for n, (x, y) in enumerate(zip(a, b)))
+        if paragraph and isinstance(a, str) and isinstance(b, str) and re.fullmatch(r"/content/rich_text/[0-9]+/text/content", path):
+            cursor = 0
+            loss = 0
+            for char in a:
+                if cursor < len(b) and char == b[cursor]:
+                    cursor += 1
+                elif char == "\u200b":
+                    loss += 1
+                else:
+                    return False
+            if cursor != len(b) or not loss:
+                return False
+            deleted[0] += loss
+            return True
+        return False
+    for left, right in zip(expected, actual):
+        if not equal(_canonical_block(left), _canonical_block(right), "", left.get("type") == right.get("type") and left.get("type") in {"paragraph", "bulleted_list_item"}):
+            return False
+    return deleted[0] > 0
+
+
+def unicode_legacy_profile_matches(relative: str, markdown: str) -> bool:
+    """Only a reference-free source whose current native and legacy renders agree."""
+    outside = "".join(re.split(r"(```[\s\S]*?```)", markdown)[::2])
+    if (re.search(r"(!?)\[([^\]\n]+)\]\(([^)\n]+)\)", outside)
+            or re.search(r"(!?)\[\[([^\]\n]+)\]\]", outside)
+            or re.search(r"<(?:img|a|video|audio|source|link)\b", outside, re.IGNORECASE)):
+        return False
+    body = native_markdown_to_blocks(markdown)
+    native = [quote_block("来源路径：" + relative), divider_block(), *body] if body else [quote_block("来源路径：" + relative)]
+    return [block_identity(b) for b in native] == [block_identity(b) for b in file_page_blocks(ROOT, relative, markdown)]
+
+
+def unicode_original_target(api_key: str, intent: Dict[str, Any], observed: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, List[Dict[str, Any]]]:
+    context = intent.get("context") or {}
+    target = list_child_pages(api_key, intent["parent_id"]).get(context.get("title"))
+    if not target or (intent.get("target_id") and target != intent["target_id"]):
+        raise MirrorHeld("unicode preservation original target not unique")
+    verify_page_binding(api_key, target, intent["parent_id"], context["title"])
+    observed = retrieve_block_tree(api_key, target) if observed is None else observed
+    prefix = intent.get("baseline") or []
+    if _baseline(observed[:len(prefix)]) != prefix:
+        raise MirrorHeld("unicode preservation original prefix changed")
+    return target, observed
+
+
+def recover_unicode_preservation(api_key: str, intent: Dict[str, Any], observed: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """GET-only verification of the exact preserved original and attached source bytes."""
+    proof = intent.get("unicode_preservation") or {}
+    if proof.get("phase") not in {"dispatched", "verified"}:
+        return {"status": "held", "reason": "unicode_preservation_not_dispatched", "retry_allowed": False}
+    try:
+        target, observed = unicode_original_target(api_key, intent, observed)
+        before = proof["before_blocks"]
+        if target != proof["target_id"] or _baseline(before) != proof["before_baseline"] or _baseline(observed[:len(before)]) != proof["before_baseline"]:
+            raise MirrorHeld("unicode preservation target changed")
+        if not unicode_deletion_matches(intent, before[len(intent.get("baseline") or []):]):
+            raise MirrorHeld("unicode preservation original evidence changed")
+        tail = observed[len(before):]
+        request = proof["request"]
+        if not intent_expected_matches({"expected": proof["expected"], "context": {"request": request}}, tail):
+            raise MirrorHeld("unicode preservation attachment incomplete")
+        import notion_private_assets as assets
+        source = base64.b64decode(proof["original_source_base64"], validate=True)
+        source_meta = proof["asset"]
+        context = intent["context"]
+        markdown = source.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        original_payload = context["request"]["children"]
+        if (not unicode_legacy_profile_matches(context["source_path"], markdown)
+                or source_meta["source_commit"] != context["source_snapshot"] or source_meta["source_path"] != context["source_path"]
+                or sha256_text(markdown) != context["source_signature"] or hashlib.sha256(source).hexdigest() != source_meta["sha256"]
+                or len(source) != source_meta["size"] or hashlib.sha1(b"blob " + str(len(source)).encode() + b"\0" + source).hexdigest() != source_meta["source_blob"]
+                or assets.CREDENTIAL_SHAPE.search(source)
+                or [block_identity(b) for b in file_page_blocks(ROOT, context["source_path"], markdown)] != [block_identity(b) for b in original_payload[2:-1]]):
+            raise MirrorHeld("unicode preservation complete source evidence differs")
+        if len(tail) != 4 or tail[2].get("type") != "file":
+            raise MirrorHeld("unicode preservation original file missing")
+        actual = assets.canonical_native_file(tail[2])
+        if actual["sha256"] != proof["asset"]["sha256"] or actual["size"] != proof["asset"]["size"]:
+            raise MirrorHeld("unicode preservation original bytes differ")
+        return {"status": "verified", "target_id": target, "retry_allowed": False, "fidelity": "source_attachment_complete"}
+    except (KeyError, TypeError, ValueError, MirrorHeld):
+        return {"status": "held", "reason": "unicode_preservation_readback_held", "retry_allowed": False}
+
+
+def preserve_unicode_source(api_key: str, node: Node, parent: str, budget: Dict[str, Any], authorization: Dict[str, Any]) -> bool:
+    """A bounded same-target repair; never replay the original ambiguous request."""
+    state = load_state()
+    key = state_entry_key(node.path, state_secret())
+    pending = [(op, i) for op, i in (state.get("write_intents") or {}).items()
+               if i.get("status") != "verified" and (i.get("context") or {}).get("entry_key") == key]
+    if not pending:
+        return False
+    if len(pending) != 1 or state.get("write_outcome", {}).get("retry_allowed") is False:
+        raise MirrorHeld("unicode preservation unresolved competing intent")
+    operation, intent = pending[0]
+    context = intent.get("context") or {}
+    if (authorization.get("action") != "preserve_unicode_source" or authorization.get("operation_id") != operation
+            or authorization.get("source_snapshot") != context.get("source_snapshot")
+            or authorization.get("render_version") != context.get("render_version", "legacy-v1")
+            or authorization.get("original_request_hash") != sha256_text(json.dumps(context.get("request"), sort_keys=True, ensure_ascii=False))):
+        raise MirrorHeld("unicode preservation explicit request differs")
+    if (node.kind != "file" or context.get("source_signature") != node.signature or intent.get("parent_id") != parent
+            or context.get("source_path") != node.path or context.get("title") != node.title
+            or context.get("render_version", "legacy-v1") != "legacy-v1" or context.get("batch_count") != 1
+            or context.get("batch_index") != 0 or context.get("final_batch") is not True):
+        raise MirrorHeld("unicode preservation source or renderer changed")
+    proof = intent.get("unicode_preservation") or {}
+    if proof and (proof.get("target_id") != authorization.get("target_page_id")
+                  or any(proof.get("asset", {}).get(name) != authorization.get(request_name) for name, request_name in
+                         (("source_blob", "source_blob"), ("sha256", "source_sha256"), ("size", "source_size")))):
+        raise MirrorHeld("unicode preservation existing receipt differs from request")
+    if proof.get("phase") in {"dispatched", "verified"}:
+        if finalize_intent(api_key, operation).get("status") != "verified":
+            raise MirrorHeld("unicode preservation unknown requires readback")
+        return True
+    if time.monotonic() >= budget["deadline"] or budget["remaining"] <= 0:
+        raise MirrorHeld("unicode preservation budget unavailable")
+    import notion_private_assets as assets
+    commit = context.get("source_snapshot")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise MirrorHeld("unicode preservation source pin unavailable")
+    found = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", commit + "^{commit}"], capture_output=True, timeout=15)
+    if found.returncode:
+        # Read only this already-authorized private Git revision; never move HEAD.
+        try:
+            verify_private_checkout(ROOT, os.environ.get("PRIVATE_VAULT_TOKEN", ""))
+        except Exception:
+            raise MirrorHeld("unicode preservation private checkout rejected") from None
+        try:
+            fetched = subprocess.run(["git", "-C", str(ROOT), "fetch", "--no-tags", "--depth=1", "origin", commit], capture_output=True, timeout=90)
+        except (OSError, subprocess.TimeoutExpired):
+            raise MirrorHeld("unicode preservation source pin read failed") from None
+        if fetched.returncode:
+            raise MirrorHeld("unicode preservation source pin read failed")
+    try:
+        asset = assets.prepare(ROOT, commit, node.path)
+    except assets.AssetHeld:
+        raise MirrorHeld("unicode preservation original source unavailable") from None
+    try:
+        markdown = asset.data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError:
+        raise MirrorHeld("unicode preservation source encoding held") from None
+    expected = context.get("request", {}).get("children")
+    if (sha256_text(markdown) != node.signature or not isinstance(expected, list)
+            or [block_identity(b) for b in file_page_blocks(ROOT, node.path, markdown)] != [block_identity(b) for b in expected[2:-1]]
+            or len(expected) < 3 or block_identity(expected[1]) != block_identity(heading_block(2, "同步版本 " + node.signature[:12] + " · 1/1"))
+            or block_identity(expected[0]) != block_identity(paragraph_block(intent["marker"]))
+            or block_identity(expected[-1]) != block_identity(paragraph_block("eddie-mirror-end:" + operation))):
+        raise MirrorHeld("unicode preservation source request mismatch")
+    if (authorization.get("source_blob") != asset.blob or authorization.get("source_sha256") != asset.sha256
+            or authorization.get("source_size") != len(asset.data)):
+        raise MirrorHeld("unicode preservation reviewed original bytes differ")
+    target, observed = unicode_original_target(api_key, intent)
+    if target != authorization.get("target_page_id"):
+        raise MirrorHeld("unicode preservation reviewed original target differs")
+    if any(op != operation and i.get("status") != "verified" and
+           (not (i.get("context") or {}).get("entry_key") or i.get("target_id") == target)
+           for op, i in (state.get("write_intents") or {}).items()):
+        raise MirrorHeld("unicode preservation target has competing unknown")
+    if not unicode_deletion_matches(intent, observed[len(intent.get("baseline") or []):]):
+        raise MirrorHeld("unicode preservation requires exact deletion evidence")
+    encoded = json.dumps(observed, ensure_ascii=False).encode()
+    if (len(api_key) > 16 and api_key.encode() in encoded) or assets.CREDENTIAL_SHAPE.search(encoded):
+        raise MirrorHeld("unicode preservation snapshot credential held")
+    if not (os.environ.get("GITHUB_RUN_ID") or os.environ.get("CODEX_THREAD_ID")):
+        raise MirrorHeld("unicode preservation write owner unavailable")
+    def text_zwsp_count(blocks: Sequence[Dict[str, Any]]) -> int:
+        return sum(part.get("text", {}).get("content", "").count("\u200b") for block in blocks if block.get("type") in {"paragraph", "bulleted_list_item"}
+                   for part in block.get(block["type"], {}).get("rich_text", []))
+    unicode_counts = {"source_file": markdown.count("\u200b"), "requested_text_runs": text_zwsp_count(expected),
+                      "actual_text_runs": text_zwsp_count(observed[len(intent.get("baseline") or []):])}
+    if not proof:
+        proof = {"phase": "planned", "target_id": target, "before_blocks": observed, "before_baseline": _baseline(observed),
+                 "original_source_base64": base64.b64encode(asset.data).decode("ascii"),
+                 "asset": {"sha256": asset.sha256, "size": len(asset.data), "source_commit": asset.commit,
+                           "source_blob": asset.blob, "source_path": asset.path}, "unicode_counts": unicode_counts, "fidelity": "source_attachment_complete"}
+        state["write_intents"][operation]["unicode_preservation"] = proof
+        persist_private_state(state)
+    elif proof.get("before_baseline") != _baseline(observed) or proof.get("asset", {}).get("sha256") != asset.sha256:
+        raise MirrorHeld("unicode preservation prepared target changed")
+    def checkpoint(receipt: Dict[str, Any]) -> None:
+        current = load_state()
+        current.setdefault("assets", {})[asset.sha256] = receipt
+        persist_private_state(current)
+    published = assets.publish(asset, api_key, checkpoint, load_state().get("assets", {}).get(asset.sha256))
+    if published.get("status") != "ready":
+        raise MirrorHeld("unicode preservation original upload held")
+    file_block = published["block"]
+    file_block[file_block["type"]]["caption"] = text_rich_text("来源附件：" + node.path)
+    additions = [paragraph_block("eddie-mirror-preservation:" + operation),
+                 paragraph_block("显示保真说明：原文件含 " + str(unicode_counts["source_file"]) + " 个 U+200B；本次正文文本请求含 "
+                     + str(unicode_counts["requested_text_runs"]) + " 个，Notion 保留 " + str(unicode_counts["actual_text_runs"])
+                     + " 个。下方 Markdown 原件保留完整源文件字节（SHA-256：" + asset.sha256 + "）；正文不代表逐字一致副本。"),
+                 file_block, paragraph_block("eddie-mirror-preservation-end:" + operation)]
+    state = load_state()
+    proof = state["write_intents"][operation]["unicode_preservation"]
+    proof.update(phase="prepared", request={"children": additions}, expected=[block_identity(b) for b in additions])
+    persist_private_state(state)
+    if _baseline(retrieve_block_tree(api_key, target)) != proof["before_baseline"]:
+        raise MirrorHeld("unicode preservation target changed before append")
+    if time.monotonic() >= budget["deadline"] or budget["remaining"] <= 0:
+        raise MirrorHeld("unicode preservation budget exhausted")
+    proof["phase"] = "dispatched"
+    persist_private_state(state)
+    budget["remaining"] -= 1
+    try:
+        _send_once(api_key, "PATCH", "/blocks/" + normalize_notion_id(target) + "/children", {"children": additions})
+    except UnknownWrite:
+        raise MirrorHeld("unicode preservation append unknown; GET-only recovery") from None
+    if finalize_intent(api_key, operation).get("status") != "verified":
+        raise MirrorHeld("unicode preservation attachment readback held")
+    return True
+
+
+def execute_unicode_request(api_key: str, opaque_id: str) -> Dict[str, int]:
+    """The existing explicit request route alone authorizes first source preservation."""
+    require_published_state()
+    state = load_state()
+    request = state.get("execution_request") or {}
+    try:
+        if (uuid.UUID(opaque_id).version != 4 or request["request_id"] != opaque_id
+                or request["action"] != "preserve_unicode_source" or request["allow_new_page"] is not False
+                or request["render_version"] != "legacy-v1"):
+            raise ValueError("request mismatch")
+        for field in ("source_signature", "source_sha256", "original_request_hash", "operation_id"):
+            if not re.fullmatch(r"[0-9a-f]{64}", request[field]):
+                raise ValueError("request hash invalid")
+        for field in ("source_snapshot", "source_blob"):
+            if not re.fullmatch(r"[0-9a-f]{40}", request[field]):
+                raise ValueError("request pin invalid")
+        if type(request["source_size"]) is not int or request["source_size"] <= 0:
+            raise ValueError("source size invalid")
+        relative = request["source_path"]
+        if not isinstance(relative, str) or Path(relative).as_posix() != relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise ValueError("invalid source path")
+        for field in ("target_page_id", "parent_page_id"):
+            normalize_notion_id(request[field])
+            if not UUID_RE.fullmatch(request[field]):
+                raise ValueError("invalid target")
+        intent = state["write_intents"][request["operation_id"]]
+        context = intent["context"]
+        if (context["source_path"] != relative or context["source_signature"] != request["source_signature"]
+                or intent["parent_id"] != request["parent_page_id"] or context["source_snapshot"] != request["source_snapshot"]
+                or context.get("render_version", "legacy-v1") != request["render_version"]
+                or sha256_text(json.dumps(context["request"], sort_keys=True, ensure_ascii=False)) != request["original_request_hash"]):
+            raise ValueError("original source differs")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise MirrorHeld("reviewed private preservation request unavailable") from None
+    current = subprocess.run(["git", "-C", str(ROOT), "show", "HEAD:" + relative], capture_output=True, timeout=30)
+    try:
+        if current.returncode or sha256_text(current.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")) != request["source_signature"]:
+            raise ValueError("source changed")
+    except (ValueError, UnicodeDecodeError):
+        raise MirrorHeld("reviewed preservation source version changed") from None
+    current_markdown = current.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    if not unicode_legacy_profile_matches(relative, current_markdown):
+        raise MirrorHeld("reviewed preservation current renderer differs")
+    if intent.get("status") == "verified":
+        entry = previous_entry_for_path(state.get("entries", {}), relative, state_secret())
+        proof = intent.get("unicode_preservation") or {}
+        if (entry.get("signature") != request["source_signature"] or entry.get("render_version", "legacy-v1") != request["render_version"]
+                or any(proof.get("asset", {}).get(name) != request[request_name] for name, request_name in
+                       (("source_blob", "source_blob"), ("sha256", "source_sha256"), ("size", "source_size")))
+                or intent.get("target_id") != request["target_page_id"] or not proof
+                or recover_unicode_preservation(api_key, intent).get("status") != "verified"):
+            raise MirrorHeld("preservation request already resolved differently")
+        return {"held": 0, "source_attachment_complete": 1, "attempted_batches": 0}
+    budget = {"remaining": 1, "deadline": time.monotonic() + 900}
+    try:
+        node = Node(relative, None, Path(relative).name, "file", request["source_signature"])
+        if not preserve_unicode_source(api_key, node, request["parent_page_id"], budget, request):
+            raise MirrorHeld("preservation original intent unavailable")
+    except MirrorHeld as exc:
+        if exc.code != "held":
+            raise
+        return {"held": 1, "source_attachment_complete": 0, "attempted_batches": 1 - budget["remaining"]}
+    return {"held": 0, "source_attachment_complete": 1, "attempted_batches": 1 - budget["remaining"]}
 
 
 def assert_intent_fence(state: Dict[str, Any], entry_key: Optional[str], target: Optional[str]) -> None:
@@ -2004,7 +2309,7 @@ def compact_verified_intents(state: Dict[str, Any], receipt_commit: str) -> None
     if not re.fullmatch(r"[0-9a-f]{40}", receipt_commit):
         raise MirrorHeld("verified receipt history pin unavailable")
     for intent in (state.get("write_intents") or {}).values():
-        if intent.get("status") != "verified" or intent.get("receipt_compacted"):
+        if intent.get("status") != "verified" or intent.get("receipt_compacted") or intent.get("unicode_preservation"):
             continue
         proof = {name: intent.get(name) for name in ("expected", "baseline", "verified_baseline")}
         intent["receipt_hash"] = sha256_text(json.dumps(proof, sort_keys=True, ensure_ascii=False))
@@ -2194,6 +2499,12 @@ def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int
     counts.update(verified=len(seen), held=len(held), deferred=max(0, len(nodes) - len(seen) - len(held)))
     for name in ("assets_ready", "assets_held", "assets_fallback"):
         counts[name] = sum(value.get(name, 0) for value in cycle_assets.values())
+    counts["source_attachment_complete"] = sum(
+        (entry.get("fidelity") or {}).get("mode") == "source_attachment_complete"
+        and (entry.get("fidelity") or {}).get("source_signature") == signature
+        and (entry.get("fidelity") or {}).get("render_version") == entry.get("render_version", "legacy-v1")
+        for path, signature in seen.items()
+        for entry in [previous_entry_for_path(state.get("entries", {}), path, state_secret())])
     manifest_hash = sha256_text(json.dumps([[n.path, n.signature] for n in nodes], ensure_ascii=False))
     progress = {"request_id": request_id, "source_snapshot": old_progress.get("source_snapshot", snapshot) if old_progress.get("manifest_hash") == manifest_hash else snapshot,
                 "manifest_hash": manifest_hash, "renderer_revision": NATIVE_RENDERER_REVISION, "counts": counts, "held": held,
@@ -2264,10 +2575,16 @@ def _main() -> int:
                 raise ValueError("invalid source binding")
         except (ValueError, KeyError, TypeError):
             raise MirrorHeld("reviewed private execution request unavailable") from None
-        counts = execute_revision(load_notion_api_key(), request["source_path"], request["parent_page_id"],
-                                  request["allow_new_page"], expected_signature=request["source_signature"])
-        print(json.dumps({"status": "revision_verified", "counts": counts}))
-        return 0
+        if request.get("action") == "preserve_unicode_source":
+            counts = execute_unicode_request(load_notion_api_key(), args.execute_request)
+        elif request.get("action", "append_revision") == "append_revision":
+            counts = execute_revision(load_notion_api_key(), request["source_path"], request["parent_page_id"],
+                                      request["allow_new_page"], expected_signature=request["source_signature"])
+        else:
+            raise MirrorHeld("private execution request action unavailable")
+        incomplete = bool(counts.get("held"))
+        print(json.dumps({"status": "revision_incomplete" if incomplete else "revision_verified", "counts": counts}))
+        return 2 if incomplete else 0
     if args.execute_revision:
         counts = execute_revision(load_notion_api_key(), args.execute_revision, args.parent_page_id, args.allow_new_page)
         print(json.dumps({"status": "revision_verified", "counts": counts}))

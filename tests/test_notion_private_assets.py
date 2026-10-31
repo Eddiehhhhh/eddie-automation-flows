@@ -84,7 +84,9 @@ class PrivateAssetTests(unittest.TestCase):
             with self.assertRaises(assets.AssetHeld) as error:assets.prepare(self.root,self.commit,'assets/source.png')
             self.assertEqual(error.exception.code,'source_read_budget')
         for name,data,expected in [('pointer',b'version https://git-lfs.github.com/spec/v1\n','source_lfs_payload_unavailable'),
-                                  ('credential',('ghp_'+'A'*36).encode(),'potential_credential_in_asset')]:
+                                  ('credential',('ghp_'+'A'*36).encode(),'potential_credential_in_asset'),
+                                  ('old-notion',('secret_'+'A'*40).encode(),'potential_credential_in_asset'),
+                                  ('new-notion',('ntn_'+'B'*40).encode(),'potential_credential_in_asset')]:
             (self.root/name).write_bytes(data);self.git('add',name);self.git('commit','-qm','synthetic fixture')
             commit=self.git('rev-parse','HEAD').strip()
             with self.assertRaises(assets.AssetHeld) as error:assets.prepare(self.root,commit,name)

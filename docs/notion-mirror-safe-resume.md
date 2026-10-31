@@ -325,3 +325,61 @@ block hashes, stored baselines and renderer profiles are unchanged.
 This does not permit Unicode content loss: omitted zero-width characters are
 actual content differences and keep their original unknown receipts held until
 a complete preservation path is explicitly implemented and verified.
+
+## Source-attachment preservation for proven Unicode display loss
+
+A single final legacy file batch can use a restricted preservation transition
+when its complete checkpointed request still matches its old expected hashes
+and the actual unique same-parent/title target differs solely by deletion of
+U+200B in paragraph or bulleted-list text (the two observed block types). Other characters, text-run structure, styles, links,
+block counts, original operation/end markers and old baseline blocks remain
+exact. A changed source signature or renderer profile holds. The first implementation
+is limited to reference-free sources whose current pure native render exactly
+matches the original legacy render; linked/asset-dependent sources stay held. This is not a
+general Unicode normalization rule and does not make native text byte-equal.
+
+First upload and the same-page preservation append require the existing explicit
+`--execute-request <opaque UUID>` route, carried by the workflow's existing
+`revision_request` input. Its private `execution_request` must use
+`action: preserve_unicode_source`, `allow_new_page: false` and lock the original
+`operation_id`, `source_path`, `source_signature`, `source_snapshot`, `source_blob`,
+`source_sha256`, `source_size`, `render_version: legacy-v1`, `target_page_id`,
+`parent_page_id` and `original_request_hash` (SHA-256 of the unchanged full original
+request JSON, sorted keys, Unicode unescaped). The request UUID is v4. Missing or
+changed locks hold before target writes. Ordinary bulk/cron and
+`--execute-revision` do not consume this preservation request. Existing
+`--recover-intents` remains GET/download-only; `--persist-recovery` additionally
+publishes verified private state but never uploads or appends.
+
+The executor reads the original Markdown bytes from the fixed authorized private
+Git commit, verifies the source signature and its complete original legacy
+rendered payload, then acknowledges a private full before-tree and complete original-source-byte
+checkpoint. GET-only clean-runner recovery rechecks these bytes against the original
+request, source signature, Git blob identity and attachment hash; a pointer alone
+is insufficient. A
+missing old Git object can be fetched by that exact commit only after private
+checkout verification; HEAD, index and source files remain unchanged. Existing
+asset receipts checkpoint the original-file upload. On the same original page,
+one separately checkpointed PATCH appends a preservation marker, explicit
+display-difference notice, the complete Markdown file and an end marker. Every
+actual send consumes the existing batch budget after remote acknowledgement.
+
+Only unchanged original blocks plus the complete notice/file suffix and an
+actual attachment download matching the source SHA/size qualify the old intent
+as `source_attachment_complete`. The old expected hashes and original request
+remain intact, including after verified-state compaction. Matching source/profile
+then no-ops using the actual target baseline; a later source revision is checked
+and delivered independently. The reported fidelity and separate `source_attachment_complete` aggregate describe
+a complete source attachment, never a claim that native body characters are identical.
+
+A lost upload response uses existing upload-ID GET recovery or stays held when
+its ID is unknown. A dispatched preservation PATCH is never reissued: clean
+runners use GET-only recovery. Failed private publication, differing attachment
+bytes, human target changes or ambiguous evidence hold only that object. Notion
+has no CAS; a concurrent edit can therefore still leave this preservation held.
+No original block is edited or deleted and no replacement page is created.
+
+Both source uploads and manual private snapshots reject high-confidence old
+`secret_` and current `ntn_` Notion credentials, in addition to the existing GitHub,
+OpenAI and private-key signatures. This includes credentials different from the
+currently configured API token.

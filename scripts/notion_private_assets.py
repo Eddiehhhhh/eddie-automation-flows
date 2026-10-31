@@ -24,7 +24,7 @@ SINGLE_PART_BYTES = 20 * 1024 * 1024
 SOURCE_READ_BYTES = 64 * 1024 * 1024
 CREDENTIAL_SHAPE = re.compile(
     rb'(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}'
-    rb'|sk-[A-Za-z0-9_-]{20,})(?![A-Za-z0-9_])'
+    rb'|sk-[A-Za-z0-9_-]{20,}|(?:ntn_|secret_)[A-Za-z0-9]{30,})(?![A-Za-z0-9_])'
     rb'|-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----')
 
 
