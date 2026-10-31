@@ -41,6 +41,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 BASE_URL = "https://api.notion.com/v1"
 NOTION_VERSION = os.environ.get("NOTION_VERSION", "2022-06-28")
+NATIVE_RENDERER_REVISION = "native-code-exact-v1"
 TZ = dt.timezone(dt.timedelta(hours=8))
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -636,6 +637,21 @@ def text_rich_text(text: str) -> List[Dict[str, Any]]:
     ]
 
 
+def exact_text_rich_text(text: str) -> List[Dict[str, Any]]:
+    """Split at API-safe Unicode boundaries without trimming any source character."""
+    chunks: List[str] = []
+    start, units = 0, 0
+    for index, character in enumerate(text):
+        width = 2 if ord(character) > 0xFFFF else 1
+        if units + width > 1800:
+            chunks.append(text[start:index])
+            start, units = index, 0
+        units += width
+    if start < len(text):
+        chunks.append(text[start:])
+    return [{"type": "text", "text": {"content": chunk}} for chunk in chunks]
+
+
 def paragraph_block(text: str) -> Dict[str, Any]:
     return {
         "object": "block",
@@ -677,14 +693,14 @@ def numbered_block(text: str) -> Dict[str, Any]:
     }
 
 
-def code_block(text: str, language: str = "plain text") -> Dict[str, Any]:
+def code_block(text: str, language: str = "plain text", preserve_text: bool = False) -> Dict[str, Any]:
     normalized_language = normalize_code_language(language)
     return {
         "object": "block",
         "type": "code",
         "code": {
             "language": normalized_language,
-            "rich_text": text_rich_text(text or " "),
+            "rich_text": exact_text_rich_text(text or " ") if preserve_text else text_rich_text(text or " "),
         },
     }
 
@@ -713,13 +729,13 @@ def split_frontmatter(text: str) -> Tuple[Optional[str], str]:
     return head[4:], body
 
 
-def markdown_to_blocks(markdown: str) -> List[Dict[str, Any]]:
+def markdown_to_blocks(markdown: str, preserve_code: bool = False) -> List[Dict[str, Any]]:
     frontmatter, body = split_frontmatter(markdown.replace("\r\n", "\n").replace("\r", "\n"))
     blocks: List[Dict[str, Any]] = []
 
     if frontmatter is not None:
         blocks.append(heading_block(3, "Frontmatter"))
-        blocks.append(code_block(frontmatter.strip("\n"), "yaml"))
+        blocks.append(code_block(frontmatter.strip("\n"), "yaml", preserve_text=True) if preserve_code else code_block(frontmatter.strip("\n"), "yaml"))
 
     lines = body.split("\n")
     paragraph_lines: List[str] = []
@@ -742,7 +758,7 @@ def markdown_to_blocks(markdown: str) -> List[Dict[str, Any]]:
 
     def flush_code() -> None:
         nonlocal code_lines, code_language
-        blocks.append(code_block("\n".join(code_lines), code_language))
+        blocks.append(code_block("\n".join(code_lines), code_language, preserve_text=True) if preserve_code else code_block("\n".join(code_lines), code_language))
         code_lines = []
         code_language = "plain text"
 
@@ -825,7 +841,7 @@ def native_markdown_to_blocks(markdown: str) -> List[Dict[str, Any]]:
         return [v.strip().replace("\\|", "|") for v in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
     def flush() -> None:
         if pending:
-            blocks.extend(markdown_to_blocks("\n".join(pending)))
+            blocks.extend(markdown_to_blocks("\n".join(pending), preserve_code=True))
             pending.clear()
     while index < len(lines):
         line = lines[index]
@@ -1851,7 +1867,8 @@ def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int
     budget = {"remaining": max_batches, "deadline": time.monotonic() + max_seconds}
     signatures = {node.path: node.signature for node in nodes}
     old_progress = state.get("bulk_progress") or {}
-    continuing = old_progress.get("request_id") == request_id and old_progress.get("cycle_complete") is False
+    continuing = (old_progress.get("request_id") == request_id and old_progress.get("cycle_complete") is False
+                  and old_progress.get("renderer_revision") == NATIVE_RENDERER_REVISION)
     fenced_keys = {(intent.get("context") or {}).get("entry_key") for intent in (state.get("write_intents") or {}).values() if intent.get("status") != "verified"}
     fenced_targets = {intent.get("target_id") for intent in (state.get("write_intents") or {}).values() if intent.get("status") != "verified"}
     def still_bound(path: str, signature: str) -> bool:
@@ -1970,7 +1987,7 @@ def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int
         counts[name] = sum(value.get(name, 0) for value in cycle_assets.values())
     manifest_hash = sha256_text(json.dumps([[n.path, n.signature] for n in nodes], ensure_ascii=False))
     progress = {"request_id": request_id, "source_snapshot": old_progress.get("source_snapshot", snapshot) if old_progress.get("manifest_hash") == manifest_hash else snapshot,
-                "manifest_hash": manifest_hash, "counts": counts, "held": held,
+                "manifest_hash": manifest_hash, "renderer_revision": NATIVE_RENDERER_REVISION, "counts": counts, "held": held,
                 "next_order": list(order(nodes[next_index])) if next_index < len(nodes) else None,
                 "cycle_complete": next_index == len(nodes), "cycle_verified": seen, "cycle_assets": cycle_assets}
     before_compaction = json.dumps(state, sort_keys=True, ensure_ascii=False)

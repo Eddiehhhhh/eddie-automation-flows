@@ -249,3 +249,23 @@ remote dispatched checkpoint and before sending. Unknown/rejected writes consume
 an attempt too; reused verified history does not. `attempted_batches` reports
 this separately from verified receipts, so failures cannot expand a bounded pass
 past its requested number of attempts.
+
+## Preserving native code whitespace
+
+Only the native renderer uses exact text chunks for fenced code and frontmatter.
+The old renderer remains unchanged for historical original-page matching. Native
+chunks preserve every character of the parsed fence body, including indentation,
+blank lines, tabs and boundary whitespace, while staying below the API text
+budget without splitting a Unicode codepoint. They do not trim around a chunk.
+
+The rendered-content signature changes only when the actual native representation
+changes. A source with a previously lossy long code block therefore receives an
+append-only corrected version; unchanged short code retains a genuine no-op.
+This is separate from intent recovery: recovery proves the originally sent
+payload was complete, not that an earlier renderer preserved the Git fence body.
+
+The private scan progress also records a fixed `renderer_revision`. A renderer
+upgrade invalidates an older partial scan once, so unchanged source hashes before
+a saved cursor cannot hide a required format correction. Ordinary state commits
+or source insertions still do not reset that cursor. Rescanning does not rewrite
+plain or short-code pages whose actual rendered content is unchanged.
