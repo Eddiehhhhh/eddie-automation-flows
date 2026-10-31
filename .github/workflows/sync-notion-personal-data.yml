@@ -147,7 +147,7 @@ jobs:
               value = json.loads(path.read_bytes())
               if value.get('version') != 1 or type(value.get('stage_enabled')) is not bool:
                   raise ValueError('Invalid private flomo configuration')
-              if type(value.get('original_source_enabled', False)) is not bool:
+              if any(type(value.get(key, False)) is not bool for key in ('original_source_enabled', 'current_export_enabled')):
                   raise ValueError('Invalid private flomo original source configuration')
               enabled = value['stage_enabled']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
@@ -182,7 +182,7 @@ jobs:
         if: ${{ !cancelled() && (steps.flomo_sync.outcome == 'success' || steps.flomo_sync.outcome == 'failure') }}
         run: |
           paths=()
-          for item in "Raw/02 Notion/01 Databases/碎片中心/flomo-stage" ".github/state/notion-flomo-sync-state.json"; do
+          for item in "Raw/02 Notion/01 Databases/碎片中心/flomo-stage" ".github/state/notion-flomo-sync-state.json" "Raw/01 Flomo/云端" ".github/state/flomo-cloud-current-state.json"; do
             if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
           done
           if test "${#paths[@]}" -gt 0; then

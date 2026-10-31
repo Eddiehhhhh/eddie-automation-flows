@@ -24,6 +24,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import sync_notion_flomo_to_raw as flomo_stage
+
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
 
@@ -182,6 +184,7 @@ def scan_directory(base: Path, source: str) -> list[Violation]:
     """Scan a source directory and return naming violations."""
     violations: list[Violation] = []
     for path in sorted(base.rglob("*.md")):
+        if flomo_stage.current_artifact(ROOT,path): continue
         if path.is_symlink():
             continue
         name = path.name
@@ -219,6 +222,7 @@ def scan_directory(base: Path, source: str) -> list[Violation]:
 
 def fix_violation(v: Violation) -> bool:
     """Rename a single file to its expected clean name. Returns True if changed."""
+    if flomo_stage.current_artifact(ROOT,v.path): return False
     if not v.expected:
         return False
 
