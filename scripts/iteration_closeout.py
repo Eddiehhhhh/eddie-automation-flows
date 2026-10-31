@@ -16,6 +16,7 @@ from typing import Any, Iterable
 import build_observatory_frontend
 import iteration_incremental_audit
 import flomo_cloud_current
+import sync_notehelper_messages_to_raw as notehelper_messages
 import iteration_source_discovery
 from iteration_public_state import public_state
 import workspace_intake_report
@@ -390,6 +391,7 @@ def entries_in_range(base: Path | None, source: str, start: date, end: date, *, 
     for path in iter_markdown_files(base):
         if path.is_relative_to(ROOT / flomo_cloud_current.shared.STAGE): continue
         if selection is not None and not flomo_cloud_current.eligible_path(ROOT,path,selection): continue
+        if not notehelper_messages.eligible_path(ROOT,path): continue
         entry = entry_from_path(path, source)
         if entry.frontmatter.get('stage_only','').lower() == 'true': continue
         if entry.evidence_date and start <= entry.evidence_date <= end:

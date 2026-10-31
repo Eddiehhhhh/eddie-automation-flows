@@ -7,6 +7,11 @@ on:
     - cron: "20 7 * * *"
   workflow_dispatch:
     inputs:
+      messages_only:
+        description: "Run only the private notehelper message collector"
+        required: false
+        type: boolean
+        default: false
       raw16_only:
         description: "Run only the private article source collector"
         required: false
@@ -67,7 +72,7 @@ jobs:
     steps:
       - name: Validate manual source selection
         id: source_selection
-        if: ${{ github.event_name == 'workflow_dispatch' && ((inputs.flomo_stage_only && inputs.full_sync) || (inputs.raw16_only && (inputs.flomo_stage_only || inputs.full_sync))) }}
+        if: ${{ github.event_name == 'workflow_dispatch' && ((inputs.messages_only && (inputs.flomo_stage_only || inputs.raw16_only || inputs.full_sync)) || (inputs.flomo_stage_only && inputs.full_sync) || (inputs.raw16_only && (inputs.flomo_stage_only || inputs.full_sync))) }}
         run: |
           echo "Choose one source-only mode per run."
           exit 1
@@ -92,7 +97,7 @@ jobs:
           python-version: "3.11"
 
       - name: Sync podcast notes
-        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only }}
+        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
@@ -110,19 +115,19 @@ jobs:
           fi
 
       - name: Sync workout daily notes
-        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only && !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
+        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
         run: |
           set -euo pipefail
           python scripts/run_private_command.py --label "workout sync" -- python scripts/sync_notion_workout_daily_to_raw.py
 
       - name: Sync douban books
-        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only }}
+        if: ${{ !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
         run: |
           set -euo pipefail
           python scripts/run_private_command.py --label "douban sync" -- python scripts/sync_notion_douban_to_raw.py
 
       - name: Commit Raw updates
-        if: ${{ success() && !inputs.flomo_stage_only && !inputs.raw16_only }}
+        if: ${{ success() && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
         run: |
           target_ref="${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref_name }}"
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
@@ -135,7 +140,7 @@ jobs:
 
       - name: Read private flomo stage configuration
         id: flomo_config
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.raw16_only && (github.event_name == 'schedule' || inputs.flomo_stage_only) }}
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.raw16_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.flomo_stage_only) }}
         continue-on-error: true
         run: |
           python - <<'PYTHON'
@@ -207,7 +212,7 @@ jobs:
 
       - name: Read private article source configuration
         id: raw16_config
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && (github.event_name == 'schedule' || inputs.raw16_only) }}
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.raw16_only) }}
         continue-on-error: true
         run: |
           python - <<'PYTHON'
@@ -268,4 +273,57 @@ jobs:
         if: ${{ !cancelled() && (steps.raw16_config.outcome == 'failure' || steps.raw16_requested.outcome == 'failure' || steps.raw16_sync.outcome == 'failure' || steps.raw16_commit.outcome == 'failure' || steps.raw16_readback.outcome == 'failure') }}
         run: |
           echo "Article source capture is incomplete; inspect private coverage and readback."
+          exit 2
+
+      - name: Read private message source configuration
+        id: messages_config
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && (github.event_name == 'schedule' || inputs.messages_only) }}
+        run: python scripts/sync_notehelper_messages_to_raw.py --check-config
+
+      - name: Require requested message configuration
+        id: messages_requested
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.messages_only && steps.messages_config.outputs.enabled != 'true' }}
+        run: |
+          echo "Private message configuration is not enabled."
+          exit 1
+
+      - name: Collect notehelper messages privately
+        id: messages_sync
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.messages_config.outcome == 'success' && steps.messages_config.outputs.enabled == 'true' }}
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          NOTEBOOKSYNCER_API_KEY: ${{ secrets.NOTEBOOKSYNCER_API_KEY }}
+        run: |
+          python scripts/run_private_command.py --label "Private message source" -- \
+            python scripts/sync_notehelper_messages_to_raw.py --apply
+
+      - name: Persist message content and progress
+        id: messages_commit
+        if: ${{ !cancelled() && (steps.messages_sync.outcome == 'success' || steps.messages_sync.outcome == 'failure') }}
+        run: |
+          paths=()
+          for item in "Raw/16 笔记同步助手/云端消息" ".github/state/notehelper-messages-state.json"; do
+            if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
+          done
+          if test "${#paths[@]}" -gt 0; then
+            python scripts/commit_private_vault.py --all --ref main \
+              --message "Persist private notehelper messages" "${paths[@]}"
+          fi
+
+      - name: Verify private message content and state
+        id: messages_readback
+        if: ${{ !cancelled() && steps.messages_commit.outcome == 'success' }}
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          python scripts/run_private_command.py --label "Message source readback" -- \
+            python scripts/sync_notehelper_messages_to_raw.py --verify-remote-state
+
+      - name: Report incomplete message capture
+        if: ${{ !cancelled() && (steps.messages_config.outcome == 'failure' || steps.messages_requested.outcome == 'failure' || steps.messages_sync.outcome == 'failure' || steps.messages_commit.outcome == 'failure' || steps.messages_readback.outcome == 'failure') }}
+        run: |
+          echo "Message capture is incomplete; inspect private coverage and readback."
           exit 2
