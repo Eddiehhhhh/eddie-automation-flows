@@ -66,13 +66,19 @@ class GuardedExecutorTests(unittest.TestCase):
         self.requests.append(request.method)
         payload=json.loads(request.data)
         if request.method=='POST':
-            self.assertEqual(payload['properties']['title']['title'],m.text_rich_text('note'))
-            self.blocks[PARENT].append({'id':TARGET,'type':'child_page','child_page':{'title':'note'}})
+            self.assertEqual(payload['properties']['title']['title'],m.text_rich_text('note.md'))
+            self.blocks[PARENT].append({'id':TARGET,'type':'child_page','child_page':{'title':'note.md'}})
             destination=TARGET
         else:
             destination=request.full_url.split('/blocks/')[1].split('/children')[0]
         for block in payload['children']:
-            self.blocks[destination].append({'id':f'block-{len(self.blocks[destination])}',**copy.deepcopy(block)})
+            response=copy.deepcopy(block)
+            kind=response['type'];payload=response[kind]
+            if kind.startswith('heading_'):payload['is_toggleable']=False
+            if kind=='paragraph':payload['icon']=None
+            if kind=='code':payload['caption']=[]
+            if kind not in ['code','divider']:payload['color']='default'
+            self.blocks[destination].append({'id':f'block-{len(self.blocks[destination])}',**response})
         if self.lose_response:
             self.lose_response=False
             raise TimeoutError('SYNTHETIC_RESPONSE_LOSS')
@@ -80,7 +86,7 @@ class GuardedExecutorTests(unittest.TestCase):
 
     def managed(self):
         self.blocks[TARGET]=[{'id':'original',**m.paragraph_block('human content retained')}]
-        self.blocks[PARENT]=[{'id':TARGET,'type':'child_page','child_page':{'title':'note'}}]
+        self.blocks[PARENT]=[{'id':TARGET,'type':'child_page','child_page':{'title':'note.md'}}]
         state={'entries':{'Wiki/note.md':{'signature':'previous','page_id':TARGET,'parent_page_id':PARENT,
                                        'managed_block_baseline':m._baseline(self.blocks[TARGET])}}}
         m.write_json(self.state,state)
@@ -126,6 +132,24 @@ class GuardedExecutorTests(unittest.TestCase):
         self.assertEqual(m.recover_intents('synthetic',persist=True)['held'],1)
         self.assertEqual(self.requests,['PATCH'])
         self.assertEqual(m.load_state()['entries']['Wiki/note.md']['signature'],'previous')
+
+    def test_existing_full_filename_page_without_state_must_not_be_duplicated(self):
+        self.blocks[PARENT]=[{'id':TARGET,'type':'child_page','child_page':{'title':'note.md'}}]
+        with self.assertRaises(m.MirrorHeld):m.execute_revision('synthetic','Wiki/note.md',PARENT,True)
+        self.assertEqual(self.requests,[])
+        self.assertEqual(self.events,[])
+
+    def test_api_defaults_do_not_hide_meaningful_human_formatting(self):
+        for block,key,default,changed in [
+            (m.heading_block(2,'synthetic'),'is_toggleable',False,True),
+            (m.paragraph_block('synthetic'),'icon',None,{'type':'emoji','emoji':'X'}),
+            (m.code_block('synthetic'),'caption',[],m.text_rich_text('human caption')),
+        ]:
+            original=m.block_identity(block)
+            block[block['type']][key]=default
+            self.assertEqual(m.block_identity(block),original)
+            block[block['type']][key]=changed
+            self.assertNotEqual(m.block_identity(block),original)
 
     def test_legacy_entry_cannot_be_duplicated_even_when_create_allowed(self):
         m.write_json(self.state,{'entries':{'Wiki/note.md':{'signature':'old'}}})
