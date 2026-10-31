@@ -485,10 +485,13 @@ def yaml_quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def render_frontmatter(fields: Dict[str, Any]) -> str:
+def render_frontmatter(fields: Dict[str, Any], *, native_lists: bool = False) -> str:
     lines = ["---"]
     for key, value in fields.items():
         if value is None:
+            continue
+        if native_lists and isinstance(value, list):
+            lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
             continue
         if isinstance(value, (dict, list)):
             rendered = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
