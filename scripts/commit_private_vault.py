@@ -25,6 +25,26 @@ def require(result: subprocess.CompletedProcess[str], label: str) -> None:
         raise SystemExit(result.returncode)
 
 
+def require_compatible_index_paths(vault: Path) -> None:
+    result = subprocess.run(
+        ["git", "-C", str(vault), "ls-files", "-z", "--cached"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    require(result, "inspect index paths")
+    invalid_count = sum(
+        any(len(component) > 255 for component in path.split(b"/"))
+        for path in result.stdout.split(b"\0") if path
+    )
+    if invalid_count:
+        print(
+            f"::error::private vault has {invalid_count} indexed paths with components over 255 bytes; paths suppressed",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vault", default="vault")
@@ -39,6 +59,7 @@ def main() -> int:
     require(git(vault, "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"), "configure email")
     add_args = ["add"] + (["-A"] if args.all else []) + ["--", *args.path]
     require(git(vault, *add_args), "stage")
+    require_compatible_index_paths(vault)
     staged = git(vault, "diff", "--cached", "--quiet")
     if staged.returncode == 0:
         print("private vault commit: changed=no")
@@ -49,6 +70,7 @@ def main() -> int:
     require(git(vault, "commit", "-m", args.message), "commit")
     require(git(vault, "fetch", "origin", args.ref), "fetch")
     require(git(vault, "merge-base", "--is-ancestor", f"origin/{args.ref}", "HEAD"), "ancestry check")
+    require_compatible_index_paths(vault)
     require(git(vault, "push", "origin", f"HEAD:{args.ref}"), "push")
     print("private vault commit: changed=yes")
     return 0
