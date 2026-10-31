@@ -217,6 +217,7 @@ class GuardedExecutorTests(unittest.TestCase):
     def test_new_nested_human_content_is_held_without_overwrite(self):
         self.managed()
         self.blocks[TARGET][0]['has_children']=True
+        self.blocks['original']=[{'id':'nested-human',**m.paragraph_block('nested human text')}]
         with self.assertRaises(m.MirrorHeld):m.execute_revision('synthetic','Wiki/note.md',PARENT)
         self.assertEqual(self.requests,[])
         self.assertTrue(self.blocks[TARGET][0]['has_children'])
