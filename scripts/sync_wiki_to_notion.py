@@ -1209,26 +1209,49 @@ def render_native_source(api_key: str, relative: str, markdown: str, snapshot: s
     import notion_private_assets as assets
     statuses: Dict[str, str] = {}
     attachments: List[Dict[str, Any]] = []
+    expanded_bundles = set()
     counts = {"assets_ready": 0, "assets_held": 0, "assets_fallback": 0}
     state = load_state()
     known = state.get("entries") or {}
     paths = source_tree_paths(snapshot)
+    aliases = (state.get("bulk_request") or {}).get("source_root_aliases", [])
+    if not isinstance(aliases, list) or any(
+        not isinstance(alias, str) or not alias.startswith("/") or not alias.endswith("/")
+        or len(alias) < 3 or "\\" in alias or "\0" in alias
+        or any(part in {"", ".", ".."} for part in alias[1:-1].split("/"))
+        for alias in aliases
+    ):
+        raise MirrorHeld("source root alias configuration invalid")
     def resolve(target: str, source: Optional[str] = None) -> Optional[str]:
         value = urllib.parse.unquote(target.split("#", 1)[0].strip().strip("<>"))
-        if not value or urllib.parse.urlsplit(value).scheme or value.startswith("/") or "\\" in value:
+        if not value or urllib.parse.urlsplit(value).scheme or "\\" in value:
             return None
-        path = posixpath.normpath(posixpath.join(posixpath.dirname(source or relative), value))
+        if value.startswith("/"):
+            # Explicit private aliases identify old vault roots, never disk inputs.
+            candidates = set()
+            for alias in aliases:
+                if value.startswith(alias):
+                    relative_path = value[len(alias):]
+                    if ".." not in relative_path.split("/") and relative_path in paths:
+                        candidates.add(relative_path)
+            return next(iter(candidates)) if len(candidates) == 1 else None
+        origin = source or relative
+        path = posixpath.normpath(posixpath.join(posixpath.dirname(origin), value))
         if path.startswith("../") or path == "..":
             return None
         for candidate in [path, value, path + ".md", value + ".md"]:
             if candidate in paths:
                 return candidate
+        if origin.startswith("Wiki/") and ".." not in value.split("/"):
+            candidates = {candidate for candidate in ("Wiki/" + value, "Wiki/" + value + ".md") if candidate in paths}
+            if candidates:
+                return next(iter(candidates)) if len(candidates) == 1 else None
         if "/" not in value:
             candidates = [p for p in paths if Path(p).stem == value and p.endswith(".md")]
             if len(candidates) == 1:
                 return candidates[0]
         return None
-    def link(label: str, target: str, embed: bool = False, source: Optional[str] = None, depth: int = 0) -> str:
+    def link(label: str, target: str, embed: bool = False, source: Optional[str] = None, depth: int = 0, bundle: bool = False) -> str:
         if (deadline is not None and time.monotonic() >= deadline) or depth > 16 or len(statuses) >= 1000:
             raise MirrorHeld("source asset traversal budget exhausted")
         parsed = urllib.parse.urlsplit(target)
@@ -1288,24 +1311,27 @@ def render_native_source(api_key: str, relative: str, markdown: str, snapshot: s
                 counts["assets_held"] += 1
                 if fallback:
                     counts["assets_fallback"] += 1
-            suffix = Path(path).suffix.lower()
-            if suffix in {".html", ".htm", ".css", ".json"}:
-                if len(asset.data) > 1024 * 1024:
+        suffix = Path(path).suffix.lower()
+        # A Markdown JSON link is an original file, not a manifest of all strings.
+        # JSON recursion is limited to explicit HTML/CSS bundle resource chains.
+        if (suffix in {".html", ".htm", ".css"} or (suffix == ".json" and bundle)) and path not in expanded_bundles:
+            expanded_bundles.add(path)
+            if len(asset.data) > 1024 * 1024:
+                counts["assets_held"] += 1
+                statuses[path + "#dependencies"] = "bundle_read_budget"
+            else:
+                try:
+                    text = asset.data.decode("utf-8")
+                    refs = bundle_references(text, suffix)
+                except (UnicodeDecodeError, ValueError):
                     counts["assets_held"] += 1
-                    statuses[path + "#dependencies"] = "bundle_read_budget"
-                else:
-                    try:
-                        text = asset.data.decode("utf-8")
-                        refs = bundle_references(text, suffix)
-                    except (UnicodeDecodeError, ValueError):
-                        counts["assets_held"] += 1
-                        statuses[path + "#dependencies"] = "bundle_unreadable"
-                        refs = []
-                    for child in refs:
-                        if suffix == ".json" and resolve(child, path) is None:
-                            continue  # JSON strings are not intrinsically file references.
-                        child_label = link(Path(child).name or child, child, source=path, depth=depth + 1)
-                        attachments.append(paragraph_block("依赖文件：" + child_label))
+                    statuses[path + "#dependencies"] = "bundle_unreadable"
+                    refs = []
+                for child in refs:
+                    if suffix == ".json" and resolve(child, path) is None:
+                        continue  # JSON strings are not intrinsically file references.
+                    child_label = link(Path(child).name or child, child, source=path, depth=depth + 1, bundle=True)
+                    attachments.append(paragraph_block("依赖文件：" + child_label))
         receipt = load_state().get("assets", {}).get(asset.sha256, {})
         pin = receipt.get("source_commit")
         if fallback and isinstance(pin, str) and re.fullmatch(r"[0-9a-f]{40}", pin):
@@ -1324,7 +1350,7 @@ def render_native_source(api_key: str, relative: str, markdown: str, snapshot: s
                 counts["assets_held"] += 1
                 statuses["html-source"] = "bundle_unreadable"
             for target in references:
-                attachments.append(paragraph_block("引用文件：" + link(Path(target).name or target, target)))
+                attachments.append(paragraph_block("引用文件：" + link(Path(target).name or target, target, bundle=True)))
         pieces[index] = text
     blocks = native_markdown_to_blocks("".join(pieces))
     def rich_links(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
