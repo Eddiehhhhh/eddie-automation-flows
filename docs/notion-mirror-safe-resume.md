@@ -42,6 +42,11 @@ create a replacement page to manufacture successful acceptance of an old source.
 
 ## Durable operation and recovery
 
+The packaged `commit_private_vault.py` helper runs directly in an isolated
+process group with a bounded timeout; no vault-only launcher is required. Public
+failure diagnostics print only allowlisted checkpoint codes. Private paths,
+request bodies and raw helper output remain suppressed.
+
 The existing private `.github/state/notion-wiki-mirror-state.json` holds request
 payloads, source snapshot/signature, owner, batch identity and target baseline.
 The existing private commit helper publishes and reads back `prepared`, then

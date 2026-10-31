@@ -115,17 +115,17 @@ class DurableRecoveryTests(unittest.TestCase):
         root = Path(self.tmp.name)
         path = root / '.github/state/notion-wiki-mirror-state.json'
         path.parent.mkdir(parents=True)
-        calls = [SimpleNamespace(returncode=0), SimpleNamespace(returncode=0),
+        calls = [SimpleNamespace(returncode=0),
                  SimpleNamespace(returncode=0, stdout='abc\n'),
                  SimpleNamespace(returncode=0, stdout='abc\trefs/heads/main\n')]
-        with patch.dict(os.environ, {'PRIVATE_VAULT_TOKEN': 'synthetic'}), patch.object(m, 'verify_private_checkout'), patch.object(m, 'ROOT', root), patch.object(m, 'STATE_PATH', path), patch.object(m.subprocess, 'run', side_effect=calls) as run:
+        with patch.dict(os.environ, {'PRIVATE_VAULT_TOKEN': 'synthetic'}), patch.object(m, 'verify_private_checkout'), patch.object(m, 'ROOT', root), patch.object(m, 'STATE_PATH', path), patch.object(m.subprocess, 'run', side_effect=calls) as run, patch.object(m, '_run_checkpoint', return_value=0) as publish:
             m.persist_private_state({'entries': {'legacy': {'signature': 'retained'}}})
-            command = run.call_args_list[1].args[0]
+            command = publish.call_args.args[0]
             self.assertIn('commit_private_vault.py', ' '.join(command))
             self.assertEqual(command[-2:], ['--path', '.github/state/notion-wiki-mirror-state.json'])
-            self.assertEqual(len(run.call_args_list), 4)
+            self.assertEqual(len(run.call_args_list), 3)
         calls[-1] = SimpleNamespace(returncode=0, stdout='different\trefs/heads/main\n')
-        with patch.dict(os.environ, {'PRIVATE_VAULT_TOKEN': 'synthetic'}), patch.object(m, 'verify_private_checkout'), patch.object(m, 'ROOT', root), patch.object(m, 'STATE_PATH', path), patch.object(m.subprocess, 'run', side_effect=calls), self.assertRaises(m.MirrorHeld):
+        with patch.dict(os.environ, {'PRIVATE_VAULT_TOKEN': 'synthetic'}), patch.object(m, 'verify_private_checkout'), patch.object(m, 'ROOT', root), patch.object(m, 'STATE_PATH', path), patch.object(m.subprocess, 'run', side_effect=calls), patch.object(m, '_run_checkpoint', return_value=0), self.assertRaises(m.MirrorHeld):
             m.persist_private_state({'entries': {}})
 
     def test_create_server_commit_response_loss_and_clean_runner_readback(self):
