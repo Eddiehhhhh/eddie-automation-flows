@@ -67,13 +67,25 @@ class OriginalTests(unittest.TestCase):
         self.enrich([memo('b3JwaGFu')]); before = self.state()
         self.assertIn('upstream-only', before['pages']['b3JwaGFu']['source_pages'])
         result = self.enrich([])
+        self.assertFalse(result['capture_complete'])
         self.assertEqual(self.state(), before)
         self.assertEqual(result['retained_prior_not_observed'], ['b3JwaGFu'])
+
+    def test_not_observed_original_is_explicit_hold_not_deletion_or_success(self):
+        self.enrich()
+        original=(self.base/source.STATE).read_bytes()
+        result=self.enrich([])
+        self.assertTrue(result['inventory_complete'])
+        self.assertEqual(result['notion_without_original'],['YWJj'])
+        self.assertEqual(result['held']['YWJj::original-source'],'original_memo_not_observed')
+        self.assertFalse(result['capture_complete']);self.assertFalse(result['complete'])
+        self.assertEqual((self.base/source.STATE).read_bytes(),original)
+        self.assertEqual((self.root/bridge.STATE).read_bytes(),self.original_notion)
 
     def test_eleven_upstream_only_memos_survive_later_empty_inventory(self):
         values=[memo('orphan'+str(i)) for i in range(11)]
         result=self.enrich(values)
-        self.assertTrue(result['capture_complete']);self.assertEqual(result['written'],11)
+        self.assertEqual(result['written'],11)
         before=(self.base / source.STATE).read_bytes()
         result=self.enrich([])
         self.assertEqual(len(result['retained_prior_not_observed']),11)

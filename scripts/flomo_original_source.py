@@ -148,6 +148,9 @@ def enrich(root, bridge, *, token, signing_suffix, max_pages, downloader, reader
                    'retained_prior_not_observed': sorted(set(state['pages']) - set(memos))})
     notion_state_path = bridge.safe_path(root, bridge.STATE)
     notion_state = json.loads(notion_state_path.read_bytes()) if notion_state_path.exists() else {'pages': {}}
+    report['notion_without_original'] = sorted(set(notion_state['pages']) - set(memos))
+    for missing in report['notion_without_original']:
+        report['held'][missing + '::original-source'] = 'original_memo_not_observed'
     attempted = 0
     for mid, memo in memos.items():
         prior = state['pages'].get(mid, {})

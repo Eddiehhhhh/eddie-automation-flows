@@ -184,6 +184,9 @@ state and receipts are untouched. Immutable original snapshots are grouped by
 memos receive a clearly named `upstream-only` entry instead of being discarded.
 Later mappings and edits add versions and retain old evidence. Missing entries or
 upstream deletion flags never authorize deletion of local or historical data.
+Notion receipts whose memo is not observed in a complete original-source scan
+are explicitly held as `original_memo_not_observed`; existing Notion and original
+evidence remains intact, and full capture/media fidelity is not asserted.
 All supplement state and objects share the existing private commit and remote
 blob verification; the ordinary Notion commit cannot publish this state early.
 
