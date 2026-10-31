@@ -9,6 +9,8 @@ live under Raw/02 Notion/01 Databases/, which is gitignored.
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
+from email.utils import parsedate_to_datetime
 import datetime as dt
 import json
 import os
@@ -21,6 +23,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+
+READ_RETRIES = ContextVar("notion_read_retries", default=4)
 
 BASE_URL = "https://api.notion.com/v1"
 NOTION_VERSION = os.environ.get("NOTION_VERSION", "2022-06-28")
@@ -139,7 +143,8 @@ def notion_request(
 
     url = f"{BASE_URL}{path}"
     last_error: Optional[Exception] = None
-    for attempt in range(5):
+    retry_limit = READ_RETRIES.get()
+    for attempt in range(retry_limit + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
@@ -148,18 +153,24 @@ def notion_request(
         except urllib.error.HTTPError as exc:
             last_error = exc
             body = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 429 and attempt < 4:
+            if exc.code == 429 and attempt < retry_limit:
                 retry_after = exc.headers.get("Retry-After")
-                time.sleep(int(retry_after) if retry_after and retry_after.isdigit() else 10)
+                try:
+                    delay = float(retry_after) if retry_after else 10
+                except ValueError:
+                    delay = (parsedate_to_datetime(retry_after) - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                if delay < 0: delay = 0
+                if delay > 60: raise RuntimeError("notion_retry_delay_exceeds_budget") from None
+                time.sleep(delay)
                 continue
-            if 500 <= exc.code < 600 and attempt < 4:
+            if 500 <= exc.code < 600 and attempt < retry_limit:
                 time.sleep(5)
                 continue
             message = body or exc.reason
             raise RuntimeError(f"Notion API {method} {path} failed ({exc.code}): {message}") from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_error = exc
-            if attempt < 4:
+            if attempt < retry_limit:
                 time.sleep(5)
                 continue
             raise RuntimeError(f"Notion request failed for {method} {path}: {exc}") from exc
@@ -219,6 +230,7 @@ def paginate_database(
 ) -> Iterable[Dict[str, Any]]:
     cursor: Optional[str] = None
     seen = set()
+    rows = []
     while True:
         response = query_database(api_key, database_id, filter_obj=filter_obj, start_cursor=cursor, sorts=sorts)
         if (not isinstance(response, dict) or not isinstance(response.get("results"), list)
@@ -232,11 +244,12 @@ def paginate_database(
             seen.add(next_cursor)
         elif next_cursor is not None:
             raise RuntimeError("Notion database pagination terminal cursor is inconsistent")
-        for item in response["results"]:
-            yield item
+        rows.extend(response["results"])
         if not response["has_more"]:
             break
         cursor = next_cursor
+
+    yield from rows
 
 
 def retrieve_block_children(api_key: str, block_id: str) -> List[Dict[str, Any]]:
@@ -514,6 +527,7 @@ def block_text(block: Dict[str, Any]) -> str:
 def render_blocks(
     api_key: str, blocks: List[Dict[str, Any]], depth: int = 0, *,
     children_loader: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
+    embed_images: bool = False,
 ) -> List[str]:
     lines: List[str] = []
     indent = "  " * depth
@@ -572,7 +586,7 @@ def render_blocks(
                     url = data.get("url") or ""
             label = text or block_type
             if url:
-                lines.append(f"{indent}[{label}]({url})")
+                lines.append(f"{indent}{'!' if embed_images and block_type == 'image' else ''}[{label}]({url})")
             elif label:
                 lines.append(f"{indent}[{label}]")
             lines.append("")
@@ -602,7 +616,7 @@ def render_blocks(
 
         if block.get("has_children"):
             children = (children_loader or retrieve_block_children)(api_key, str(block.get("id")))
-            child_lines = render_blocks(api_key, children, depth=depth + 1, children_loader=children_loader)
+            child_lines = render_blocks(api_key, children, depth=depth + 1, children_loader=children_loader, embed_images=embed_images)
             if child_lines:
                 if lines and lines[-1] != "":
                     lines.append("")

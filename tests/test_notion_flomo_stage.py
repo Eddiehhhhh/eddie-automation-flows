@@ -549,9 +549,10 @@ class StageTests(unittest.TestCase):
             model.flomo_config.outputs = SimpleNamespace(enabled='true' if state['flomo_config'] == 'success' else '')
             expression = steps[name].split('        if: ${{ ', 1)[1].split(' }}', 1)[0]
             expression = expression.replace('!cancelled()', 'not cancelled()').replace('!inputs.full_sync', 'not inputs.full_sync')
+            expression = expression.replace('!inputs.raw16_only', 'not inputs.raw16_only')
             expression = expression.replace('&&', 'and').replace('||', 'or')
             return eval(expression, {'__builtins__': {}}, {'steps': model, 'cancelled': lambda: cancelled,
-                'inputs': SimpleNamespace(full_sync=False, flomo_stage_only=False),
+                'inputs': SimpleNamespace(full_sync=False, flomo_stage_only=False, raw16_only=False),
                 'github': SimpleNamespace(event_name='schedule')})
         # No success() dependency: earlier ordinary source failure can still stage.
         self.assertTrue(allowed(names[0], {'ordinary_source': 'failure'}))
