@@ -311,3 +311,17 @@ Notion has no CAS. A target change after the checkpoint can still cause readback
 to hold; the automation keeps the private before-version and never retries the
 write blindly or overwrites the competing content. No new confirmation queue,
 state file, page replacement, schedule or external storage is introduced.
+
+## Exact Notion app-link query normalization during recovery
+
+Request-bound semantic recovery additionally recognizes the observed API removal
+of the sole terminal `?pvs=204` from an HTTPS `app.notion.com/p/<32 lowercase hex>`
+text link. The full retained request must first match its original expected
+hashes. Only the expected URL is normalized; destination ID/host/path, label,
+annotations, other URL parameters and fragments remain exact. Query addition,
+other hosts/routes and missing or altered request evidence stay held. Existing
+block hashes, stored baselines and renderer profiles are unchanged.
+
+This does not permit Unicode content loss: omitted zero-width characters are
+actual content differences and keep their original unknown receipts held until
+a complete preservation path is explicitly implemented and verified.
