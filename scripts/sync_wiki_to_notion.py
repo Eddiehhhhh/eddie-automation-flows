@@ -1408,7 +1408,7 @@ def _semantic_block_identity(block: Dict[str, Any]) -> str:
 
 
 def intent_expected_matches(intent: Dict[str, Any], observed: Sequence[Dict[str, Any]]) -> bool:
-    """Allow API run coalescing only against the remotely checkpointed original request."""
+    """Allow narrow API normalization only against the checkpointed original request."""
     if [block_identity(block) for block in observed] == intent.get("expected"):
         return True
     payload = (intent.get("context") or {}).get("request", {}).get("children")
@@ -1417,7 +1417,25 @@ def intent_expected_matches(intent: Dict[str, Any], observed: Sequence[Dict[str,
     # The saved payload must still agree with the original unmodified expected hashes.
     if [block_identity(block) for block in payload] != intent.get("expected"):
         return False
-    return [_semantic_block_identity(block) for block in observed] == [_semantic_block_identity(block) for block in payload]
+    observed_hashes = [_semantic_block_identity(block) for block in observed]
+    if observed_hashes == [_semantic_block_identity(block) for block in payload]:
+        return True
+    # Directional, request-bound compatibility for the exact observed API change.
+    # Do not canonicalize stored baselines or accept arbitrary query deletion.
+    def without_notion_pvs(value: Any) -> Any:
+        if isinstance(value, list):
+            return [without_notion_pvs(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: without_notion_pvs(item) for key, item in value.items()}
+        if result.get("type") == "text" and isinstance(result.get("text"), dict):
+            link = result["text"].get("link")
+            if isinstance(link, dict) and set(link) == {"url"} and isinstance(link["url"], str):
+                url = link["url"]
+                if re.fullmatch(r"https://app\.notion\.com/p/[0-9a-f]{32}\?pvs=204", url):
+                    result["text"]["link"] = {"url": url[:-8]}
+        return result
+    return observed_hashes == [_semantic_block_identity(without_notion_pvs(block)) for block in payload]
 
 
 def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequence[Dict[str, Any]],
