@@ -254,11 +254,21 @@ def writer_lock(root):
     finally: os.close(fd)
 
 
-def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset):
+def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset,
+        original_source_enabled=False, original_signing_suffix=None):
     if apply:
         private_checkout.verify_private_checkout(root, os.environ.get('PRIVATE_VAULT_TOKEN'))
         with writer_lock(root):
-            return stage(root, database_id, api_key, apply=True, max_pages=max_pages, downloader=downloader)
+            result = stage(root, database_id, api_key, apply=True, max_pages=max_pages, downloader=downloader)
+            if original_source_enabled:
+                import flomo_original_source as original
+                import sys
+                supplement = original.enrich(root, sys.modules[__name__],
+                    token=os.environ.get('FLOMO_WEB_ACCESS_TOKEN'), signing_suffix=original_signing_suffix,
+                    max_pages=max_pages, downloader=downloader)
+                result['original_source'] = supplement
+                result['complete'] = result['complete'] and supplement['complete']
+            return result
     return stage(root, database_id, api_key, max_pages=max_pages, downloader=downloader)
 
 
@@ -444,16 +454,18 @@ def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=d
 def verify_remote_state(root):
     private_checkout.verify_private_checkout(root, os.environ.get('PRIVATE_VAULT_TOKEN'))
     state = safe_path(root, STATE)
-    if not state.exists(): return False
-    raw = state.read_bytes()
-    expected = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+    import flomo_original_source as original
+    supplement = safe_path(root / STAGE, original.STATE)
+    if not state.exists() and not supplement.exists(): return False
+    raw = state.read_bytes() if state.exists() else None
+    expected = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() if raw is not None else None
     def git(*args):
         result = subprocess.run(['git', '-C', str(root), *args], capture_output=True,
                                 text=True, timeout=60)
         if result.returncode: raise ValueError('private_state_readback_failed')
         return result.stdout.strip()
     git('fetch', 'origin', 'main')
-    if git('rev-parse', 'HEAD:' + str(STATE)) != expected or git('rev-parse', 'origin/main:' + str(STATE)) != expected:
+    if raw is not None and (git('rev-parse', 'HEAD:' + str(STATE)) != expected or git('rev-parse', 'origin/main:' + str(STATE)) != expected):
         raise ValueError('private_state_readback_failed')
     if git('rev-parse', 'HEAD:' + str(STAGE)) != git('rev-parse', 'origin/main:' + str(STAGE)):
         raise ValueError('private_state_readback_failed')
@@ -462,14 +474,27 @@ def verify_remote_state(root):
         if not row: continue
         metadata, path = row.split('\t', 1)
         tree[path] = metadata.split()[2]
-    for record in json.loads(raw)['pages'].values():
+    for record in (json.loads(raw)['pages'].values() if raw is not None else []):
         for relative, expected_sha in prior_files(record).items():
             path = safe_path(root, STAGE / relative)
             data = path.read_bytes()
             blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
             if digest(data) != expected_sha or tree.get(str(STAGE / relative)) != blob:
                 raise ValueError('private_state_readback_failed')
-    if state.read_bytes() != raw: raise ValueError('state_changed')
+    # Supplement state is separate from Notion capture state but shares publication.
+    if supplement.exists():
+        data = supplement.read_bytes()
+        blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+        if tree.get(str(STAGE / original.STATE)) != blob:
+            raise ValueError('private_state_readback_failed')
+        for record in json.loads(data)['pages'].values():
+            for relative, expected_sha in prior_files(record).items():
+                content = safe_path(root / STAGE, relative).read_bytes()
+                content_blob = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+                if digest(content) != expected_sha or tree.get(str(STAGE / relative)) != content_blob:
+                    raise ValueError('private_state_readback_failed')
+        if supplement.read_bytes() != data: raise ValueError('state_changed')
+    if (state.read_bytes() if state.exists() else None) != raw: raise ValueError('state_changed')
     return True
 
 
@@ -481,10 +506,13 @@ def main():
     parser.add_argument('--verify-remote-state', action='store_true')
     parser.add_argument('--max-pages', type=int, default=50)
     args = parser.parse_args()
+    config = {}
     if args.config:
         config = json.loads(args.config.read_bytes())
         if config.get('version') != 1 or not isinstance(config.get('database_id'), str):
             parser.error('invalid private source configuration')
+        if type(config.get('original_source_enabled', False)) is not bool:
+            parser.error('invalid original source configuration')
         args.database_id = config['database_id']
     if args.verify_remote_state:
         if not os.environ.get('VAULT_ROOT'): parser.error('VAULT_ROOT required')
@@ -493,7 +521,9 @@ def main():
         return 0
     if not args.database_id or not os.environ.get('VAULT_ROOT'): parser.error('database ID and VAULT_ROOT required')
     result = run(Path(os.environ['VAULT_ROOT']), args.database_id, notion.load_notion_api_key(),
-                 apply=args.apply, max_pages=args.max_pages)
+                 apply=args.apply, max_pages=args.max_pages,
+                 original_source_enabled=config.get('original_source_enabled', False),
+                 original_signing_suffix=os.environ.get('FLOMO_WEB_SIGNING_SUFFIX'))
     print(json.dumps({key: result[key] for key in ('notion_pages', 'flomo_ids', 'flomo_source_pages', 'written', 'unchanged', 'pending',
         'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete')}))
     return 0 if result['complete'] or not args.apply else 2

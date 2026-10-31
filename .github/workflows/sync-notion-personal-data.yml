@@ -142,6 +142,8 @@ jobs:
               value = json.loads(path.read_bytes())
               if value.get('version') != 1 or type(value.get('stage_enabled')) is not bool:
                   raise ValueError('Invalid private flomo configuration')
+              if type(value.get('original_source_enabled', False)) is not bool:
+                  raise ValueError('Invalid private flomo original source configuration')
               enabled = value['stage_enabled']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
               stream.write('enabled=' + str(enabled).lower() + '\n')
@@ -161,6 +163,8 @@ jobs:
         continue-on-error: true
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          FLOMO_WEB_ACCESS_TOKEN: ${{ secrets.FLOMO_WEB_ACCESS_TOKEN }}
+          FLOMO_WEB_SIGNING_SUFFIX: ${{ secrets.FLOMO_WEB_SIGNING_SUFFIX }}
           FLOMO_MAX_PAGES: ${{ inputs.flomo_max_pages || '50' }}
         run: |
           python scripts/run_private_command.py --label "Notion flomo staging" -- \

@@ -140,3 +140,74 @@ shared audit. This filter does not enable any daily or weekly schedule.
 files, including staging versions. Those counts measure inventory, not active
 candidates or unique facts. Only the incremental audit candidate counts apply
 the stage filter; no inventory entries are removed or hidden.
+
+## Optional original-flomo enrichment
+
+The same personal-data workflow can supplement the Notion mirror with the
+original flomo HTML, full original JSON, second-precision creation/update times,
+original file metadata, and content-addressed asset bytes. This is an additional
+reader inside the existing verified, locked private writer. It never writes
+Notion or Raw/01, enables another schedule, or restores the legacy flomo workflow.
+
+Enable it only through the existing **private**
+`.github/state/notion-flomo-config.json`: retain its existing fields and add
+`original_source_enabled: true`. Keep both access and signing material out of
+tracked configuration, including the private Git repository. The original reader uses the
+existing signed GET `/api/v1/memo/updated/` contract and bounded complete pagination.
+It does not call login, token refresh, rotation, account mutation or source writes.
+A completed initial scan retains private page termination/ID proofs; a failed or
+malformed scan advances no original-source capture progress.
+
+The workflow requires two distinct Actions secrets, `FLOMO_WEB_ACCESS_TOKEN` and
+`FLOMO_WEB_SIGNING_SUFFIX`, read as environment variables only in the existing
+staging step. Their legal sources are the already configured Obsidian
+flomo-bridge access token and the installed client's `SIGN_SECRET` protocol
+constant respectively. The registered
+MCP token is a different credential; do not silently substitute `FLOMO_TOKEN` or
+`FLOMO_MCP_TOKEN`. Never copy credentials to tracked files, command arguments,
+logs, reports or PRs. Deployment operator: securely set these two dedicated secrets,
+update the small private configuration, then run the existing manual stage-only
+entry point and inspect capture/media coverage plus private commit/readback.
+This implementation does not configure the secret or enable the private switch.
+
+Only the existing access token is used. Read-only access has been validated;
+session refresh/rotation coexistence with the local plugin has **not** been
+validated, so no automatic refresh is implemented. Expiry or access rejection
+holds the supplement explicitly and preserves the separately captured Notion
+progress. Keep local sync available during acceptance; do not log out, rotate,
+or refresh the shared session as a recovery action without separate validation.
+
+Supplement state/coverage live under the already registered staging subtree at
+`original-source/state.json` and `original-source/coverage.json`. Existing Notion
+state and receipts are untouched. Immutable original snapshots are grouped by
+`(memo slug, Notion source page)`, including every duplicate variant; upstream-only
+memos receive a clearly named `upstream-only` entry instead of being discarded.
+Later mappings and edits add versions and retain old evidence. Missing entries or
+upstream deletion flags never authorize deletion of local or historical data.
+Notion receipts whose memo is not observed in a complete original-source scan
+are explicitly held as `original_memo_not_observed`; existing Notion and original
+evidence remains intact, and full capture/media fidelity is not asserted.
+All supplement state and objects share the existing private commit and remote
+blob verification; the ordinary Notion commit cannot publish this state early.
+
+Original JSON/HTML and metadata pass the same high-confidence credential gate
+before object writes. File URLs and HTML `img src`/ordinary image URLs are kept
+privately and downloaded through the existing HTTPS public-address-pinned,
+non-redirecting, bounded downloader. No flomo authorization is forwarded to asset
+hosts. Files are not excluded by type. A refused external URL is preserved with
+an explicit status such as `asset_http_403`; it is **not** a saved image. Resource
+budgets are explicit degraded reasons. Successful original JSON can be saved even
+when one image is unavailable; failed assets are retried on the next invocation.
+
+`inventory_complete` means source pagination reached its terminal page;
+`source_complete` additionally requires all selected original object receipts;
+`media_complete` also requires every discovered asset to be saved. A pending,
+held or degraded supplement returns incomplete overall while preserving successful
+Notion and original progress. All original materials remain stage-only and are
+excluded by the exact existing staging-path fact-promotion guard.
+
+Acceptance must reconcile original source IDs, all Notion variants, historical
+Raw/01-only entries and actual binary media. Three readable original memos or an
+all-text staging run alone cannot justify disabling local sync or claim full
+media fidelity. No Mac-off/cloud deployment or full-history attachment completion
+is asserted by unit tests or a public code merge.
