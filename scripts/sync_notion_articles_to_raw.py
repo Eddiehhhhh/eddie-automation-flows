@@ -80,7 +80,7 @@ def render(page, blocks, relation, prefix='', historical=False):
         children_loader=lambda key, ident: cache[ident], embed_images=True))
     if relation['local_existing_paths']:
         body += '\n\n## 既有存档\n\n' + '\n'.join('[[%s]]' % path.removesuffix('.md') for path in relation['local_existing_paths'])
-    return (notion.render_frontmatter(metadata) + '\n\n' + body + '\n').encode()
+    return (notion.render_frontmatter(metadata, native_lists=True) + '\n\n' + body + '\n').encode()
 
 
 def state_bytes(path):
