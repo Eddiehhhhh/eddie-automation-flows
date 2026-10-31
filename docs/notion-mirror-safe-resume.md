@@ -227,3 +227,25 @@ public path parameter is introduced.
 `adopted`, `skipped` and `verified_batches` describe work in this invocation.
 A legacy progress record without a cursor begins one new full scan. All existing
 checkpoint, single-attempt and incomplete-exit requirements remain in force.
+
+## Rich-text run coalescing during intent recovery
+
+Notion can return a long code block as one text run after receiving several
+same-attribute runs. Intent readback first uses the existing exact hashes. On a
+mismatch it may normalize adjacent text runs only when the original privately
+checkpointed `context.request.children` is still present and its unchanged
+canonical hashes agree with the saved `expected` hashes. Text, links, meaningful
+annotations and all other properties must then agree after coalescing.
+
+This compatibility check applies to both initial create/append recovery and the
+second read in finalization. Before/after target baselines still use the existing
+`block_identity`; no historical baseline hash migration, target mutation or
+write retry is needed. Missing/tampered payloads, changed human prefixes, true
+text/style/link changes and incomplete targets remain held.
+
+
+The page-batch budget counts actual single-send attempts immediately after the
+remote dispatched checkpoint and before sending. Unknown/rejected writes consume
+an attempt too; reused verified history does not. `attempted_batches` reports
+this separately from verified receipts, so failures cannot expand a bounded pass
+past its requested number of attempts.

@@ -1340,8 +1340,8 @@ def render_native_source(api_key: str, relative: str, markdown: str, snapshot: s
     return rendered, version, counts
 
 
-def block_identity(block: Dict[str, Any]) -> str:
-    """Compare content, including human formatting, without Notion response metadata."""
+def _canonical_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the established baseline representation unchanged."""
     def clean(value: Any) -> Any:
         if isinstance(value, list):
             return [clean(item) for item in value]
@@ -1362,7 +1362,46 @@ def block_identity(block: Dict[str, Any]) -> str:
         return result
     kind = block.get("type")
     asset_content = asset_block_identity(block)
-    return sha256_text(json.dumps({"type": kind, "content": clean(asset_content if asset_content is not None else block.get(kind, {}))}, sort_keys=True, ensure_ascii=False))
+    return {"type": kind, "content": clean(asset_content if asset_content is not None else block.get(kind, {}))}
+
+
+def block_identity(block: Dict[str, Any]) -> str:
+    return sha256_text(json.dumps(_canonical_block(block), sort_keys=True, ensure_ascii=False))
+
+
+def _semantic_block_identity(block: Dict[str, Any]) -> str:
+    """Notion may merge equal-attribute text runs; content, links and formatting remain exact."""
+    def normalize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        if not isinstance(value, list):
+            return value
+        result: List[Any] = []
+        def text_run(item: Any) -> bool:
+            return isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text", {}).get("content"), str)
+        def attributes(item: Dict[str, Any]) -> Dict[str, Any]:
+            return {**item, "text": {key: part for key, part in item["text"].items() if key != "content"}}
+        for raw in value:
+            item = normalize(raw)
+            if result and text_run(result[-1]) and text_run(item) and attributes(result[-1]) == attributes(item):
+                result[-1]["text"]["content"] += item["text"]["content"]
+            else:
+                result.append(item)
+        return result
+    return sha256_text(json.dumps(normalize(_canonical_block(block)), sort_keys=True, ensure_ascii=False))
+
+
+def intent_expected_matches(intent: Dict[str, Any], observed: Sequence[Dict[str, Any]]) -> bool:
+    """Allow API run coalescing only against the remotely checkpointed original request."""
+    if [block_identity(block) for block in observed] == intent.get("expected"):
+        return True
+    payload = (intent.get("context") or {}).get("request", {}).get("children")
+    if not isinstance(payload, list) or len(payload) != len(observed) or any(not isinstance(block, dict) for block in payload):
+        return False
+    # The saved payload must still agree with the original unmodified expected hashes.
+    if [block_identity(block) for block in payload] != intent.get("expected"):
+        return False
+    return [_semantic_block_identity(block) for block in observed] == [_semantic_block_identity(block) for block in payload]
 
 
 def prepare_intent(operation_id: str, kind: str, parent_id: str, blocks: Sequence[Dict[str, Any]],
@@ -1423,7 +1462,7 @@ def recover_intent(api_key: str, intent: Dict[str, Any]) -> Dict[str, Any]:
         if observed != baseline:
             return {"status": "held", "reason": "human_or_target_change", "retry_allowed": False}
         children = children[len(baseline):]
-    if [block_identity(block) for block in children] != intent.get("expected"):
+    if not intent_expected_matches(intent, children):
         return {"status": "held", "reason": "partial_or_modified", "retry_allowed": False}
     context = intent.get("context") or {}
     if context.get("title"):
@@ -1515,7 +1554,7 @@ def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
     baseline = _baseline(observed)
     expected = intent["baseline"] + [{"id": block["id"], "hash": block_identity(block)}
                                     for block in observed[len(intent["baseline"]):]]
-    if baseline != expected or [block_identity(block) for block in observed[len(intent["baseline"]):]] != intent["expected"]:
+    if baseline != expected or not intent_expected_matches(intent, observed[len(intent["baseline"]):]):
         return {"status": "held", "reason": "target_changed_during_readback", "retry_allowed": False}
     context = intent.get("context")
     if not context:
@@ -1652,6 +1691,8 @@ def execute_node_blocks(api_key: str, node: Node, blocks: List[Dict[str, Any]], 
         intent = state["write_intents"][operation]
         intent["status"] = "dispatched"
         persist_private_state(state)
+        if budget is not None:
+            budget["remaining"] -= 1
         try:
             _send_once(api_key, context["method"], context["path"], payload)
         except UnknownWrite:
@@ -1662,8 +1703,6 @@ def execute_node_blocks(api_key: str, node: Node, blocks: List[Dict[str, Any]], 
         if finalize_intent(api_key, operation)["status"] != "verified":
             raise MirrorHeld("target readback held; no duplicate request permitted")
         verified += 1
-        if budget is not None:
-            budget["remaining"] -= 1
     return {"verified_batches": verified, "skipped": 0}
 
 def _bulk_sources(request: Dict[str, Any]) -> Tuple[str, List[Node], Dict[str, str]]:
@@ -1924,6 +1963,7 @@ def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int
         except (RuntimeError, urllib.error.URLError):
             # Read/pagination failures never justify create or loss of an existing binding.
             mark_held(node.path, "read_held")
+    counts["attempted_batches"] = max_batches - budget["remaining"]
     state = load_state()
     counts.update(verified=len(seen), held=len(held), deferred=max(0, len(nodes) - len(seen) - len(held)))
     for name in ("assets_ready", "assets_held", "assets_fallback"):
