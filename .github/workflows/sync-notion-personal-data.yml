@@ -7,6 +7,16 @@ on:
     - cron: "20 7 * * *"
   workflow_dispatch:
     inputs:
+      flomo_stage_only:
+        description: "Run only the private Notion flomo staging candidate"
+        required: false
+        type: boolean
+        default: false
+      flomo_max_pages:
+        description: "Maximum changed flomo pages to stage; 0 is unlimited"
+        required: false
+        type: string
+        default: "50"
       checkout_ref:
         description: "Branch or commit to checkout before running the sync"
         required: false
@@ -50,24 +60,34 @@ jobs:
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
       VAULT_ROOT: ${{ github.workspace }}/vault
     steps:
+      - name: Validate manual source selection
+        id: source_selection
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.flomo_stage_only && inputs.full_sync }}
+        run: |
+          echo "Choose flomo staging or podcast full sync in one run."
+          exit 1
+
       - name: Check out repository
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
 
       - name: Check out private vault
+        id: private_checkout
         uses: actions/checkout@v7
         with:
           repository: Eddiehhhhh/eddie-llm-wiki
           token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           path: vault
           fetch-depth: 1
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
       - name: Sync podcast notes
+        if: ${{ !inputs.flomo_stage_only }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
@@ -85,18 +105,19 @@ jobs:
           fi
 
       - name: Sync workout daily notes
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
+        if: ${{ !inputs.flomo_stage_only && !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
         run: |
           set -euo pipefail
           python scripts/run_private_command.py --label "workout sync" -- python scripts/sync_notion_workout_daily_to_raw.py
 
       - name: Sync douban books
+        if: ${{ !inputs.flomo_stage_only }}
         run: |
           set -euo pipefail
           python scripts/run_private_command.py --label "douban sync" -- python scripts/sync_notion_douban_to_raw.py
 
       - name: Commit Raw updates
-        if: ${{ success() }}
+        if: ${{ success() && !inputs.flomo_stage_only }}
         run: |
           target_ref="${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref_name }}"
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
@@ -106,3 +127,71 @@ jobs:
           fi
           python scripts/commit_private_vault.py --all --ref "$target_ref" \
             --message "Sync Notion personal data to Raw" "${paths[@]}"
+
+      - name: Read private flomo stage configuration
+        id: flomo_config
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && (github.event_name == 'schedule' || inputs.flomo_stage_only) }}
+        continue-on-error: true
+        run: |
+          python - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['VAULT_ROOT']) / '.github/state/notion-flomo-config.json'
+          enabled = False
+          if path.exists():
+              value = json.loads(path.read_bytes())
+              if value.get('version') != 1 or type(value.get('stage_enabled')) is not bool:
+                  raise ValueError('Invalid private flomo configuration')
+              enabled = value['stage_enabled']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('enabled=' + str(enabled).lower() + '\n')
+          PYTHON
+
+      - name: Require requested flomo stage configuration
+        id: flomo_requested
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.flomo_stage_only && steps.flomo_config.outputs.enabled != 'true' }}
+        run: |
+          echo "Private flomo stage configuration is not enabled."
+          exit 1
+
+      - name: Stage Notion flomo content privately
+        id: flomo_sync
+        if: ${{ !cancelled() && steps.flomo_config.outcome == 'success' && steps.flomo_config.outputs.enabled == 'true' }}
+        continue-on-error: true
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          FLOMO_MAX_PAGES: ${{ inputs.flomo_max_pages || '50' }}
+        run: |
+          python scripts/run_private_command.py --label "Notion flomo staging" -- \
+            python scripts/sync_notion_flomo_to_raw.py --apply \
+            --config "$VAULT_ROOT/.github/state/notion-flomo-config.json" \
+            --max-pages "$FLOMO_MAX_PAGES"
+
+      - name: Persist flomo staging and object progress
+        id: flomo_commit
+        if: ${{ !cancelled() && (steps.flomo_sync.outcome == 'success' || steps.flomo_sync.outcome == 'failure') }}
+        run: |
+          paths=()
+          for item in "Raw/02 Notion/01 Databases/碎片中心/flomo-stage" ".github/state/notion-flomo-sync-state.json"; do
+            if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
+          done
+          if test "${#paths[@]}" -gt 0; then
+            python scripts/commit_private_vault.py --all --ref main \
+              --message "Persist private Notion flomo staging" "${paths[@]}"
+          fi
+
+      - name: Verify remote flomo object state
+        id: flomo_readback
+        if: ${{ !cancelled() && steps.flomo_commit.outcome == 'success' }}
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          python scripts/run_private_command.py --label "Private flomo state readback" -- \
+            python scripts/sync_notion_flomo_to_raw.py --verify-remote-state
+
+      - name: Report incomplete flomo staging
+        if: ${{ !cancelled() && (steps.flomo_config.outcome == 'failure' || steps.flomo_requested.outcome == 'failure' || steps.flomo_sync.outcome == 'failure' || steps.flomo_commit.outcome == 'failure' || steps.flomo_readback.outcome == 'failure') }}
+        run: |
+          echo "Flomo staging is incomplete; inspect the private coverage report and persistence/readback steps."
+          exit 2

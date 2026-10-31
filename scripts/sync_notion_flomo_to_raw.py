@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""Stage the existing Notion flomo feed in a private vault; never write Raw/01.
+
+Default is inventory only. Apply stores source JSON, readable Markdown and
+content-addressed attachments below Raw/02 for later reviewed collector cutover.
+"""
+from __future__ import annotations
+import argparse
+from contextlib import contextmanager
+import fcntl
+from collections import defaultdict
+from copy import deepcopy
+import hashlib
+import http.client
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import tempfile
+import urllib.parse
+import urllib.request
+
+import sync_notion_to_raw as notion
+import cloud_private_checkout as private_checkout
+
+STAGE = Path('Raw/02 Notion/01 Databases/碎片中心/flomo-stage')
+STATE = Path('.github/state/notion-flomo-sync-state.json')
+MAX_ASSET_BYTES = 50 * 1024 * 1024
+CREDENTIAL_SHAPE = re.compile(
+    r'(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}'
+    r'|sk-[A-Za-z0-9_-]{20,})(?![A-Za-z0-9_])'
+    r'|-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----')
+
+
+def reject_credentials(raw):
+    if CREDENTIAL_SHAPE.search(raw.decode('utf-8')):
+        raise ValueError('potential_credential_in_source')
+
+
+def digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def encoded(value):
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode()
+
+
+def memo_id(page):
+    value = page.get('properties', {}).get('Link', {}).get('url')
+    if not isinstance(value, str): return None
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != 'https' or parsed.hostname not in ('v.flomoapp.com', 'flomoapp.com'):
+        return None
+    values = urllib.parse.parse_qs(parsed.query).get('memo_id', [])
+    if len(values) != 1 or not re.fullmatch(r'[A-Za-z0-9_-]{1,120}', values[0]):
+        raise ValueError('invalid_memo_identity')
+    return values[0]
+
+
+def local_inventory(root):
+    paths = defaultdict(list)
+    no_id = []
+    for path in sorted((root / 'Raw/01 Flomo').rglob('*.md')):
+        if path.is_symlink(): raise ValueError('local_symlink')
+        parts = path.read_text(encoding='utf-8').split('---', 2)
+        match = re.search(r'^memo_id:\s*["\x27]?([^"\x27\s]+)', parts[1], re.M) if len(parts) == 3 else None
+        if match: paths[match[1]].append(str(path.relative_to(root)))
+        else: no_id.append(str(path.relative_to(root)))
+    return dict(paths), no_id
+
+
+def checked_page(api_key, page):
+    """Retain full relation values when Notion's page response truncates them."""
+    result = deepcopy(page)
+    for value in result.get('properties', {}).values():
+        if value.get('type') != 'relation' or not value.get('has_more'): continue
+        cursor = None
+        seen = set()
+        rows = []
+        while True:
+            query = urllib.parse.urlencode({'page_size': 100, **({'start_cursor': cursor} if cursor else {})})
+            prop = urllib.parse.quote(urllib.parse.unquote(value['id']), safe='')
+            response = notion.notion_request(api_key, 'GET', f'/pages/{page["id"]}/properties/{prop}?{query}')
+            if (not isinstance(response.get('results'), list) or type(response.get('has_more')) is not bool
+                    or any(row.get('type') != 'relation' for row in response['results'])):
+                raise ValueError('incomplete_relation')
+            rows.extend(row['relation'] for row in response['results'])
+            if not response['has_more']: break
+            cursor = response.get('next_cursor')
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                raise ValueError('incomplete_relation')
+            seen.add(cursor)
+        value['relation'] = rows
+        value['has_more'] = False
+    return result
+
+
+def block_tree(api_key, page_id, depth=0, ancestors=()):
+    if depth > 30 or page_id in ancestors: raise ValueError('block_cycle')
+    rows = notion.retrieve_block_children(api_key, page_id)
+    for row in rows:
+        if not isinstance(row.get('id'), str) or not isinstance(row.get('type'), str):
+            raise ValueError('incomplete_block')
+        if row['type'] == 'unsupported': raise ValueError('unsupported_block')
+        source = (row.get('synced_block') or {}).get('synced_from') or {}
+        if row.get('has_children') or source.get('block_id'):
+            row['_children'] = block_tree(api_key, source.get('block_id') or row['id'], depth + 1,
+                                          (*ancestors, page_id))
+    return rows
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs): return None
+
+
+def download_asset(url):
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+            or parsed.port not in (None, 443)):
+        raise ValueError('unsafe_asset_url')
+    addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+    if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
+        raise ValueError('unsafe_asset_address')
+    address = addresses[0][4][0]
+    class PinnedConnection(http.client.HTTPSConnection):
+        def connect(self):
+            if self.host != parsed.hostname: raise ValueError('asset_host_changed')
+            # Connect to the checked IP once; keep TLS hostname verification.
+            raw_socket = socket.create_connection((address, 443), self.timeout)
+            try: self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+            except Exception:
+                raw_socket.close()
+                raise
+    class PinnedHTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, request): return self.do_open(PinnedConnection, request)
+    # Never attach the Notion credential or follow an unvalidated redirect.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), PinnedHTTPS())
+    with opener.open(urllib.request.Request(url, method='GET'), timeout=60) as response:
+        raw = response.read(MAX_ASSET_BYTES + 1)
+        length = response.headers.get('Content-Length')
+        if len(raw) > MAX_ASSET_BYTES: raise ValueError('asset_file_budget')
+        if response.status != 200 or (length and int(length) != len(raw)):
+            raise ValueError('incomplete_asset')
+    return raw
+
+
+def materialize_assets(value, files, downloader):
+    if isinstance(value, list):
+        return [materialize_assets(item, files, downloader) for item in value]
+    if not isinstance(value, dict): return value
+    result = {key: materialize_assets(item, files, downloader) for key, item in value.items()}
+    kind = value.get('type')
+    if kind in ('file', 'external') and isinstance(value.get(kind), dict) and value[kind].get('url'):
+        raw = downloader(value[kind]['url'])
+        suffix = Path(urllib.parse.urlsplit(value[kind]['url']).path).suffix.lower()
+        suffix = suffix if re.fullmatch(r'\.[a-z0-9]{1,8}', suffix) else '.bin'
+        relative = Path('assets') / (digest(raw) + suffix)
+        if sum(len(item) for item in files.values()) + len(raw) > 200 * 1024 * 1024:
+            raise ValueError('asset_batch_bound')
+        files[str(relative)] = raw
+        result[kind]['url'] = relative.as_posix()
+    return result
+
+
+def render_record(page, blocks, mid, local_paths):
+    cache = {}
+    def register(rows):
+        for row in rows:
+            if '_children' in row:
+                cache[row['id']] = row['_children']
+                register(row['_children'])
+                row['has_children'] = True
+    register(blocks)
+    title = notion.page_title(page, 'Name')
+    properties = notion.summarize_properties(page)
+    metadata = {'source_system': 'flomo', 'upstream_system': 'notion', 'memo_id': mid,
+                'title': title, 'notion_page_id': page['id'], 'notion_page_url': page.get('url'),
+                'created_at': ((page.get('properties', {}).get('Created At') or {}).get('date') or {}).get('start'),
+                'notion_created_time': page.get('created_time'),
+                'notion_last_edited_time': page.get('last_edited_time'),
+                'tags': properties.get('Tags', []), 'notion_properties': properties,
+                'local_existing_paths': local_paths, 'stage_only': True}
+    body = '\n'.join(notion.render_blocks('', blocks, children_loader=lambda key, ident: cache[ident]))
+    return (notion.render_frontmatter(metadata) + '\n\n' + body + '\n').encode()
+
+
+def safe_path(root, relative):
+    relative = Path(relative)
+    if relative.is_absolute() or '..' in relative.parts: raise ValueError('unsafe_stage_path')
+    path = root / relative
+    for item in (path, *path.parents):
+        if item.is_symlink(): raise ValueError('stage_symlink')
+        if item == root: break
+    if not path.resolve().is_relative_to(root.resolve()): raise ValueError('unsafe_stage_path')
+    return path
+
+
+def atomic_write(path, raw):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(raw)
+    try: os.replace(temporary, path)
+    finally: temporary.unlink(missing_ok=True)
+    if path.read_bytes() != raw: raise ValueError('stage_readback_failed')
+
+
+def immutable_write(path, raw):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(raw)
+    try:
+        try: os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != raw: raise ValueError('stage_edited')
+    finally: temporary.unlink(missing_ok=True)
+    if path.read_bytes() != raw: raise ValueError('stage_readback_failed')
+
+
+def prior_files(prior):
+    result = dict(prior.get('files', {}))
+    for files in prior.get('versions', {}).values(): result.update(files)
+    return result
+
+
+def apply_record(root, mid, files, prior):
+    for relative, sha in prior_files(prior).items():
+        path = safe_path(root / STAGE, relative)
+        if not path.is_file() or digest(path.read_bytes()) != sha: raise ValueError('stage_edited')
+    version = digest(encoded({key: digest(raw) for key, raw in files.items()}))
+    versioned = {str(Path('versions') / mid / version / rel): raw for rel, raw in files.items()}
+    for relative, raw in versioned.items():
+        immutable_write(safe_path(root / STAGE, relative), raw)
+    return version, {relative: digest(raw) for relative, raw in versioned.items()}
+
+
+@contextmanager
+def writer_lock(root):
+    result = subprocess.run(['git', '-C', str(root), 'rev-parse', '--absolute-git-dir'],
+                            capture_output=True, text=True, timeout=15, check=True)
+    path = Path(result.stdout.strip()) / 'notion-flomo-stage.lock'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: raise ValueError('stage_writer_busy') from None
+        yield
+    finally: os.close(fd)
+
+
+def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset):
+    if apply:
+        private_checkout.verify_private_checkout(root, os.environ.get('PRIVATE_VAULT_TOKEN'))
+        with writer_lock(root):
+            return stage(root, database_id, api_key, apply=True, max_pages=max_pages, downloader=downloader)
+    return stage(root, database_id, api_key, max_pages=max_pages, downloader=downloader)
+
+
+def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset):
+    if max_pages < 0: raise ValueError('invalid_limit')
+    local, no_id = local_inventory(root)
+    rows = list(notion.paginate_database(api_key, database_id))
+    groups = defaultdict(list)
+    page_ids = set()
+    for row in rows:
+        if (not isinstance(row.get('id'), str) or row['id'] in page_ids
+                or notion.parse_time(row.get('last_edited_time')) is None):
+            raise ValueError('incomplete_page_inventory')
+        page_ids.add(row['id'])
+        mid = memo_id(row)
+        if mid: groups[mid].append(row)
+    state_path = safe_path(root, STATE)
+    original_state = state_path.read_bytes() if state_path.exists() else None
+    state = json.loads(original_state) if original_state else {'version': 1, 'pages': {}}
+    if state.get('version') != 1 or not isinstance(state.get('pages'), dict): raise ValueError('invalid_state')
+    report = {'notion_pages': len(rows), 'flomo_ids': len(groups),
+              'duplicate_ids': {mid: [p['id'] for p in pages] for mid, pages in groups.items() if len(pages) > 1},
+              'notion_only': sorted(set(groups) - set(local)), 'local_only': sorted(set(local) - set(groups)),
+              'local_duplicate_ids': {mid: paths for mid, paths in local.items() if len(paths) > 1},
+              'local_no_id': no_id, 'attempted': 0, 'written': 0, 'unchanged': 0, 'pending': 0, 'held': {}}
+    for mid, pages in groups.items():
+        if len(pages) != 1:
+            report['held'][mid] = 'duplicate_notion_identity'
+            continue
+        page = pages[0]
+        prior = state['pages'].get(mid, {})
+        if prior and prior.get('notion_page_id') != page['id']:
+            report['held'][mid] = 'source_identity_changed'
+            continue
+        current = prior.get('last_edited_time') == page.get('last_edited_time') and bool(prior.get('files'))
+        if current:
+            current = all((safe_path(root / STAGE, rel).is_file()
+                           and digest(safe_path(root / STAGE, rel).read_bytes()) == sha)
+                          for rel, sha in prior_files(prior).items())
+        prior_changed = prior and any(not safe_path(root / STAGE, rel).is_file()
+            or digest(safe_path(root / STAGE, rel).read_bytes()) != sha
+            for rel, sha in prior_files(prior).items())
+        if prior_changed:
+            report['held'][mid] = 'stage_edited'
+            continue
+        if current:
+            report['unchanged'] += 1
+            continue
+        if not apply or (max_pages and report['attempted'] >= max_pages):
+            report['pending'] += 1
+            continue
+        report['attempted'] += 1
+        try:
+            complete = checked_page(api_key, page)
+            blocks = block_tree(api_key, page['id'])
+            reject_credentials(encoded({'page': complete, 'blocks': blocks}))
+            files = {}
+            material = materialize_assets({'page': complete, 'blocks': blocks}, files, downloader)
+            files[mid + '.md'] = render_record(material['page'], material['blocks'], mid, local.get(mid, []))
+            reject_credentials(files[mid + '.md'])
+            files[mid + '.json'] = encoded({'page': complete, 'blocks': blocks,
+                                          'materialized': material})
+            latest = notion.notion_request(api_key, 'GET', '/pages/' + page['id'])
+            if latest.get('last_edited_time') != page.get('last_edited_time'):
+                raise ValueError('source_changed_during_read')
+            if (state_path.read_bytes() if state_path.exists() else None) != original_state:
+                raise ValueError('state_changed')
+            version, hashes = apply_record(root, mid, files, prior)
+            state['pages'][mid] = {'notion_page_id': page['id'],
+                                   'last_edited_time': page.get('last_edited_time'), 'current_version': version,
+                                   'files': hashes, 'versions': {**prior.get('versions', {}), version: hashes}}
+            if (state_path.read_bytes() if state_path.exists() else None) != original_state:
+                raise ValueError('state_changed')
+            original_state = encoded(state)
+            atomic_write(state_path, original_state)
+            report['written'] += 1
+        except Exception as exc:
+            # Never print URLs, content, credentials or source exception text.
+            code = str(exc)
+            report['held'][mid] = code if code in {'stage_edited', 'source_changed_during_read', 'state_changed',
+                'incomplete_asset', 'incomplete_relation', 'unsupported_block', 'block_cycle',
+                'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source'} else 'source_or_stage_failed'
+    report['complete'] = not report['held'] and not report['pending']
+    if apply: atomic_write(safe_path(root, STAGE / 'coverage.json'), encoded(report))
+    return report
+
+
+def verify_remote_state(root):
+    private_checkout.verify_private_checkout(root, os.environ.get('PRIVATE_VAULT_TOKEN'))
+    state = safe_path(root, STATE)
+    if not state.exists(): return False
+    raw = state.read_bytes()
+    expected = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+    def git(*args):
+        result = subprocess.run(['git', '-C', str(root), *args], capture_output=True,
+                                text=True, timeout=60)
+        if result.returncode: raise ValueError('private_state_readback_failed')
+        return result.stdout.strip()
+    git('fetch', 'origin', 'main')
+    if git('rev-parse', 'HEAD:' + str(STATE)) != expected or git('rev-parse', 'origin/main:' + str(STATE)) != expected:
+        raise ValueError('private_state_readback_failed')
+    if git('rev-parse', 'HEAD:' + str(STAGE)) != git('rev-parse', 'origin/main:' + str(STAGE)):
+        raise ValueError('private_state_readback_failed')
+    tree = {}
+    for row in git('ls-tree', '-rz', 'HEAD', '--', str(STAGE)).split('\0'):
+        if not row: continue
+        metadata, path = row.split('\t', 1)
+        tree[path] = metadata.split()[2]
+    for record in json.loads(raw)['pages'].values():
+        for relative, expected_sha in prior_files(record).items():
+            path = safe_path(root, STAGE / relative)
+            data = path.read_bytes()
+            blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+            if digest(data) != expected_sha or tree.get(str(STAGE / relative)) != blob:
+                raise ValueError('private_state_readback_failed')
+    if state.read_bytes() != raw: raise ValueError('state_changed')
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--database-id', default=os.environ.get('NOTION_FLOMO_DATABASE_ID'))
+    parser.add_argument('--config', type=Path)
+    parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--verify-remote-state', action='store_true')
+    parser.add_argument('--max-pages', type=int, default=50)
+    args = parser.parse_args()
+    if args.config:
+        config = json.loads(args.config.read_bytes())
+        if config.get('version') != 1 or not isinstance(config.get('database_id'), str):
+            parser.error('invalid private source configuration')
+        args.database_id = config['database_id']
+    if args.verify_remote_state:
+        if not os.environ.get('VAULT_ROOT'): parser.error('VAULT_ROOT required')
+        verified = verify_remote_state(Path(os.environ['VAULT_ROOT']))
+        print('Private flomo state and content readback verified.' if verified else 'No flomo object state to verify.')
+        return 0
+    if not args.database_id or not os.environ.get('VAULT_ROOT'): parser.error('database ID and VAULT_ROOT required')
+    result = run(Path(os.environ['VAULT_ROOT']), args.database_id, notion.load_notion_api_key(),
+                 apply=args.apply, max_pages=args.max_pages)
+    print(json.dumps({key: result[key] for key in ('notion_pages', 'flomo_ids', 'written', 'unchanged', 'pending', 'complete')}))
+    return 0 if result['complete'] or not args.apply else 2
+
+
+if __name__ == '__main__': raise SystemExit(main())
