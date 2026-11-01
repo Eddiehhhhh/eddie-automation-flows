@@ -1203,6 +1203,33 @@ def bundle_references(text: str, suffix: str) -> List[str]:
     return list(dict.fromkeys(ref for ref in refs if ref and not ref.startswith("#") and not urllib.parse.urlsplit(ref).scheme))
 
 
+def _inline_code_spans(text: str) -> List[Tuple[int, int]]:
+    """Matched equal-width backtick runs; escaped/unclosed openers stay ordinary."""
+    runs = list(re.finditer(r"`+", text))
+    next_run: Dict[int, int] = {}
+    last: Dict[int, int] = {}
+    for index in range(len(runs) - 1, -1, -1):
+        width = len(runs[index][0])
+        if width in last:
+            next_run[index] = last[width]
+        last[width] = index
+    result: List[Tuple[int, int]] = []
+    index = 0
+    while index < len(runs):
+        start = runs[index].start()
+        backslashes = 0
+        while start - backslashes > 0 and text[start - backslashes - 1] == "\\":
+            backslashes += 1
+        closing = next_run.get(index)
+        if (backslashes % 2 or closing is None
+                or re.search(r"\n[ \t]*\n", text[runs[index].end():runs[closing].start()])):
+            index += 1
+            continue
+        result.append((start, runs[closing].end()))
+        index = closing + 1
+    return result
+
+
 def render_native_source(api_key: str, relative: str, markdown: str, snapshot: str, deadline: Optional[float] = None) -> Tuple[List[Dict[str, Any]], str, Dict[str, int]]:
     """Link to original private objects; attach only verified pinned binary uploads."""
     import posixpath
@@ -1337,10 +1364,24 @@ def render_native_source(api_key: str, relative: str, markdown: str, snapshot: s
         if fallback and isinstance(pin, str) and re.fullmatch(r"[0-9a-f]{40}", pin):
             fallback = fallback.replace("/blob/" + snapshot + "/", "/blob/" + pin + "/", 1)
         return "[" + label + "](" + fallback + ")" if fallback else label + "（附件待核验）"
+    # Protect code before both link rewriting and block/rich-text chunking.
+    literal_prefix = "NATIVEINLINE" + uuid.uuid4().hex + "X"
+    while literal_prefix in markdown:
+        literal_prefix += "X"
+    literals: Dict[str, str] = {}
+    def protect_inline(text: str) -> str:
+        output: List[str] = []
+        offset = 0
+        for start, end in _inline_code_spans(text):
+            token = literal_prefix + str(len(literals)) + "Z"
+            literals[token] = text[start:end]
+            output.extend((text[offset:start], token))
+            offset = end
+        return "".join([*output, text[offset:]])
     # Fenced examples remain literal and do not trigger uploads.
-    pieces = re.split(r"(```[\s\S]*?```)", markdown)
+    pieces = re.split(r"(^[ \t]*```[^\n]*\n[\s\S]*?^[ \t]*```[^\n]*(?:\n|$))", markdown, flags=re.MULTILINE)
     for index in range(0, len(pieces), 2):
-        text = re.sub(r"(!?)\[([^\]\n]+)\]\(([^)\n]+)\)", lambda match: link(match[2], match[3], bool(match[1])), pieces[index])
+        text = re.sub(r"(!?)\[([^\]\n]+)\]\(([^)\n]+)\)", lambda match: link(match[2], match[3], bool(match[1])), protect_inline(pieces[index]))
         text = re.sub(r"(!?)\[\[([^\]\n]+)\]\]", lambda match: link(match[2].split("|", 1)[-1], match[2].split("|", 1)[0], bool(match[1])), text)
         if re.search(r"<(?:img|a|video|audio|source|link)\b", text, re.IGNORECASE):
             try:
@@ -1353,22 +1394,41 @@ def render_native_source(api_key: str, relative: str, markdown: str, snapshot: s
                 attachments.append(paragraph_block("引用文件：" + link(Path(target).name or target, target, bundle=True)))
         pieces[index] = text
     blocks = native_markdown_to_blocks("".join(pieces))
-    def rich_links(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    literal_pattern = re.compile("(" + re.escape(literal_prefix) + r"\d+Z)")
+    def rich_links(parts: List[Dict[str, Any]], code: bool = False) -> List[Dict[str, Any]]:
         output: List[Dict[str, Any]] = []
-        for part in parts:
-            content = part.get("text", {}).get("content", "")
+        joined = "".join(part.get("text", {}).get("content", "") for part in parts)
+        if literal_prefix in joined:
+            contents = [joined]
+        elif code:
+            return parts
+        else:
+            contents = [part.get("text", {}).get("content", "") for part in parts]
+        for content in contents:
+            segments: List[Tuple[str, Optional[str]]] = []
             offset = 0
-            for match in re.finditer(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", content):
-                output.extend(text_rich_text(content[offset:match.start()]))
-                output.extend({"type": "text", "text": {"content": chunk, "link": {"url": match[2]}}} for chunk in chunk_text(match[1]))
-                offset = match.end()
-            output.extend(text_rich_text(content[offset:]))
+            if not code:
+                for match in re.finditer(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", content):
+                    segments.extend(((content[offset:match.start()], None), (match[1], match[2])))
+                    offset = match.end()
+            segments.append((content[offset:], None))
+            for text, url in segments:
+                for piece in literal_pattern.split(text):
+                    literal = literals.get(piece)
+                    if literal is None and literal_prefix in piece:
+                        raise MirrorHeld("inline code literal restoration failed")
+                    runs = exact_text_rich_text(literal) if literal is not None else (
+                        exact_text_rich_text(piece) if code else text_rich_text(piece))
+                    if url:
+                        for run in runs:
+                            run["text"]["link"] = {"url": url}
+                    output.extend(runs)
         return output
     def convert(block: Dict[str, Any]) -> None:
         kind = block["type"]
         payload = block[kind]
-        if kind != "code" and "rich_text" in payload:
-            payload["rich_text"] = rich_links(payload["rich_text"])
+        if "rich_text" in payload:
+            payload["rich_text"] = rich_links(payload["rich_text"], code=kind == "code")
         if kind == "table_row":
             payload["cells"] = [rich_links(cell) for cell in payload["cells"]]
         for child in payload.get("children", []):
