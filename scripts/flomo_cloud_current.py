@@ -208,7 +208,8 @@ def notion_body(root,mid,record,files,evidence):
         elif isinstance(value,list):
             for item in value:rewrite(item)
     rewrite(material)
-    rendered=shared.render_record(material['page'],material['blocks'],mid,[],embed_images=True).decode()
+    rendered=shared.render_record(material['page'],material['blocks'],mid,[],embed_images=True,
+        include_text_properties=(captured.get('property_capture') or {}).get('proof_version')==1).decode()
     body=rendered.split('---',2)[2].lstrip()
     page=captured['page']; title=shared.notion.page_title(page,'Name')
     for prop_name,prop in material['page'].get('properties',{}).items():

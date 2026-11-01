@@ -194,7 +194,10 @@ def flomo_delegation(root,row,database_id):
         if not path.exists():return result
         group=json.loads(path.read_bytes())['pages'].get(row['flomo_memo_id'],{})
         source=group.get('source_pages',{}).get(row['id']) or (group if group.get('notion_page_id')==row['id'] else {})
-        if source.get('property_proof_version')!=PROOF_VERSION or source.get('last_edited_time')!=row['last_edited_time']:return result
+        if (source.get('property_proof_version')!=PROOF_VERSION or source.get('last_edited_time')!=row['last_edited_time']
+                or not isinstance(source.get('metadata_fingerprint'),str)
+                or not re.fullmatch(r'[0-9a-f]{64}',source['metadata_fingerprint'])
+                or source['metadata_fingerprint']!=row.get('metadata_fingerprint')):return result
         payloads=[]
         for relative,expected in source.get('files',{}).items():
             raw=shared.safe_path(root/shared.STAGE,relative).read_bytes()

@@ -211,3 +211,64 @@ Raw/01-only entries and actual binary media. Three readable original memos or an
 all-text staging run alone cannot justify disabling local sync or claim full
 media fidelity. No Mac-off/cloud deployment or full-history attachment completion
 is asserted by unit tests or a public code merge.
+
+
+## Complete-property receipts (optional backfill)
+
+The existing private `notion-flomo-config.json` can opt into strict API-visible
+property archival without adding another collector or schedule:
+
+```json
+{
+  "property_proof_enabled": true,
+  "property_proof_batch": {"max_pages": 50, "max_seconds": 300, "max_requests": 250}
+}
+```
+
+These fields supplement the existing source configuration; they are not a new
+configuration file. The flag defaults to false. Keep it off until the public
+runtime dependency and a small private source-only acceptance run are verified.
+No source ID or credential belongs in this public example.
+
+When enabled, title/rich-text/people properties are fully paginated with the
+shared complete-property helper; relation/formula/rollup use that helper's
+explicit completion rules. Each source JSON retains an untouched `original_page`,
+all property response envelopes and the separate hydrated view inside
+`property_capture`. The old `page`, `blocks` and `materialized` keys remain usable.
+Completed rich-text properties also appear in a clearly labelled readable text
+section of that stage version and its formal current, including explicit href /
+text-link target addresses beside their labels; raw formatting remains
+fully preserved in the property response envelopes. Only a completed object receives `property_proof_version: 1` in its receipt.
+Old same-version body receipts remain intact but require this backfill before
+being treated as proof of complete properties. New or visibly changed pages have
+priority; completed unchanged versions skip hydration. Temporary Notion asset
+URL query/expiry rotation does not force a new version.
+
+The bounded defaults apply even when the old `--max-pages 0` is used. The private
+batch supports 1–500 pages, 60–1200 seconds and 20–2000 requests; the CLI nonzero
+page limit can reduce it. Actual Notion HTTP attempts count against the request
+budget, use serial throttling and disable implicit read retries for this pass.
+Assets share the 50 MiB per-file / 200 MiB per-pass budget. These limits defer
+work, not exclude file types. Local time reserve and the existing workflow job
+deadline preserve room for the already-configured private commit/readback steps.
+If the global persistence reserve is reached, original-source/current followups
+are deferred instead of starting more expensive work.
+
+A budget exit persists already completed object receipts and reports the rest as
+pending; incomplete metadata traversal never replaces source state or claims an
+empty complete inventory. Changed identity, incomplete property responses,
+credentials, edited immutable objects and missing previously owned source pages
+remain explicit holds. Every duplicate source page keeps its own proof/version;
+none is selected as a winner. Existing current pointers, original-source evidence
+and legacy notes remain preserved. The same private commit paths and remote
+byte/hash readback cover the added JSON, Markdown, assets and state together.
+No generic collector writes this Flomo state. Generic delegation may accept a
+matching Flomo proof only after verifying the pinned receipt, source bundle and
+strictly equal metadata fingerprint. Missing legacy fingerprints stay pending;
+unchanged edit timestamps alone cannot validate changed properties. Both source
+and Flomo fingerprints use the same signed-resource URL normalization.
+
+Code/tests alone do not establish production completeness. Acceptance must show
+one real bounded run, a private commit containing state plus all referenced
+objects, remote readback, and correct current consumers; historical backfill stays
+pending until every observed owned source page has the new proof.

@@ -20,6 +20,7 @@ import re
 import socket
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 
@@ -32,7 +33,7 @@ CURRENT_BASE = Path('Raw/01 Flomo/云端')
 MAX_ASSET_BYTES = 50 * 1024 * 1024
 CREDENTIAL_SHAPE = re.compile(
     r'(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}'
-    r'|sk-[A-Za-z0-9_-]{20,})(?![A-Za-z0-9_])'
+    r'|sk-[A-Za-z0-9_-]{20,}|(?:ntn_|secret_)[A-Za-z0-9]{30,})(?![A-Za-z0-9_])'
     r'|-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----')
 
 
@@ -174,7 +175,7 @@ def materialize_assets(value, files, downloader):
     return result
 
 
-def render_record(page, blocks, mid, local_paths, *, embed_images=False):
+def render_record(page, blocks, mid, local_paths, *, embed_images=False, include_text_properties=False):
     cache = {}
     def register(rows):
         for row in rows:
@@ -193,6 +194,21 @@ def render_record(page, blocks, mid, local_paths, *, embed_images=False):
                 'tags': properties.get('Tags', []), 'notion_properties': properties,
                 'local_existing_paths': local_paths, 'stage_only': True}
     body = '\n'.join(notion.render_blocks('', blocks, children_loader=lambda key, ident: cache[ident], embed_images=embed_images))
+    if include_text_properties:
+        for name, prop in page.get('properties', {}).items():
+            if prop.get('type') != 'rich_text': continue
+            parts = []
+            for item in prop.get('rich_text', []):
+                text = notion.rich_text_plain_text([item])
+                targets = [item.get('href'), ((item.get('text') or {}).get('link') or {}).get('url')]
+                seen = set()
+                for target in targets:
+                    if isinstance(target, str) and target and target != text and target not in seen:
+                        text += ' (' + target + ')'
+                        seen.add(target)
+                parts.append(text)
+            text = ''.join(parts)
+            if text.strip(): body += '\n\n## Notion 文本属性：' + str(name).replace('\n', ' ') + '\n\n' + text
     return (notion.render_frontmatter(metadata) + '\n\n' + body + '\n').encode()
 
 
@@ -263,12 +279,17 @@ def writer_lock(root):
 
 
 def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset,
-        original_source_enabled=False, original_signing_suffix=None, current_export_enabled=False):
+        original_source_enabled=False, original_signing_suffix=None, current_export_enabled=False,
+        property_proof_enabled=False, property_proof_batch=None):
     if apply:
         private_checkout.verify_private_checkout(root, os.environ.get('PRIVATE_VAULT_TOKEN'))
         with writer_lock(root):
-            result = stage(root, database_id, api_key, apply=True, max_pages=max_pages, downloader=downloader)
-            if original_source_enabled:
+            result = stage(root, database_id, api_key, apply=True, max_pages=max_pages, downloader=downloader,
+                           property_proof_enabled=property_proof_enabled, property_proof_batch=property_proof_batch)
+            persistence_due = result.get('budget_reason') == 'job_budget_reserved_for_persistence'
+            if persistence_due:
+                result['followup_pending'] = {'original_source': original_source_enabled, 'formal_current': current_export_enabled}
+            if original_source_enabled and not persistence_due:
                 import flomo_original_source as original
                 import sys
                 supplement = original.enrich(root, sys.modules[__name__],
@@ -276,12 +297,29 @@ def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=dow
                     max_pages=max_pages, downloader=downloader)
                 result['original_source'] = supplement
                 result['complete'] = result['complete'] and supplement['complete']
-            if current_export_enabled:
+            if current_export_enabled and not persistence_due:
                 import flomo_cloud_current as current
                 result['formal_current'] = current.export(root)
                 result['complete'] = result['complete'] and result['formal_current']['complete']
             return result
-    return stage(root, database_id, api_key, max_pages=max_pages, downloader=downloader)
+    return stage(root, database_id, api_key, max_pages=max_pages, downloader=downloader,
+                 property_proof_enabled=property_proof_enabled, property_proof_batch=property_proof_batch)
+
+
+def metadata_fingerprint(page):
+    """Compare API-visible values without temporary Notion resource URL churn."""
+    def stable(value):
+        if isinstance(value, list): return [stable(item) for item in value]
+        if not isinstance(value, dict): return value
+        result = {key: stable(item) for key, item in value.items()}
+        if value.get('type') == 'file' and isinstance(result.get('file'), dict):
+            result['file'].pop('expiry_time', None)
+            url = result['file'].get('url')
+            if isinstance(url, str):
+                parsed = urllib.parse.urlsplit(url)
+                result['file']['url'] = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', ''))
+        return result
+    return digest(encoded(stable({key: page.get(key) for key in ('properties', 'cover', 'icon')})))
 
 
 def source_fingerprints(page, blocks):
@@ -325,10 +363,70 @@ def variant_index(root, mid, group, observed):
     return relative, {relative: digest(raw)}
 
 
-def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset):
+def proof_limits(value=None, max_pages=50):
+    limits = {'max_pages': 50, 'max_seconds': 300, 'max_requests': 250}
+    bounds = {'max_pages': (1, 500), 'max_seconds': (60, 1200), 'max_requests': (20, 2000)}
+    if value is not None:
+        if not isinstance(value, dict) or set(value) - set(limits): raise ValueError('invalid_property_proof_batch')
+        limits.update(value)
+    for key, (low, high) in bounds.items():
+        if type(limits[key]) is not int or not low <= limits[key] <= high:
+            raise ValueError('invalid_property_proof_batch')
+    if max_pages: limits['max_pages'] = min(limits['max_pages'], max_pages)
+    return limits
+
+
+def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset,
+          property_proof_enabled=False, property_proof_batch=None):
+    if type(property_proof_enabled) is not bool: raise ValueError('invalid_property_proof_configuration')
+    if not property_proof_enabled:
+        return _stage(root, database_id, api_key, apply=apply, max_pages=max_pages, downloader=downloader)
+    from notion_source_budget import Budget
+    budget = Budget(proof_limits(property_proof_batch, max_pages))
+    last_request = [None]
+    def observe(method, path):
+        if method != 'GET' and not (method == 'POST' and path == '/databases/' + notion.normalize_notion_id(database_id) + '/query'):
+            raise ValueError('unexpected_source_mutation')
+        budget.request()
+        if last_request[0] is not None:
+            delay = .7 - (time.monotonic() - last_request[0])
+            if delay > 0: time.sleep(delay)
+        budget.check()
+        last_request[0] = time.monotonic()
+    original_downloader = downloader
+    def downloader(url):
+        budget.request()
+        raw = original_downloader(url)
+        budget.asset(raw)
+        return raw
+    observer = notion.REQUEST_OBSERVER.set(observe)
+    retries = notion.READ_RETRIES.set(0)
+    try:
+        return _stage(root, database_id, api_key, apply=apply, max_pages=max_pages,
+                      downloader=downloader, proof_budget=budget)
+    finally:
+        notion.READ_RETRIES.reset(retries)
+        notion.REQUEST_OBSERVER.reset(observer)
+
+
+def _stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=download_asset, proof_budget=None):
     if max_pages < 0: raise ValueError('invalid_limit')
     local, no_id = local_inventory(root)
-    rows = list(notion.paginate_database(api_key, database_id))
+    try:
+        rows = list(notion.paginate_database(api_key, database_id))
+    except Exception as exc:
+        from notion_source_budget import BudgetExceeded
+        if proof_budget is None or not isinstance(exc, BudgetExceeded): raise
+        # A partial metadata traversal cannot prove absence or replace source progress.
+        report = {'notion_pages': None, 'flomo_ids': None, 'flomo_source_pages': None,
+                  'written': 0, 'unchanged': 0, 'pending': None, 'held': {},
+                  'complete': False, 'capture_complete': False,
+                  'property_proof_complete': False, 'inventory_complete': False,
+                  'budget_reason': str(exc), 'requests': proof_budget.requests,
+                  'unmerged_variant_group_count': None, 'semantic_merge_complete': False,
+                  'stage_only': True, 'fact_promotion_allowed': False}
+        if apply: atomic_write(safe_path(root, STAGE / 'coverage.json'), encoded(report))
+        return report
     groups = defaultdict(list)
     page_ids = set()
     identity_holds = {}
@@ -337,7 +435,9 @@ def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=d
                 or notion.parse_time(row.get('last_edited_time')) is None):
             raise ValueError('incomplete_page_inventory')
         page_ids.add(row['id'])
-        try: mid = memo_id(row)
+        try:
+            if proof_budget is not None: reject_credentials(encoded(row))
+            mid = memo_id(row)
         except ValueError as exc:
             if str(exc) != 'potential_credential_in_source': raise
             identity_holds['page::' + row['id']] = 'potential_credential_in_source'
@@ -369,10 +469,28 @@ def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=d
               'local_no_id': no_id, 'attempted': 0, 'written': 0, 'unchanged': 0, 'pending': 0, 'held': identity_holds,
               'variant_groups': {}, 'unmerged_variant_groups': {}, 'stage_only': True,
               'fact_promotion_allowed': False}
+    if proof_budget is not None:
+        for ident, mid in owners.items():
+            if ident not in page_ids or not any(page['id'] == ident for page in groups.get(mid, [])):
+                report['held'][mid + '::' + ident] = 'source_identity_not_observed'
+    # Fresh and changed input has priority over historical property-proof backfill.
+    def is_backfill_page(mid, page):
+        group = state['pages'].get(mid, {})
+        prior = group.get('source_pages', {}).get(page['id'], group)
+        return (prior.get('notion_page_id') == page['id']
+                and prior.get('last_edited_time') == page.get('last_edited_time') and bool(prior.get('files'))
+                and (prior.get('property_proof_version') != 1
+                     or prior.get('metadata_fingerprint') == metadata_fingerprint(page)))
+    def is_backfill(item):
+        mid, pages = item
+        return all(is_backfill_page(mid, page) for page in pages)
+    ordered_groups = sorted(groups.items(), key=is_backfill) if proof_budget else groups.items()
+    budget_reason = None
     errors = {'stage_edited', 'source_changed_during_read', 'state_changed', 'source_identity_changed',
               'incomplete_asset', 'incomplete_relation', 'unsupported_block', 'block_cycle',
-              'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source'}
-    for mid, pages in groups.items():
+              'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source', 'incomplete_property_proof'}
+    for mid, pages in ordered_groups:
+        if proof_budget is not None: pages = sorted(pages, key=lambda page: is_backfill_page(mid, page))
         group = state['pages'].get(mid, {})
         grouped = len(pages) > 1 or 'source_pages' in group or bool(group.get('notion_page_id')
                     and group['notion_page_id'] != pages[0]['id'])
@@ -393,33 +511,62 @@ def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=d
             if (ident in owners and owners[ident] != mid) or (prior and prior.get('notion_page_id') != ident):
                 report['held'][failure_key] = 'source_identity_changed'
                 continue
-            if prior.get('last_edited_time') == page.get('last_edited_time') and prior.get('files'):
+            if (prior.get('last_edited_time') == page.get('last_edited_time') and prior.get('files')
+                    and (proof_budget is None or (prior.get('property_proof_version') == 1
+                        and prior.get('metadata_fingerprint') == metadata_fingerprint(page)))):
                 report['unchanged'] += 1
                 continue
-            if not apply or (max_pages and report['attempted'] >= max_pages):
+            if not apply or budget_reason or (max_pages and report['attempted'] >= max_pages):
                 report['pending'] += 1
                 continue
             report['attempted'] += 1
             try:
-                complete = checked_page(api_key, page)
+                property_capture = None
+                if proof_budget is not None:
+                    from notion_complete_properties import hydrate_page
+                    proof_budget.page()
+                    before = notion.notion_request(api_key, 'GET', '/pages/' + ident)
+                    if (before.get('id') != ident or before.get('parent', {}).get('database_id', '').replace('-', '')
+                            != database_id.replace('-', '') or memo_id(before) != mid):
+                        raise ValueError('source_identity_changed')
+                    if (before.get('last_edited_time') != page.get('last_edited_time')
+                            or before.get('created_time') != page.get('created_time')
+                            or metadata_fingerprint(before) != metadata_fingerprint(page)):
+                        raise ValueError('source_changed_during_read')
+                    property_capture = hydrate_page(before,
+                        lambda method, path, payload=None: notion.notion_request(api_key, method, path, payload))
+                    complete = property_capture['hydrated_page']
+                    reject_credentials(encoded(property_capture))
+                else: complete = checked_page(api_key, page)
                 blocks = block_tree(api_key, ident)
                 reject_credentials(encoded({'page': complete, 'blocks': blocks}))
                 files = {}
                 material = materialize_assets({'page': complete, 'blocks': blocks}, files, downloader)
-                files[mid + '.md'] = render_record(material['page'], material['blocks'], mid, local.get(mid, []))
+                files[mid + '.md'] = render_record(material['page'], material['blocks'], mid, local.get(mid, []),
+                                                 include_text_properties=property_capture is not None)
                 reject_credentials(files[mid + '.md'])
-                files[mid + '.json'] = encoded({'page': complete, 'blocks': blocks, 'materialized': material})
+                snapshot = {'page': complete, 'blocks': blocks, 'materialized': material}
+                if property_capture is not None: snapshot['property_capture'] = property_capture
+                files[mid + '.json'] = encoded(snapshot)
                 latest = notion.notion_request(api_key, 'GET', '/pages/' + ident)
-                if latest.get('last_edited_time') != page.get('last_edited_time'):
+                if (latest.get('last_edited_time') != page.get('last_edited_time')
+                        or (proof_budget is not None and (latest.get('id') != ident
+                            or memo_id(latest) != mid
+                            or latest.get('created_time') != before.get('created_time')
+                            or latest.get('parent') != before.get('parent')
+                            or metadata_fingerprint(latest) != metadata_fingerprint(before)))):
                     raise ValueError('source_changed_during_read')
                 if (state_path.read_bytes() if state_path.exists() else None) != original_state:
                     raise ValueError('state_changed')
+                if proof_budget is not None: proof_budget.check()
                 version, hashes = apply_record(root, mid, files, prior)
                 body_sha, properties_sha = source_fingerprints(complete, blocks)
                 receipt = {'notion_page_id': ident, 'last_edited_time': page.get('last_edited_time'),
                            'current_version': version, 'files': hashes,
                            'versions': {**prior.get('versions', {}), version: hashes},
                            'body_content_sha256': body_sha, 'properties_content_sha256': properties_sha}
+                if property_capture is not None:
+                    receipt.update(property_proof_version=1, metadata_fingerprint=metadata_fingerprint(before))
                 candidate = deepcopy(state)
                 if grouped:
                     sources[ident] = receipt
@@ -429,7 +576,13 @@ def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=d
                 owners[ident] = mid
                 report['written'] += 1
             except Exception as exc:
+                from notion_source_budget import BudgetExceeded
+                if proof_budget is not None and isinstance(exc, BudgetExceeded):
+                    budget_reason = str(exc)
+                    report['pending'] += 1
+                    continue
                 code = str(exc)
+                if proof_budget is not None and code.startswith('property_'): code = 'incomplete_property_proof'
                 report['held'][failure_key] = code if code in errors else 'source_or_stage_failed'
         if grouped:
             group = state['pages'].get(mid, {})
@@ -443,6 +596,8 @@ def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=d
                     info = {'source_page_ids': sorted(sources), 'observed_source_page_ids': observed,
                             'body_variant_count': bodies, 'properties_variant_count': properties,
                             'capture_complete': all(ident in sources and sources[ident]['last_edited_time'] == page['last_edited_time']
+                                and (proof_budget is None or (sources[ident].get('property_proof_version') == 1
+                                    and sources[ident].get('metadata_fingerprint') == metadata_fingerprint(page)))
                                 for ident, page in ((page['id'], page) for page in pages))}
                     report['variant_groups'][mid] = info
                     if bodies > 1 or properties > 1: report['unmerged_variant_groups'][mid] = info
@@ -456,6 +611,9 @@ def stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=d
                     code = str(exc)
                     report['held'][mid + '::variant_index'] = code if code in errors else 'source_or_stage_failed'
     report['capture_complete'] = not report['held'] and not report['pending']
+    if proof_budget is not None:
+        report.update(property_proof_complete=report['capture_complete'], inventory_complete=True,
+                      budget_reason=budget_reason, requests=proof_budget.requests)
     report['complete'] = report['capture_complete']
     report['unmerged_variant_group_count'] = len(report['unmerged_variant_groups'])
     report['semantic_merge_complete'] = report['capture_complete'] and not report['unmerged_variant_groups']
@@ -525,7 +683,7 @@ def main():
         config = json.loads(args.config.read_bytes())
         if config.get('version') != 1 or not isinstance(config.get('database_id'), str):
             parser.error('invalid private source configuration')
-        if any(type(config.get(key, False)) is not bool for key in ('original_source_enabled','current_export_enabled')):
+        if any(type(config.get(key, False)) is not bool for key in ('original_source_enabled','current_export_enabled','property_proof_enabled')):
             parser.error('invalid original source configuration')
         args.database_id = config['database_id']
     if args.verify_remote_state:
@@ -538,7 +696,9 @@ def main():
                  apply=args.apply, max_pages=args.max_pages,
                  original_source_enabled=config.get('original_source_enabled', False),
                  original_signing_suffix=os.environ.get('FLOMO_WEB_SIGNING_SUFFIX'),
-                 current_export_enabled=config.get('current_export_enabled', False))
+                 current_export_enabled=config.get('current_export_enabled', False),
+                 property_proof_enabled=config.get('property_proof_enabled', False),
+                 property_proof_batch=config.get('property_proof_batch'))
     print(json.dumps({key: result[key] for key in ('notion_pages', 'flomo_ids', 'flomo_source_pages', 'written', 'unchanged', 'pending',
         'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete')}))
     return 0 if result['complete'] or not args.apply else 2

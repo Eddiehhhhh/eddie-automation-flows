@@ -171,7 +171,7 @@ jobs:
               value = json.loads(path.read_bytes())
               if value.get('version') != 1 or type(value.get('stage_enabled')) is not bool:
                   raise ValueError('Invalid private flomo configuration')
-              if any(type(value.get(key, False)) is not bool for key in ('original_source_enabled', 'current_export_enabled')):
+              if any(type(value.get(key, False)) is not bool for key in ('original_source_enabled', 'current_export_enabled', 'property_proof_enabled')):
                   raise ValueError('Invalid private flomo original source configuration')
               enabled = value['stage_enabled']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
