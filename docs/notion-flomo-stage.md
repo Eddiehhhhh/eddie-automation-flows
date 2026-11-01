@@ -211,6 +211,16 @@ without the new marker are compared only after verifying their JSON and every
 referenced asset/history hash. A URL-only rotation does not migrate old receipts
 or generate new source/current versions.
 
+Fingerprint revisions are explicit: V1 validates the historical single-host
+algorithm (`static.flomoapp.com` only); V2 covers the two individually verified
+hosts above. Existing V1 receipts are checked against V1 using their fully
+verified cached raw snapshot, then stable input comparison uses V2. An auth-only
+no-op leaves the V1 marker, raw bytes, versions and current untouched. Only a
+real capture stamps V2; missing markers retain the verified-cache path, while
+unknown or malformed revision values fail closed. Future normalization changes
+must version the algorithm and test prior issued markers, not just markerless
+fixtures.
+
 A stable URL is not evidence that remote bytes stayed identical. Healthy cached
 assets are freshly read and SHA-checked through the same credential-free bounded
 downloader; identical bytes consume no data-capture slot. Changed bytes are

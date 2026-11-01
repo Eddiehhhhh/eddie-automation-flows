@@ -25,7 +25,8 @@ COVERAGE = AREA / 'coverage.json'
 LIMIT = 200
 MAX_PAGES = 100
 MAX_RESPONSE = 8 * 1024 * 1024
-INPUT_FINGERPRINT_VERSION = 1
+INPUT_FINGERPRINT_VERSION = 2
+AUTH_CDN_HOSTS_V1 = frozenset(('static.flomoapp.com',))
 AUTH_CDN_HOSTS = frozenset(('static.flomoapp.com', 'flomo.oss-cn-shanghai.aliyuncs.com'))
 AUTH_QUERY_KEYS = frozenset(('Expires', 'Signature'))
 
@@ -124,12 +125,19 @@ def image_urls(memo):
     return list(dict.fromkeys(html.unescape(value) for value in urls))
 
 
-def stable_asset_url(value):
+def fingerprint_hosts(version):
+    if type(version) is not int or version not in (1, INPUT_FINGERPRINT_VERSION):
+        raise OriginalError('unsupported_input_fingerprint_version')
+    return AUTH_CDN_HOSTS_V1 if version == 1 else AUTH_CDN_HOSTS
+
+
+def stable_asset_url(value, *, fingerprint_version=INPUT_FINGERPRINT_VERSION):
     """Remove only proved authentication fields; preserve all other URL bytes."""
+    hosts = fingerprint_hosts(fingerprint_version)
     if not isinstance(value, str): return value
     try:
         parsed = urllib.parse.urlsplit(value)
-        if (parsed.scheme != 'https' or parsed.hostname not in AUTH_CDN_HOSTS
+        if (parsed.scheme != 'https' or parsed.hostname not in hosts
                 or parsed.username or parsed.password or parsed.port not in (None, 443)):
             return value
     except ValueError: return value
@@ -154,12 +162,13 @@ def stable_asset_url(value):
     return value[:question] + ('?' + kept if kept else '') + tail
 
 
-def input_fingerprint(memo, bridge):
+def input_fingerprint(memo, bridge, *, fingerprint_version=INPUT_FINGERPRINT_VERSION):
+    fingerprint_hosts(fingerprint_version)
     projection = deepcopy(memo)
     for item in projection.get('files', []):
         if not isinstance(item, dict): continue
         for field in ('url', 'thumbnail_url'):
-            if field in item: item[field] = stable_asset_url(item[field])
+            if field in item: item[field] = stable_asset_url(item[field], fingerprint_version=fingerprint_version)
     return bridge.digest(bridge.encoded(projection))
 
 
@@ -281,8 +290,13 @@ def enrich(root, bridge, *, token, signing_suffix, max_pages, downloader, reader
                     unit['old_assets'] = old_assets
                     old_stable = input_fingerprint(old_memo, bridge)
                     marker = record.get('input_fingerprint_version')
-                    if marker is not None and (type(marker) is not int or marker != INPUT_FINGERPRINT_VERSION or record.get('input_fingerprint') != old_stable):
-                        raise OriginalError('original_cache_input_fingerprint')
+                    if marker is not None:
+                        # Version 1 was issued before the second host was proved.
+                        # Validate that exact algorithm against the verified raw
+                        # snapshot, then compare inputs using the current rules.
+                        expected = input_fingerprint(old_memo, bridge, fingerprint_version=marker)
+                        if record.get('input_fingerprint') != expected:
+                            raise OriginalError('original_cache_input_fingerprint')
                     if source_hash == record.get('source_sha256') and not record.get('degraded') and not old_assets and (mid, ident) not in pending:
                         report['unchanged'] += 1; continue
                     if stable == old_stable and not record.get('degraded'):
