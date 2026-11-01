@@ -30,6 +30,8 @@ CONFIG=Path('.github/state/notion-sources-config.json')
 LEGACY_SCOPE=Path('Raw/02 Notion/03 State/.local-sync-state.json')
 DOUBAN_BASE=Path('Raw/14 豆瓣影视/云端原文')
 DOUBAN_STATE=Path('.github/state/notion-douban-source-state.json')
+EPISODE_BASE=Path('Raw/13 小宇宙/云端原文')
+EPISODE_STATE=Path('.github/state/notion-episode-source-state.json')
 PROOF_VERSION=1
 RENDERER_VERSION=1
 BUTTON_PARTIAL_PROOF_VERSION=1
@@ -432,8 +434,14 @@ def source_coverage(record,held,source_key):
     return result
 
 
-def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,downloader=shared.download_asset,budget=None,base=BASE,state_file=STATE):
+def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,downloader=shared.download_asset,budget=None,base=BASE,state_file=STATE,query_filter=None):
     root=Path(root)
+    if query_filter is not None:
+        import sync_my_podcast_to_raw as episode
+        require(base==EPISODE_BASE and state_file==EPISODE_STATE and len(settings['sources'])==1
+            and settings['sources'][0]['key']=='episode'
+            and settings['sources'][0]['database_id']==notion.normalize_notion_id(episode.EPISODE_DATABASE_ID)
+            and query_filter==episode.LISTENED_FILTER,'episode_query_scope_not_authorized')
     if apply:cloud_private_checkout.verify_private_checkout(root,os.environ.get('PRIVATE_VAULT_TOKEN'))
     budget=budget or Budget(settings['batch']);last_request=[0.0]
     def call(method,path,payload=None,*,api_version=None):
@@ -469,6 +477,10 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
         for source in ordered:
             key=source['key'];record=deepcopy(state['sources'].get(key,{'database_id':source['database_id'],'pages':{}}))
             require(record['database_id']==source['database_id'],'source_state_identity_changed')
+            if query_filter is not None:
+                require('query_filter' in record or (not record['pages'] and not record.get('inventory')),'source_query_scope_missing')
+                require(record.get('query_filter',query_filter)==query_filter,'source_query_scope_changed')
+                record['query_filter']=deepcopy(query_filter)
             def save_source():
                 candidate={**state,'sources':{**state['sources'],key:deepcopy(record)}};persist(candidate)
             try:
@@ -488,6 +500,7 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                 for _ in range(settings['batch']['max_query_pages']):
                     if inventory['complete']:break
                     payload={'page_size':100,'sorts':[{'timestamp':'last_edited_time','direction':'descending'}]}
+                    if query_filter is not None:payload['filter']=deepcopy(query_filter)
                     if inventory['cursor']:payload['start_cursor']=inventory['cursor']
                     value=call('POST','/databases/'+source['database_id']+'/query',payload)
                     require(isinstance(value.get('results'),list) and type(value.get('has_more')) is bool,'source_inventory_shape')
@@ -646,7 +659,7 @@ def active_selection(root,base=BASE,state_file=STATE):
 
 def all_active_selection(root):
     result={'current':set(),'edited':set(),'held':{}}
-    for base,state_file in ((BASE,STATE),(DOUBAN_BASE,DOUBAN_STATE)):
+    for base,state_file in ((BASE,STATE),(DOUBAN_BASE,DOUBAN_STATE),(EPISODE_BASE,EPISODE_STATE)):
         current=active_selection(root,base,state_file)
         for key in ('current','edited'):result[key].update(current[key])
         result['held'].update({str(state_file)+':'+key:value for key,value in current['held'].items()})
@@ -654,7 +667,7 @@ def all_active_selection(root):
 
 
 def eligible_path(root,path,selection=None):
-    if not any(path.is_relative_to(root/base) for base in (BASE,DOUBAN_BASE)):return True
+    if not any(path.is_relative_to(root/base) for base in (BASE,DOUBAN_BASE,EPISODE_BASE)):return True
     selection=selection if selection is not None else all_active_selection(root)
     return str(path.relative_to(root)) in selection['current']
 
@@ -743,13 +756,39 @@ def run_douban_source(root,api_key,*,apply=False,max_pages=None,request=None,dow
     return collect(root,settings,api_key,apply=apply,request=request,downloader=downloader,base=DOUBAN_BASE,state_file=DOUBAN_STATE)
 
 
+def episode_source_settings(root):
+    """Use only the existing Episode caller's identity and listened scope."""
+    import sync_my_podcast_to_raw as episode
+    settings=config(root)
+    value=settings.get('dedicated_episode',{})
+    require(isinstance(value,dict) and set(value)<={'enabled'} and type(value.get('enabled',False)) is bool,'invalid_episode_source_configuration')
+    if not settings['enabled'] or not value.get('enabled'):return None
+    require('episode' not in {source['key'] for source in settings['sources']},'episode_source_key_conflict')
+    limits={**settings['batch'],'max_seconds':min(settings['batch']['max_seconds'],300),'max_requests':min(settings['batch']['max_requests'],250)}
+    return {'sources':[{'key':'episode','name':'小宇宙节目','database_id':notion.normalize_notion_id(episode.EPISODE_DATABASE_ID),
+            'date_property':'日期','owner':'generic'}],'batch':limits}
+
+
+def run_episode_source(root,api_key,*,apply=False,max_pages=None,request=None,downloader=shared.download_asset):
+    import sync_my_podcast_to_raw as episode
+    settings=episode_source_settings(root)
+    require(settings is not None,'episode_source_configuration_disabled')
+    if max_pages is not None:
+        require(type(max_pages) is int and 1<=max_pages<=500,'invalid_source_page_budget');settings['batch']['max_pages']=max_pages
+    return collect(root,settings,api_key,apply=apply,request=request,downloader=downloader,
+        base=EPISODE_BASE,state_file=EPISODE_STATE,query_filter=deepcopy(episode.LISTENED_FILTER))
+
+
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');p.add_argument('--source-key',action='append');p.add_argument('--max-pages',type=int);p.add_argument('--check-config',action='store_true');p.add_argument('--check-douban-config',action='store_true');p.add_argument('--verify-remote-state',action='store_true');args=p.parse_args();root=Path(os.environ['VAULT_ROOT'])
+    p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');p.add_argument('--source-key',action='append');p.add_argument('--max-pages',type=int);p.add_argument('--check-config',action='store_true');p.add_argument('--check-douban-config',action='store_true');p.add_argument('--check-episode-config',action='store_true');p.add_argument('--verify-remote-state',action='store_true');args=p.parse_args();root=Path(os.environ['VAULT_ROOT'])
     if args.verify_remote_state:
-        for base,state_file in ((BASE,STATE),(DOUBAN_BASE,DOUBAN_STATE)):
+        for base,state_file in ((BASE,STATE),(DOUBAN_BASE,DOUBAN_STATE),(EPISODE_BASE,EPISODE_STATE)):
             if shared.safe_path(root,state_file).exists():verify_remote(root,base,state_file)
         return
     settings=config(root)
+    if args.check_episode_config:
+        with open(os.environ['GITHUB_OUTPUT'],'a') as stream:stream.write('enabled='+str(episode_source_settings(root) is not None).lower()+'\n')
+        return
     if args.check_douban_config:
         with open(os.environ['GITHUB_OUTPUT'],'a') as stream:stream.write('enabled='+str(douban_source_settings(root) is not None).lower()+'\n')
         return

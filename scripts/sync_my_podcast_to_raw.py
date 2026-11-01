@@ -50,6 +50,8 @@ LISTENED_FILTER = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--original-source-only", action="store_true", help="Capture original Episode evidence without changing existing notes.")
+    parser.add_argument("--max-pages", type=int, help="Bound the original-source collector.")
     parser.add_argument("--page-id", action="append", default=[], help="Notion episode page ID. May be repeated.")
     parser.add_argument("--all-current", action="store_true", help="Run a full backfill for all listened episodes.")
     parser.add_argument("--hours-back", type=int, default=DEFAULT_HOURS_BACK, help="Incremental lookback window for edited episodes.")
@@ -60,6 +62,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.hours_back < 0 or args.max_episodes < 0:
         parser.error("--hours-back and --max-episodes must be non-negative")
+    if args.original_source_only and (args.page_id or args.all_current or args.only_missing or args.rebuild_index or args.max_episodes):
+        parser.error("Original-source capture uses its existing listened scope; legacy selectors cannot be combined")
+    if args.max_pages is not None and (not args.original_source_only or not 1 <= args.max_pages <= 500):
+        parser.error("--max-pages requires original-source mode and a value from 1 to 500")
     return args
 
 
@@ -304,7 +310,7 @@ def find_existing_file_by_episode_id(base_dir: Path, page_id: str) -> Optional[P
     normalized = normalize_notion_id(page_id)
     matches: List[Path] = []
     for path in sorted(base_dir.rglob("*.md")):
-        if path.name == "索引.md":
+        if path.is_relative_to(OUTPUT_ROOT / "云端原文") or path.name == "索引.md":
             continue
         meta = parse_frontmatter(path.read_text(encoding="utf-8"))
         if normalize_notion_id(meta.get("episode_page_id", "")) == normalized:
@@ -354,7 +360,7 @@ def all_episode_files(page_id: str) -> List[Path]:
         for path in sorted(root.rglob("*")):
             if path.is_symlink() or not is_within(path.resolve(), root.resolve()):
                 raise RuntimeError("Symlink episode path; migration stopped")
-            if path.suffix != ".md" or path.name == "索引.md" or path.is_dir():
+            if path.is_relative_to(OUTPUT_ROOT / "云端原文") or path.suffix != ".md" or path.name == "索引.md" or path.is_dir():
                 continue
             meta = parse_frontmatter(path.read_bytes().decode("utf-8"))
             if normalize_notion_id(meta.get("episode_page_id", "")) == normalize_notion_id(page_id):
@@ -685,7 +691,7 @@ def parse_frontmatter(text: str) -> Dict[str, str]:
 def rebuild_index() -> Path:
     rows_by_podcast: Dict[str, List[Dict[str, str]]] = {}
     for path in sorted(OUTPUT_ROOT.rglob("*.md")):
-        if path.name == "索引.md":
+        if path.is_relative_to(OUTPUT_ROOT / "云端原文") or path.name == "索引.md":
             continue
         meta = parse_frontmatter(path.read_text(encoding="utf-8"))
         if not meta:
@@ -743,6 +749,12 @@ def rebuild_index() -> Path:
 
 def main() -> None:
     args = parse_args()
+    if args.original_source_only:
+        import sync_notion_sources_to_raw as originals
+        result = originals.run_episode_source(ROOT, load_notion_api_key(), apply=not args.dry_run, max_pages=args.max_pages)
+        print(json.dumps({key: result[key] for key in ('written','partial_written','unchanged','partial_unchanged','selected_scope_complete','soft_exit')}))
+        if not result['selected_scope_complete'] and not args.dry_run: raise SystemExit(2)
+        return
     scan_started_at = now()
     scan_complete = False
     page_ids = [normalize_notion_id(item) for item in args.page_id]

@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       notion_source_key:
-        description: "One configured original source key, or douban; empty rotates configured sources"
+        description: "One configured original source key, or douban/episode; empty rotates enabled sources"
         required: false
         type: string
         default: ""
@@ -350,7 +350,7 @@ jobs:
       - name: Read private complete source configuration
         id: sources_config
         continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && inputs.notion_source_key != 'douban' && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
         run: python scripts/sync_notion_sources_to_raw.py --check-config
 
       - name: Read private complete film source configuration
@@ -359,10 +359,16 @@ jobs:
         if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && (inputs.notion_source_key == '' || inputs.notion_source_key == 'douban') && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
         run: python scripts/sync_notion_sources_to_raw.py --check-douban-config
 
+      - name: Read private complete Episode source configuration
+        id: episode_source_config
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && (inputs.notion_source_key == '' || inputs.notion_source_key == 'episode') && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
+        run: python scripts/sync_notion_sources_to_raw.py --check-episode-config
+
       - name: Require requested complete source configuration
         id: sources_requested
         continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.notion_sources_only && ((inputs.notion_source_key == 'douban' && steps.film_source_config.outputs.enabled != 'true') || (inputs.notion_source_key != 'douban' && steps.sources_config.outputs.enabled != 'true')) }}
+        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.notion_sources_only && ((inputs.notion_source_key == 'douban' && steps.film_source_config.outputs.enabled != 'true') || (inputs.notion_source_key == 'episode' && steps.episode_source_config.outputs.enabled != 'true') || (inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && steps.sources_config.outputs.enabled != 'true')) }}
         run: |
           echo "Requested private original source adapter is not enabled."
           exit 1
@@ -392,12 +398,23 @@ jobs:
           python scripts/run_private_command.py --label "Complete original film source" -- \
             python scripts/sync_notion_douban_to_raw.py --original-source-only --max-pages "$NOTION_SOURCE_MAX_PAGES"
 
+      - name: Capture complete Episode originals through existing caller
+        id: episode_source_sync
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.episode_source_config.outcome == 'success' && steps.episode_source_config.outputs.enabled == 'true' }}
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_SOURCE_MAX_PAGES: ${{ inputs.notion_source_max_pages || '50' }}
+        run: |
+          python scripts/run_private_command.py --label "Complete original Episode source" -- \
+            python scripts/sync_my_podcast_to_raw.py --original-source-only --max-pages "$NOTION_SOURCE_MAX_PAGES"
+
       - name: Persist complete originals and durable progress
         id: sources_commit
-        if: ${{ !cancelled() && (steps.sources_sync.outcome == 'success' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'success' || steps.film_source_sync.outcome == 'failure') }}
+        if: ${{ !cancelled() && (steps.sources_sync.outcome == 'success' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'success' || steps.film_source_sync.outcome == 'failure' || steps.episode_source_sync.outcome == 'success' || steps.episode_source_sync.outcome == 'failure') }}
         run: |
           paths=()
-          for item in "Raw/02 Notion/云端原文" ".github/state/notion-sources-sync-state.json" "Raw/14 豆瓣影视/云端原文" ".github/state/notion-douban-source-state.json"; do
+          for item in "Raw/02 Notion/云端原文" ".github/state/notion-sources-sync-state.json" "Raw/14 豆瓣影视/云端原文" ".github/state/notion-douban-source-state.json" "Raw/13 小宇宙/云端原文" ".github/state/notion-episode-source-state.json"; do
             if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
           done
           if test "${#paths[@]}" -gt 0; then
@@ -415,7 +432,7 @@ jobs:
             python scripts/sync_notion_sources_to_raw.py --verify-remote-state
 
       - name: Report incomplete original source capture
-        if: ${{ !cancelled() && (steps.sources_config.outcome == 'failure' || steps.film_source_config.outcome == 'failure' || steps.sources_requested.outcome == 'failure' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'failure' || steps.sources_commit.outcome == 'failure' || steps.sources_readback.outcome == 'failure') }}
+        if: ${{ !cancelled() && (steps.sources_config.outcome == 'failure' || steps.film_source_config.outcome == 'failure' || steps.episode_source_config.outcome == 'failure' || steps.sources_requested.outcome == 'failure' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'failure' || steps.episode_source_sync.outcome == 'failure' || steps.sources_commit.outcome == 'failure' || steps.sources_readback.outcome == 'failure') }}
         run: |
           echo "Complete original source capture is partial; inspect private coverage, soft budgets and remote readback."
           exit 2

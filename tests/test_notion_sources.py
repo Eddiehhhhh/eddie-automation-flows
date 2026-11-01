@@ -308,10 +308,11 @@ class Workflow(unittest.TestCase):
         text=(Path(__file__).resolve().parents[1]/'.github/workflows/sync-notion-personal-data.yml').read_text()
         steps={p.splitlines()[0]:p for p in text.split('      - name: ')[1:]}
         def allowed(name,key='morning',cancelled=False,outcomes=None,enabled=True):
-            statuses={'private_checkout':'success','source_selection':'skipped','sources_config':'success','film_source_config':'success','sources_requested':'skipped','sources_sync':'failure','film_source_sync':'success','sources_commit':'success','sources_readback':'success'};statuses.update(outcomes or {})
+            statuses={'private_checkout':'success','source_selection':'skipped','sources_config':'success','film_source_config':'success','episode_source_config':'success','episode_source_sync':'skipped','sources_requested':'skipped','sources_sync':'failure','film_source_sync':'success','sources_commit':'success','sources_readback':'success'};statuses.update(outcomes or {})
             model=SimpleNamespace(**{k:SimpleNamespace(outcome=v) for k,v in statuses.items()})
             model.sources_config.outputs=SimpleNamespace(enabled='true' if enabled else '')
             model.film_source_config.outputs=SimpleNamespace(enabled='true')
+            model.episode_source_config.outputs=SimpleNamespace(enabled='true')
             expression=steps[name].split('        if: ${{ ',1)[1].split(' }}',1)[0].replace('!cancelled()','not cancelled()')
             expression=re.sub(r'!inputs\.', 'not inputs.',expression).replace('&&','and').replace('||','or')
             return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(notion_sources_only=True,notion_source_key=key,full_sync=False,flomo_stage_only=False,raw16_only=False,messages_only=False),'github':SimpleNamespace(event_name='workflow_dispatch'),'cancelled':lambda:cancelled})
