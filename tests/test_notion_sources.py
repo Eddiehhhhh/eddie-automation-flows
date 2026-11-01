@@ -232,6 +232,32 @@ class Sources(unittest.TestCase):
         self.assertEqual(report['soft_exit'],'job_budget_reserved_for_persistence');self.assertEqual(len(api.calls),0)
         self.assertTrue((self.root/m.STATE).exists());self.assertTrue((self.root/m.BASE/'index.md').exists());self.assertFalse(report['selected_scope_complete'])
 
+    def test_route_hold_repair_probes_same_page_without_inventory_rescan(self):
+        api=API([page(100,text='ghp_'+'A'*36),page(101,text='已完成的另一条')]);first=self.collect(api)
+        self.assertEqual(first['written'],1);self.assertIn('route_hold',self.state()['sources']['source1']['inventory']['records'][0])
+        other=deepcopy(self.state()['sources']['source1']['pages'][uid(101)])
+        api.pages[0]['properties']['Note']['rich_text']=[rt('源中已经修好')];api.pages[0]['last_edited_time']='2026-11-01T01:02:03.000Z';api.calls.clear()
+        report=self.collect(api)
+        self.assertEqual(report['written'],1);self.assertFalse(report['held']);self.assertTrue(report['selected_scope_complete'])
+        self.assertFalse(any(method=='POST' for method,path,payload in api.calls));self.assertIn(('GET','/pages/'+uid(100),None),api.calls)
+        state=self.state()['sources']['source1'];self.assertNotIn('route_hold',state['inventory']['records'][0]);self.assertEqual(state['pages'][uid(101)],other)
+        self.assertEqual(state['pages'][uid(100)]['last_edited_time'],'2026-11-01T01:02:03.000Z')
+    def test_route_hold_probe_still_bad_or_moved_is_bounded_and_never_adopted(self):
+        api=API([page(100,text='ghp_'+'A'*36),page(101)]);self.collect(api);other=deepcopy(self.state()['sources']['source1']['pages'][uid(101)]);api.calls.clear()
+        report=self.collect(api,settings(max_pages=1));self.assertEqual(report['held'][uid(100)],'potential_credential_in_source')
+        self.assertEqual(api.calls,[('GET','/pages/'+uid(100),None)]);self.assertEqual(report['page_attempts'],1)
+        api.pages[0]['parent']['database_id']=uid(2);api.calls.clear();report=self.collect(api,settings(max_pages=1))
+        self.assertEqual(report['held'][uid(100)],'source_parent_identity_changed');self.assertEqual(api.calls,[('GET','/pages/'+uid(100),None)])
+        state=self.state()['sources']['source1'];self.assertNotIn(uid(100),state['pages']);self.assertEqual(state['pages'][uid(101)],other)
+
+    def test_route_hold_fixed_memo_identity_delegates_instead_of_generic_copy(self):
+        api=API([page(100),page(101)]);config=settings();config['sources'][0]['owner']='flomo'
+        api.pages[0]['properties']['Link']={'id':'link','type':'url','url':'https://flomoapp.com/mine?memo_id=invalid%20memo'}
+        self.collect(api,config);api.pages[0]['properties']['Link']['url']='https://flomoapp.com/mine?memo_id=synthetic-repaired';api.calls.clear()
+        report=self.collect(api,config);self.assertFalse(report['held']);self.assertEqual(report['written'],0)
+        self.assertEqual(report['delegated'][uid(100)]['memo_id'],'synthetic-repaired');self.assertFalse(report['delegated'][uid(100)]['verified'])
+        self.assertNotIn(uid(100),self.state()['sources']['source1']['pages']);self.assertEqual(api.calls,[('GET','/pages/'+uid(100),None)])
+
 
 class Scope(unittest.TestCase):
     def setUp(self):self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)

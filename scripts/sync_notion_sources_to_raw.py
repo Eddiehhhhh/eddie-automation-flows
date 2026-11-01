@@ -430,9 +430,25 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                 attempted=0
                 for row in inventory['records']:
                     budget.check()
-                    ident=row['id'];prior=record['pages'].get(ident,{})
+                    ident=row['id'];prior=record['pages'].get(ident,{});probed=False
                     if row.get('route_hold'):
-                        report['held'][ident]=row['route_hold'];continue
+                        if attempted>=settings['batch']['per_source_pages']:
+                            report['pending'][key]='per_source_page_budget';break
+                        budget.page();attempted+=1;probed=True
+                        try:
+                            fresh=call('GET','/pages/'+ident)
+                            parent=fresh.get('parent',{}).get('database_id') or fresh.get('parent',{}).get('data_source_id')
+                            require(fresh.get('id')==ident and parent==source['database_id'],'source_parent_identity_changed')
+                            require(notion.parse_time(fresh.get('last_edited_time')) is not None and notion.parse_time(fresh.get('created_time')) is not None,'source_probe_time_missing')
+                            mid=shared.memo_id(fresh) if source.get('owner')=='flomo' else None
+                            fingerprint=metadata_fingerprint(fresh)
+                            row.update(last_edited_time=fresh['last_edited_time'],created_time=fresh['created_time'],metadata_fingerprint=fingerprint)
+                            row.pop('route_hold',None);row.pop('flomo_memo_id',None)
+                            if mid:row['flomo_memo_id']=mid
+                            save_source()
+                        except BudgetExceeded:raise
+                        except Exception as exc:
+                            row['route_hold']=safe_failure(exc);report['held'][ident]=row['route_hold'];save_source();continue
                     if row.get('flomo_memo_id'):
                         delegated=flomo_delegation(root,row,source['database_id'])
                         record.setdefault('delegations',{})[ident]=delegated
@@ -444,9 +460,10 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                             report['unchanged']+=1;continue
                         if not apply:
                             report['pending'][ident]='dry_run';continue
-                        if attempted>=settings['batch']['per_source_pages']:
-                            report['pending'][key]='per_source_page_budget';break
-                        budget.page();attempted+=1
+                        if not probed:
+                            if attempted>=settings['batch']['per_source_pages']:
+                                report['pending'][key]='per_source_page_budget';break
+                            budget.page();attempted+=1
                         receipt,files=capture_page(root,row,source,prior,call,budget,downloader,base)
                         require(read(state_path)==before,'source_state_changed');check_files(root,owned_files(prior),base)
                         for path,raw in files.items():shared.immutable_write(shared.safe_path(root/base,path),raw)
