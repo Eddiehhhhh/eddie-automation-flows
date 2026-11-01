@@ -179,7 +179,7 @@ class Wiring(unittest.TestCase):
             expression=steps[name].split('        if: ${{ ',1)[1].split(' }}',1)[0]
             expression=expression.replace('!cancelled()','not cancelled()')
             expression=re.sub(r'!inputs\.', 'not inputs.', expression).replace('&&','and').replace('||','or')
-            return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(raw16_only=False,flomo_stage_only=False,full_sync=False,messages_only=only),'github':SimpleNamespace(event_name='workflow_dispatch' if only else 'schedule'),'cancelled':lambda:cancelled})
+            return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(raw16_only=False,flomo_stage_only=False,full_sync=False,messages_only=only, notion_sources_only=False),'github':SimpleNamespace(event_name='workflow_dispatch' if only else 'schedule'),'cancelled':lambda:cancelled})
         config='Read private message source configuration'
         self.assertTrue(allowed(config));self.assertTrue(allowed(config,only=True));self.assertFalse(allowed(config,cancelled=True))
         self.assertIn('continue-on-error: true',steps[config])

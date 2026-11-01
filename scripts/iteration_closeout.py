@@ -17,6 +17,7 @@ import build_observatory_frontend
 import iteration_incremental_audit
 import flomo_cloud_current
 import sync_notehelper_messages_to_raw as notehelper_messages
+import sync_notion_sources_to_raw as complete_sources
 import iteration_source_discovery
 from iteration_public_state import public_state
 import workspace_intake_report
@@ -336,6 +337,8 @@ def extract_note_type(fields: dict[str, str]) -> str | None:
 
 
 def pick_evidence_date(path: Path, fields: dict[str, str], source: str) -> date | None:
+    if fields.get("source_system") == "notion-cloud-source":
+        return parse_date(fields.get("source_date")) or parse_date(fields.get("notion_created_time"))
     for key in ("created_at", "updated_at", "date", "收藏时间"):
         found = parse_date(fields.get(key))
         if found:
@@ -387,11 +390,14 @@ def entries_in_range(base: Path | None, source: str, start: date, end: date, *, 
     if base is None or not base.exists():
         return []
     items: list[Entry] = []
+    managed = [ROOT/complete_sources.BASE, ROOT/complete_sources.DOUBAN_BASE]
+    notion_selection = complete_sources.all_active_selection(ROOT) if any(path.is_relative_to(base) or base.is_relative_to(path) for path in managed) else None
     selection = (flomo_selection if flomo_selection is not None else flomo_cloud_current.active_selection(ROOT)) if source == 'flomo' else None
     for path in iter_markdown_files(base):
         if path.is_relative_to(ROOT / flomo_cloud_current.shared.STAGE): continue
         if selection is not None and not flomo_cloud_current.eligible_path(ROOT,path,selection): continue
         if not notehelper_messages.eligible_path(ROOT,path): continue
+        if not complete_sources.eligible_path(ROOT,path,notion_selection): continue
         entry = entry_from_path(path, source)
         if entry.frontmatter.get('stage_only','').lower() == 'true': continue
         if entry.evidence_date and start <= entry.evidence_date <= end:
@@ -715,7 +721,7 @@ def build_source_snapshot(
 ) -> dict[str, Any]:
     flomo_selection = flomo_cloud_current.active_selection(ROOT)
     flomo_window_entries = entries_in_range(RAW_DIR / "01 Flomo", "flomo", start, end, flomo_selection=flomo_selection)
-    notion_window_entries = entries_in_range(RAW_DIR / "02 Notion", "notion", start, end)
+    notion_window_entries = entries_in_range(RAW_DIR / "02 Notion", "notion", start, end) + entries_in_range(ROOT/complete_sources.DOUBAN_BASE, "notion", start, end)
     get_window_entries = entries_in_range(RAW_DIR / "03 Get", "get", start, end)
     cubox_root, cubox_mode = source_root_for_cubox()
     cubox_window_entries = entries_in_range(cubox_root, "cubox", start, end)
@@ -728,7 +734,7 @@ def build_source_snapshot(
             "window_entries": flomo_window_entries,
         },
         "notion": {
-            "entries": entries_in_range(RAW_DIR / "02 Notion", "notion", exact_start, exact_end),
+            "entries": entries_in_range(RAW_DIR / "02 Notion", "notion", exact_start, exact_end) + entries_in_range(ROOT/complete_sources.DOUBAN_BASE, "notion", exact_start, exact_end),
             "window_entries": notion_window_entries,
         },
         "get": {

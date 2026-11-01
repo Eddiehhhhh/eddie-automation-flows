@@ -148,7 +148,7 @@ def notion_request(
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+                body = resp.read().decode("utf-8", errors="strict")
             return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
             last_error = exc

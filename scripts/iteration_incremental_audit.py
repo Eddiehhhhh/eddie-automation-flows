@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +19,7 @@ from pathlib import Path
 import iteration_source_discovery
 import flomo_cloud_current
 import sync_notehelper_messages_to_raw as notehelper_messages
+import sync_notion_sources_to_raw as complete_sources
 
 
 ROOT = Path(os.environ.get("VAULT_ROOT", Path(__file__).resolve().parents[1]))
@@ -38,6 +39,8 @@ class Candidate:
     note_type: str | None
     priority: str
     reason: str
+    source_identities: list[str] = field(default_factory=list)
+    source_representation: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,7 +109,25 @@ def priority_for(source: str, path: Path, note_type: str | None) -> tuple[str, s
     return "normal", "incremental source evidence"
 
 
-def candidate_from_file(path: Path, source: str, start: date, end: date, *, flomo_selection=None) -> Candidate | None:
+def source_identities(fields):
+    if fields.get('source_identity'):return [fields['source_identity']]
+    for key in ('notion_page_id','page_id','episode_page_id'):
+        if fields.get(key):return ['notion:'+fields[key]]
+    value=fields.get('session_page_ids')
+    if value:
+        try:
+            values=json.loads(value)
+            if isinstance(values,str):values=json.loads(values)
+            if isinstance(values,list):return ['notion:'+str(v) for v in values]
+        except (ValueError,TypeError):pass
+    return []
+
+
+def source_representation(fields):
+    return fields.get('source_representation') or ('daily_aggregate' if fields.get('source_type')=='workout_daily' else 'existing_summary' if fields.get('source_type')=='douban_movie' else None)
+
+
+def candidate_from_file(path: Path, source: str, start: date, end: date, *, flomo_selection=None, notion_selection=None) -> Candidate | None:
     if path.suffix.lower() != ".md":
         return None
     if "_assets" in path.parts or "Asserts" in path.parts:
@@ -123,6 +144,7 @@ def candidate_from_file(path: Path, source: str, start: date, end: date, *, flom
     relative = rel(path) if path.is_relative_to(ROOT) else ''
     if not flomo_cloud_current.eligible_path(ROOT,path,selection): return None
     if not notehelper_messages.eligible_path(ROOT,path): return None
+    if not complete_sources.eligible_path(ROOT,path,notion_selection): return None
     text = read_text_head(path)
     fields = parse_frontmatter(text)
     if fields.get("stage_only", "").lower() == "true":
@@ -137,6 +159,11 @@ def candidate_from_file(path: Path, source: str, start: date, end: date, *, flom
     ]
     if relative in selection['edited']:
         date_fields.insert(0, ('mtime_weak', datetime.fromtimestamp(path.stat().st_mtime, SHANGHAI).isoformat()))
+    if fields.get("source_system") == "notion-cloud-source":
+        date_fields = [(key,fields.get(key)) for key in ("source_date","notion_created_time","notion_last_edited_time")] + [("path", "")]
+        current_selection = notion_selection if notion_selection is not None else complete_sources.all_active_selection(ROOT)
+        if relative in current_selection["edited"]:
+            date_fields.insert(0,("mtime_weak",datetime.fromtimestamp(path.stat().st_mtime,SHANGHAI).isoformat()))
     for field, raw_value in date_fields:
         found = parse_date(raw_value)
         if found and start <= found <= end:
@@ -151,6 +178,8 @@ def candidate_from_file(path: Path, source: str, start: date, end: date, *, flom
                 note_type=note_type,
                 priority=priority,
                 reason=reason,
+                source_identities=source_identities(fields),
+                source_representation=source_representation(fields),
             )
 
     # mtime is only a weak fallback when the file has no usable date evidence.
@@ -168,6 +197,8 @@ def candidate_from_file(path: Path, source: str, start: date, end: date, *, flom
                 note_type=note_type,
                 priority=priority,
                 reason=reason,
+                source_identities=source_identities(fields),
+                source_representation=source_representation(fields),
             )
     return None
 
@@ -188,6 +219,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
     per_source_counts: dict[str, int] = {}
 
     flomo_selection = flomo_cloud_current.active_selection(ROOT)
+    notion_selection = complete_sources.all_active_selection(ROOT)
     for item in discovery["sources"]:
         source = item["path"]
         if not item["exists"] or item.get("source_status") == "archive-only":
@@ -197,7 +229,7 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
         for path in source_path.rglob("*.md"):
             if not path.is_file():
                 continue
-            candidate = candidate_from_file(path, source, start, end, flomo_selection=flomo_selection)
+            candidate = candidate_from_file(path, source, start, end, flomo_selection=flomo_selection, notion_selection=notion_selection)
             if candidate:
                 source_candidates.append(candidate)
         source_candidates.sort(key=lambda c: (c.priority != "high", c.evidence_date or "", c.path))
@@ -205,6 +237,9 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
         candidates.extend(source_candidates[:limit_per_source])
 
     high_priority = [c for c in candidates if c.priority == "high"]
+    identity_groups = {}
+    for candidate in candidates:
+        for identity in candidate.source_identities:identity_groups.setdefault(identity,[]).append(candidate.path)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target_date": target.isoformat(),
@@ -218,9 +253,12 @@ def audit(target: date, window_days: int, limit_per_source: int) -> dict:
             "per_source": per_source_counts,
         },
         "candidates": [asdict(c) for c in candidates],
+        "source_identity_groups": {key:paths for key,paths in identity_groups.items() if len(paths)>1},
+        "notion_source_verification": {"selected":len(notion_selection["current"]),"held_count":len(notion_selection["held"]),"held_reasons":dict(Counter(notion_selection["held"].values()))},
         "flomo_current_verification": {"selected": len(flomo_selection["current"]), "superseded_legacy": len(flomo_selection["superseded"]), "held_count": len(flomo_selection["held"]), "held_reasons": dict(Counter(flomo_selection["held"].values()))},
         "notes": [
             "mtime_weak means date metadata was absent; do not promote without reading the file.",
+            "source_identity_groups identify the same underlying Notion record across original/summary/aggregate views; do not count it as several events. All readable text remains available.",
             "each discovered source is scanned recursively, so new files and subfolders under it are automatically included.",
             "Get voice/recorder candidates should be read before judging personal state.",
             "source_delta is read from the previous iteration-source-discovery snapshot when available.",
