@@ -308,6 +308,10 @@ def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=dow
                     max_pages=max_pages, downloader=downloader)
                 result['original_source'] = supplement
                 result['complete'] = result['complete'] and supplement['complete']
+                if supplement.get('soft_exit') == 'job_budget_reserved_for_persistence':
+                    persistence_due = True
+                    result['followup_pending'] = {'formal_current': current_export_enabled}
+                    if current_export_enabled: result['complete'] = False
             if current_export_enabled and not persistence_due:
                 import flomo_cloud_current as current
                 result['formal_current'] = current.export(root)
