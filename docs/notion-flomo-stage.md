@@ -272,3 +272,35 @@ Code/tests alone do not establish production completeness. Acceptance must show
 one real bounded run, a private commit containing state plus all referenced
 objects, remote readback, and correct current consumers; historical backfill stays
 pending until every observed owned source page has the new proof.
+
+
+## Readable relation targets and renderer revision
+
+Proof-enabled stage notes now render each complete relation target as a stable
+Notion page link in the readable body. The source JSON, property response
+annotations and relation values are unchanged. Unproved notes keep their old
+rendering; the data proof stays `property_proof_version: 1`.
+
+The separate receipt/Markdown field `property_renderer_revision: 2` governs this
+reading format. Existing proof receipts with no field mean revision 1. An
+unchanged source with a valid older proof can upgrade from its immutable cache:
+all source JSON, response envelopes and assets must pass their recorded hashes;
+property pagination is replayed offline; source identity and metadata must match
+fresh before/after page GETs. Original JSON bytes are copied unchanged, all old
+versions remain, and only a new Markdown/state version is published. Incomplete,
+edited, credential-bearing or source-changed evidence holds or uses the existing
+safe fresh-capture path; no data proof is fabricated. No property/block/asset
+network reads occur solely to change cached formatting.
+
+Page priority is new/changed sources, then completed proofs awaiting this format,
+then unproved historical backfill. The existing bounded page/request/time budgets
+still apply. Coverage distinguishes `renderer_rewritten` from `property_hydrated`;
+`written` includes both and must not be called a count of newly acquired data
+proofs. Source dates and old fact candidates are preserved.
+
+Formal current follows the changed stage version through its existing source
+hash gate and records `notion_property_renderer_revisions`. It renders legacy
+proofs as revision 1 until their stage receipt upgrades. The global current
+renderer version is not bumped, so unrelated current notes are not all rewritten.
+The independent original-source followup can still update other notes under its
+own existing limits; this revision does not change that stage or schedule.

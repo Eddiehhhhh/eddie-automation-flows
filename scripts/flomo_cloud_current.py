@@ -209,7 +209,8 @@ def notion_body(root,mid,record,files,evidence):
             for item in value:rewrite(item)
     rewrite(material)
     rendered=shared.render_record(material['page'],material['blocks'],mid,[],embed_images=True,
-        include_text_properties=(captured.get('property_capture') or {}).get('proof_version')==1).decode()
+        include_text_properties=(captured.get('property_capture') or {}).get('proof_version')==1,
+        property_renderer_revision=record.get('property_renderer_revision',1)).decode()
     body=rendered.split('---',2)[2].lstrip()
     page=captured['page']; title=shared.notion.page_title(page,'Name')
     for prop_name,prop in material['page'].get('properties',{}).items():
@@ -314,6 +315,9 @@ def render(root,mid,notion_record,original_record,legacy,status,now):
         'notion_source_page_ids':[item[0] for item in variants],
         'stage_only':False,'formal_current':True,'unmerged_evidence':len(variants)>1 or bool(legacy),
         'media_complete':not degraded,'degraded_reasons':sorted(set(degraded))}
+    revisions={ident:record.get('property_renderer_revision',1) for ident,record in sources(notion_record).items()
+               if record.get('property_proof_version')==1}
+    if revisions:metadata['notion_property_renderer_revisions']=revisions
     if metadata['upstream_deleted_at']:
         body='> 原源带有删除标记。本文保留历史证据，不代表内容继续有效。\n\n'+body
     raw=(shared.notion.render_frontmatter(metadata,native_lists=True)+'\n\n# '+html.escape(title.replace('\n',' '),quote=False)+'\n\n'+body+'\n').encode()
