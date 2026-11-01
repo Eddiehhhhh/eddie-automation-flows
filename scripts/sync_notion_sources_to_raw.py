@@ -12,6 +12,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 
 import cloud_private_checkout
@@ -32,6 +33,7 @@ DOUBAN_STATE=Path('.github/state/notion-douban-source-state.json')
 PROOF_VERSION=1
 RENDERER_VERSION=1
 BUTTON_PARTIAL_PROOF_VERSION=1
+ASSET_PARTIAL_PROOF_VERSION=1
 MARKDOWN_API_VERSION="2026-03-11"
 UUID=re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 MAX_BATCH_BYTES=200*1024*1024
@@ -125,7 +127,7 @@ def property_text(prop):
     kind=prop.get('type');value=prop.get(kind)
     if kind in ('title','rich_text'):return rich_text(value or [])
     if kind=='files':
-        return '\n'.join('- ['+label(item.get('name') or '附件')+']('+link(item.get(item.get('type'),{}).get('url',''))+')' for item in value or [])
+        return '\n'.join('- '+label(item.get('name') or '附件')+'（附件未保存：'+item['_asset_gap']['reason']+'）' if item.get('_asset_gap') else '- ['+label(item.get('name') or '附件')+']('+link(item.get(item.get('type'),{}).get('url',''))+')' for item in value or [])
     if kind=='relation':return '\n'.join('- [关联原页](https://www.notion.so/'+item['id'].replace('-','')+')' for item in value or [])
     if kind=='people':return '\n'.join('- '+str(item.get('name') or item.get('id','')) for item in value or [])
     if kind in ('select','status'):return str((value or {}).get('name') or '')
@@ -136,10 +138,14 @@ def property_text(prop):
     return str(value)
 
 
-def render(page,blocks,source,asset_files,gaps=()):
+def render(page,blocks,source,asset_files,gaps=(),asset_gaps=()):
     page=deepcopy(page);blocks=deepcopy(blocks);cache={};gap_ids={gap["block_id"] for gap in gaps}
     def transform(rows):
         for row in rows:
+            unavailable=row.get(row['type'],{}).get('_asset_gap')
+            if unavailable:
+                caption=rich_text(row.get(row['type'],{}).get('caption') or [])
+                row['type']='paragraph';row['paragraph']={'rich_text':[{'type':'text','text':{'content':caption+'（附件未保存：'+unavailable['reason']+'；原始来源已保留）'}}]}
             if row['id'] in gap_ids:
                 text='[Notion 按钮读取缺口：标签及操作未能保存，不能视为空内容](https://www.notion.so/'+page['id'].replace('-','')+'#'+row['id'].replace('-','')+')'
                 row['type']='paragraph';row['paragraph']={'rich_text':[{'type':'text','text':{'content':text}}]}
@@ -162,7 +168,8 @@ def render(page,blocks,source,asset_files,gaps=()):
         'notion_last_edited_time':page.get('last_edited_time'),'source_date':source_date,
         'source_date_property':date_name,'source_date_basis':'notion_property' if source_date else 'notion_page_created_time',
         'property_proof_version':PROOF_VERSION,'captured_at':stamp(),'legacy_merge_status':'unmerged_legacy_preserved'}
-    if gaps:metadata.update(capture_complete=False,readable_partial=True,unsupported_gap_count=len(gaps))
+    if gaps or asset_gaps:metadata.update(capture_complete=False,readable_partial=True,unsupported_gap_count=len(gaps))
+    if asset_gaps:metadata['asset_gap_count']=len(asset_gaps)
     # Materialized assets are adjacent to the versioned readable note.
     parts=[notion.render_frontmatter(metadata,native_lists=True),'','# '+title,'',
         '- 资料日期：'+str(source_date or '未提供独立资料日期'),
@@ -171,7 +178,8 @@ def render(page,blocks,source,asset_files,gaps=()):
     for name,prop in page['properties'].items():
         value=property_text(prop)
         if value:parts.extend(['### '+str(name),'',value,''])
-    if gaps:parts.extend(['> ⚠️ 部分保存：可读取的属性、正文和附件已保存；Notion 按钮的标签及操作仍有缺口，不是完整备份。',''])
+    if asset_gaps:parts.extend(['> ⚠️ 部分保存：可读取的属性、正文和其余附件已保存；有附件无法读取'+('，按钮也有读取缺口' if gaps else '')+'，不是完整备份。',''])
+    elif gaps:parts.extend(['> ⚠️ 部分保存：可读取的属性、正文和附件已保存；Notion 按钮的标签及操作仍有缺口，不是完整备份。',''])
     parts.extend(['## 正文','']);parts.extend(notion.render_blocks('',blocks,children_loader=lambda _,ident:cache[ident],embed_images=True))
     # Covers/icons can be meaningful even when they are not block content.
     used='\n'.join(parts)
@@ -180,6 +188,7 @@ def render(page,blocks,source,asset_files,gaps=()):
         item=page.get(area) or {};url=item.get(item.get('type'),{}).get('url') if isinstance(item.get(item.get('type')),dict) else None
         if url and url not in used:extras.append('!['+area+']('+link(url)+')')
     if extras:parts.extend(['','## 页面附件','',*extras])
+    if asset_gaps:parts.extend(['','## 未保存附件','',*['- 附件 '+str(i+1)+'：'+gap['reason']+'；来源保留在原始记录中，后续有界重试。' for i,gap in enumerate(asset_gaps)]])
     text='\n'.join(parts).rstrip()+'\n'
     text=notehelper_owner.MARKER.sub(lambda match:'<!--source-notion:'+match.group(1)+'-->',text)
     raw=text.encode();reject(raw)
@@ -274,8 +283,33 @@ def button_gaps(page_id,blocks,request):
 
 
 def current_proof(entry,row,*,partial=False):
-    proven=(entry.get('capture_complete') is False and entry.get('readable_partial') is True and entry.get('button_partial_proof_version')==BUTTON_PARTIAL_PROOF_VERSION and bool(entry.get('incomplete_gaps'))) if partial else entry.get('capture_complete')
+    proven=entry.get('capture_complete')
+    if partial:
+        gaps=entry.get('incomplete_gaps') or []
+        proven=(entry.get('capture_complete') is False and entry.get('readable_partial') is True and bool(gaps)
+            and all(gap.get('type') in ('button','asset') for gap in gaps)
+            and (not any(gap['type']=='button' for gap in gaps) or entry.get('button_partial_proof_version')==BUTTON_PARTIAL_PROOF_VERSION)
+            and (not any(gap['type']=='asset' for gap in gaps) or entry.get('asset_partial_proof_version')==ASSET_PARTIAL_PROOF_VERSION))
     return bool(proven and entry.get('property_proof_version')==PROOF_VERSION and entry.get('renderer_version')==RENDERER_VERSION and entry.get('last_edited_time')==row['last_edited_time'] and entry.get('metadata_fingerprint')==row.get('metadata_fingerprint'))
+
+
+def has_asset_gap(entry):return any(gap.get('type')=='asset' for gap in entry.get('incomplete_gaps',[]))
+
+
+def asset_http_reason(exc):
+    require(type(exc.code) is int and 300<=exc.code<=599,'invalid_asset_http_status')
+    return 'asset_http_'+str(exc.code)
+
+
+def unavailable_link(text,url,reason):
+    notice='附件未保存：'+reason+'；原始来源已保留'
+    target=re.escape(url)
+    def image_notice(match):
+        labels=[item[2] for item in re.finditer(r'\b(?:alt|title)=(["\'])(.*?)\1',match[0],re.I)]
+        return ' '.join(dict.fromkeys(labels))+'（'+notice+'）'
+    text=re.sub(r'<img\b[^>]*\bsrc=["\']'+target+r'["\'][^>]*>',image_notice,text,flags=re.I)
+    text=re.sub(r'!?\[([^\]\n]*)\]\('+target+r'\)',lambda match:(match[1]+'（'+notice+'）'),text)
+    return text.replace(url,'['+notice+']')
 
 
 def download_checked(url,budget,downloader):
@@ -285,21 +319,26 @@ def download_checked(url,budget,downloader):
 
 
 def materialize(value,budget,downloader):
-    files={};cache={};urls={}
-    def download(url):
-        if url not in cache:
-            raw=download_checked(url,budget,downloader);cache[url]=raw;urls[digest(raw)]=url
-        return cache[url]
-    rendered=shared.materialize_assets(value,files,download)
-    renames={};result={}
-    for relative,raw in files.items():
-        new='assets/'+digest(raw)+flomo_cloud_current.asset_suffix(raw,urls[digest(raw)])
-        renames[relative]=new;result[new]=raw
-    def rewrite(obj):
-        if isinstance(obj,list):return [rewrite(v) for v in obj]
-        if isinstance(obj,dict):return {k:rewrite(v) for k,v in obj.items()}
-        return renames.get(obj,obj) if isinstance(obj,str) else obj
-    return rewrite(rendered),result
+    files={};cache={};failed={};gaps=[]
+    def visit(obj,trail=()):
+        if isinstance(obj,list):return [visit(v,(*trail,i)) for i,v in enumerate(obj)]
+        if not isinstance(obj,dict):return obj
+        result={key:visit(item,(*trail,key)) for key,item in obj.items()};kind=obj.get('type')
+        if kind not in ('file','external') or not isinstance(obj.get(kind),dict) or not obj[kind].get('url'):return result
+        url=obj[kind]['url']
+        if url not in cache and url not in failed:
+            try:cache[url]=download_checked(url,budget,downloader)
+            except urllib.error.HTTPError as exc:
+                failed[url]=asset_http_reason(exc);exc.close()
+        if url in failed:
+            gap={'type':'asset','asset_id':digest(encoded(trail)),'location':list(trail),'reason':failed[url]}
+            gaps.append(gap);result[kind]['url']='';result['_asset_gap']=gap
+        else:
+            raw=cache[url];relative='assets/'+digest(raw)+flomo_cloud_current.asset_suffix(raw,url)
+            files[relative]=raw;result[kind]['url']=relative
+        return result
+    rendered=visit(value)
+    return rendered,files,gaps,failed
 
 
 def capture_page(root,page,source,prior,request,budget,downloader,base=BASE):
@@ -320,33 +359,55 @@ def capture_page(root,page,source,prior,request,budget,downloader,base=BASE):
         'blocks':blocks,'property_proof_version':full['proof_version'],'source_database_id':source['database_id']}
     if gaps:original.update(markdown_v2={'api_version':MARKDOWN_API_VERSION,'markdown_version':'v2','response':markdown_response},readable_partial=True,incomplete_gaps=gaps)
     reject(encoded(original))
-    material,files=materialize({'page':full['hydrated_page'],'blocks':blocks},budget,downloader)
+    material,files,asset_gaps,failed_urls=materialize({'page':full['hydrated_page'],'blocks':blocks},budget,downloader)
     original['materialized']=deepcopy(material)
     original['materialized_assets']={name:{'sha256':digest(raw),'size':len(raw)} for name,raw in files.items()}
-    filename,markdown,metadata=render(material['page'],material['blocks'],source,files,gaps=gaps)
+    filename,markdown,metadata=render(material['page'],material['blocks'],source,files,gaps=gaps,asset_gaps=asset_gaps)
     # Preserve image/file embeds that arrived as literal Markdown or HTML text.
     text=markdown.decode();embedded=set(re.findall(r'!\[[^\]\n]*\]\((https?://[^\s)]+)\)',text))
     embedded.update(re.findall(r'<img\b[^>]*\bsrc=["\'](https?://[^"\']+)',text,re.I))
     embedded.update(re.findall(r'📎\s*\[[^\]\n]*\]\((https?://[^\s)]+)\)',text))
     for url in sorted(embedded):
-        raw=download_checked(url,budget,downloader)
+        if url in failed_urls:
+            asset_gaps.append({'type':'asset','asset_id':digest(encoded(['literal',url])),'location':['literal'],'reason':failed_urls[url]})
+            continue
+        try:raw=download_checked(url,budget,downloader)
+        except urllib.error.HTTPError as exc:
+            failed_urls[url]=asset_http_reason(exc);exc.close()
+            asset_gaps.append({'type':'asset','asset_id':digest(encoded(['literal',url])),'location':['literal'],'reason':failed_urls[url]})
+            continue
         relative='assets/'+digest(raw)+flomo_cloud_current.asset_suffix(raw,url);files[relative]=raw
         original.setdefault('literal_assets',{})[url]={'path':relative,'sha256':digest(raw),'size':len(raw)}
         text=text.replace(url,link(relative))
     text=notehelper_owner.MARKER.sub(lambda match:'<!--source-notion:'+match.group(1)+'-->',text)
+    for url,reason in failed_urls.items():text=unavailable_link(text,url,reason)
+    # Literal embeds are discovered after rendering; rebuild the notice with their gaps too.
+    if asset_gaps:
+        original.update(readable_partial=True,asset_gaps=asset_gaps,asset_failure_sources=[{'url':url,'reason':reason} for url,reason in failed_urls.items()])
+        filename,rebuilt,metadata=render(material['page'],material['blocks'],source,files,gaps=gaps,asset_gaps=asset_gaps)
+        text=rebuilt.decode()
+        for url,asset in original.get('literal_assets',{}).items():text=text.replace(url,link(asset['path']))
+        for url,reason in failed_urls.items():text=unavailable_link(text,url,reason)
     markdown=text.encode();reject(markdown)
     files['source.json']=encoded(original);files[filename]=markdown
     after=request('GET','/pages/'+ident)
     require(after.get('id')==ident and after.get('last_edited_time')==before['last_edited_time'] and metadata_fingerprint(after)==metadata_fingerprint(before),'source_changed_during_capture')
     require((after.get('parent',{}).get('database_id') or after.get('parent',{}).get('data_source_id'))==source['database_id'],'source_parent_identity_changed')
+    all_gaps=gaps+asset_gaps
+    stable_page=deepcopy(full['hydrated_page']);stable_page.pop('request_id',None)
+    capture_fingerprint=digest(encoded({'page':metadata_fingerprint({'properties':{'page':{'type':'raw','raw':stable_page}}}),'blocks':metadata_fingerprint({'properties':{'blocks':{'type':'raw','raw':blocks}}}),'edited':before['last_edited_time'],'gaps':sorted(all_gaps,key=lambda gap:gap.get('asset_id') or gap['block_id']),'assets':original['materialized_assets'],'literal_assets':original.get('literal_assets',{})}))
+    if prior.get('asset_partial_proof_version')==ASSET_PARTIAL_PROOF_VERSION and prior.get('capture_fingerprint')==capture_fingerprint:
+        return deepcopy(prior),{}
     version=digest(encoded({p:digest(raw) for p,raw in files.items()}));prefix=Path('versions')/source['key']/ident/version
     versioned={str(prefix/name):raw for name,raw in files.items()}
     receipt={'notion_page_id':ident,'source_identity':'notion:'+ident,'source_database_id':source['database_id'],
         'last_edited_time':before['last_edited_time'],'metadata_fingerprint':metadata_fingerprint(before),'property_observed_at':stamp(),'notion_created_time':before.get('created_time'),
-        'source_date':metadata['source_date'],'renderer_version':RENDERER_VERSION,'property_proof_version':full['proof_version'],'capture_complete':not bool(gaps),
+        'source_date':metadata['source_date'],'renderer_version':RENDERER_VERSION,'property_proof_version':full['proof_version'],'capture_complete':not bool(all_gaps),
         'current_path':str(prefix/filename),'title':metadata['title'],'files':{p:digest(raw) for p,raw in versioned.items()},
         'versions':{**prior.get('versions',{}),version:{p:digest(raw) for p,raw in versioned.items()}}}
-    if gaps:receipt.update(readable_partial=True,button_partial_proof_version=BUTTON_PARTIAL_PROOF_VERSION,incomplete_gaps=gaps)
+    if all_gaps:receipt.update(readable_partial=True,incomplete_gaps=all_gaps,capture_fingerprint=capture_fingerprint)
+    if gaps:receipt['button_partial_proof_version']=BUTTON_PARTIAL_PROOF_VERSION
+    if asset_gaps:receipt['asset_partial_proof_version']=ASSET_PARTIAL_PROOF_VERSION
     return receipt,versioned
 
 
@@ -354,8 +415,8 @@ def safe_failure(exc):
     if isinstance(exc,UnicodeError):return 'source_invalid_utf8'
     reason=str(exc)
     if isinstance(exc,ValueError) and re.fullmatch(r'[a-z_0-9]+',reason):return reason
-    cause=getattr(exc,'__cause__',None)
-    return 'source_http_'+str(cause.code) if hasattr(cause,'code') else 'source_capture_failed'
+    cause=exc if isinstance(exc,urllib.error.HTTPError) else getattr(exc,'__cause__',None)
+    return 'source_http_'+str(cause.code) if isinstance(cause,urllib.error.HTTPError) and type(cause.code) is int and 300<=cause.code<=599 else 'source_capture_failed'
 
 
 def source_coverage(record,held,source_key):
@@ -403,7 +464,7 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
         require(not source_keys or set(source_keys)<=keys,'unknown_selected_source')
         ordered=sources[state.get('next_source',0):]+sources[:state.get('next_source',0)]
         if source_keys:ordered=[s for s in sources if s['key'] in source_keys]
-        report={'written':0,'partial_written':0,'unchanged':0,'partial_unchanged':0,'held':{},'pending':{},'delegated':{},'soft_exit':None,'selected_sources':[s['key'] for s in ordered],
+        report={'written':0,'partial_written':0,'unchanged':0,'partial_unchanged':0,'asset_retries':0,'asset_http_failures':{},'held':{},'pending':{},'delegated':{},'soft_exit':None,'selected_sources':[s['key'] for s in ordered],
             'legacy_policy':'preserved_unmerged','configured_scope_complete':False,'selected_scope_complete':False}
         for source in ordered:
             key=source['key'];record=deepcopy(state['sources'].get(key,{'database_id':source['database_id'],'pages':{}}))
@@ -461,9 +522,11 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                 partial_ids=[row['id'] for row in inventory['records'] if current_proof(record['pages'].get(row['id'],{}),row,partial=True)]
                 previous=record.get('partial_probe_after')
                 partial_probe=partial_ids[(partial_ids.index(previous)+1)%len(partial_ids)] if previous in partial_ids else next(iter(partial_ids),None)
-                for row in inventory['records']:
+                # Retry the selected asset gap after unread pages, preserving their capture slots.
+                processing_rows=sorted(inventory['records'],key=lambda row:row['id']==partial_probe and has_asset_gap(record['pages'].get(row['id'],{})))
+                for row in processing_rows:
                     budget.check()
-                    ident=row['id'];prior=record['pages'].get(ident,{});probed=False
+                    ident=row['id'];prior=record['pages'].get(ident,{});probed=False;retry_asset=False
                     if row.get('route_hold'):
                         if attempted>=settings['batch']['per_source_pages']:
                             report['pending'][key]='per_source_page_budget';break
@@ -501,7 +564,9 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                             fingerprint=metadata_fingerprint(fresh)
                             require(notion.parse_time(fresh.get('last_edited_time')) is not None,'source_edit_time_missing')
                             if fresh['last_edited_time']==prior['last_edited_time'] and fingerprint==prior['metadata_fingerprint']:
-                                report['partial_unchanged']+=1;continue
+                                if not has_asset_gap(prior):
+                                    report['partial_unchanged']+=1;continue
+                                retry_asset=True
                             row.update(last_edited_time=fresh['last_edited_time'],metadata_fingerprint=fingerprint)
 
                         if not apply:
@@ -510,13 +575,19 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                             if attempted>=settings['batch']['per_source_pages']:
                                 report['pending'][key]='per_source_page_budget';break
                             budget.page();attempted+=1
+                        if retry_asset:report['asset_retries']+=1
                         receipt,files=capture_page(root,row,source,prior,call,budget,downloader,base)
                         require(read(state_path)==before,'source_state_changed');check_files(root,owned_files(prior),base)
                         for path,raw in files.items():shared.immutable_write(shared.safe_path(root/base,path),raw)
                         row['last_edited_time']=receipt['last_edited_time'];row['created_time']=receipt['notion_created_time'];row['metadata_fingerprint']=receipt['metadata_fingerprint']
                         check_files(root,owned_files(prior),base)
-                        record['pages'][ident]=receipt;save_source();report['written']+=1
-                        if receipt.get('readable_partial'):report['partial_written']+=1
+                        record['pages'][ident]=receipt;save_source()
+                        if files:
+                            report['written']+=1
+                            if receipt.get('readable_partial'):report['partial_written']+=1
+                        else:report['partial_unchanged']+=1
+                        for gap in receipt.get('incomplete_gaps',[]):
+                            if gap.get('type')=='asset':report['asset_http_failures'][gap['reason']]=report['asset_http_failures'].get(gap['reason'],0)+1
                     except RoutedFlomo as routed:
                         row.update(flomo_memo_id=routed.mid,last_edited_time=routed.edited,created_time=routed.created)
                         delegated=flomo_delegation(root,row,source['database_id']);record.setdefault('delegations',{})[ident]=delegated;report['delegated'][ident]=delegated;save_source()
@@ -545,7 +616,7 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                 if coverage.get('unobserved_remainder_unknown'):progress+='；来源清点尚未结束'
                 if coverage.get('delegated_pending'):progress+='；flomo原链完整属性证明待补 '+str(coverage['delegated_pending'])+' 页'
                 index.extend(['## '+source['name'],'',progress,''])
-                for ident,entry in sorted(state['sources'].get(source['key'],{}).get('pages',{}).items()):index.append('- ['+label(entry['title'])+']('+link(entry['current_path'])+')'+('（部分保存：按钮仍有读取缺口）' if entry.get('readable_partial') else '')+('（本轮源未观察；原稿保留）' if ident in source_state.get('retained_not_observed',[]) else ''))
+                for ident,entry in sorted(state['sources'].get(source['key'],{}).get('pages',{}).items()):index.append('- ['+label(entry['title'])+']('+link(entry['current_path'])+')'+('（部分保存：'+('附件' if has_asset_gap(entry) else '按钮')+'仍有读取缺口）' if entry.get('readable_partial') else '')+('（本轮源未观察；原稿保留）' if ident in source_state.get('retained_not_observed',[]) else ''))
                 index.append('')
             text=notehelper_owner.MARKER.sub(lambda match:'<!--source-notion:'+match.group(1)+'-->','\n'.join(index))
             raw=text.encode();reject(raw);path=shared.safe_path(root,base/'index.md');existing=read(path)
@@ -689,7 +760,7 @@ def main():
     require(settings['enabled'],'source_configuration_disabled')
     if args.max_pages is not None:require(1<=args.max_pages<=500,'invalid_source_page_budget');settings['batch']['max_pages']=args.max_pages
     report=collect(root,settings,notion.load_notion_api_key(),apply=args.apply,source_keys=args.source_key)
-    print(json.dumps({k:report[k] for k in ('written','partial_written','unchanged','partial_unchanged','selected_scope_complete','configured_scope_complete','soft_exit','api_requests','page_attempts')}))
+    print(json.dumps({k:report[k] for k in ('written','partial_written','unchanged','partial_unchanged','asset_retries','asset_http_failures','selected_scope_complete','configured_scope_complete','soft_exit','api_requests','page_attempts')}))
     if not report['selected_scope_complete']:raise SystemExit(2)
 
 if __name__=='__main__':main()
