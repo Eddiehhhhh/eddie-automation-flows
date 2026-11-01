@@ -1806,6 +1806,23 @@ def native_legacy_equivalent_payload(intent: Dict[str, Any], markdown: str) -> b
             and [_semantic_block_identity(b) for b in body] == [_semantic_block_identity(b) for b in file_page_blocks(ROOT, context["source_path"], markdown)])
 
 
+def _reused_snapshot_baseline(before: List[Dict[str, Any]], observed: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    # Historical signed URLs expire; the matching live block is byte-verified first.
+    assets = [b for b in before if b.get("type") in {"file", "image", "pdf", "audio", "video"}]
+    if len(assets) != 1 or assets[0].get("type") != "file" or assets[0].get("has_children"):
+        raise MirrorHeld("historical attachment shape requires review")
+    old = assets[0]
+    matches = [b for b in observed if b.get("id") == old.get("id") and b.get("type") == "file"]
+    if len(matches) != 1 or not old.get("id") or matches[0].get("has_children"):
+        raise MirrorHeld("historical attachment identity changed")
+    old_file, live_file = old.get("file", {}), matches[0].get("file", {})
+    if not isinstance(old_file, dict) or not isinstance(live_file, dict):
+        raise MirrorHeld("historical attachment payload invalid")
+    if any(old_file.get(k) != live_file.get(k) for k in ("name", "caption")):
+        raise MirrorHeld("historical attachment details changed")
+    return [{"id": b["id"], "hash": block_identity(matches[0])} if b is old else _baseline([b])[0] for b in before]
+
+
 def recover_reused_unicode_preservation(api_key: str, intent: Dict[str, Any], observed: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """GET-only requalification: retain the exact old attachment and all appended blocks."""
     try:
@@ -1851,8 +1868,8 @@ def recover_reused_unicode_preservation(api_key: str, intent: Dict[str, Any], ob
             raise MirrorHeld("reused attachment source or profile differs")
         target, observed = unicode_original_target(api_key, intent, observed)
         before = proof["before_blocks"]
-        if (target != proof["target_id"] or _baseline(before) != proof["before_baseline"]
-                or _baseline(observed) != proof["before_baseline"]
+        if (target != proof["target_id"] or _baseline(observed) != proof["before_baseline"]
+                or _reused_snapshot_baseline(before, observed) != proof["before_baseline"]
                 or not unicode_deletion_matches(intent, observed[len(intent["baseline"]):])
                 or recover_unicode_preservation(api_key, previous, observed[:len(intent["baseline"])]).get("status") != "verified"):
             raise MirrorHeld("reused original attachment target differs")

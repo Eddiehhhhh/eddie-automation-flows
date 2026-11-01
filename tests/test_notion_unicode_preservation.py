@@ -194,6 +194,24 @@ class UnicodePreservationTests(unittest.TestCase):
         state=m.load_state();state['write_intents']['f'*64]=copy.deepcopy(state['write_intents'][self.operation]);self.fx.persist(state)
         self.assertEqual(m.recover_intent('synthetic',intent)['status'],'held')
 
+    def test_historical_attachment_uses_matching_live_block_without_reading_expired_url(self):
+        old={'id':'file-1','type':'file','has_children':False,'file':{'type':'file','name':'source.md','caption':[],'file':{'url':'expired'}}}
+        live=copy.deepcopy(old);live['file']['file']['url']='fresh'
+        text={'id':'text-1','type':'paragraph','has_children':False,'paragraph':{'rich_text':[]}}
+        def identity(block):
+            if block.get('type')=='file':
+                self.assertEqual(block['file']['file']['url'],'fresh')
+            return 'hash-'+block['id']
+        with mock.patch.object(m,'block_identity',side_effect=identity):
+            baseline=m._reused_snapshot_baseline([text,old],[text,live])
+            self.assertEqual(baseline,[{'id':'text-1','hash':'hash-text-1'},{'id':'file-1','hash':'hash-file-1'}])
+            for mutate in (lambda b:b.update(id='other'),lambda b:b['file'].update(name='different'),lambda b:b['file'].update(caption=[{'text':{'content':'different'}}])):
+                changed=copy.deepcopy(live);mutate(changed)
+                with self.assertRaises(m.MirrorHeld):m._reused_snapshot_baseline([text,old],[text,changed])
+            with self.assertRaises(m.MirrorHeld):m._reused_snapshot_baseline([old,copy.deepcopy(old)],[live])
+            invalid=copy.deepcopy(live);invalid['file']=None
+            with self.assertRaises(m.MirrorHeld):m._reused_snapshot_baseline([old],[invalid])
+
     def test_lost_attachment_append_response_recovers_after_runner_rebuild_by_gets_only(self):
         self.lose_repair=True;result=self.repair();self.assertEqual(result['held'],1);self.assertEqual(result['attempted_batches'],1)
         state=m.load_state();self.assertEqual(state['write_intents'][self.operation]['unicode_preservation']['phase'],'dispatched')
