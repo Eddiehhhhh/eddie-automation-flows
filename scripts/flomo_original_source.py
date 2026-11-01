@@ -26,7 +26,7 @@ LIMIT = 200
 MAX_PAGES = 100
 MAX_RESPONSE = 8 * 1024 * 1024
 INPUT_FINGERPRINT_VERSION = 1
-AUTH_CDN_HOSTS = frozenset(('static.flomoapp.com',))
+AUTH_CDN_HOSTS = frozenset(('static.flomoapp.com', 'flomo.oss-cn-shanghai.aliyuncs.com'))
 AUTH_QUERY_KEYS = frozenset(('Expires', 'Signature'))
 
 
