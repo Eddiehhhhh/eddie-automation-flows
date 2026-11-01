@@ -1,43 +1,22 @@
-name: One-time Get read-only credential probe
-
+name: Temporary bounded Get proof read-only smoke
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: List-only authentication or bounded detail metrics
-        type: choice
-        options: [list, details]
-        default: list
-
 permissions:
   contents: read
-
-concurrency:
-  group: getnote-readonly-probe
-  cancel-in-progress: false
-
 jobs:
-  probe:
+  smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Offline log and request-boundary tests
-        run: python -m unittest discover -s tests -p 'test_probe_getnote*.py' -v
-      - name: One Get list request with existing cloud secrets
-        if: inputs.mode != 'details'
+      - name: Verify fixed source through bounded read-only HTTPS
         env:
-          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
-          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
-        run: python scripts/probe_getnote_auth.py
-      - name: At most two detail requests after one list page
-        if: inputs.mode == 'details'
-        env:
-          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
-          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
-        run: python scripts/probe_getnote_details.py
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: python get-runtime/tests/readonly_https_smoke.py
