@@ -390,7 +390,7 @@ def entries_in_range(base: Path | None, source: str, start: date, end: date, *, 
     if base is None or not base.exists():
         return []
     items: list[Entry] = []
-    managed = [ROOT/complete_sources.BASE, ROOT/complete_sources.DOUBAN_BASE]
+    managed = [ROOT/complete_sources.BASE, ROOT/complete_sources.DOUBAN_BASE, ROOT/complete_sources.EPISODE_BASE]
     notion_selection = complete_sources.all_active_selection(ROOT) if any(path.is_relative_to(base) or base.is_relative_to(path) for path in managed) else None
     selection = (flomo_selection if flomo_selection is not None else flomo_cloud_current.active_selection(ROOT)) if source == 'flomo' else None
     for path in iter_markdown_files(base):
@@ -721,7 +721,7 @@ def build_source_snapshot(
 ) -> dict[str, Any]:
     flomo_selection = flomo_cloud_current.active_selection(ROOT)
     flomo_window_entries = entries_in_range(RAW_DIR / "01 Flomo", "flomo", start, end, flomo_selection=flomo_selection)
-    notion_window_entries = entries_in_range(RAW_DIR / "02 Notion", "notion", start, end) + entries_in_range(ROOT/complete_sources.DOUBAN_BASE, "notion", start, end)
+    notion_window_entries = entries_in_range(RAW_DIR / "02 Notion", "notion", start, end) + entries_in_range(ROOT/complete_sources.DOUBAN_BASE, "notion", start, end) + entries_in_range(ROOT/complete_sources.EPISODE_BASE, "notion", start, end)
     get_window_entries = entries_in_range(RAW_DIR / "03 Get", "get", start, end)
     cubox_root, cubox_mode = source_root_for_cubox()
     cubox_window_entries = entries_in_range(cubox_root, "cubox", start, end)
@@ -734,7 +734,7 @@ def build_source_snapshot(
             "window_entries": flomo_window_entries,
         },
         "notion": {
-            "entries": entries_in_range(RAW_DIR / "02 Notion", "notion", exact_start, exact_end) + entries_in_range(ROOT/complete_sources.DOUBAN_BASE, "notion", exact_start, exact_end),
+            "entries": entries_in_range(RAW_DIR / "02 Notion", "notion", exact_start, exact_end) + entries_in_range(ROOT/complete_sources.DOUBAN_BASE, "notion", exact_start, exact_end) + entries_in_range(ROOT/complete_sources.EPISODE_BASE, "notion", exact_start, exact_end),
             "window_entries": notion_window_entries,
         },
         "get": {
