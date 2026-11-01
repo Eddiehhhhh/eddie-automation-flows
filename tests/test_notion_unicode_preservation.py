@@ -92,6 +92,108 @@ class UnicodePreservationTests(unittest.TestCase):
         self.assertEqual(m.execute_bulk('synthetic',fixtures.REQUEST)['held'],0)
         self.assertEqual(len(self.fx.sends),writes);self.assertEqual(len(self.upload_calls),uploads)
 
+    def test_qualified_same_source_skips_before_changed_renderer_or_assets(self):
+        self.assertEqual(self.repair()['held'],0)
+        state=m.load_state();state['bulk_progress']['next_order']=None
+        state['bulk_progress']['cycle_complete']=False
+        state['bulk_progress']['renderer_revision']='older-renderer'
+        self.fx.persist(state)
+        before=copy.deepcopy(state['write_intents'][self.operation]);writes=len(self.fx.sends);uploads=len(self.upload_calls)
+        with mock.patch.object(m,'render_native_source',side_effect=AssertionError('must not rerender qualified source')):
+            result=m.execute_bulk('synthetic',fixtures.REQUEST)
+        self.assertEqual(result['held'],0);self.assertEqual(result['source_attachment_complete'],1)
+        self.assertEqual(len(self.fx.sends),writes);self.assertEqual(len(self.upload_calls),uploads)
+        after=m.load_state()['write_intents'][self.operation]
+        self.assertEqual(after['expected'],before['expected']);self.assertEqual(after['context']['request'],before['context']['request'])
+        node=m.Node('Wiki/a.md',None,'a.md','file',m.file_signature(self.source))
+        snapshot=subprocess.check_output(['git','-C',str(self.fx.root),'rev-parse','HEAD'],text=True).strip()
+        self.assertEqual(m.execute_node_blocks('synthetic',node,[],self.original['parent_id'],False,snapshot,render_version='native-v1:changed')['skipped'],1)
+        self.assertEqual(m.load_state()['entries']['Wiki/a.md']['render_version'],'legacy-v1')
+
+    def test_merged_identical_runs_are_only_directional_unicode_evidence(self):
+        expected=m.paragraph_block('')
+        expected['paragraph']['rich_text']=[{'type':'text','text':{'content':'part'+str(i)+'\u200b\u200b'}}for i in range(6)]
+        actual=copy.deepcopy(expected)
+        actual['paragraph']['rich_text']=[{'type':'text','text':{'content':''.join(x['text']['content']for x in expected['paragraph']['rich_text']).replace('\u200b','')}}]
+        intent={'expected':[m.block_identity(expected)],'context':{'request':{'children':[expected]}}}
+        original=copy.deepcopy(intent)
+        self.assertTrue(m.unicode_deletion_matches(intent,[actual]))
+        self.assertFalse(m.intent_expected_matches(intent,[actual]))
+        self.assertEqual(intent,original)
+        for mutation in ('style','link','other_character','reverse'):
+            changed=copy.deepcopy(actual)
+            if mutation=='style':changed['paragraph']['rich_text'][0]['annotations']={'bold':True}
+            elif mutation=='link':changed['paragraph']['rich_text'][0]['text']['link']={'url':'https://example.invalid/changed'}
+            elif mutation=='other_character':changed['paragraph']['rich_text'][0]['text']['content']+='x'
+            else:changed['paragraph']['rich_text'][0]['text']['content']+='\u200b'
+            if mutation=='reverse':
+                reverse={'expected':[m.block_identity(actual)],'context':{'request':{'children':[actual]}}}
+                self.assertFalse(m.unicode_deletion_matches(reverse,[changed]))
+            else:self.assertFalse(m.unicode_deletion_matches(intent,[changed]))
+
+    def native_reuse_request(self):
+        self.assertEqual(self.repair()['held'],0)
+        self.qualified_original=copy.deepcopy(m.load_state()['write_intents'][self.operation])
+        body=m.file_page_blocks(self.fx.root,'Wiki/a.md',self.source.read_text())
+        for block in body:
+            if block['type']not in {'paragraph','bulleted_list_item'}:continue
+            runs=[]
+            for run in block[block['type']]['rich_text']:
+                text=run['text']['content'];half=len(text)//2
+                for part in (text[:half],text[half:]):
+                    item=copy.deepcopy(run);item['text']['content']=part;runs.append(item)
+            block[block['type']]['rich_text']=runs
+        version='native-v1:'+m.sha256_text(json.dumps([m.block_identity(b)for b in body]))
+        state=m.load_state();state['bulk_progress']['next_order']=None;state['bulk_progress']['cycle_complete']=False;self.fx.persist(state)
+        with mock.patch.object(m,'qualified_unchanged_source',return_value=False),mock.patch.object(m,'render_native_source',return_value=(body,version,{'assets_ready':0,'assets_held':0,'assets_fallback':0})):
+            self.assertEqual(m.execute_bulk('synthetic',fixtures.REQUEST)['held'],1)
+        state=m.load_state();operation,intent=next((op,i)for op,i in state['write_intents'].items()if i['status']!='verified')
+        self.native_operation=operation;self.native_before=copy.deepcopy(intent)
+        request=copy.deepcopy(state['execution_request']);request.update(request_id=str(uuid.uuid4()),operation_id=operation,source_snapshot=intent['context']['source_snapshot'],render_version=version,original_request_hash=m.sha256_text(json.dumps(intent['context']['request'],sort_keys=True,ensure_ascii=False)),reused_operation_id=self.operation)
+        state['execution_request']=request;self.fx.persist(state);return request
+
+    def test_native_equivalent_pending_reuses_old_exact_attachment_by_gets_only(self):
+        request=self.native_reuse_request();sends=len(self.fx.sends);uploads=len(self.upload_calls);before=copy.deepcopy(self.fx.children[self.target])
+        with mock.patch.object(m,'_send_once',side_effect=AssertionError('qualification must not write Notion')):
+            result=m.execute_unicode_request('synthetic',request['request_id'])
+            self.assertEqual(result['held'],0);self.assertEqual(result['attempted_batches'],0)
+            self.assertEqual(m.execute_unicode_request('synthetic',request['request_id'])['held'],0)
+        state=m.load_state();intent=state['write_intents'][self.native_operation]
+        self.assertEqual(intent['status'],'verified');self.assertEqual(intent['unicode_preservation']['mode'],'reuse_verified_attachment')
+        self.assertTrue(state['entries']['Wiki/a.md']['fidelity']['native_loss'])
+        self.assertFalse(m.intent_expected_matches(intent,before[len(intent['baseline']):]))
+        for field in ('expected','context','baseline'):self.assertEqual(intent[field],self.native_before[field])
+        self.assertEqual(state['write_intents'][self.operation],self.qualified_original)
+        self.assertEqual(self.fx.children[self.target],before);self.assertEqual(len(self.fx.sends),sends);self.assertEqual(len(self.upload_calls),uploads)
+        # Every future readback rechecks the retained source attachment and full baseline.
+        self.fx.children[self.target][-1]['paragraph']['rich_text'][0]['text']['content']+='human'
+        self.assertEqual(m.recover_intent('synthetic',intent)['status'],'held')
+
+    def test_native_reuse_rejects_different_profile_wrong_old_proof_and_old_prefix_change(self):
+        request=self.native_reuse_request();state=m.load_state();intent=state['write_intents'][self.native_operation]
+        wrong=copy.deepcopy(intent);wrong['context']['request']['children'][2]['quote']['rich_text'][0]['text']['content']+='changed'
+        wrong['expected']=[m.block_identity(b)for b in wrong['context']['request']['children']]
+        wrong['context']['render_version']='native-v1:'+m.sha256_text(json.dumps([m.block_identity(b)for b in wrong['context']['request']['children'][2:-1]]))
+        self.assertFalse(m.native_legacy_equivalent_payload(wrong,self.source.read_text()))
+        state['execution_request']['reused_operation_id']='f'*64;self.fx.persist(state)
+        self.assertEqual(m.execute_unicode_request('synthetic',request['request_id'])['held'],1)
+        state=m.load_state();state['execution_request']=request;self.fx.persist(state)
+        self.fx.children[self.target][0]['paragraph']['rich_text'][0]['text']['content']+='changed-prefix'
+        self.assertEqual(m.execute_unicode_request('synthetic',request['request_id'])['held'],1)
+        self.assertEqual(m.load_state()['write_intents'][self.native_operation]['status'],'dispatched')
+
+    def test_native_reuse_rechecks_asset_and_unique_old_proof_on_every_get(self):
+        request=self.native_reuse_request()
+        self.assertEqual(m.execute_unicode_request('synthetic',request['request_id'])['held'],0)
+        intent=m.load_state()['write_intents'][self.native_operation]
+        self.wrong_bytes=True
+        self.assertEqual(m.recover_intent('synthetic',intent)['status'],'held')
+        self.wrong_bytes=False
+        changed=copy.deepcopy(intent);changed['unicode_preservation']['qualification_request']['original_request_hash']='0'*64
+        self.assertEqual(m.recover_intent('synthetic',changed)['status'],'held')
+        state=m.load_state();state['write_intents']['f'*64]=copy.deepcopy(state['write_intents'][self.operation]);self.fx.persist(state)
+        self.assertEqual(m.recover_intent('synthetic',intent)['status'],'held')
+
     def test_lost_attachment_append_response_recovers_after_runner_rebuild_by_gets_only(self):
         self.lose_repair=True;result=self.repair();self.assertEqual(result['held'],1);self.assertEqual(result['attempted_batches'],1)
         state=m.load_state();self.assertEqual(state['write_intents'][self.operation]['unicode_preservation']['phase'],'dispatched')

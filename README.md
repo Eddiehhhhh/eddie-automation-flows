@@ -68,3 +68,25 @@ Obsidian copy. Code deployment alone does not authorize disabling the local
 plugin: daily message input not represented in the article database remains a
 separate migration gap. A failed/interrupted publication can leave an unowned
 managed file; preserve it and reconcile against the private receipt before retry.
+
+## Notion mirror source preservation
+
+A verified `source_attachment_complete` entry is already delivered: unchanged
+source bytes are checked against the original attachment and current target by
+GET before rendering. A renderer revision alone cannot append another copy.
+This qualification does not mean that Notion's displayed text is byte-exact.
+
+The existing private `preserve_unicode_source` execution request can also name
+`reused_operation_id` for a saved `native-v1:<hash>` intent. This is GET-only:
+its pinned source, request hashes, complete target prefix and current blocks must
+match a unique previously verified original attachment. The native payload must
+match the legacy payload after merging only adjacent text runs with identical
+attributes. Only directional U+200B loss in paragraph/list text is admissible;
+format, link or other character changes stay held. No native payload is resent,
+and original expected hashes, requests and baselines remain unchanged.
+
+Before replacing a completed private execution request, retain its original state
+blob and request object in the batch's private recovery evidence. Dispatch only
+the new reviewed opaque UUID. A successful reuse receipt remains
+`source_attachment_complete` with `native_loss: true`; verify the private state
+and original target before resuming a bulk run.

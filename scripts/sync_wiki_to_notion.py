@@ -1471,26 +1471,28 @@ def block_identity(block: Dict[str, Any]) -> str:
     return sha256_text(json.dumps(_canonical_block(block), sort_keys=True, ensure_ascii=False))
 
 
+def _merge_identical_text_runs(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _merge_identical_text_runs(item) for key, item in value.items()}
+    if not isinstance(value, list):
+        return value
+    result: List[Any] = []
+    def text_run(item: Any) -> bool:
+        return isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text", {}).get("content"), str)
+    def attributes(item: Dict[str, Any]) -> Dict[str, Any]:
+        return {**item, "text": {key: part for key, part in item["text"].items() if key != "content"}}
+    for raw in value:
+        item = _merge_identical_text_runs(raw)
+        if result and text_run(result[-1]) and text_run(item) and attributes(result[-1]) == attributes(item):
+            result[-1]["text"]["content"] += item["text"]["content"]
+        else:
+            result.append(item)
+    return result
+
+
 def _semantic_block_identity(block: Dict[str, Any]) -> str:
-    """Notion may merge equal-attribute text runs; content, links and formatting remain exact."""
-    def normalize(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: normalize(item) for key, item in value.items()}
-        if not isinstance(value, list):
-            return value
-        result: List[Any] = []
-        def text_run(item: Any) -> bool:
-            return isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text", {}).get("content"), str)
-        def attributes(item: Dict[str, Any]) -> Dict[str, Any]:
-            return {**item, "text": {key: part for key, part in item["text"].items() if key != "content"}}
-        for raw in value:
-            item = normalize(raw)
-            if result and text_run(result[-1]) and text_run(item) and attributes(result[-1]) == attributes(item):
-                result[-1]["text"]["content"] += item["text"]["content"]
-            else:
-                result.append(item)
-        return result
-    return sha256_text(json.dumps(normalize(_canonical_block(block)), sort_keys=True, ensure_ascii=False))
+    """Notion may merge equal-attribute runs; characters and attributes stay exact."""
+    return sha256_text(json.dumps(_merge_identical_text_runs(_canonical_block(block)), sort_keys=True, ensure_ascii=False))
 
 
 def intent_expected_matches(intent: Dict[str, Any], observed: Sequence[Dict[str, Any]]) -> bool:
@@ -1692,6 +1694,8 @@ def finalize_intent(api_key: str, operation_id: str) -> Dict[str, Any]:
         entry["fidelity"] = {"mode": "source_attachment_complete", "operation_id": operation_id,
                              "source_signature": context["source_signature"], "render_version": context.get("render_version", "legacy-v1"),
                              "asset": intent["unicode_preservation"]["asset"]}
+        if intent["unicode_preservation"].get("native_loss") is True:
+            entry["fidelity"]["native_loss"] = True
     if context.get("preserved_target_ref"):
         entry["preserved_target_version"] = context["preserved_target_ref"]
     if context["final_batch"]:
@@ -1759,7 +1763,7 @@ def unicode_deletion_matches(intent: Dict[str, Any], actual: Sequence[Dict[str, 
             return True
         return False
     for left, right in zip(expected, actual):
-        if not equal(_canonical_block(left), _canonical_block(right), "", left.get("type") == right.get("type") and left.get("type") in {"paragraph", "bulleted_list_item"}):
+        if not equal(_merge_identical_text_runs(_canonical_block(left)), _merge_identical_text_runs(_canonical_block(right)), "", left.get("type") == right.get("type") and left.get("type") in {"paragraph", "bulleted_list_item"}):
             return False
     return deleted[0] > 0
 
@@ -1773,7 +1777,7 @@ def unicode_legacy_profile_matches(relative: str, markdown: str) -> bool:
         return False
     body = native_markdown_to_blocks(markdown)
     native = [quote_block("来源路径：" + relative), divider_block(), *body] if body else [quote_block("来源路径：" + relative)]
-    return [block_identity(b) for b in native] == [block_identity(b) for b in file_page_blocks(ROOT, relative, markdown)]
+    return [_semantic_block_identity(b) for b in native] == [_semantic_block_identity(b) for b in file_page_blocks(ROOT, relative, markdown)]
 
 
 def unicode_original_target(api_key: str, intent: Dict[str, Any], observed: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, List[Dict[str, Any]]]:
@@ -1789,9 +1793,79 @@ def unicode_original_target(api_key: str, intent: Dict[str, Any], observed: Opti
     return target, observed
 
 
+def native_legacy_equivalent_payload(intent: Dict[str, Any], markdown: str) -> bool:
+    """Only a saved native profile differing from legacy by equal-attribute run splits."""
+    context = intent.get("context") or {}
+    payload = context.get("request", {}).get("children")
+    if not isinstance(payload, list) or len(payload) < 3 or [block_identity(b) for b in payload] != intent.get("expected"):
+        return False
+    body = payload[2:-1]
+    version = "native-v1:" + sha256_text(json.dumps([block_identity(b) for b in body]))
+    return (context.get("render_version") == version
+            and unicode_legacy_profile_matches(context.get("source_path", ""), markdown)
+            and [_semantic_block_identity(b) for b in body] == [_semantic_block_identity(b) for b in file_page_blocks(ROOT, context["source_path"], markdown)])
+
+
+def recover_reused_unicode_preservation(api_key: str, intent: Dict[str, Any], observed: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """GET-only requalification: retain the exact old attachment and all appended blocks."""
+    try:
+        proof = intent["unicode_preservation"]
+        context = intent["context"]
+        state = load_state()
+        operation = proof["reused_operation_id"]
+        previous = state["write_intents"][operation]
+        old_context = previous["context"]
+        old_proof = previous["unicode_preservation"]
+        candidates = [op for op, item in state["write_intents"].items()
+                      if item.get("status") == "verified" and (item.get("unicode_preservation") or {}).get("mode") != "reuse_verified_attachment"
+                      and item.get("unicode_preservation") and item.get("target_id") == intent.get("target_id")
+                      and (item.get("context") or {}).get("entry_key") == context["entry_key"]
+                      and (item.get("context") or {}).get("source_signature") == context["source_signature"]]
+        source = base64.b64decode(proof["original_source_base64"], validate=True)
+        asset = proof["asset"]
+        authorization = proof["qualification_request"]
+        if (authorization.get("reused_operation_id") != operation or authorization.get("action") != "preserve_unicode_source"
+                or authorization.get("target_page_id") != intent.get("target_id") or authorization.get("parent_page_id") != intent.get("parent_id")
+                or authorization.get("source_path") != context.get("source_path") or authorization.get("source_snapshot") != context.get("source_snapshot")
+                or authorization.get("source_signature") != context.get("source_signature") or authorization.get("render_version") != context.get("render_version")
+                or authorization.get("original_request_hash") != sha256_text(json.dumps(context.get("request"), sort_keys=True, ensure_ascii=False))
+                or any(authorization.get(name) != asset.get(field) for name, field in (("source_blob", "source_blob"), ("source_sha256", "sha256"), ("source_size", "size")))):
+            raise MirrorHeld("reused attachment authorization changed")
+        current = state["write_intents"][authorization["operation_id"]]
+        if (any(current.get(field) != intent.get(field) for field in ("expected", "context", "baseline", "target_id", "parent_id"))
+                or any(op != authorization["operation_id"] and item.get("status") != "verified" and
+                       (not (item.get("context") or {}).get("entry_key") or (item.get("context") or {}).get("entry_key") == context["entry_key"] or item.get("target_id") == intent.get("target_id"))
+                       for op, item in state["write_intents"].items())):
+            raise MirrorHeld("reused attachment original intent or fence differs")
+        markdown = source.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        if (candidates != [operation] or old_proof.get("phase") != "verified"
+                or proof.get("phase") not in {"prepared", "verified"} or proof.get("native_loss") is not True
+                or previous["parent_id"] != intent["parent_id"] or old_context["source_path"] != context["source_path"]
+                or previous.get("verified_baseline") != intent["baseline"]
+                or any(asset.get(k) != old_proof.get("asset", {}).get(k) for k in ("sha256", "size", "source_blob", "source_path"))
+                or asset["source_commit"] != context["source_snapshot"] or asset["source_path"] != context["source_path"]
+                or source != base64.b64decode(old_proof["original_source_base64"], validate=True)
+                or hashlib.sha256(source).hexdigest() != asset["sha256"] or len(source) != asset["size"]
+                or hashlib.sha1(b"blob " + str(len(source)).encode() + b"\0" + source).hexdigest() != asset["source_blob"]
+                or sha256_text(markdown) != context["source_signature"] or not native_legacy_equivalent_payload(intent, markdown)):
+            raise MirrorHeld("reused attachment source or profile differs")
+        target, observed = unicode_original_target(api_key, intent, observed)
+        before = proof["before_blocks"]
+        if (target != proof["target_id"] or _baseline(before) != proof["before_baseline"]
+                or _baseline(observed) != proof["before_baseline"]
+                or not unicode_deletion_matches(intent, observed[len(intent["baseline"]):])
+                or recover_unicode_preservation(api_key, previous, observed[:len(intent["baseline"])]).get("status") != "verified"):
+            raise MirrorHeld("reused original attachment target differs")
+        return {"status": "verified", "target_id": target, "retry_allowed": False, "fidelity": "source_attachment_complete", "native_loss": True}
+    except (KeyError, TypeError, ValueError, MirrorHeld):
+        return {"status": "held", "reason": "reused_unicode_preservation_readback_held", "retry_allowed": False}
+
+
 def recover_unicode_preservation(api_key: str, intent: Dict[str, Any], observed: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """GET-only verification of the exact preserved original and attached source bytes."""
     proof = intent.get("unicode_preservation") or {}
+    if proof.get("mode") == "reuse_verified_attachment":
+        return recover_reused_unicode_preservation(api_key, intent, observed)
     if proof.get("phase") not in {"dispatched", "verified"}:
         return {"status": "held", "reason": "unicode_preservation_not_dispatched", "retry_allowed": False}
     try:
@@ -1845,9 +1919,10 @@ def preserve_unicode_source(api_key: str, node: Node, parent: str, budget: Dict[
             or authorization.get("render_version") != context.get("render_version", "legacy-v1")
             or authorization.get("original_request_hash") != sha256_text(json.dumps(context.get("request"), sort_keys=True, ensure_ascii=False))):
         raise MirrorHeld("unicode preservation explicit request differs")
+    native_reuse = bool(re.fullmatch(r"native-v1:[0-9a-f]{64}", context.get("render_version", "")) and re.fullmatch(r"[0-9a-f]{64}", str(authorization.get("reused_operation_id", ""))))
     if (node.kind != "file" or context.get("source_signature") != node.signature or intent.get("parent_id") != parent
             or context.get("source_path") != node.path or context.get("title") != node.title
-            or context.get("render_version", "legacy-v1") != "legacy-v1" or context.get("batch_count") != 1
+            or (context.get("render_version", "legacy-v1") != "legacy-v1" and not native_reuse) or context.get("batch_count") != 1
             or context.get("batch_index") != 0 or context.get("final_batch") is not True):
         raise MirrorHeld("unicode preservation source or renderer changed")
     proof = intent.get("unicode_preservation") or {}
@@ -1855,7 +1930,7 @@ def preserve_unicode_source(api_key: str, node: Node, parent: str, budget: Dict[
                   or any(proof.get("asset", {}).get(name) != authorization.get(request_name) for name, request_name in
                          (("source_blob", "source_blob"), ("sha256", "source_sha256"), ("size", "source_size")))):
         raise MirrorHeld("unicode preservation existing receipt differs from request")
-    if proof.get("phase") in {"dispatched", "verified"}:
+    if proof.get("phase") in {"dispatched", "verified"} or proof.get("mode") == "reuse_verified_attachment":
         if finalize_intent(api_key, operation).get("status") != "verified":
             raise MirrorHeld("unicode preservation unknown requires readback")
         return True
@@ -1888,7 +1963,7 @@ def preserve_unicode_source(api_key: str, node: Node, parent: str, budget: Dict[
         raise MirrorHeld("unicode preservation source encoding held") from None
     expected = context.get("request", {}).get("children")
     if (sha256_text(markdown) != node.signature or not isinstance(expected, list)
-            or [block_identity(b) for b in file_page_blocks(ROOT, node.path, markdown)] != [block_identity(b) for b in expected[2:-1]]
+            or (not native_legacy_equivalent_payload(intent, markdown) if native_reuse else [block_identity(b) for b in file_page_blocks(ROOT, node.path, markdown)] != [block_identity(b) for b in expected[2:-1]])
             or len(expected) < 3 or block_identity(expected[1]) != block_identity(heading_block(2, "同步版本 " + node.signature[:12] + " · 1/1"))
             or block_identity(expected[0]) != block_identity(paragraph_block(intent["marker"]))
             or block_identity(expected[-1]) != block_identity(paragraph_block("eddie-mirror-end:" + operation))):
@@ -1915,6 +1990,23 @@ def preserve_unicode_source(api_key: str, node: Node, parent: str, budget: Dict[
                    for part in block.get(block["type"], {}).get("rich_text", []))
     unicode_counts = {"source_file": markdown.count("\u200b"), "requested_text_runs": text_zwsp_count(expected),
                       "actual_text_runs": text_zwsp_count(observed[len(intent.get("baseline") or []):])}
+    if native_reuse:
+        if proof:
+            raise MirrorHeld("reused attachment prepared proof requires GET-only recovery")
+        proof = {"mode": "reuse_verified_attachment", "phase": "prepared", "target_id": target,
+                 "reused_operation_id": authorization["reused_operation_id"], "before_blocks": observed, "before_baseline": _baseline(observed),
+                 "original_source_base64": base64.b64encode(asset.data).decode("ascii"),
+                 "asset": {"sha256": asset.sha256, "size": len(asset.data), "source_commit": asset.commit,
+                           "source_blob": asset.blob, "source_path": asset.path},
+                 "qualification_request": json.loads(json.dumps(authorization)), "native_loss": True, "unicode_counts": unicode_counts, "fidelity": "source_attachment_complete"}
+        candidate = {**intent, "unicode_preservation": proof}
+        if recover_reused_unicode_preservation(api_key, candidate, observed).get("status") != "verified":
+            raise MirrorHeld("existing original attachment reuse held")
+        state["write_intents"][operation]["unicode_preservation"] = proof
+        persist_private_state(state)
+        if finalize_intent(api_key, operation).get("status") != "verified":
+            raise MirrorHeld("existing original attachment final readback held")
+        return True
     if not proof:
         proof = {"phase": "planned", "target_id": target, "before_blocks": observed, "before_baseline": _baseline(observed),
                  "original_source_base64": base64.b64encode(asset.data).decode("ascii"),
@@ -1966,7 +2058,7 @@ def execute_unicode_request(api_key: str, opaque_id: str) -> Dict[str, int]:
     try:
         if (uuid.UUID(opaque_id).version != 4 or request["request_id"] != opaque_id
                 or request["action"] != "preserve_unicode_source" or request["allow_new_page"] is not False
-                or request["render_version"] != "legacy-v1"):
+                or (request["render_version"] != "legacy-v1" and not (re.fullmatch(r"native-v1:[0-9a-f]{64}", str(request["render_version"])) and re.fullmatch(r"[0-9a-f]{64}", str(request.get("reused_operation_id", "")))))):
             raise ValueError("request mismatch")
         for field in ("source_signature", "source_sha256", "original_request_hash", "operation_id"):
             if not re.fullmatch(r"[0-9a-f]{64}", request[field]):
@@ -2042,6 +2134,34 @@ def verify_page_binding(api_key: str, target: str, parent: str, title: str) -> N
         raise MirrorHeld("original page identity or parent changed")
 
 
+def qualified_unchanged_source(api_key: str, node: Node, snapshot: str) -> bool:
+    """Renderer changes do not invalidate a GET-verified, exact original attachment."""
+    state = load_state()
+    key = state_entry_key(node.path, state_secret())
+    entry = previous_entry_for_path(state.get("entries", {}), node.path, state_secret())
+    assert_intent_fence(state, key, entry.get("page_id"))
+    fidelity = entry.get("fidelity") or {}
+    if entry.get("signature") != node.signature or fidelity.get("source_signature") != node.signature or fidelity.get("mode") != "source_attachment_complete":
+        return False
+    require_known_or_protected_binding(state, key, entry)
+    intent = (state.get("write_intents") or {}).get(fidelity.get("operation_id")) or {}
+    context = intent.get("context") or {}
+    proof = intent.get("unicode_preservation") or {}
+    asset = proof.get("asset") or {}
+    source = subprocess.run(["git", "-C", str(ROOT), "show", snapshot + ":" + node.path], capture_output=True, timeout=30)
+    if (intent.get("status") != "verified" or intent.get("target_id") != entry.get("page_id")
+            or intent.get("parent_id") != entry.get("parent_page_id") or context.get("entry_key") != key
+            or context.get("source_path") != node.path or context.get("source_signature") != node.signature
+            or fidelity.get("render_version") != entry.get("render_version", "legacy-v1") or fidelity.get("asset") != asset
+            or source.returncode or hashlib.sha256(source.stdout).hexdigest() != asset.get("sha256") or len(source.stdout) != asset.get("size")):
+        raise MirrorHeld("qualified original source binding changed")
+    observed = retrieve_block_tree(api_key, entry["page_id"])
+    if (_baseline(observed) != entry.get("managed_block_baseline")
+            or recover_unicode_preservation(api_key, intent, observed).get("status") != "verified"):
+        raise MirrorHeld("qualified original attachment requires review")
+    return True
+
+
 def execute_node_blocks(api_key: str, node: Node, blocks: List[Dict[str, Any]], parent_id: Optional[str],
                         allow_new: bool, snapshot: str, budget: Optional[Dict[str, Any]] = None, render_version: str = "legacy-v1") -> Dict[str, int]:
     relative, signature = node.path, node.signature
@@ -2056,6 +2176,8 @@ def execute_node_blocks(api_key: str, node: Node, blocks: List[Dict[str, Any]], 
         raise MirrorHeld("legacy unknown write requires review")
     assert_intent_fence(state, key, entry.get("page_id"))
     require_known_or_protected_binding(state, key, entry)
+    if qualified_unchanged_source(api_key, node, snapshot):
+        return {"verified_batches": 0, "skipped": 1}
     if entry.get("signature") == signature and entry.get("render_version", "legacy-v1") == render_version:
         if _baseline(retrieve_block_tree(api_key, entry["page_id"])) != entry["managed_block_baseline"]:
             raise MirrorHeld("human changes retained; baseline review required")
@@ -2523,7 +2645,10 @@ def execute_bulk(api_key: str, opaque_id: Optional[str] = None) -> Dict[str, int
             if adopted:
                 retain_human_append(api_key, node)
                 current = previous_entry_for_path(load_state().get("entries", {}), node.path, state_secret())
-            if node.kind != "file" and adopted:
+            if node.kind == "file" and qualified_unchanged_source(api_key, node, snapshot):
+                result = {"verified_batches": 0, "skipped": 1}
+                asset_counts = {"assets_ready": 1, "assets_held": 0, "assets_fallback": 0}
+            elif node.kind != "file" and adopted:
                 # Child pages evolve independently of the directory's own retained human header.
                 observed = [b for b in retrieve_block_tree(api_key, current["page_id"]) if b.get("type") != "child_page"]
                 if _baseline(observed) != current["managed_block_baseline"]:
