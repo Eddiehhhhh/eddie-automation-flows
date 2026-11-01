@@ -75,6 +75,23 @@ class StableInput(unittest.TestCase):
         for changed in [second.replace('w_100','w_200'),second.replace('unknown=%20','unknown=+'),second.replace('provider-id','other-id'),second.replace('/a.png','/other.png'),second.replace('#fragment','#other')]:
             self.assertNotEqual(s.stable_asset_url(first),s.stable_asset_url(changed))
 
+    def test_each_proved_host_rotation_is_noop_but_similar_unknown_host_remains_sensitive(self):
+        for host in ('static.flomoapp.com','flomo.oss-cn-shanghai.aliyuncs.com'):
+            with self.subTest(host=host):
+                old=image('a');rotated=image('a',2)
+                for memo_value in (old,rotated):
+                    for field in ('url','thumbnail_url'):
+                        memo_value['files'][0][field]=memo_value['files'][0][field].replace(HOST,host)
+                self.seed([old],legacy=True);before=self.record('a');c.export(self.root)
+                result=self.run_source([rotated],max_pages=2)
+                self.assertEqual((result['written'],result['capture_attempted'],result['asset_probe_verified']),(0,0,1))
+                self.assertEqual(self.record('a'),before);self.assertEqual(c.export(self.root)['written'],0)
+                unknown=deepcopy(rotated)
+                for field in ('url','thumbnail_url'):
+                    unknown['files'][0][field]=unknown['files'][0][field].replace(host,'flomo.oss-other-region.aliyuncs.com')
+                self.assertNotEqual(s.input_fingerprint(rotated,b),s.input_fingerprint(unknown,b))
+                value=unknown['files'][0]['url'];self.assertEqual(s.stable_asset_url(value),value)
+
     def test_unknown_host_missing_duplicate_or_invalid_signature_shape_not_normalized(self):
         valid=url()
         for value in [valid.replace(HOST,'files.invalid'),valid+'&Signature=duplicate',valid.replace('Expires=2000000001','Expires=bad'),valid.split('&Signature=')[0],valid.replace('Signature=','Signature=invalid-'),valid.replace('https://','http://'),valid.replace(HOST,'user:pass@'+HOST)]:

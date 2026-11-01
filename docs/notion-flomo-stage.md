@@ -201,7 +201,8 @@ when one image is unavailable; failed assets are retried on the next invocation.
 
 The original reader distinguishes raw capture identity from stable input identity.
 Only `Expires` and `Signature` are ignored, and only in `files[].url` /
-`thumbnail_url` on the observed flomo CDN with a complete numeric expiry,
+`thumbnail_url` on the two individually verified hosts `static.flomoapp.com` and
+`flomo.oss-cn-shanghai.aliyuncs.com`, with a complete numeric expiry,
 canonical 20-byte base64 signature and nonempty `OSSAccessKeyId`. Access-key IDs,
 host/path, transforms, unknown query bytes, HTML, dates and all other fields
 remain meaningful. Malformed or unfamiliar URLs remain byte-sensitive. The raw
