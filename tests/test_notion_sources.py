@@ -26,7 +26,7 @@ def prop_response(prop):
 class API:
     def __init__(self,pages=None):
         self.pages=pages or [page()];self.calls=[];self.blocks={};self.query_hook=None;self.page_hook=None
-    def __call__(self,method,path,payload=None):
+    def __call__(self,method,path,payload=None,*,api_version=None):
         self.calls.append((method,path,deepcopy(payload)))
         if method=='POST':
             if self.query_hook:return self.query_hook(method,path,payload)
@@ -36,6 +36,7 @@ class API:
         if parts[1]=='databases':return {'id':parts[2],'properties':{'Name':{'type':'title'},'Date':{'type':'date'},'添加日期':{'type':'date'},'日期':{'type':'date'}}}
         if parts[1]=='blocks':return deepcopy(self.blocks.get(parts[2],{'results':[],'has_more':False,'next_cursor':None}))
         if parts[1]=='pages':
+            if len(parts)>3 and parts[3]=='markdown':return {}
             original=next(p for p in self.pages if p['id']==parts[2])
             if len(parts)>3:
                 prop=next(v for v in original['properties'].values() if v['id']==parts[4]);return prop_response(prop)

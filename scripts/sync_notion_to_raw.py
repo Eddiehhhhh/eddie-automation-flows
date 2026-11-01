@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 
 READ_RETRIES = ContextVar("notion_read_retries", default=4)
+REQUEST_OBSERVER = ContextVar("notion_request_observer", default=None)
 
 BASE_URL = "https://api.notion.com/v1"
 NOTION_VERSION = os.environ.get("NOTION_VERSION", "2022-06-28")
@@ -130,10 +131,11 @@ def notion_request(
     method: str,
     path: str,
     payload: Optional[Dict[str, Any]] = None,
+    *, api_version: Optional[str] = None,
 ) -> Dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Notion-Version": NOTION_VERSION,
+        "Notion-Version": api_version or NOTION_VERSION,
         "User-Agent": "eddie-wiki-notion-sync/1.0",
     }
     data = None
@@ -145,6 +147,9 @@ def notion_request(
     last_error: Optional[Exception] = None
     retry_limit = READ_RETRIES.get()
     for attempt in range(retry_limit + 1):
+        observer = REQUEST_OBSERVER.get()
+        if observer is not None:
+            observer(method, path)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
