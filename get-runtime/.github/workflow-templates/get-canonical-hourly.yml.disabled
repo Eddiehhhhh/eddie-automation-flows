@@ -1,0 +1,39 @@
+# PREPARATION ONLY. Outside .github/workflows and non-workflow extension.
+# No live Get/GitHub/Notion steps or credentials are present.
+# Intended cadence after separate consolidated approval: 17 * * * * (UTC).
+# Activation also requires authenticated last-publication anchor retrieval.
+name: Canonical Get single writer (disabled preparation)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+jobs:
+  preparation:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # existing reviewed pin
+        with:
+          persist-credentials: false
+      - name: Explain inactive boundary
+        run: |
+          echo 'Production approval and independently verified publication anchors are required.'
+          exit 1
+# Both eventual workflow_dispatch and minute-17 schedule must call the SAME
+# get_recurring_entry.prepare path, then the existing m.publish primitive once.
+# Reuse its exact-lease CAS/readback; never introduce a second writer.
+# Notion may consume confirmed_private_handoff only after verified readback.
+# Do not upload snapshots, plans, receipts, content IDs, or note text as public artifacts.
+# Keep the existing old-writer-disabled/no-active-runs guard before any CAS.
+
+# Read-only runtime exists in scripts/get_recurring_runtime.py. A reviewed local
+# invocation supplies --policy and --approved-policy-sha256; --apply is absent
+# by default and hard-blocked while PRODUCTION_ACTIVATED is false.
+# No policy, production approval, credential mapping or schedule is provided here.
+# An eventual approved final Get step may call this exact runtime and emit
+# GET_CANONICAL_PUBLICATION_V1 after shared CAS/readback. Keep its successful
+# workflow result independent of Notion: use a separate workflow, or a caught
+# callback partial outcome. A failed overall run is NOT Get publication trust.
