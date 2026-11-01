@@ -4,6 +4,7 @@ import argparse
 from copy import deepcopy
 from datetime import datetime,timezone
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import urllib.parse
 
 import cloud_private_checkout
 import flomo_cloud_current
+from notion_source_budget import Budget as SourceBudget, BudgetExceeded
 import notion_complete_properties as complete_properties
 import sync_notion_flomo_to_raw as shared
 import sync_notion_to_raw as notion
@@ -29,6 +31,8 @@ DOUBAN_BASE=Path('Raw/14 豆瓣影视/云端原文')
 DOUBAN_STATE=Path('.github/state/notion-douban-source-state.json')
 PROOF_VERSION=1
 RENDERER_VERSION=1
+BUTTON_PARTIAL_PROOF_VERSION=1
+MARKDOWN_API_VERSION="2026-03-11"
 UUID=re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 MAX_BATCH_BYTES=200*1024*1024
 
@@ -44,37 +48,13 @@ def require(value,reason):
     if not value:raise ValueError(reason)
 
 
-class BudgetExceeded(Exception):pass
-
-
 class RoutedFlomo(Exception):
     def __init__(self,mid,edited,created):self.mid=mid;self.edited=edited;self.created=created
 
 
-class Budget:
+class Budget(SourceBudget):
     def __init__(self,limits,clock=time.monotonic):
-        self.clock=clock;self.started=clock();self.limits=limits;self.requests=0;self.pages=0;self.asset_bytes=0
-        value=os.environ.get('NOTION_SOURCE_JOB_DEADLINE')
-        require(value is None or value.isdigit(),'invalid_source_job_deadline')
-        self.job_deadline=int(value) if value else None
-    def check(self):
-        if self.job_deadline is not None and time.time()>=self.job_deadline-300:
-            raise BudgetExceeded('job_budget_reserved_for_persistence')
-        if self.clock()-self.started>=self.limits['max_seconds']-min(60,self.limits['max_seconds']/4):
-            raise BudgetExceeded('time_budget')
-    def request(self):
-        self.check()
-        if self.requests>=self.limits['max_requests']:raise BudgetExceeded('request_budget')
-        self.requests+=1
-    def page(self):
-        self.check()
-        if self.pages>=self.limits['max_pages']:raise BudgetExceeded('page_budget')
-        self.pages+=1
-    def asset(self,raw):
-        require(bool(raw),'empty_source_asset')
-        require(len(raw)<=shared.MAX_ASSET_BYTES,'asset_file_budget')
-        if self.asset_bytes+len(raw)>MAX_BATCH_BYTES:raise BudgetExceeded('asset_batch_budget')
-        self.asset_bytes+=len(raw)
+        super().__init__(limits,clock,max_asset_bytes=shared.MAX_ASSET_BYTES,max_batch_bytes=MAX_BATCH_BYTES)
 
 
 def config(root):
@@ -156,10 +136,13 @@ def property_text(prop):
     return str(value)
 
 
-def render(page,blocks,source,asset_files):
-    page=deepcopy(page);blocks=deepcopy(blocks);cache={}
+def render(page,blocks,source,asset_files,gaps=()):
+    page=deepcopy(page);blocks=deepcopy(blocks);cache={};gap_ids={gap["block_id"] for gap in gaps}
     def transform(rows):
         for row in rows:
+            if row['id'] in gap_ids:
+                text='[Notion 按钮读取缺口：标签及操作未能保存，不能视为空内容](https://www.notion.so/'+page['id'].replace('-','')+'#'+row['id'].replace('-','')+')'
+                row['type']='paragraph';row['paragraph']={'rich_text':[{'type':'text','text':{'content':text}}]}
             data=row.get(row['type'],{})
             for key in ('rich_text','caption'):
                 if row['type']!='code' and isinstance(data.get(key),list):
@@ -179,6 +162,7 @@ def render(page,blocks,source,asset_files):
         'notion_last_edited_time':page.get('last_edited_time'),'source_date':source_date,
         'source_date_property':date_name,'source_date_basis':'notion_property' if source_date else 'notion_page_created_time',
         'property_proof_version':PROOF_VERSION,'captured_at':stamp(),'legacy_merge_status':'unmerged_legacy_preserved'}
+    if gaps:metadata.update(capture_complete=False,readable_partial=True,unsupported_gap_count=len(gaps))
     # Materialized assets are adjacent to the versioned readable note.
     parts=[notion.render_frontmatter(metadata,native_lists=True),'','# '+title,'',
         '- 资料日期：'+str(source_date or '未提供独立资料日期'),
@@ -187,6 +171,7 @@ def render(page,blocks,source,asset_files):
     for name,prop in page['properties'].items():
         value=property_text(prop)
         if value:parts.extend(['### '+str(name),'',value,''])
+    if gaps:parts.extend(['> ⚠️ 部分保存：可读取的属性、正文和附件已保存；Notion 按钮的标签及操作仍有缺口，不是完整备份。',''])
     parts.extend(['## 正文','']);parts.extend(notion.render_blocks('',blocks,children_loader=lambda _,ident:cache[ident],embed_images=True))
     # Covers/icons can be meaningful even when they are not block content.
     used='\n'.join(parts)
@@ -236,7 +221,7 @@ def check_files(root,files,base=BASE):
         require(path.is_file() and digest(path.read_bytes())==expected,'source_owned_content_edited')
 
 
-def block_tree(page_id,request,depth=0,ancestors=()):
+def block_tree(page_id,request,depth=0,ancestors=(),*,allow_unsupported=False):
     require(depth<=30 and page_id not in ancestors,'source_block_cycle')
     rows=[];cursor=None;cursors=set();ids=set()
     while True:
@@ -244,14 +229,50 @@ def block_tree(page_id,request,depth=0,ancestors=()):
         value=request('GET',path);require(isinstance(value.get('results'),list) and type(value.get('has_more')) is bool,'source_block_pagination_shape')
         for row in value['results']:
             ident=row.get('id');require(isinstance(ident,str) and ident and ident not in ids and isinstance(row.get('type'),str),'source_block_identity')
-            require(row['type']!='unsupported','unsupported_source_block');ids.add(ident)
+            require(allow_unsupported or row['type']!='unsupported','unsupported_source_block');ids.add(ident)
             node=deepcopy(row);synced=(row.get('synced_block') or {}).get('synced_from') or {}
             if row.get('has_children') or synced.get('block_id'):
-                node['_children']=block_tree(synced.get('block_id') or ident,request,depth+1,(*ancestors,page_id))
+                node['_children']=block_tree(synced.get('block_id') or ident,request,depth+1,(*ancestors,page_id),allow_unsupported=allow_unsupported)
             rows.append(node)
         if not value['has_more']:
             require(value.get('next_cursor') is None,'source_block_terminal_conflict');return rows
         cursor=value.get('next_cursor');require(isinstance(cursor,str) and cursor and cursor not in cursors,'source_block_cursor_incomplete');cursors.add(cursor)
+
+
+def button_gaps(page_id,blocks,request):
+    """Only the same page's complete unknown-ID set may classify a button gap."""
+    def walk(rows):
+        for row in rows:
+            yield row
+            yield from walk(row.get('_children',[]))
+    unsupported=[row['id'] for row in walk(blocks) if row['type']=='unsupported']
+    if not unsupported:return None,[]
+    value=request('GET','/pages/'+page_id+'/markdown?markdown_version=v2',api_version=MARKDOWN_API_VERSION)
+    require(isinstance(value,dict) and value.get('object')=='page_markdown' and value.get('id')==page_id and isinstance(value.get('markdown'),str) and type(value.get('truncated')) is bool,'unsupported_source_block')
+    reject(encoded(value))
+    unknown=value.get('unknown_block_ids')
+    require(isinstance(unknown,list) and all(isinstance(ident,str) and UUID.fullmatch(ident) for ident in unknown) and len(unknown)==len(set(unknown)) and set(unknown)==set(unsupported),'unsupported_source_block')
+    class Unknowns(HTMLParser):
+        def __init__(self):super().__init__(convert_charrefs=True);self.rows=[]
+        def handle_starttag(self,tag,attrs):
+            if tag=='unknown':self.rows.append(attrs)
+        def handle_startendtag(self,tag,attrs):self.handle_starttag(tag,attrs)
+    parser=Unknowns();parser.feed(value['markdown']);parser.close();gaps=[]
+    for attrs in parser.rows:
+        require(len(attrs)==2 and len(dict(attrs))==2 and set(dict(attrs))=={'url','alt'},'unsupported_source_block')
+        item=dict(attrs);url=urllib.parse.urlsplit(item['url'] or '')
+        require(item['alt']=='button' and url.scheme=='https' and url.netloc in ('www.notion.so','notion.so','app.notion.com','www.notion.com','notion.com') and not url.query and url.path in ('/'+page_id.replace('-',''),'/p/'+page_id.replace('-','')),'unsupported_source_block')
+        require(bool(UUID.fullmatch(url.fragment) or re.fullmatch(r'[0-9a-f]{32}',url.fragment)),'unsupported_source_block')
+        ident=notion.normalize_notion_id(url.fragment)
+        require(UUID.fullmatch(ident) and ident in unsupported,'unsupported_source_block')
+        gaps.append({'block_id':ident,'type':'button','reason':'button_label_and_action_not_exposed','source':'same_page_markdown_v2'})
+    require(len(gaps)==len(unsupported) and {gap['block_id'] for gap in gaps}==set(unsupported),'unsupported_source_block')
+    return value,gaps
+
+
+def current_proof(entry,row,*,partial=False):
+    proven=(entry.get('capture_complete') is False and entry.get('readable_partial') is True and entry.get('button_partial_proof_version')==BUTTON_PARTIAL_PROOF_VERSION and bool(entry.get('incomplete_gaps'))) if partial else entry.get('capture_complete')
+    return bool(proven and entry.get('property_proof_version')==PROOF_VERSION and entry.get('renderer_version')==RENDERER_VERSION and entry.get('last_edited_time')==row['last_edited_time'] and entry.get('metadata_fingerprint')==row.get('metadata_fingerprint'))
 
 
 def download_checked(url,budget,downloader):
@@ -290,14 +311,16 @@ def capture_page(root,page,source,prior,request,budget,downloader,base=BASE):
     if source.get('owner')=='flomo':
         mid=shared.memo_id(before)
         if mid:raise RoutedFlomo(mid,before['last_edited_time'],before['created_time'])
-    full=complete_properties.hydrate_page(before,request);blocks=block_tree(ident,request)
+    full=complete_properties.hydrate_page(before,request);blocks=block_tree(ident,request,allow_unsupported=True)
+    markdown_response,gaps=button_gaps(ident,blocks,request)
     original={'original_page':full['original_page'],'property_responses':full['property_responses'],'hydrated_page':full['hydrated_page'],
         'blocks':blocks,'property_proof_version':full['proof_version'],'source_database_id':source['database_id']}
+    if gaps:original.update(markdown_v2={'api_version':MARKDOWN_API_VERSION,'markdown_version':'v2','response':markdown_response},readable_partial=True,incomplete_gaps=gaps)
     reject(encoded(original))
     material,files=materialize({'page':full['hydrated_page'],'blocks':blocks},budget,downloader)
     original['materialized']=deepcopy(material)
     original['materialized_assets']={name:{'sha256':digest(raw),'size':len(raw)} for name,raw in files.items()}
-    filename,markdown,metadata=render(material['page'],material['blocks'],source,files)
+    filename,markdown,metadata=render(material['page'],material['blocks'],source,files,gaps=gaps)
     # Preserve image/file embeds that arrived as literal Markdown or HTML text.
     text=markdown.decode();embedded=set(re.findall(r'!\[[^\]\n]*\]\((https?://[^\s)]+)\)',text))
     embedded.update(re.findall(r'<img\b[^>]*\bsrc=["\'](https?://[^"\']+)',text,re.I))
@@ -317,9 +340,10 @@ def capture_page(root,page,source,prior,request,budget,downloader,base=BASE):
     versioned={str(prefix/name):raw for name,raw in files.items()}
     receipt={'notion_page_id':ident,'source_identity':'notion:'+ident,'source_database_id':source['database_id'],
         'last_edited_time':before['last_edited_time'],'metadata_fingerprint':metadata_fingerprint(before),'property_observed_at':stamp(),'notion_created_time':before.get('created_time'),
-        'source_date':metadata['source_date'],'renderer_version':RENDERER_VERSION,'property_proof_version':full['proof_version'],'capture_complete':True,
+        'source_date':metadata['source_date'],'renderer_version':RENDERER_VERSION,'property_proof_version':full['proof_version'],'capture_complete':not bool(gaps),
         'current_path':str(prefix/filename),'title':metadata['title'],'files':{p:digest(raw) for p,raw in versioned.items()},
         'versions':{**prior.get('versions',{}),version:{p:digest(raw) for p,raw in versioned.items()}}}
+    if gaps:receipt.update(readable_partial=True,button_partial_proof_version=BUTTON_PARTIAL_PROOF_VERSION,incomplete_gaps=gaps)
     return receipt,versioned
 
 
@@ -334,9 +358,10 @@ def safe_failure(exc):
 def source_coverage(record,held,source_key):
     inventory=record.get('inventory',{});rows=inventory.get('records',[])
     captured=sum(1 for row in rows if row['id'] not in held and record['pages'].get(row['id'],{}).get('capture_complete') and record['pages'][row['id']].get('property_proof_version')==PROOF_VERSION and record['pages'][row['id']].get('renderer_version')==RENDERER_VERSION and record['pages'][row['id']].get('last_edited_time')==row['last_edited_time'] and record['pages'][row['id']].get('metadata_fingerprint')==row.get('metadata_fingerprint'))
+    partial=sum(1 for row in rows if row['id'] not in held and current_proof(record['pages'].get(row['id'],{}),row,partial=True))
     verified=sum(bool(record.get('delegations',{}).get(row['id'],{}).get('verified')) for row in rows if row.get('flomo_memo_id'))
     delegated=sum(bool(row.get('flomo_memo_id')) for row in rows)
-    result={'observed':len(rows),'captured':captured,'delegated_verified':verified,'delegated_pending':delegated-verified,
+    result={'observed':len(rows),'captured':captured,'partial_saved':partial,'unread_observed':len(rows)-captured-verified-partial,'delegated_verified':verified,'delegated_pending':delegated-verified,
         'pending_observed':len(rows)-captured-verified,'held_observed':sum(row['id'] in held for row in rows),
         'inventory_complete':bool(inventory.get('complete')),'unobserved_remainder_unknown':not inventory.get('complete',False)}
     result['complete']=result['inventory_complete'] and captured+verified==len(rows) and source_key not in held
@@ -347,16 +372,18 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
     root=Path(root)
     if apply:cloud_private_checkout.verify_private_checkout(root,os.environ.get('PRIVATE_VAULT_TOKEN'))
     budget=budget or Budget(settings['batch']);last_request=[0.0]
-    def call(method,path,payload=None):
+    def call(method,path,payload=None,*,api_version=None):
         require(method=='GET' or (method=='POST' and re.fullmatch(r'/databases/[0-9a-f-]+/query',path)),'source_mutation_forbidden')
+        require(api_version is None or (api_version==MARKDOWN_API_VERSION and method=='GET' and re.fullmatch(r'/pages/[0-9a-f-]+/markdown\?markdown_version=v2',path)),'source_api_version_forbidden')
         budget.request()
         try:
             if request is None:
                 time.sleep(max(0,.7-(time.monotonic()-last_request[0])));last_request[0]=time.monotonic()
-                token=notion.READ_RETRIES.set(0)
-                try:return notion.notion_request(api_key,method,path,payload)
-                finally:notion.READ_RETRIES.reset(token)
-            return request(method,path,payload)
+                token=notion.READ_RETRIES.set(0);observer=notion.REQUEST_OBSERVER.set(None)
+                try:return notion.notion_request(api_key,method,path,payload,**({"api_version":api_version} if api_version else {}))
+                finally:
+                    notion.REQUEST_OBSERVER.reset(observer);notion.READ_RETRIES.reset(token)
+            return request(method,path,payload,**({"api_version":api_version} if api_version else {}))
         except Exception as exc:
             if getattr(getattr(exc,'__cause__',None),'code',None)==429:raise BudgetExceeded('source_rate_limited') from None
             raise
@@ -373,7 +400,7 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
         require(not source_keys or set(source_keys)<=keys,'unknown_selected_source')
         ordered=sources[state.get('next_source',0):]+sources[:state.get('next_source',0)]
         if source_keys:ordered=[s for s in sources if s['key'] in source_keys]
-        report={'written':0,'unchanged':0,'held':{},'pending':{},'delegated':{},'soft_exit':None,'selected_sources':[s['key'] for s in ordered],
+        report={'written':0,'partial_written':0,'unchanged':0,'partial_unchanged':0,'held':{},'pending':{},'delegated':{},'soft_exit':None,'selected_sources':[s['key'] for s in ordered],
             'legacy_policy':'preserved_unmerged','configured_scope_complete':False,'selected_scope_complete':False}
         for source in ordered:
             key=source['key'];record=deepcopy(state['sources'].get(key,{'database_id':source['database_id'],'pages':{}}))
@@ -428,6 +455,9 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                     report['pending'][key]='inventory_query_page_budget';record['coverage']=source_coverage(record,report['held'],key);save_source();continue
                 record['retained_not_observed']=sorted(set(record['pages'])-observed)
                 attempted=0
+                partial_ids=[row['id'] for row in inventory['records'] if current_proof(record['pages'].get(row['id'],{}),row,partial=True)]
+                previous=record.get('partial_probe_after')
+                partial_probe=partial_ids[(partial_ids.index(previous)+1)%len(partial_ids)] if previous in partial_ids else next(iter(partial_ids),None)
                 for row in inventory['records']:
                     budget.check()
                     ident=row['id'];prior=record['pages'].get(ident,{});probed=False
@@ -456,8 +486,21 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                         continue
                     try:
                         check_files(root,owned_files(prior),base)
-                        if prior.get('capture_complete') and prior.get('property_proof_version')==PROOF_VERSION and prior.get('renderer_version')==RENDERER_VERSION and prior.get('last_edited_time')==row['last_edited_time'] and prior.get('metadata_fingerprint')==row.get('metadata_fingerprint'):
+                        if current_proof(prior,row):
                             report['unchanged']+=1;continue
+                        if current_proof(prior,row,partial=True):
+                            if ident!=partial_probe:
+                                report['partial_unchanged']+=1;continue
+                            record['partial_probe_after']=ident
+                            fresh=call('GET','/pages/'+ident)
+                            parent=fresh.get('parent',{}).get('database_id') or fresh.get('parent',{}).get('data_source_id')
+                            require(fresh.get('id')==ident and parent==source['database_id'],'source_parent_identity_changed')
+                            fingerprint=metadata_fingerprint(fresh)
+                            require(notion.parse_time(fresh.get('last_edited_time')) is not None,'source_edit_time_missing')
+                            if fresh['last_edited_time']==prior['last_edited_time'] and fingerprint==prior['metadata_fingerprint']:
+                                report['partial_unchanged']+=1;continue
+                            row.update(last_edited_time=fresh['last_edited_time'],metadata_fingerprint=fingerprint)
+
                         if not apply:
                             report['pending'][ident]='dry_run';continue
                         if not probed:
@@ -470,6 +513,7 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
                         row['last_edited_time']=receipt['last_edited_time'];row['created_time']=receipt['notion_created_time'];row['metadata_fingerprint']=receipt['metadata_fingerprint']
                         check_files(root,owned_files(prior),base)
                         record['pages'][ident]=receipt;save_source();report['written']+=1
+                        if receipt.get('readable_partial'):report['partial_written']+=1
                     except RoutedFlomo as routed:
                         row.update(flomo_memo_id=routed.mid,last_edited_time=routed.edited,created_time=routed.created)
                         delegated=flomo_delegation(root,row,source['database_id']);record.setdefault('delegations',{})[ident]=delegated;report['delegated'][ident]=delegated;save_source()
@@ -490,15 +534,15 @@ def collect(root,settings,api_key,*,apply=False,source_keys=None,request=None,do
         report['configured_scope_complete']=all(state['sources'].get(s['key'],{}).get('coverage',{}).get('complete') for s in sources)
         report['api_requests']=budget.requests;report['page_attempts']=budget.pages;report['asset_bytes']=budget.asset_bytes;report['elapsed_seconds']=round(max(0,budget.clock()-budget.started),3)
         if apply:
-            index=['---','stage_only: true','---','','# Notion 云端完整原资料','','旧稿及人工内容保留；下列链接指向已保存的当前版本。','']
+            index=['---','stage_only: true','---','','# Notion 云端原资料','','旧稿及人工内容保留；下列链接指向已保存的当前版本。','']
             for source in sources:
                 source_state=state['sources'].get(source['key'],{});coverage=source_state.get('coverage',{})
-                progress=('已保存 '+str(coverage.get('captured',0))+' / 本轮已发现 '+str(coverage.get('observed',0))) if coverage else '等待分批同步'
+                progress=('完整保存 '+str(coverage.get('captured',0))+'；部分保存 '+str(coverage.get('partial_saved',0))+'；未保存 '+str(coverage.get('unread_observed',0))+' / 本轮已发现 '+str(coverage.get('observed',0))) if coverage else '等待分批同步'
                 if coverage and not coverage.get('complete'):progress+='；仍有未完成内容'
                 if coverage.get('unobserved_remainder_unknown'):progress+='；来源清点尚未结束'
                 if coverage.get('delegated_pending'):progress+='；flomo原链完整属性证明待补 '+str(coverage['delegated_pending'])+' 页'
                 index.extend(['## '+source['name'],'',progress,''])
-                for ident,entry in sorted(state['sources'].get(source['key'],{}).get('pages',{}).items()):index.append('- ['+label(entry['title'])+']('+link(entry['current_path'])+')'+('（本轮源未观察；原稿保留）' if ident in source_state.get('retained_not_observed',[]) else ''))
+                for ident,entry in sorted(state['sources'].get(source['key'],{}).get('pages',{}).items()):index.append('- ['+label(entry['title'])+']('+link(entry['current_path'])+')'+('（部分保存：按钮仍有读取缺口）' if entry.get('readable_partial') else '')+('（本轮源未观察；原稿保留）' if ident in source_state.get('retained_not_observed',[]) else ''))
                 index.append('')
             text=notehelper_owner.MARKER.sub(lambda match:'<!--source-notion:'+match.group(1)+'-->','\n'.join(index))
             raw=text.encode();reject(raw);path=shared.safe_path(root,base/'index.md');existing=read(path)
@@ -642,7 +686,7 @@ def main():
     require(settings['enabled'],'source_configuration_disabled')
     if args.max_pages is not None:require(1<=args.max_pages<=500,'invalid_source_page_budget');settings['batch']['max_pages']=args.max_pages
     report=collect(root,settings,notion.load_notion_api_key(),apply=args.apply,source_keys=args.source_key)
-    print(json.dumps({k:report[k] for k in ('written','unchanged','selected_scope_complete','configured_scope_complete','soft_exit','api_requests','page_attempts')}))
+    print(json.dumps({k:report[k] for k in ('written','partial_written','unchanged','partial_unchanged','selected_scope_complete','configured_scope_complete','soft_exit','api_requests','page_attempts')}))
     if not report['selected_scope_complete']:raise SystemExit(2)
 
 if __name__=='__main__':main()
