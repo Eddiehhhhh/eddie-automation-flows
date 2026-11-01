@@ -199,6 +199,31 @@ an explicit status such as `asset_http_403`; it is **not** a saved image. Resour
 budgets are explicit degraded reasons. Successful original JSON can be saved even
 when one image is unavailable; failed assets are retried on the next invocation.
 
+The original reader distinguishes raw capture identity from stable input identity.
+Only `Expires` and `Signature` are ignored, and only in `files[].url` /
+`thumbnail_url` on the observed flomo CDN with a complete numeric expiry,
+canonical 20-byte base64 signature and nonempty `OSSAccessKeyId`. Access-key IDs,
+host/path, transforms, unknown query bytes, HTML, dates and all other fields
+remain meaningful. Malformed or unfamiliar URLs remain byte-sensitive. The raw
+JSON and `source_sha256` always describe actual captured evidence; old receipts
+without the new marker are compared only after verifying their JSON and every
+referenced asset/history hash. A URL-only rotation does not migrate old receipts
+or generate new source/current versions.
+
+A stable URL is not evidence that remote bytes stayed identical. Healthy cached
+assets are freshly read and SHA-checked through the same credential-free bounded
+downloader; identical bytes consume no data-capture slot. Changed bytes are
+captured using those already-read bytes. Real metadata/new-object work is handled
+before ordinary validation. The existing `max_pages` still limits data captures,
+not the whole job or validation HTTP calls. Inventory plus asset reads use a
+separate 100-request/300-second stage budget (new work stops with persistence
+reserve), 50 MiB/file and 200 MiB/pass limits. A private validation cursor resumes
+bounded checks, and `asset_change_pending` retains byte changes beyond the capture
+quota. Failed probes keep old evidence and report explicit held reasons; deferred
+checks report pending rather than claiming completeness. The shared job deadline
+also prevents starting formal-current followup when persistence time is reserved.
+No new writer, schedule, source scope or configuration switch is introduced.
+
 `inventory_complete` means source pagination reached its terminal page;
 `source_complete` additionally requires all selected original object receipts;
 `media_complete` also requires every discovered asset to be saved. A pending,
