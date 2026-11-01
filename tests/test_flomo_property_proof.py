@@ -302,6 +302,36 @@ class ProofTests(unittest.TestCase):
         later['properties']['Attachment']['files'][0]['name'] = 'changed.bin'
         self.assertNotEqual(m.metadata_fingerprint(first), m.metadata_fingerprint(later))
 
+    def test_proved_text_properties_preserve_href_and_text_link_targets_in_readable_body(self):
+        path = '/pages/page-a/properties/text-prop?page_size=100'
+        envelope = self.request('fixture', 'GET', path)
+        chunks = [
+            {'type':'text', 'plain_text':'First label', 'text':{'content':'First label',
+                'link':{'url':'https://reference.invalid/first?section=one'}},
+             'href':'https://reference.invalid/first?section=one', 'annotations':{'bold':True}},
+            {'type':'text', 'plain_text':' Second label', 'text':{'content':' Second label',
+                'link':{'url':'https://reference.invalid/second'}}, 'href':None,
+             'annotations':{'italic':True}},
+            {'type':'mention', 'plain_text':' Mention label', 'mention':{'type':'page','page':{'id':'reference-page'}},
+             'href':'https://reference.invalid/mentioned-page', 'annotations':{'underline':True}}]
+        envelope['results'] = [{'object':'property_item','id':'text-prop','type':'rich_text','rich_text':item} for item in chunks]
+        self.responses[path] = envelope
+        self.assertTrue(self.run_sync(property_proof_enabled=True)['complete'])
+        record = self.record(); snapshot = self.snapshot(record)
+        self.assertEqual(snapshot['property_capture']['property_responses']['text-prop'][0], envelope)
+        note = next(p for p in record['files'] if p.endswith('/memo-a.md'))
+        stage_body = (self.root/m.STAGE/note).read_text().split('---',2)[2]
+        import flomo_cloud_current as current
+        current_body = current.notion_body(self.root, 'memo-a', record, {}, {})[2]
+        for body in (stage_body,current_body):
+            for value in ('First label','Second label','Mention label',
+                          'https://reference.invalid/first?section=one',
+                          'https://reference.invalid/second','https://reference.invalid/mentioned-page'):
+                self.assertIn(value,body)
+        unproved_body = m.render_record(snapshot['page'],snapshot['blocks'],'memo-a',[]).decode().split('---',2)[2]
+        self.assertNotIn('Notion 文本属性',unproved_body)
+        self.assertNotIn('https://reference.invalid/first?section=one',unproved_body)
+
     def test_bounds_are_finite_even_with_legacy_unlimited(self):
         self.assertEqual(m.proof_limits(max_pages=0)['max_pages'], 50)
         for value in ({'max_pages':0}, {'max_requests': True}, {'max_seconds':99999}, {'unknown':1}):

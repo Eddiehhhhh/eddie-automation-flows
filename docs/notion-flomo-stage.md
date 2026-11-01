@@ -236,7 +236,8 @@ explicit completion rules. Each source JSON retains an untouched `original_page`
 all property response envelopes and the separate hydrated view inside
 `property_capture`. The old `page`, `blocks` and `materialized` keys remain usable.
 Completed rich-text properties also appear in a clearly labelled readable text
-section of that stage version and its formal current; raw formatting remains
+section of that stage version and its formal current, including explicit href /
+text-link target addresses beside their labels; raw formatting remains
 fully preserved in the property response envelopes. Only a completed object receives `property_proof_version: 1` in its receipt.
 Old same-version body receipts remain intact but require this backfill before
 being treated as proof of complete properties. New or visibly changed pages have

@@ -197,7 +197,17 @@ def render_record(page, blocks, mid, local_paths, *, embed_images=False, include
     if include_text_properties:
         for name, prop in page.get('properties', {}).items():
             if prop.get('type') != 'rich_text': continue
-            text = notion.rich_text_plain_text(prop.get('rich_text', []))
+            parts = []
+            for item in prop.get('rich_text', []):
+                text = notion.rich_text_plain_text([item])
+                targets = [item.get('href'), ((item.get('text') or {}).get('link') or {}).get('url')]
+                seen = set()
+                for target in targets:
+                    if isinstance(target, str) and target and target != text and target not in seen:
+                        text += ' (' + target + ')'
+                        seen.add(target)
+                parts.append(text)
+            text = ''.join(parts)
             if text.strip(): body += '\n\n## Notion 文本属性：' + str(name).replace('\n', ' ') + '\n\n' + text
     return (notion.render_frontmatter(metadata) + '\n\n' + body + '\n').encode()
 
