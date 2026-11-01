@@ -92,6 +92,61 @@ class StableInput(unittest.TestCase):
                 self.assertNotEqual(s.input_fingerprint(rotated,b),s.input_fingerprint(unknown,b))
                 value=unknown['files'][0]['url'];self.assertEqual(s.stable_asset_url(value),value)
 
+    def seed_v1_second_host(self):
+        values=[image('a'),image('b')]
+        for memo_value in values:
+            for field in ('url','thumbnail_url'):
+                memo_value['files'][0][field]=memo_value['files'][0][field].replace(HOST,'flomo.oss-cn-shanghai.aliyuncs.com')
+        self.seed(values)
+        state=self.state()
+        for memo_value in values:
+            record=state['pages'][memo_value['slug']]['source_pages']['upstream-only']
+            record['input_fingerprint_version']=1
+            record['input_fingerprint']=s.input_fingerprint(memo_value,b,fingerprint_version=1)
+            self.assertEqual(record['input_fingerprint'],b.digest(b.encoded(memo_value)))
+        (self.root/b.STAGE/s.STATE).write_bytes(b.encoded(state))
+        return values
+
+    def test_v1_second_host_receipts_verify_old_algorithm_then_compare_v2_without_migration(self):
+        values=self.seed_v1_second_host();c.export(self.root)
+        before=(self.root/b.STAGE/s.STATE).read_bytes();current=(self.root/c.STATE).read_bytes()
+        for memo_value in values:
+            for field in ('url','thumbnail_url'):
+                memo_value['files'][0][field]=url(memo_value['slug'],2).replace(HOST,'flomo.oss-cn-shanghai.aliyuncs.com')
+        result=self.run_source(values)
+        self.assertEqual(result['held'],{});self.assertEqual(result['written'],0)
+        self.assertEqual(result['asset_probe_verified'],2)
+        self.assertEqual((self.root/b.STAGE/s.STATE).read_bytes(),before)
+        self.assertEqual(c.export(self.root)['written'],0)
+        self.assertEqual((self.root/c.STATE).read_bytes(),current)
+
+    def test_v1_second_host_real_asset_and_meaningful_url_changes_capture_with_v2_marker(self):
+        values=self.seed_v1_second_host()
+        values[1]['files'][0]['url']+='&transform=changed'
+        result=self.run_source(values,downloader=lambda u:NEW)
+        self.assertEqual(result['written'],2)
+        self.assertEqual(result['held'],{})
+        for mid in ('a','b'):
+            self.assertEqual(self.record(mid)['input_fingerprint_version'],2)
+            self.assertEqual(self.record(mid)['input_fingerprint'],s.input_fingerprint(json.loads(self.raw(self.record(mid))),b))
+
+    def test_v1_marker_cannot_be_validated_with_v2_algorithm(self):
+        values=self.seed_v1_second_host();state=self.state()
+        state['pages']['a']['source_pages']['upstream-only']['input_fingerprint']=s.input_fingerprint(values[0],b)
+        (self.root/b.STAGE/s.STATE).write_bytes(b.encoded(state))
+        result=self.run_source(values)
+        self.assertIn('original_cache_input_fingerprint',result['held'].values())
+        self.assertEqual(result['written'],0)
+
+    def test_unknown_noninteger_and_boolean_marker_versions_fail_closed(self):
+        self.seed([image('a')]);before=self.state()
+        for version in (0,3,'1',True):
+            state=deepcopy(before);state['pages']['a']['source_pages']['upstream-only']['input_fingerprint_version']=version
+            (self.root/b.STAGE/s.STATE).write_bytes(b.encoded(state))
+            result=self.run_source([image('a',2)])
+            self.assertIn('unsupported_input_fingerprint_version',result['held'].values())
+            self.assertEqual(result['written'],0)
+
     def test_unknown_host_missing_duplicate_or_invalid_signature_shape_not_normalized(self):
         valid=url()
         for value in [valid.replace(HOST,'files.invalid'),valid+'&Signature=duplicate',valid.replace('Expires=2000000001','Expires=bad'),valid.split('&Signature=')[0],valid.replace('Signature=','Signature=invalid-'),valid.replace('https://','http://'),valid.replace(HOST,'user:pass@'+HOST)]:
