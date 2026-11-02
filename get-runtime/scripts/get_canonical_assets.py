@@ -6,7 +6,7 @@ import re
 from urllib.parse import unquote, urlsplit
 
 MARKER = '<!-- get-cloud-attachments -->'
-MAX_ASSET = 25 * 1024 * 1024
+MAX_ASSET = 48 * 1024 * 1024
 MEDIA_TYPES = {'audio','local_audio','recorder_audio','recorder_flash_audio','meeting'}
 PATH = re.compile(r'_assets/(?:images|files)/([0-9a-f]{64})\.(?:png|jpg|webp|gif|pdf|bin|json|pending\.json|media\.json)\Z')
 
@@ -57,7 +57,7 @@ class SourceWithAssets:
         self.source = source
         self.directory = directory
         self.pending_media = {}
-        self.store = AssetStore(directory, allow_media=download_media, **({'fetch':fetch} if fetch else {}))
+        self.store = AssetStore(directory, allow_media=download_media, max_run=48 * 1024 * 1024, **({'fetch':fetch} if fetch else {}))
 
     def __getattr__(self, name):
         return getattr(self.source, name)

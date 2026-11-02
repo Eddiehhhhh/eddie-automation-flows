@@ -48,6 +48,15 @@ class FullEntry(unittest.TestCase):
    def initial_fetch(url,max_bytes):
     if '.mp3' in url: raise TimeoutError('synthetic media timeout')
     return b'image','image/png'
+   # If the complete transaction has no room for audio, retain text and pending debt.
+   from unittest.mock import patch
+   oversize=assets.SourceWithAssets(Source(notes),root/'budget-assets',fetch=lambda url,max_bytes:(b'x'*200000,'audio/mpeg') if '.mp3' in url else (b'image','image/png'))
+   with patch.object(m,'MAX_CHANGED_BYTES',100000):
+    budget_plan,budget_files=entry.prepare(reader,evidence,parent,oversize,approved_rules_sha256=entry.rules_sha256(),preview=preview,bootstrap=bootstrap)
+   self.assertEqual(len(budget_plan['proposed_content_ids']),10)
+   self.assertTrue(any(p.endswith('.pending.json') for p in budget_files))
+   receipts=[json.loads(v) for p,v in budget_files.items() if p.endswith('.media.json')]
+   self.assertTrue(all(item['mime'].startswith('image/') for rec in receipts for item in rec['items']))
    source=assets.SourceWithAssets(Source(notes),root/'disposable-assets',fetch=initial_fetch)
    plan,files=entry.prepare(reader,evidence,parent,source,approved_rules_sha256=entry.rules_sha256(),preview=preview,bootstrap=bootstrap)
    self.assertEqual(len(plan['proposed_content_ids']),10)

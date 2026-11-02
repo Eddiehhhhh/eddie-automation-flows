@@ -13,6 +13,7 @@ import time
 from urllib.parse import urljoin, urlsplit
 
 MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_MEDIA_BYTES = 48 * 1024 * 1024
 MAX_RUN_BYTES = 200 * 1024 * 1024
 MAX_ASSETS = 128
 AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.amr', '.ogg', '.flac', '.opus'}
@@ -250,7 +251,7 @@ class AssetStore:
                 try:
                     if len(self.memo) >= self.max_assets:
                         raise AssetError('asset count limit reached')
-                    remaining = min(self.max_file, self.max_run - self.bytes)
+                    remaining = min(MAX_MEDIA_BYTES if media and self.allow_media and self.max_file == MAX_FILE_BYTES else self.max_file, self.max_run - self.bytes)
                     if remaining <= 0:
                         raise AssetError('run byte limit reached')
                     content, mime = self.fetch(url, max_bytes=remaining)

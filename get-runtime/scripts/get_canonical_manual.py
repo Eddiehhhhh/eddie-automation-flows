@@ -97,8 +97,19 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     if loader is None and any(assets.MARKER.encode() in current.get(path,b'') for path in changes):
         m.fail('manual_scope')
     if loader is not None:
-        original_changes=set(changes)
-        next_registry,changes=assets.enrich(next_registry,changes,details,loader,current=current,retry=retry,read_asset=lambda path:read_saved_asset(reader,parent,path))
+        original_registry, original_changes = next_registry, changes
+        def candidate():
+            return assets.enrich(original_registry,original_changes,details,loader,current=current,retry=retry,read_asset=lambda path:read_saved_asset(reader,parent,path))
+        next_registry,changes=candidate()
+        before_tree=reader.tree(parent)
+        def changed_bytes(registry,outputs):
+            proposed={**outputs,a.STATE:a.encoded(states['legacy']),n.STATE:a.encoded(registry)}
+            return sum(len(data) for path,data in proposed.items() if before_tree.get(r.GET+'/'+path, (None,None,None))[2] != r.oid(data))
+        if changed_bytes(next_registry,changes)>m.MAX_CHANGED_BYTES:
+            store=getattr(getattr(loader,'__self__',None),'store',None)
+            if store is None: m.fail('manual_budget')
+            store.allow_media=False
+            next_registry,changes=candidate()
         for identity in retry:
             path=next_registry['newById'][identity]['filePath']
             if path not in original_changes and changes.get(path,current.get(path))!=current.get(path):
