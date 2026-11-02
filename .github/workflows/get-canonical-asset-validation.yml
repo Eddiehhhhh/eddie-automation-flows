@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: be2f215a81a82cc0a14407bc391854059d9ff342
+          ref: 30e8dacb11f6930413c3ec73b4bbbd364f5e6fbd
           path: engine
           persist-credentials: false
           filter: blob:none
@@ -65,6 +65,8 @@ jobs:
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_history_subtree_cache.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_registered_history_scope.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_asset*.py' -v
+          python -m unittest discover -s engine/get-runtime/tests -p 'test_get_sparse_asset_retry.py' -v
+          python -m unittest discover -s engine/get-runtime/tests -p 'test_get_timeline_moments_fidelity.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_full_entry_publication_fixture.py' -v
           if [ "$GET_HISTORY_PROBE_ONLY" != '1' ]; then
             python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_live_asset_probe.py' -v
