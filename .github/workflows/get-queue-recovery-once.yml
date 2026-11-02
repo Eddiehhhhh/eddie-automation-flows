@@ -1,0 +1,16 @@
+name: Get queue recovery once
+on:
+  push:
+    branches: [codex/get-queue-recovery]
+    paths: [.github/workflows/get-queue-recovery-once.yml]
+permissions: {}
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: true
+jobs:
+  release-queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Complete without accessing data
+        run: 'true'
