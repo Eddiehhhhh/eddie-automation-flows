@@ -113,7 +113,7 @@ def main():
         main_after=github('git/ref/heads/main')['object']['sha']
         if remote.source_get_tree(main_after)!=remote.source_get_tree(main_before):
             raise RuntimeError('production_get_tree_changed_during_probe')
-        output={'status':'isolated_full_entry_and_publication_verified','changed_paths':len(files),'counts':plan['counts'],'result':result,'production_targeted':False,'notion_requested':False}
+        output={'status':'isolated_full_entry_and_publication_verified_with_media_pending' if source.pending_media else 'isolated_full_entry_and_publication_verified','changed_paths':len(files),'counts':plan['counts'],'media_pending_notes_this_run':len(source.pending_media),'media_pending_files_this_run':sum(source.pending_media.values()),'result':result,'production_targeted':False,'notion_requested':False}
         Path(os.environ['FULL_PROBE_RESULT']).write_text(json.dumps(output))
         print(json.dumps(output))
 

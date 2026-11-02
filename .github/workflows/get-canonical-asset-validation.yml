@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: a644f9ba4dbc10bd147a2a0798f7fbb511c1af11
+          ref: be2f215a81a82cc0a14407bc391854059d9ff342
           path: engine
           persist-credentials: false
           filter: blob:none
