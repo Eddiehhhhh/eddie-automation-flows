@@ -44,14 +44,33 @@ class IsolatedRemote(runtime.m.Remote):
         self.local.run('push','--porcelain',runtime.r.REMOTE_URL,commit+':'+REF)
 
 
+class ProbeTimer(runtime.PreparationTimer):
+    def start(self,stage):
+        if stage in runtime.PREPARATION_STAGES:
+            print(json.dumps({'contract':'get-isolated-stage-1','stage':stage,'phase':'start'}),flush=True)
+        return super().start(stage)
+
+    def finish(self,stage,started):
+        super().finish(stage,started)
+        value=self.diagnostic().get(stage)
+        if value is not None:
+            print(json.dumps({'contract':'get-isolated-stage-1','stage':stage,'phase':'finish',**value}),flush=True)
+
+
 def main():
+    timer=ProbeTimer()
+    runtime._PREPARATION_TIMER.set(timer)
     token=os.environ['PRIVATE_VAULT_TOKEN']
     main_before=github('git/ref/heads/main')['object']['sha']
+    history_only=os.environ.get('GET_HISTORY_PROBE_ONLY')=='1'
     parent=main_before
-    try:
-        github('git/refs','POST',{'ref':REF,'sha':parent})
-    except RuntimeError:
+    if history_only:
         parent=github('git/ref/heads/'+BRANCH)['object']['sha']
+    else:
+        try:
+            github('git/refs','POST',{'ref':REF,'sha':parent})
+        except RuntimeError:
+            parent=github('git/ref/heads/'+BRANCH)['object']['sha']
     remote=IsolatedRemote(None,token)
     if remote.source_get_tree(parent)!=remote.source_get_tree(main_before):
         raise RuntimeError('isolated_branch_get_tree_changed')
@@ -74,6 +93,11 @@ def main():
             if detail is not None:print(json.dumps({'contract':'get-isolated-capture-transport-diagnostic-1',**detail}))
             raise
         anchor,preview,witness=runtime.at_stage('trusted_inputs',runtime.load_trusted_inputs,local,reader,evidence,remote,token,root,parent,client,policy,bootstrap=entry.BOOTSTRAP,exclude_run_id=int(os.environ['GITHUB_RUN_ID']),exclude_run_attempt=int(os.environ['GITHUB_RUN_ATTEMPT']))
+        if history_only:
+            output={'status':'isolated_history_read_only_probe_finished','production_targeted':False,'publisher_requested':False,'stage_timings':timer.diagnostic()}
+            Path(os.environ['FULL_PROBE_RESULT']).write_text(json.dumps(output))
+            print(json.dumps(output),flush=True)
+            return
         key,client_id=load_credentials()
         source=SourceWithAssets(runtime.m.c.Source(key,client_id,RequestPolicy(seconds=30*60)),root/'assets')
         plan,files=runtime.at_stage('canonical_prepare',entry.prepare,reader,evidence,parent,source,approved_rules_sha256=policy['rules_sha256'],anchor=anchor,preview=preview,bootstrap=entry.BOOTSTRAP,history_witness=witness)

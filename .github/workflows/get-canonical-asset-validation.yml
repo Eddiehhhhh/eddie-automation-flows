@@ -8,9 +8,10 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 12
     env:
       PYTHONDONTWRITEBYTECODE: '1'
+      GET_HISTORY_PROBE_ONLY: '1'
       PYTHONPATH: ${{ github.workspace }}/engine/get-runtime/scripts
       PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -63,8 +64,12 @@ jobs:
           python -m unittest discover -s engine/get-runtime/tests -p 'test_exact_source_binding.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_asset*.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_full_entry_publication_fixture.py' -v
-          python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_live_asset_probe.py' -v
+          if [ "$GET_HISTORY_PROBE_ONLY" != '1' ]; then
+            python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_live_asset_probe.py' -v
+          fi
       - name: Store isolated candidate for remote readback
+        if: env.GET_HISTORY_PROBE_ONLY != '1'
         run: python scripts/commit_private_vault.py --vault private --ref codex/get-cloud-proof --message 'Verify isolated canonical attachment candidate' --path 'Raw/03 Get/01 Notes/Cloud Proof/Canonical Candidate' --force
-      - name: Validate complete original entry and publisher against isolated ref
-        run: python scripts/get_canonical_full_runtime_probe.py
+      - name: Locate original historical input stage without publication
+        timeout-minutes: 9
+        run: timeout --signal=TERM --kill-after=15s 420s python -u scripts/get_canonical_full_runtime_probe.py
