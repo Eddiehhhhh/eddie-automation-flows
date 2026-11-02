@@ -70,6 +70,17 @@ def single_parent(reader, commit):
     return rows[1]
 
 
+def history_parent(reader, commit):
+    """Follow only the first parent; extra merge parents supply no authority."""
+    a.checked(commit, 40)
+    rows = reader.local.run('rev-list', '--parents', '-n', '1', commit).decode().split()
+    if len(rows) < 2 or rows[0] != commit:
+        fail('entry_non_linear_history')
+    for parent in rows[1:]:
+        a.checked(parent, 40)
+    return rows[1]
+
+
 @dataclass(frozen=True)
 class VerifiedHistoryWitness:
     """In-memory authority returned only by original publication verification.
@@ -135,7 +146,7 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None)
             fail('entry_foreign_get_change')
         if cursor == ancestor:
             return
-        cursor = single_parent(reader, cursor)
+        cursor = history_parent(reader, cursor)
     fail('entry_history_bound')
 
 

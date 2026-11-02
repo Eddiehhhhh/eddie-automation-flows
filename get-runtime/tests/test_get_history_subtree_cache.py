@@ -50,4 +50,24 @@ class HistorySubtree(unittest.TestCase):
   commit=self.commit('replace Get directory')
   with self.assertRaisesRegex(RuntimeError,'adapter_anchor'):self.reader.source_get_tree(commit)
 
+ def merge_commit(self,first,second,tree=None):
+  return self.git('commit-tree',tree or self.git('rev-parse',first+'^{tree}'),'-p',first,'-p',second,'-m','merge fixture')
+ def test_merge_extra_parent_does_not_block_unchanged_first_parent_chain(self):
+  self.note.write_text('untrusted side text');side=self.commit('side Get edit')
+  merged=self.merge_commit(self.commits[-1],side)
+  entry.unchanged_get_history(self.reader,self.commits[0],merged)
+  self.assertEqual(entry.history_parent(self.reader,merged),self.commits[-1])
+  with self.assertRaisesRegex(RuntimeError,'entry_non_linear_history'):entry.single_parent(self.reader,merged)
+ def test_second_parent_ancestor_does_not_authorize_history(self):
+  side=self.git('commit-tree',self.git('rev-parse',self.commits[-1]+'^{tree}'),'-p',self.commits[-1],'-m','side parent only')
+  merged=self.merge_commit(self.commits[-1],side)
+  with self.assertRaisesRegex(RuntimeError,'entry_non_linear_history'):
+   entry.unchanged_get_history(self.reader,side,merged)
+ def test_first_parent_edit_revert_at_merge_is_still_rejected(self):
+  self.note.write_text('changed');changed=self.commit('first parent Get edit')
+  merged=self.merge_commit(changed,self.commits[0],self.git('rev-parse',self.commits[-1]+'^{tree}'))
+  self.assertEqual(self.reader.source_get_tree(merged),self.reader.source_get_tree(self.commits[0]))
+  with self.assertRaisesRegex(RuntimeError,'entry_foreign_get_change'):
+   entry.unchanged_get_history(self.reader,self.commits[0],merged)
+
 if __name__=='__main__':unittest.main()
