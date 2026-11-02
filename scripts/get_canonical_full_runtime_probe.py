@@ -46,7 +46,7 @@ class IsolatedRemote(runtime.m.Remote):
 
 class ProbeTimer(runtime.PreparationTimer):
     def start(self,stage):
-        if stage in runtime.PREPARATION_STAGES:
+        if stage in runtime.STAGES:
             print(json.dumps({'contract':'get-isolated-stage-1','stage':stage,'phase':'start'}),flush=True)
         return super().start(stage)
 
@@ -109,7 +109,7 @@ def main():
         main_after=github('git/ref/heads/main')['object']['sha']
         if remote.source_get_tree(main_after)!=remote.source_get_tree(main_before):
             raise RuntimeError('production_get_tree_changed_during_probe')
-        output={'status':'isolated_full_entry_and_publication_verified','changed_paths':len(files),'result':result,'production_targeted':False,'notion_requested':False}
+        output={'status':'isolated_full_entry_and_publication_verified','changed_paths':len(files),'counts':plan['counts'],'result':result,'production_targeted':False,'notion_requested':False}
         Path(os.environ['FULL_PROBE_RESULT']).write_text(json.dumps(output))
         print(json.dumps(output))
 
