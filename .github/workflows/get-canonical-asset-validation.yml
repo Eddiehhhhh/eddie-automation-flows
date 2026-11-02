@@ -14,7 +14,7 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/engine/get-runtime/scripts
       PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
       GITHUB_TOKEN: ${{ github.token }}
-      FULL_PROBE_RESULT: ${{ runner.temp }}/get-full-probe-result.json
+      FULL_PROBE_RESULT: ${{ github.workspace }}/get-full-probe-result.json
       GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
       GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
       GET_PRIVATE_BINDINGS_FILE: ${{ github.workspace }}/private/.sync/get-notion/runtime-bindings-da4c0aa7a5f1276c48bf177cb112c6f163f5d322652b762ae7f7a2ffc5fd7512.json
