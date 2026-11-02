@@ -44,5 +44,4 @@ jobs:
           write_if_changed(target, render_note(note))
           print("Get note rendered in isolated private branch")
           PYCODE
-      - run: git -C vault add -f -- 'Raw/03 Get/01 Notes/Cloud Proof'
-      - run: python scripts/commit_private_vault.py --vault vault --ref codex/get-cloud-proof --message 'Get cloud sample proof' --path 'Raw/03 Get/01 Notes/Cloud Proof'
+      - run: python scripts/commit_private_vault.py --vault vault --ref codex/get-cloud-proof --message 'Get cloud sample proof' --path 'Raw/03 Get/01 Notes/Cloud Proof' --force
