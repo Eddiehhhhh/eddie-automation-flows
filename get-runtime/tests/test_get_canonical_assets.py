@@ -39,7 +39,7 @@ class CanonicalAssets(unittest.TestCase):
    source=a.SourceWithAssets(object(),d,fetch=failure)
    with self.assertRaises(AssetError):source.attachment_files(note,'03 纯文本记录/old.md')
    self.assertEqual(note,{'content':'![x](https://example.com/a.png)'})
- def test_failed_held_and_audio_status_never_advance_candidate(self):
+ def test_failed_and_held_downloads_never_advance_candidate(self):
   from copy import deepcopy
   from unittest.mock import Mock
   import tempfile
@@ -48,11 +48,35 @@ class CanonicalAssets(unittest.TestCase):
   before=deepcopy(registry)
   with tempfile.TemporaryDirectory() as d:
    source=a.SourceWithAssets(object(),d)
-   for status,kind in [('failed','image'),('held','file'),('not-downloaded','audio'),('not-downloaded','video')]:
+   for status,kind in [('failed','image'),('held','file'),('failed','audio'),('held','video'),('not-downloaded','file')]:
     source.store=Mock();source.store.materialize.return_value=[{'status':status,'kind':kind}]
     with self.assertRaisesRegex(ValueError,'asset_materialization_required'):
      a.enrich(registry,changes,{'1':{'content':'text'}},source.attachment_files)
     self.assertEqual(registry,before);self.assertEqual(changes,{'03 纯文本记录/a.md':b'original'})
+ def test_media_pending_is_explicit_refreshable_and_does_not_copy_signed_url(self):
+  import json,tempfile
+  from unittest.mock import Mock
+  note={'id':'1','content':'original text','updated_at':'2026-10-13T00:00:00Z',
+        'attachments':[{'type':'audio','url':'https://example.com/recording.mp3?Expires=1&Signature=fixture'}]}
+  with tempfile.TemporaryDirectory() as d:
+   fetch=Mock(side_effect=AssertionError('media is pending, not downloaded'))
+   source=a.SourceWithAssets(object(),d,fetch=fetch)
+   files=source.attachment_files(note,'99 录音卡笔记/a.md');self.assertEqual(len(files),1)
+   path,data=next(iter(files.items()));a.verify(path,data)
+   record=json.loads(data);self.assertEqual(record['source_note_id'],'1')
+   self.assertEqual(record['items'][0]['status'],'pending_download')
+   self.assertEqual(record['resolve'],'refresh_source_note_before_download')
+   self.assertNotIn(b'Signature',data);self.assertNotIn(b'https://',data)
+   body=a.append('99 录音卡笔记/a.md',b'original text',files)
+   self.assertTrue(body.startswith(b'original text'));self.assertIn('待补全'.encode(),body)
+   self.assertEqual(a.references({'99 录音卡笔记/a.md':body}),{path})
+   self.assertEqual(source.pending_media,{'1':1});fetch.assert_not_called()
+ def test_media_without_stable_source_id_is_held(self):
+  import tempfile
+  with tempfile.TemporaryDirectory() as d:
+   source=a.SourceWithAssets(object(),d)
+   with self.assertRaisesRegex(ValueError,'asset_materialization_required'):
+    source.attachment_files({'attachments':[{'type':'audio','url':'https://example.com/a.mp3'}]},'a.md')
  def test_update_rebuilds_suffix_and_baseline_from_new_source_body(self):
   binary=b'new image';asset='_assets/images/'+hashlib.sha256(binary).hexdigest()+'.png'
   registry={'newById':{'1':{'filePath':'03 纯文本记录/a.md','mirror_sha256':'old','baseline_blob':'old'}}}

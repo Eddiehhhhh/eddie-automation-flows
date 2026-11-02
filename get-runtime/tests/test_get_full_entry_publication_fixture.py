@@ -40,6 +40,7 @@ class FullEntry(unittest.TestCase):
    reader.local.run('add','--','Raw/03 Get');reader.local.run('commit','-qm','synthetic bootstrap');parent=reader.local.run('rev-parse','HEAD').decode().strip()
    bootstrap={'commit':parent,'get_tree':reader.source_get_tree(parent),'capture_anchor':evidence.anchor,'legacy_sha256':n.legacy.sha(n.legacy.encoded(state)),'legacy_managed':0,'legacy_conflicts':0,'legacy_pending':0,'existing_unmanaged':0}
    notes=[{'id':str(i),'title':'Note '+str(i),'note_type':'plain_text','content':'![x](https://example.com/a.png)','created_at':'2026-10-13T00:00:00Z','updated_at':'2026-10-13T00:00:00Z'} for i in range(1,11)]
+   notes[0]['attachments']=[{'type':'audio','url':'https://example.com/a.mp3?Expires=1&Signature=fixture'}]
    preview={}
    for note in notes:
     path=n.new_path(note,note['id']);raw=n.render_exact(note,path)
@@ -47,6 +48,9 @@ class FullEntry(unittest.TestCase):
    source=assets.SourceWithAssets(Source(notes),root/'disposable-assets',fetch=lambda url,max_bytes:(b'image','image/png'))
    plan,files=entry.prepare(reader,evidence,parent,source,approved_rules_sha256=entry.rules_sha256(),preview=preview,bootstrap=bootstrap)
    self.assertEqual(len(plan['proposed_content_ids']),10)
+   pending=[(p,data) for p,data in files.items() if p.endswith('.pending.json')]
+   self.assertEqual(len(pending),1);self.assertEqual(json.loads(pending[0][1])['source_note_id'],'1')
+   self.assertNotIn(b'Signature',pending[0][1]);self.assertEqual(source.pending_media,{'1':1})
    class Remote:
     head=parent
     def metadata(self):return {'full_name':m.r.REPOSITORY,'private':True}
@@ -58,6 +62,8 @@ class FullEntry(unittest.TestCase):
    remote=Remote()
    result=m.publish(reader,remote,plan,files,n.legacy.sha(n.legacy.encoded(plan)),lambda commit,values:{p:reader.read(commit,p,assets.MAX_ASSET) for p in values},checkpoint=lambda pl:m.write_checkpoint(root/'checkpoint.json',pl),writers_guard=lambda:None,verifier=lambda rd,pl,fs:entry.verify_plan(rd,evidence,pl,fs,entry.rules_sha256(),bootstrap=bootstrap))
    self.assertTrue(result['readback_verified']);self.assertEqual(remote.head,plan['candidate_commit']);self.assertEqual(reader.local.run('rev-parse','HEAD').decode().strip(),parent)
+   published_registry=json.loads(reader.read(remote.head,'Raw/03 Get/'+n.STATE,n.MAX_STATE))
+   self.assertEqual(published_registry['newById']['1']['source_metadata']['attachments'][0]['url'],notes[0]['attachments'][0]['url'])
    notes[0]['content']='updated source ![x](https://example.com/a.png)';notes[0]['updated_at']='2026-10-14T00:00:00Z'
    anchor={'commit':plan['candidate_commit'],'receipt_sha256':plan['receipt_sha256']}
    second,outputs=entry.prepare(reader,evidence,remote.head,source,approved_rules_sha256=entry.rules_sha256(),anchor=anchor,bootstrap=bootstrap)

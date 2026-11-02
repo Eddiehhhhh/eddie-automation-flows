@@ -1,12 +1,13 @@
 """Exact content-addressed attachments referenced by generated note suffixes."""
 import hashlib
+import json
 import posixpath
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 MARKER = '<!-- get-cloud-attachments -->'
 MAX_ASSET = 25 * 1024 * 1024
-PATH = re.compile(r'_assets/(?:images|files)/([0-9a-f]{64})\.(?:png|jpg|webp|gif|pdf|bin)\Z')
+PATH = re.compile(r'_assets/(?:images|files)/([0-9a-f]{64})\.(?:png|jpg|webp|gif|pdf|bin|json|pending\.json)\Z')
 
 
 def references(notes):
@@ -41,7 +42,10 @@ def append(note_path, original, assets):
     for path, data in sorted(assets.items()):
         verify(path, data)
         relative = posixpath.relpath(path, posixpath.dirname(note_path))
-        lines.append(('!' if path.startswith('_assets/images/') else '')+'[attachment]('+relative+')')
+        if path.endswith('.pending.json'):
+            lines.extend(['音视频附件尚待补全，原始链接与笔记来源已保留。','[待补全附件清单]('+relative+')'])
+        else:
+            lines.append(('!' if path.startswith('_assets/images/') else '')+'[attachment]('+relative+')')
     return original + ('\n'.join(lines)+'\n').encode()
 
 
@@ -51,6 +55,7 @@ class SourceWithAssets:
         from source_sync_assets import AssetStore
         self.source = source
         self.directory = directory
+        self.pending_media = {}
         self.store = AssetStore(directory, **({'fetch':fetch} if fetch else {}))
 
     def __getattr__(self, name):
@@ -64,12 +69,33 @@ class SourceWithAssets:
         value['attachments'] = list(value.get('attachments') or []) + [
             {'type':'image','url':url} for url in dict.fromkeys(inline)]
         rows = self.store.materialize(value)
-        if any(row.get('status') != 'downloaded' and
-               not (row.get('kind') == 'link' and row.get('status') == 'not-downloaded')
-               for row in rows):
-            raise ValueError('asset_materialization_required')
+        from source_sync_assets import AUDIO_EXTENSIONS
+        pending = []
+        for index, row in enumerate(rows):
+            status, kind = row.get('status'), row.get('kind')
+            if status == 'downloaded' or (kind == 'link' and status == 'not-downloaded'):
+                continue
+            if status != 'not-downloaded' or not (kind in ('audio','video') or
+                    Path(urlsplit(row.get('url') or '').path).suffix.lower() in AUDIO_EXTENSIONS):
+                raise ValueError('asset_materialization_required')
+            count = len(note.get('attachments') or [])
+            pending.append({'source_field':'attachments' if index < count else 'content.inline_images',
+                            'source_index':index if index < count else index-count,
+                            'kind':kind,'status':'pending_download'})
         result = {row['path']:(Path(self.directory)/row['path']).read_bytes()
                   for row in rows if row['status']=='downloaded'}
+        if pending:
+            from get_v7_compat import note_identity
+            try:ident = note_identity(note)
+            except ValueError:raise ValueError('asset_materialization_required') from None
+            if not re.fullmatch('[0-9]{1,64}',ident):raise ValueError('asset_materialization_required')
+            # Signed URLs remain in original source metadata; refresh by stable ID before fetching.
+            record = {'contract':'get-attachment-pending-1','source_system':'getnote',
+                      'source_note_id':ident,'source_updated_at':note.get('updated_at'),
+                      'status':'pending_download','resolve':'refresh_source_note_before_download','items':pending}
+            data = (json.dumps(record,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\n').encode()
+            result['_assets/files/'+hashlib.sha256(data).hexdigest()+'.pending.json'] = data
+            self.pending_media[ident] = len(pending)
         for asset, data in result.items():
             verify(asset, data)
         return result
