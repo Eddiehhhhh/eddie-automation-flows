@@ -57,6 +57,7 @@ def main():
         raise RuntimeError('isolated_branch_get_tree_changed')
     text=Path('.github/workflows/get-canonical.yml').read_text()
     policy=json.loads(base64.b64decode(re.search(r"POLICY_B64: '([^']+)'",text).group(1)))
+    historical_policy=dict(policy)
     policy['rules_sha256']=entry.rules_sha256()
     policy['get_policy_sha256']=entry.policy_sha256(policy['rules_sha256'],entry.BOOTSTRAP)
     client=provenance.PublicGithub(os.environ.get('GITHUB_TOKEN'))
@@ -66,7 +67,34 @@ def main():
         local=runtime.at_stage('checkout',runtime.r.readback_checkout,root/'objects',entry.BOOTSTRAP['capture_anchor']['capture_commit'],token)
         remote.local=local
         reader,evidence,_=runtime.at_stage('capture_evidence',runtime.m.load_evidence,local,remote,token,root,parent,anchor=entry.BOOTSTRAP['capture_anchor'])
-        anchor,preview,witness=runtime.at_stage('trusted_inputs',runtime.load_trusted_inputs,local,reader,evidence,remote,token,root,parent,client,policy,bootstrap=entry.BOOTSTRAP,exclude_run_id=int(os.environ['GITHUB_RUN_ID']),exclude_run_attempt=int(os.environ['GITHUB_RUN_ATTEMPT']))
+        # Authenticate historical publications using their original public policy.
+        # Candidate rules are applied only to the new transaction, never relabel old proof.
+        runtime.fetch_commit(local,parent,entry.MAX_INTERVENING+2)
+        runtime.fetch_commit(local,entry.BOOTSTRAP['commit'])
+        runtime.load_inventory(reader,remote,token,root/'bootstrap',entry.BOOTSTRAP['commit'])
+        current=runtime.load_inventory(reader,remote,token,root/'parent',parent)
+        anchor=preview=witness=None
+        if entry.FULL_RECEIPT in reader.tree(parent):
+            verified=runtime.at_stage('receipt_provenance',provenance.discover,client,historical_policy,exclude_run_id=int(os.environ['GITHUB_RUN_ID']),exclude_run_attempt=int(os.environ['GITHUB_RUN_ATTEMPT']),capture_history_witness=True)
+            anchor=verified['anchor'];commit=anchor['commit']
+            runtime.fetch_commit(local,commit,entry.MAX_INTERVENING+2)
+            runtime.load_receipt(reader,remote,token,root,commit)
+            receipt=entry.read_receipt(reader,commit,anchor['receipt_sha256'],policy['get_policy_sha256'])
+            if receipt['sequence']!=verified['receipt_sequence']:raise RuntimeError('isolated_receipt_sequence')
+            before=receipt['parent_commit'];previous=receipt['previous_receipt_commit']
+            if provenance.history_witness_required(anchor,receipt):
+                witness=verified.get('history_witness') or provenance.verify_history_witness(client,historical_policy,candidate_runs_checked=verified['candidate_runs_checked'])
+                runtime.fetch_commit(local,witness.observed_commit)
+            runtime.fetch_commit(local,before,entry.MAX_INTERVENING+2)
+            runtime.fetch_commit(local,previous)
+            if receipt['sequence']>1:runtime.load_receipt(reader,remote,token,root,previous)
+            for target in sorted({before,commit}):runtime.load_inventory(reader,remote,token,root/target,target)
+        _,_,states=runtime.at_stage('trusted_states',entry.trust_current,reader,evidence,parent,policy['rules_sha256'],anchor,bootstrap=entry.BOOTSTRAP,history_witness=witness)
+        _,legacy,registry=states
+        runtime.m.selected_baselines(reader,legacy,parent,remote)
+        runtime.engine.new_baselines(reader,registry,parent,remote)
+        if runtime.n.STATE not in current:
+            _,preview=runtime.m.load_canonical_inputs(reader,remote,token,root,parent)
         key,client_id=load_credentials()
         source=SourceWithAssets(runtime.m.c.Source(key,client_id,RequestPolicy(seconds=30*60)),root/'assets')
         plan,files=runtime.at_stage('canonical_prepare',entry.prepare,reader,evidence,parent,source,approved_rules_sha256=policy['rules_sha256'],anchor=anchor,preview=preview,bootstrap=entry.BOOTSTRAP,history_witness=witness)
