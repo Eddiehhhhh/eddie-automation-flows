@@ -21,6 +21,21 @@ jobs:
       GET_ASSET_SAMPLE_FILE: ${{ github.workspace }}/private/Raw/03 Get/01 Notes/Cloud Proof/asset-probe.json
       CANDIDATE_OUTPUT: ${{ github.workspace }}/private/Raw/03 Get/01 Notes/Cloud Proof/Canonical Candidate
     steps:
+      - name: Check private token read budget before historical proof
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          python - <<'PYCODE'
+          import json, subprocess, time
+          budget = json.loads(subprocess.check_output(['gh', 'api', 'rate_limit']))['resources']['core']
+          fields = {key: budget[key] for key in ('limit', 'remaining', 'reset')}
+          if not all(type(value) is int and value >= 0 for value in fields.values()):
+              raise SystemExit('invalid_private_read_budget')
+          print(json.dumps({'contract': 'get-isolated-read-budget-1', **fields,
+                            'minimum_remaining': 500, 'observed_at': int(time.time())}))
+          if fields['remaining'] < 500:
+              raise SystemExit('private_read_budget_not_available')
+          PYCODE
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
