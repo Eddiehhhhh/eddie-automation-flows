@@ -7,6 +7,10 @@ import re
 import subprocess
 import tempfile
 import traceback
+import sys
+
+ENGINE_SCRIPTS=(Path(__file__).resolve().parents[1]/'engine/get-runtime/scripts').resolve()
+sys.path.insert(0,str(ENGINE_SCRIPTS))
 import get_recurring_runtime as runtime
 import get_recurring_entry as entry
 import get_publication_provenance as provenance
