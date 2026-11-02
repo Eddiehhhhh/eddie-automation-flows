@@ -37,6 +37,7 @@ jobs:
           python-version: '3.11'
       - name: Validate candidate source, assets and atomic baseline transaction
         run: |
+          chmod 600 "$GET_PRIVATE_BINDINGS_FILE"
           cp runtime-overlay/scripts/*.py engine/get-runtime/scripts/
           cp runtime-overlay/tests/*.py engine/get-runtime/tests/
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_asset*.py' -v

@@ -29,7 +29,8 @@ class LiveAssets(unittest.TestCase):
    self.assertGreater(len(changes),1)
    plan=n.git_candidate(reader,parent,legacy,updated,changes,{rel:raw})
    candidate=plan['candidate_commit'];self.assertEqual(reader.local.run('rev-parse','HEAD').decode().strip(),parent)
-   self.assertEqual(entry.transition(reader,None,parent,candidate,({rel:raw},legacy,registry),({rel:changes[rel]},legacy,updated)),[identity])
+   if entry.transition(reader,None,parent,candidate,({rel:raw},legacy,registry),({rel:changes[rel]},legacy,updated)) != [identity]:
+    raise RuntimeError('live_candidate_identity_mismatch')
    output=Path(os.environ['CANDIDATE_OUTPUT']);output.mkdir(parents=True,exist_ok=True)
    for row in plan['changes']:
     data=reader.read(candidate,'Raw/03 Get/'+row['path'],a.MAX_ASSET)
