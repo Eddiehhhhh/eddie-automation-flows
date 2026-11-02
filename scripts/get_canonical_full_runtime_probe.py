@@ -19,7 +19,7 @@ from get_canonical_assets import SourceWithAssets
 from source_sync_rate import RequestPolicy
 from sync_getnote_to_raw import load_credentials
 
-BRANCH='codex/get-canonical-media-budget-proof'
+BRANCH='codex/get-canonical-ogg-proof'
 REF='refs/heads/'+BRANCH
 REPO='Eddiehhhhh/eddie-llm-wiki'
 
