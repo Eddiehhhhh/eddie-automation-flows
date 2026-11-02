@@ -453,15 +453,19 @@ def git_inventory(repo,parent):
 def git_candidate(repo,parent,legacy_state,registry,changes,current):
     """Materialize one local immutable candidate; no refs/index/worktree writes."""
     import tempfile
+    import get_canonical_assets as assets
     before=repo.tree(parent);local=repo.local;prefix=legacy.retention.GET+'/'
     evaluated={p[len(prefix):] for p in before if p.startswith(prefix) and (is_markdown(p) or p[len(prefix):] in (STATE,legacy.STATE))}
     if set(current)!=evaluated:fail('canonical_current_set')
     for rel,value in current.items():
         if before.get(prefix+legacy.path_ok(rel))!=('100644','blob',legacy.retention.oid(value)):fail('canonical_parent_changed')
     allowed={row['ownership']['filePath'] for row in legacy_state['legacyById'].values()}|{row['filePath'] for row in registry['newById'].values()}
-    if set(changes)-allowed:fail('canonical_write_scope')
+    attached=assets.references({p:v for p,v in changes.items() if p in allowed})
+    if set(changes)-allowed-attached:fail('canonical_write_scope')
     for rel,data in changes.items():
-        if not isinstance(data,bytes) or len(data)>legacy.owned.MAX_NOTE:fail('canonical_note_budget')
+        if rel in attached:
+            assets.verify(rel,data)
+        elif not isinstance(data,bytes) or len(data)>legacy.owned.MAX_NOTE:fail('canonical_note_budget')
     relative={**changes,legacy.STATE:legacy.encoded(legacy_state),STATE:legacy.encoded(registry)}
     if any(len(relative[x])>MAX_STATE for x in (STATE,legacy.STATE)):fail('canonical_budget')
     writes={};rows=[];wanted=dict(before)

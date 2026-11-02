@@ -47,6 +47,10 @@ def canonical_payload(reader,plan,current):
       'current_sha256':{p:a.sha(v) for p,v in sorted(current.items())},
       **{k:deepcopy(plan[k]) for k in ('capture_anchor','previous_legacy_sha256','previous_registry_sha256','state_sha256','registry_sha256','changes','counts','source_summary_sha256','detail_receipts_sha256','initial_preview_import','conflict_reason_counts')}}
 
+def asset_cap(path):
+    import get_canonical_assets as assets
+    return assets.MAX_ASSET if assets.PATH.fullmatch(path.removeprefix(r.GET+'/')) else a.owned.MAX_NOTE
+
 def verify_plan(reader,plan,files):
     if plan.get('contract')!=CONTRACT or plan.get('local_proposal_only') is not True or plan.get('apply_ready') is not False:m.fail('manual_plan')
     parent=a.checked(plan['parent_commit'],40);commit=a.checked(plan['candidate_commit'],40)
@@ -58,7 +62,7 @@ def verify_plan(reader,plan,files):
     for row in plan['changes']:
         p=row['path'];r.safe_path(p)
         if not p.startswith(r.GET+'/') or p not in after:m.fail('manual_scope')
-        data=files[p];cap=n.MAX_STATE if p in (r.GET+'/'+a.STATE,r.GET+'/'+n.STATE) else a.owned.MAX_NOTE
+        data=files[p];cap=n.MAX_STATE if p in (r.GET+'/'+a.STATE,r.GET+'/'+n.STATE) else asset_cap(p)
         if not isinstance(data,bytes) or len(data)>cap or before.get(p,[None,None,None])[2]!=row['before_blob'] or after[p]!=('100644','blob',r.oid(data)) or row['after_blob']!=r.oid(data) or row['sha256']!=a.sha(data) or row['bytes']!=len(data) or reader.read(commit,p,cap)!=data:m.fail('manual_plan')
     if sum(map(len,files.values()))>m.MAX_CHANGED_BYTES or plan['transaction_bytes']!=sum(len(data) for oid,data in {r.oid(v):v for v in files.values()}.items() if oid not in {x[2] for x in before.values()}):m.fail('manual_budget')
     if commit!=parent and reader.local.run('rev-list','--parents','-n','1',commit).decode().split()!=[commit,parent]:m.fail('manual_plan')
@@ -85,11 +89,19 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     # Materialize the final state once directly on the same parent. The earlier
     # pure candidate is an unreferenced object, not a second reachable snapshot.
     changes={row['path']:reader.read(proposal['candidate_commit'],r.GET+'/'+row['path'],a.owned.MAX_NOTE) for row in proposal['changes'] if row['path'] not in (a.STATE,n.STATE)}
+    import get_canonical_assets as assets
+    loader=getattr(source,'attachment_files',None)
+    if loader is None and any(assets.MARKER.encode() in current.get(path,b'') for path in changes):
+        m.fail('manual_scope')
+    if loader is not None:
+        next_registry,changes=assets.enrich(next_registry,changes,details,loader)
     final=n.git_candidate(reader,parent,states['legacy'],next_registry,changes,current)
-    before=reader.tree(parent);after=reader.tree(final['candidate_commit']);files={r.GET+'/'+row['path']:reader.read(final['candidate_commit'],r.GET+'/'+row['path'],n.MAX_STATE if row['path'] in (a.STATE,n.STATE) else a.owned.MAX_NOTE) for row in final['changes']}
+    before=reader.tree(parent);after=reader.tree(final['candidate_commit']);files={r.GET+'/'+row['path']:reader.read(final['candidate_commit'],r.GET+'/'+row['path'],n.MAX_STATE if row['path'] in (a.STATE,n.STATE) else asset_cap(row['path'])) for row in final['changes']}
     rows=[{**row,'path':r.GET+'/'+row['path']} for row in final['changes']]
     all_owned={r.GET+'/'+row['ownership']['filePath'] for row in legacy['legacyById'].values()}|{r.GET+'/'+row['filePath'] for row in next_registry['newById'].values()}|{r.GET+'/'+a.STATE,r.GET+'/'+n.STATE}
-    if not set(files)<=all_owned or any(p not in after for p in files):m.fail('manual_scope')
+    import get_canonical_assets as assets
+    attached={r.GET+'/'+p for p in assets.references({p[len(r.GET)+1:]:v for p,v in files.items() if p in all_owned})}
+    if not set(files)<=all_owned|attached or any(p not in after for p in files):m.fail('manual_scope')
     counts.update(legacy_managed=len(states['legacy']['legacyById']),legacy_conflicts=len(states['legacy']['conflictsById']),legacy_pending=len(states['legacy']['pending_ids']),existing_unmanaged=sum(v=='existing_unmanaged' for v in next_registry['reserved'].values()),new_managed=len(next_registry['newById']),new_selected=len(selected),new_remaining=remaining,new_pending=len(next_registry['conflictsById']),source_details=len(details),details_unavailable=unavailable)
     counts.update(n.opaque_counts(next_registry))
     unique={r.oid(data):data for data in files.values()};existing={row[2] for row in before.values()}

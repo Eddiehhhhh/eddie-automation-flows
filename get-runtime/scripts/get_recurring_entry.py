@@ -229,6 +229,8 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
         data = current.get(rel)
         if data is None or a.sha(data) != digest or r.oid(data) != blob:
             fail('entry_ownership_changed')
+    import get_canonical_assets as assets
+    attached=assets.references({rel:current[rel] for rel,_,_ in new.values()})
     path_ids = {r.GET + '/' + row[0]: ident for ident, row in new.items()}
     changed = delta(reader, before, after)
     content_ids = []
@@ -237,6 +239,10 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
         if row['after'] is None or row['after'][:2] != ['100644', 'blob']:
             fail('entry_foreign_delta')
         if path in STATE_PATHS:
+            continue
+        rel=path.removeprefix(r.GET+'/')
+        if path.startswith(r.GET+'/') and rel in attached:
+            assets.verify(rel,reader.read(after,path,assets.MAX_ASSET))
             continue
         if path not in path_ids:
             fail('entry_foreign_delta')

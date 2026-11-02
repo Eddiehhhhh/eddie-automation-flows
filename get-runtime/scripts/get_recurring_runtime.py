@@ -364,6 +364,8 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
             bootstrap=bootstrap, exclude_run_id=run_context['run_id'] if run_context else None,
             exclude_run_attempt=run_context['run_attempt'] if run_context else None)
         at_stage('remote_guard', m.guard, remote, parent)
+        from get_canonical_assets import SourceWithAssets
+        source = SourceWithAssets(source, root / 'assets')
         plan, files = at_stage('canonical_prepare', entry.prepare, reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
             anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger, history_witness=history_witness)
         at_stage('remote_guard', m.guard, remote, parent)
