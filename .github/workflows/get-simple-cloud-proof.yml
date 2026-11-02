@@ -25,5 +25,21 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - run: python scripts/sync_getnote_to_raw.py --sample --sample-pages 3 --workers 1
-      - run: python scripts/commit_private_vault.py --vault vault --ref codex/get-cloud-proof --message 'Get cloud sample proof' --path 'Raw/03 Get'
+      - name: Copy one Get note to isolated private branch
+        run: |
+          python - <<'PYCODE'
+          from pathlib import Path
+          from scripts.sync_getnote_to_raw import load_credentials, fetch_note_pages, fetch_note_detail, note_id_from, render_note, write_if_changed
+          key, client = load_credentials()
+          pages = fetch_note_pages(key, client, max_pages=1)
+          first = next((item for _, batch, _ in pages for item in batch), None)
+          if first is None:
+              raise RuntimeError("Get returned no notes in the first page")
+          note = fetch_note_detail(note_id_from(first), key, client)
+          if note_id_from(note) != note_id_from(first) or not isinstance(note.get("content"), str):
+              raise RuntimeError("Get detail identity/content mismatch")
+          target = Path("vault/Raw/03 Get/01 Notes/Cloud Proof") / (note_id_from(note) + ".md")
+          write_if_changed(target, render_note(note))
+          print("Get note rendered in isolated private branch")
+          PYCODE
+      - run: python scripts/commit_private_vault.py --vault vault --ref codex/get-cloud-proof --message 'Get cloud sample proof' --path 'Raw/03 Get/01 Notes/Cloud Proof'
