@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: fab694c94ea7ca47d95c2e4a0c96287edd7225c7
+          ref: 0f783b26135f32ca1d51594849b4ad4edad12f15
           path: engine
           persist-credentials: false
           filter: blob:none
@@ -67,6 +67,7 @@ jobs:
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_asset*.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_sparse_asset_retry.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_media_budget.py' -v
+          python -m unittest discover -s engine/get-runtime/tests -p 'test_get_readback_budget.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_ogg_media.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_timeline_moments_fidelity.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_full_entry_publication_fixture.py' -v
