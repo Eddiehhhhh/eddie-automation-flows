@@ -26,6 +26,7 @@ jobs:
         with:
           ref: 0b83d97355739e73202b0aae2e7122e573ebcf27
           path: engine
+          persist-credentials: false
           filter: blob:none
           sparse-checkout: get-runtime
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
