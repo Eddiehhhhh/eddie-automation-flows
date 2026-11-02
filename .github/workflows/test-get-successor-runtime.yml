@@ -18,3 +18,4 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m unittest discover -s get-runtime/tests -p 'test_*binding*.py' -v
+      - run: python -m unittest discover -s get-runtime/tests -p 'test_github_only_route.py' -v
