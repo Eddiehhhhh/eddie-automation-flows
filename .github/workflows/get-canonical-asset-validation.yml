@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 85c5f8d31f3c52e82cd1ffd36725e271e9954ff9
+          ref: a644f9ba4dbc10bd147a2a0798f7fbb511c1af11
           path: engine
           persist-credentials: false
           filter: blob:none
@@ -63,6 +63,7 @@ jobs:
           chmod 600 "$GET_PRIVATE_BINDINGS_FILE"
           python -m unittest discover -s engine/get-runtime/tests -p 'test_exact_source_binding.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_history_subtree_cache.py' -v
+          python -m unittest discover -s engine/get-runtime/tests -p 'test_get_registered_history_scope.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_asset*.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_full_entry_publication_fixture.py' -v
           if [ "$GET_HISTORY_PROBE_ONLY" != '1' ]; then
