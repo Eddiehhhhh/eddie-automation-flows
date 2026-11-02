@@ -33,7 +33,7 @@ jobs:
           sys.path.insert(0, "scripts")
           from scripts.sync_getnote_to_raw import load_credentials, fetch_note_pages, fetch_note_detail, note_id_from, render_note, write_if_changed
           key, client = load_credentials()
-          pages = fetch_note_pages(key, client, max_pages=1)
+          pages = fetch_note_pages(key, client)
           first = next((item for _, batch, _ in pages for item in batch), None)
           if first is None:
               raise RuntimeError("Get returned no notes in the first page")
