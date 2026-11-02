@@ -59,6 +59,7 @@ class OfflineGit:
         env.update(GIT_NO_LAZY_FETCH='1',GIT_CONFIG_COUNT=str(n+1))
         env['GIT_CONFIG_KEY_'+str(n)]='protocol.allow';env['GIT_CONFIG_VALUE_'+str(n)]='never'
         self.cache={}
+        self._source_get_trees={}
     def tree(self,commit):
         checked(commit,40)
         if commit not in self.cache:
@@ -118,8 +119,13 @@ class OfflineGit:
             if cursor!=len(result.stdout):fail('adapter_blob_readback')
         return {path:values[blob] for path,blob in paths.items()}
     def source_get_tree(self,commit):
-        self.tree(commit)
-        return checked(self.local.run('rev-parse',commit+':'+retention.GET).decode().strip(),40)
+        checked(commit,40)
+        if commit not in self._source_get_trees:
+            if self.local.run('cat-file','-t',commit).strip()!=b'commit':fail('adapter_anchor')
+            tree=checked(self.local.run('rev-parse',commit+':'+retention.GET).decode().strip(),40)
+            if self.local.run('cat-file','-t',tree).strip()!=b'tree':fail('adapter_anchor')
+            self._source_get_trees[commit]=tree
+        return self._source_get_trees[commit]
     def tree_entries(self,tree,recursive=True):
         rows=[]
         for item in self.local.run('ls-tree','-rlz',checked(tree,40)).split(b'\0'):
