@@ -259,7 +259,7 @@ def validate_extensions(note,*,metadata_only=False):
     if 'timeline' in note:
         value=note['timeline']
         if not isinstance(value,dict) or set(value)!={'moments','resources','schema_version','version'} or any(type(value[k]) is not int or value[k]<0 for k in ('schema_version','version')) or any(not isinstance(value[k],list) for k in ('moments','resources')):fail('source_metadata_shape')
-        if value['moments'] or value['resources']:fail('source_structured_text_unmapped')
+        if value['resources']:fail('source_structured_text_unmapped')
     if 'reference' in note and note['reference'] is not None:fail('source_structured_text_unmapped')
     if 'timestamps' in note:
         value=note['timestamps']
@@ -328,6 +328,10 @@ def render_exact(note,path):
         lines=head.split('\n')
         if lines.count(old)!=1:fail('canonical_generated_header')
         head='\n'.join(new if line==old else line for line in lines)
+    moments=(note.get('timeline') or {}).get('moments')
+    if moments:
+        payload=json.dumps(moments,ensure_ascii=False,sort_keys=True,indent=2,allow_nan=False).replace('`','\\u0060')
+        body+='\n\n## 时间线标记（原始结构）\n\n```json\n'+payload+'\n```\n'
     # Generated disclosure is separate from source text and never enters its hash.
     if opaque_top_level(note):body+='\n\n> 同步提示：源扩展字段已原样保存在私有同步记录中，尚未转换为本文格式。\n'
     return (head+sep+body).encode()
