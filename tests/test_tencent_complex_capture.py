@@ -162,3 +162,25 @@ class SafetyTests(unittest.TestCase):
             if op=='smartsheet.list_views':return {'views':[],'total':0,'has_more':False,'next':0}
             return {'records':[{'record_id':'r','field_values':[{'field':'A','number_value':1}]}],'total':1,'has_more':False,'next':0}
         with self.assertRaises(ValueError):export(call,'fixture')
+
+    def test_grid_requires_every_cell_or_confirmed_merged_interior(self):
+        from capture_tencent_complex import verify_grid_coverage
+        cells=[{'row':r,'col':c} for r in range(2) for c in range(2)]
+        verify_grid_coverage(2,2,cells,[],'s')
+        with self.assertRaises(ValueError):verify_grid_coverage(2,2,cells[:-1],[],'s')
+        verify_grid_coverage(2,2,cells[:-1],['s$A1:B2'],'s')
+        with self.assertRaises(ValueError):verify_grid_coverage(2,2,cells[1:],['s$A1:B2'],'s')
+
+    def test_cross_chunk_merge_and_invalid_ranges(self):
+        from capture_tencent_complex import verify_grid_coverage
+        cells=[{'row':r,'col':0} for r in range(51) if r!=50]
+        verify_grid_coverage(51,1,cells,['s$A50:A51'],'s')
+        for ranges in (['s$A50:A52'],['other$A50:A51'],['s$A51:A50'],['s$A50:A51','s$A50:A51']):
+            with self.subTest(ranges=ranges),self.assertRaises(ValueError):verify_grid_coverage(51,1,cells,ranges,'s')
+
+    def test_formula_mode_empty_cannot_hide_populated_cell(self):
+        def call(op,args):
+            if op=='sheet.get_sheet_info':return {'sheets':[{'sheet_id':'s','sheet_type':'worksheet','row_count':1,'col_count':1}]}
+            if op=='sheet.get_merged_cells':return {'merged_cells':[]}
+            if op=='sheet.get_cell_data':return {'cells':[] if args['include_formula'] else [{'row':0,'col':0,'value_type':'STRING','string_value':'x'}]}
+        with self.assertRaises(ValueError):export(call,'fixture')

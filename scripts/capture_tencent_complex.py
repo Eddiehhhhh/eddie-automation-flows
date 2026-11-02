@@ -38,6 +38,37 @@ def all_pages(call, operation, file_id, sheet_id, key, **options):
         offset = next_offset
 
 
+
+def verify_grid_coverage(rows, cols, cells, merged_cells, sheet_id):
+    if type(rows) is not int or type(cols) is not int or rows <= 0 or cols <= 0:
+        raise ValueError("invalid worksheet dimensions")
+    ranges = []
+    for value in merged_cells:
+        if not isinstance(value, str) or not value.startswith(sheet_id + "$"):
+            raise ValueError("invalid merged-cell source")
+        match = re.fullmatch(r"([A-Z]+)([1-9][0-9]*):([A-Z]+)([1-9][0-9]*)", value[len(sheet_id)+1:])
+        if not match:
+            raise ValueError("invalid merged-cell range")
+        def col_index(text):
+            number = 0
+            for character in text:
+                number = number * 26 + ord(character) - ord("A") + 1
+            return number - 1
+        c1, r1, c2, r2 = col_index(match[1]), int(match[2])-1, col_index(match[3]), int(match[4])-1
+        if not (0 <= r1 <= r2 < rows and 0 <= c1 <= c2 < cols):
+            raise ValueError("merged-cell range outside grid")
+        if any(not (r2 < a or b < r1 or c2 < c or d < c1) for a,b,c,d in ranges):
+            raise ValueError("overlapping merged-cell ranges")
+        ranges.append((r1,r2,c1,c2))
+    seen = {(cell["row"], cell["col"]) for cell in cells}
+    for row in range(rows):
+        for col in range(cols):
+            if (row,col) in seen:
+                continue
+            if not any(a <= row <= b and c <= col <= d and (row,col) != (a,c) for a,b,c,d in ranges):
+                raise ValueError("worksheet grid coverage incomplete")
+
+
 def export(call, file_id):
     sheets = call("sheet.get_sheet_info", {"file_id": file_id}).get("sheets")
     if not isinstance(sheets, list) or not sheets or any(not isinstance(s, dict) or not isinstance(s.get('sheet_id'), str) or not s['sheet_id'].strip() for s in sheets) or len({s['sheet_id'] for s in sheets}) != len(sheets):
@@ -82,6 +113,11 @@ def export(call, file_id):
             record['merged_cells'] = call('sheet.get_merged_cells', {'file_id': file_id, 'sheet_id': sid, 'start_row': 0, 'end_row': rows-1, 'start_col': 0, 'end_col': cols-1}).get('merged_cells')
             if not isinstance(record['merged_cells'], list):
                 raise ValueError('missing merge info')
+            verify_grid_coverage(rows, cols, cells, record['merged_cells'], sid)
+            normal_values = {(cell['row'], cell['col']) for cell in cells if populated_cell(cell)}
+            formula_values = {(cell['row'], cell['col']) for cell in formula_cells if populated_cell(cell)}
+            if normal_values != formula_values:
+                raise ValueError('incomplete formula-mode coverage')
         elif kind == 'smartsheet':
             record['fields'] = all_pages(call, 'smartsheet.list_fields', file_id, sid, 'fields')
             record['views'] = all_pages(call, 'smartsheet.list_views', file_id, sid, 'views')
