@@ -67,7 +67,12 @@ def main():
         root=Path(directory)
         local=runtime.at_stage('checkout',runtime.r.readback_checkout,root/'objects',entry.BOOTSTRAP['capture_anchor']['capture_commit'],token)
         remote.local=local
-        reader,evidence,_=runtime.at_stage('capture_evidence',runtime.m.load_evidence,local,remote,token,root,parent,anchor=entry.BOOTSTRAP['capture_anchor'])
+        try:
+            reader,evidence,_=runtime.at_stage('capture_evidence',runtime.m.load_evidence,local,remote,token,root,parent,anchor=entry.BOOTSTRAP['capture_anchor'])
+        except Exception:
+            detail=remote.read_diagnostic()
+            if detail is not None:print(json.dumps({'contract':'get-isolated-capture-transport-diagnostic-1',**detail}))
+            raise
         anchor,preview,witness=runtime.at_stage('trusted_inputs',runtime.load_trusted_inputs,local,reader,evidence,remote,token,root,parent,client,policy,bootstrap=entry.BOOTSTRAP,exclude_run_id=int(os.environ['GITHUB_RUN_ID']),exclude_run_attempt=int(os.environ['GITHUB_RUN_ATTEMPT']))
         key,client_id=load_credentials()
         source=SourceWithAssets(runtime.m.c.Source(key,client_id,RequestPolicy(seconds=30*60)),root/'assets')
