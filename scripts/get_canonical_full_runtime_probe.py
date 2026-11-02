@@ -71,7 +71,7 @@ def main():
         def readback(commit,values):
             target=root/'readback';target.mkdir()
             return runtime.m.fetch_selected(remote,{p:('100644','blob',runtime.r.oid(data),len(data)) for p,data in values.items()},token,target/'files')
-        result=runtime.at_stage('publication',runtime.m.publish,reader,remote,plan,files,runtime.a.sha(runtime.a.encoded(plan)),readback,checkpoint=checkpoint,writers_guard=lambda:None,verifier=lambda rd,pl,fs:entry.verify_plan(rd,evidence,pl,fs,policy['rules_sha256'],bootstrap=entry.BOOTSTRAP,history_witness=witness))
+        result=runtime.at_stage('publication',runtime.m.publish,reader,remote,plan,files,runtime.a.sha(runtime.a.encoded(plan)),readback,checkpoint=checkpoint,writers_guard=lambda:runtime.m.disabled_writers(token=os.environ.get('GITHUB_TOKEN')),verifier=lambda rd,pl,fs:entry.verify_plan(rd,evidence,pl,fs,policy['rules_sha256'],bootstrap=entry.BOOTSTRAP,history_witness=witness))
         if github('git/ref/heads/main')['object']['sha']!=parent:
             raise RuntimeError('production_main_changed_during_probe')
         output={'status':'isolated_full_entry_and_publication_verified','changed_paths':len(files),'result':result,'production_targeted':False,'notion_requested':False}
