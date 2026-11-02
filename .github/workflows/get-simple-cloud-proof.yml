@@ -29,6 +29,8 @@ jobs:
         run: |
           python - <<'PYCODE'
           from pathlib import Path
+          import sys
+          sys.path.insert(0, "scripts")
           from scripts.sync_getnote_to_raw import load_credentials, fetch_note_pages, fetch_note_detail, note_id_from, render_note, write_if_changed
           key, client = load_credentials()
           pages = fetch_note_pages(key, client, max_pages=1)
