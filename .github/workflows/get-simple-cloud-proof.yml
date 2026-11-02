@@ -1,0 +1,29 @@
+name: Get to private GitHub isolated proof
+on:
+  push:
+    branches: [codex/get-simple-cloud-proof]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+      GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+      VAULT_ROOT: ${{ github.workspace }}/vault
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          ref: codex/get-cloud-proof
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          filter: blob:none
+          sparse-checkout: Raw/03 Get
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - run: python scripts/sync_getnote_to_raw.py --sample --sample-pages 1 --workers 1
+      - run: python scripts/commit_private_vault.py --vault vault --ref codex/get-cloud-proof --message 'Get cloud sample proof' --path 'Raw/03 Get'
