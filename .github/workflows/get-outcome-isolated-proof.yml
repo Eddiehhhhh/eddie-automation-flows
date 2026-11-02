@@ -1,0 +1,63 @@
+name: Isolated Get Notion outcome semantics
+on:
+  push:
+    branches: [codex/get-outcome-proof]
+permissions: {}
+jobs:
+  outcome:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [dual_success, github_only, route_failure, sync_failure, get_failure]
+    steps:
+      - name: Simulate Get publication
+        id: get_sync
+        continue-on-error: true
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: test "$SCENARIO" != get_failure
+      - name: Simulate canonical Notion route
+        id: notion_route
+        if: ${{ steps.get_sync.outcome == 'success' && matrix.scenario != 'github_only' }}
+        continue-on-error: true
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: test "$SCENARIO" != route_failure
+      - name: Simulate Notion synchronization
+        id: notion_sync
+        if: ${{ steps.get_sync.outcome == 'success' && steps.notion_route.outcome == 'success' && matrix.scenario != 'github_only' }}
+        continue-on-error: true
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: test "$SCENARIO" != sync_failure
+      - name: Report Notion failure without losing the Get receipt
+        id: report
+        if: ${{ always() && (steps.notion_route.outcome == 'failure' || steps.notion_sync.outcome == 'failure') }}
+        run: |
+          echo '::error::Notion synchronization failed. Check the Notion steps; any verified Get publication remains intact.'
+          echo '### Notion synchronization failed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Check the Notion steps. Any verified Get publication remains intact.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify actual step outcomes
+        if: ${{ always() }}
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          GET: ${{ steps.get_sync.outcome }}
+          ROUTE: ${{ steps.notion_route.outcome }}
+          NOTION: ${{ steps.notion_sync.outcome }}
+          REPORT: ${{ steps.report.outcome }}
+        run: |
+          python - <<'PY'
+          import os
+          expected={
+            'dual_success': ('success','success','success','skipped'),
+            'github_only': ('success','skipped','skipped','skipped'),
+            'route_failure': ('success','failure','skipped','success'),
+            'sync_failure': ('success','success','failure','success'),
+            'get_failure': ('failure','skipped','skipped','skipped'),
+          }
+          actual=tuple(os.environ[k] for k in ('GET','ROUTE','NOTION','REPORT'))
+          assert actual==expected[os.environ['SCENARIO']], (os.environ['SCENARIO'],actual)
+          print('actual step outcomes verified:', os.environ['SCENARIO'])
+          PY
