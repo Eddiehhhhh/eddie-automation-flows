@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 0b83d97355739e73202b0aae2e7122e573ebcf27
+          ref: e10e8548fbf0bcaf3ef746e8d0ad875901d4aecb
           path: engine
           persist-credentials: false
           filter: blob:none
@@ -45,6 +45,7 @@ jobs:
       - name: Validate candidate source, assets and atomic baseline transaction
         run: |
           chmod 600 "$GET_PRIVATE_BINDINGS_FILE"
+          python -m unittest discover -s engine/get-runtime/tests -p 'test_exact_source_binding.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_asset*.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_full_entry_publication_fixture.py' -v
           python -m unittest discover -s engine/get-runtime/tests -p 'test_get_canonical_live_asset_probe.py' -v
