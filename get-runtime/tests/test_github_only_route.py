@@ -1,5 +1,8 @@
 import hashlib
 import importlib.util
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -32,11 +35,31 @@ class GithubOnly(unittest.TestCase):
         self.assertIn('python scripts/get_recurring_runtime.py',text[get:pre])
         self.assertIn('--apply --scope-from-policy',text[get:pre])
 
+    def test_notion_failure_reporting_runs_real_shell_without_changing_get_outcome(self):
+        text=(ROOT/'.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
+        section=text.split('      - name: Report Notion failure without losing the Get receipt\n',1)[1].split('\n# Canonical runs',1)[0]
+        self.assertIn("always() && (steps.notion_route.outcome == 'failure' || steps.notion_sync.outcome == 'failure')",section)
+        script='\n'.join(line[10:] for line in section.split('        run: |\n',1)[1].splitlines())
+        cases=[('success','failure','skipped',True),('success','success','failure',True),('success','success','success',False),
+               ('success','skipped','skipped',False),('failure','skipped','skipped',False)]
+        for get, route_outcome, notion_outcome, expected in cases:
+            triggered=route_outcome == 'failure' or notion_outcome == 'failure'
+            self.assertEqual(triggered,expected)
+            if not triggered:
+                continue
+            with tempfile.TemporaryDirectory() as tmp:
+                summary=Path(tmp)/'summary'
+                result=subprocess.run(['/bin/sh','-c',script],env={**os.environ,'GITHUB_STEP_SUMMARY':str(summary)},capture_output=True,text=True)
+                self.assertEqual(result.returncode,0)
+                self.assertIn('::error::Notion synchronization failed',result.stdout)
+                self.assertIn('Notion synchronization failed',summary.read_text())
+                self.assertEqual(get,'success')
+
     def test_exact_template_hashes(self):
         folder=ROOT/'.github/workflow-templates'
         old=(folder/'get-canonical-controller-pre-github-only.yml.disabled').read_bytes()
         new=(folder/'get-canonical-controller.yml.disabled').read_bytes()
         self.assertEqual(hashlib.sha256(old).hexdigest(),'31623366601a23a56033eae8bb3b09bf314919b6c00b4905797eec26b6675df3')
-        self.assertEqual(hashlib.sha256(new).hexdigest(),'f4956711718296718e25ee126ab6fdb72623be1343e8a1c0f0336c50b523e87e')
+        self.assertEqual(hashlib.sha256(new).hexdigest(),'b80d7db823d9a0268febc837c8871424a95317ecba8a6e6c2e105a0cd497f288')
 
 if __name__=='__main__': unittest.main()

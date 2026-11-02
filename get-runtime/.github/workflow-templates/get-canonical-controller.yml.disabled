@@ -152,6 +152,12 @@ jobs:
               --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
               --apply --scope-from-policy
           fi
+      - name: Report Notion failure without losing the Get receipt
+        if: ${{ always() && (steps.notion_route.outcome == 'failure' || steps.notion_sync.outcome == 'failure') }}
+        run: |
+          echo '::error::Notion synchronization failed. Check the Notion steps; any verified Get publication remains intact.'
+          echo '### Notion synchronization failed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Check the Notion steps. Any verified Get publication remains intact.' >> "$GITHUB_STEP_SUMMARY"
 # Canonical runs retain independent Get and Notion failure reporting. A Notion
 # partial cannot erase a confirmed Get receipt. Fixed archive runs deliberately
 # skip Get and emit only their separate source-auth marker, never a Get receipt.
