@@ -26,5 +26,5 @@ jobs:
         with:
           python-version: '3.11'
       - name: Sync one resumable page to isolated private branch
-        run: python scripts/get_cloud_incremental_proof.py
+        run: python scripts/get_cloud_asset_probe.py
       - run: python scripts/commit_private_vault.py --vault vault --ref codex/get-cloud-proof --message 'Get cloud sample proof' --path 'Raw/03 Get/01 Notes/Cloud Proof' --path 'Raw/03 Get/_assets' --force
