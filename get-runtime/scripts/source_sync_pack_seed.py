@@ -238,7 +238,9 @@ def git_run(directory, arguments, stdin=None, stdout=None):
     return result.stdout
 
 
-def expected_blobs(blobs):
+def expected_blobs(blobs, *, max_blob=MAX_BLOB):
+    if type(max_blob) is not int or not 0 < max_blob <= 48 * MIB:
+        raise ValueError('invalid blob limit')
     if not 1 <= len(blobs) <= MAX_FILES or sum(b['size'] for b in blobs.values()) > MAX_EXPANDED:
         raise ValueError('seed size limit')
     expected = {}
@@ -246,7 +248,7 @@ def expected_blobs(blobs):
         migration.tree_path(path)
         oid = migration.sha(item['sha'])
         size = item['size']
-        if type(size) is not int or not 0 <= size <= MAX_BLOB or (oid in expected and expected[oid] != size):
+        if type(size) is not int or not 0 <= size <= max_blob or (oid in expected and expected[oid] != size):
             raise ValueError('invalid blob size')
         expected[oid] = size
     return expected

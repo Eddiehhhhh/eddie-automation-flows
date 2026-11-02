@@ -118,7 +118,8 @@ def fetch_selected(remote,metadata,token,directory):
     if sum(requested.values())>MAX_CHANGED_BYTES+a.MAX_STATE:fail('manual_budget')
     if not requested:return {}
     protocol=pack.capabilities(token)
-    files,_=r.fetch_readback_blobs(token,requested,directory,pack.MAX_PACK,protocol)
+    from get_canonical_assets import MAX_ASSET
+    files,_=r.fetch_readback_blobs(token,requested,directory,pack.MAX_PACK,protocol,max_blob=MAX_ASSET)
     result={}
     for path,(_,_,oid,size) in metadata.items():
         data=r.file_bytes(files[oid],size)

@@ -893,7 +893,7 @@ def readback_checkout(destination, preview_commit, token):
     return local
 
 
-def fetch_readback_blobs(token, entries, directory, remaining, protocol):
+def fetch_readback_blobs(token, entries, directory, remaining, protocol, *, max_blob=pack_seed.MAX_BLOB):
     """Reuse the exact-object bounded Git transfer, in a fresh offline store.
 
     The only remote wants are validated Get blob identities. No local cache,
@@ -901,7 +901,7 @@ def fetch_readback_blobs(token, entries, directory, remaining, protocol):
     """
     paths = {'objects/' + checked_sha(blob): {'sha': blob, 'size': size}
              for blob, size in entries.items()}
-    expected = pack_seed.expected_blobs(paths)
+    expected = pack_seed.expected_blobs(paths, max_blob=max_blob)
     if remaining <= 0:
         fail('source_tree_budget')
     directory.mkdir(mode=0o700)
