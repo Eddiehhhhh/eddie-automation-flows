@@ -58,7 +58,7 @@ def main():
     text=Path('.github/workflows/get-canonical.yml').read_text()
     policy=json.loads(base64.b64decode(re.search(r"POLICY_B64: '([^']+)'",text).group(1)))
     historical_policy=dict(policy)
-    policy['code_sha']=os.environ['GITHUB_SHA']
+    policy['code_sha']=runtime.executed_code_sha()
     policy['rules_sha256']=entry.rules_sha256()
     policy['get_policy_sha256']=entry.policy_sha256(policy['rules_sha256'],entry.BOOTSTRAP)
     client=provenance.PublicGithub(os.environ.get('GITHUB_TOKEN'))
