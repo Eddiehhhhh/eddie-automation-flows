@@ -101,9 +101,10 @@ def initial_registry(evidence,legacy_state,legacy_sha,current):
 def validate_registry(state,expected_sha,evidence,legacy_state,legacy_sha,current):
     if legacy.sha(legacy.encoded(state))!=legacy.checked(expected_sha,64):fail('canonical_state_hash')
     base=initial_registry(evidence,legacy_state,legacy_sha,current)
-    if not isinstance(state,dict) or set(state)!=set(base) or state.get('contract')!=CONTRACT or state.get('local_proposal_only') is not True or state.get('apply_ready') is not False or state.get('capture_anchor')!=evidence.anchor:fail('canonical_state_schema')
+    if not isinstance(state,dict) or set(state) not in (set(base),set(base)|{'media_retry_cursor'}) or state.get('contract')!=CONTRACT or state.get('local_proposal_only') is not True or state.get('apply_ready') is not False or state.get('capture_anchor')!=evidence.anchor:fail('canonical_state_schema')
     new=state['newById'];reserved=state['reserved'];conflicts=state['conflictsById']
     if state['scan_cursor'] is not None:identity(state['scan_cursor'])
+    if state.get('media_retry_cursor') is not None:identity(state['media_retry_cursor'])
     if any(not isinstance(x,dict) for x in (new,reserved,conflicts)) or set(new)&set(reserved):fail('canonical_owner_overlap')
     authoritative=set(legacy_state['legacyById'])|set(legacy_state['conflictsById'])|set(legacy_state['pending_ids'])
     if set(new)&authoritative:fail('canonical_owner_overlap')

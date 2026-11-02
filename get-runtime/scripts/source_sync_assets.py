@@ -85,7 +85,7 @@ def resolve_before(url, deadline):
     return value
 
 
-def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30, transfer_budget=None):
+def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30, transfer_budget=None, allow_media=False):
     deadline = time.monotonic() + timeout
     for _ in range(6):
         parsed, address = resolve_before(url, deadline)
@@ -126,7 +126,7 @@ def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30, transfer_budget=None):
             if response.status != 200:
                 raise AssetError('asset HTTP request rejected')
             mime = (response.getheader('Content-Type') or 'application/octet-stream').split(';')[0].lower().strip()
-            if mime.startswith(('audio/', 'video/')):
+            if mime.startswith(('audio/', 'video/')) and not allow_media:
                 raise AssetError('audio/video body download is disabled')
             length = response.getheader('Content-Length')
             try:
@@ -172,10 +172,11 @@ def fetch_once(url, max_bytes=MAX_FILE_BYTES, timeout=30, transfer_budget=None):
     raise AssetError('asset redirect limit exceeded')
 
 
-def fetch_asset(url, max_bytes=MAX_FILE_BYTES, transfer_budget=None):
+def fetch_asset(url, max_bytes=MAX_FILE_BYTES, transfer_budget=None, allow_media=False):
     for attempt in range(3):
         try:
             options = {} if transfer_budget is None else {'transfer_budget': transfer_budget}
+            if allow_media: options['allow_media'] = True
             return fetch_once(url, max_bytes=max_bytes, **options)
         except (RetryableAssetError, TimeoutError, ConnectionError, OSError, http.client.HTTPException):
             if attempt == 2:
@@ -212,10 +213,15 @@ def write_binary(root, relative, content):
 
 
 class AssetStore:
-    def __init__(self, root, fetch=fetch_asset, max_file=MAX_FILE_BYTES, max_run=MAX_RUN_BYTES, max_assets=MAX_ASSETS):
+    def __init__(self, root, fetch=fetch_asset, max_file=MAX_FILE_BYTES, max_run=MAX_RUN_BYTES, max_assets=MAX_ASSETS, allow_media=False):
+        self.allow_media = allow_media
+        if allow_media and fetch is fetch_asset:
+            from functools import partial
+            fetch = partial(fetch_asset, allow_media=True)
         self.root, self.fetch = Path(root), fetch
         self.max_file, self.max_run, self.max_assets = max_file, max_run, max_assets
         self.bytes = 0
+        self.media_attempts = 0
         self.memo = {}
 
     def materialize(self, note):
@@ -231,28 +237,42 @@ class AssetStore:
             if not isinstance(url, str) or not url:
                 raise AssetError('attachment URL missing')
             suffix = Path(urlsplit(url).path).suffix.lower()
-            if kind in ('audio', 'video', 'link') or suffix in AUDIO_EXTENSIONS:
-                result.append({'url': url, 'kind': kind, 'status': 'not-downloaded'})
+            media = kind in ('audio', 'video') or suffix in AUDIO_EXTENSIONS | {'.mp4','.webm','.mov','.m3u8'}
+            if kind == 'link' or suffix == '.m3u8' or (media and not self.allow_media):
+                result.append({'url': url, 'kind': kind, 'status': 'not-downloaded', 'reason':'unsupported_stream' if suffix == '.m3u8' else 'download_disabled'})
                 continue
             if url not in self.memo:
-                if len(self.memo) >= self.max_assets:
-                    raise AssetError('asset count limit reached')
-                remaining = min(self.max_file, self.max_run - self.bytes)
-                if remaining <= 0:
-                    raise AssetError('run byte limit reached')
-                content, mime = self.fetch(url, max_bytes=remaining)
-                if not content or len(content) > remaining:
-                    raise AssetError('asset byte limit violated')
-                if mime.startswith(('audio/', 'video/')):
-                    raise AssetError('audio/video body download is disabled')
-                if kind == 'image' and not mime.startswith('image/'):
-                    raise AssetError('image MIME mismatch')
-                digest = hashlib.sha256(content).hexdigest()
-                # Fixed safe extensions; never use title, Content-Disposition, or URL filenames.
-                extension = {'image/png':'.png', 'image/jpeg':'.jpg', 'image/webp':'.webp', 'image/gif':'.gif', 'application/pdf':'.pdf'}.get(mime, '.bin')
-                relative = Path('_assets') / ('images' if kind == 'image' else 'files') / (digest + extension)
-                write_binary(self.root, relative, content)
-                self.bytes += len(content)
-                self.memo[url] = {'url':url, 'status':'downloaded', 'path':relative.as_posix(), 'sha256':digest, 'bytes':len(content), 'mime':mime}
+                if media:
+                    if self.media_attempts >= 2:
+                        result.append({'url':url,'kind':kind,'status':'not-downloaded','reason':'media_attempt_budget'})
+                        continue
+                    self.media_attempts += 1
+                try:
+                    if len(self.memo) >= self.max_assets:
+                        raise AssetError('asset count limit reached')
+                    remaining = min(self.max_file, self.max_run - self.bytes)
+                    if remaining <= 0:
+                        raise AssetError('run byte limit reached')
+                    content, mime = self.fetch(url, max_bytes=remaining)
+                    if not content or len(content) > remaining:
+                        raise AssetError('asset byte limit violated')
+                    if mime.startswith(('audio/', 'video/')) and not self.allow_media:
+                        raise AssetError('audio/video body download is disabled')
+                    if media and not mime.startswith(('audio/', 'video/')):
+                        raise AssetError('unsupported media MIME')
+                    if kind == 'image' and not mime.startswith('image/'):
+                        raise AssetError('image MIME mismatch')
+                    digest = hashlib.sha256(content).hexdigest()
+                    # Fixed safe extensions; never use title, Content-Disposition, or URL filenames.
+                    extension = {'image/png':'.png', 'image/jpeg':'.jpg', 'image/webp':'.webp', 'image/gif':'.gif', 'application/pdf':'.pdf'}.get(mime, '.bin')
+                    relative = Path('_assets') / ('images' if kind == 'image' else 'files') / (digest + extension)
+                    write_binary(self.root, relative, content)
+                    self.bytes += len(content)
+                    self.memo[url] = {'url':url, 'status':'downloaded', 'path':relative.as_posix(), 'sha256':digest, 'bytes':len(content), 'mime':mime}
+                except (AssetError, TimeoutError, OSError, http.client.HTTPException) as error:
+                    if not media: raise
+                    reason='media_byte_budget' if 'byte' in str(error) else 'unsupported_format' if 'MIME' in str(error) else 'media_download_failed'
+                    result.append({'url':url,'kind':kind,'status':'not-downloaded','reason':reason})
+                    continue
             result.append(dict(self.memo[url], kind=kind))
         return result

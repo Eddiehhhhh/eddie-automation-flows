@@ -75,7 +75,9 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     selected,remaining=select_new(items,registry,preview)
     legacy_needed={i for i,row in legacy['legacyById'].items() if i in items and (raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or a.sha(a.encoded(items[i]))!=row['summary_sha256'])}
     new_needed={i for i,row in registry['newById'].items() if i in items and (raw_source_version(items[i].get('updated_at'))!=row['source_version'] or n.raw._source_content_hash(items[i])!=row['summary_sha256'])}
-    needed=sorted((legacy_needed|new_needed|set(selected))&set(items));details={};receipts={};unavailable=0
+    import get_canonical_assets as assets
+    retry=assets.retry_ids(registry,current) if getattr(source,'attachment_files',None) else []
+    needed=sorted((legacy_needed|new_needed|set(selected)|set(retry))&set(items));details={};receipts={};unavailable=0
     for ident in needed:
         try:
             raw=source.detail_raw(ident);details[ident]=m.detail_note(raw)
@@ -86,6 +88,7 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     proposal,states,counts=n.prepare(reader,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,selected_new=selected,preview=preview)
     next_registry=states['registry']
     if selected:next_registry['scan_cursor']=selected[-1]
+    if retry:next_registry['media_retry_cursor']=retry[-1]
     # Materialize the final state once directly on the same parent. The earlier
     # pure candidate is an unreferenced object, not a second reachable snapshot.
     changes={row['path']:reader.read(proposal['candidate_commit'],r.GET+'/'+row['path'],a.owned.MAX_NOTE) for row in proposal['changes'] if row['path'] not in (a.STATE,n.STATE)}
@@ -94,7 +97,13 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     if loader is None and any(assets.MARKER.encode() in current.get(path,b'') for path in changes):
         m.fail('manual_scope')
     if loader is not None:
-        next_registry,changes=assets.enrich(next_registry,changes,details,loader)
+        original_changes=set(changes)
+        next_registry,changes=assets.enrich(next_registry,changes,details,loader,current=current,retry=retry,read_asset=lambda path:read_saved_asset(reader,parent,path))
+        for identity in retry:
+            path=next_registry['newById'][identity]['filePath']
+            if path not in original_changes and changes.get(path,current.get(path))!=current.get(path):
+                counts['new_updated']+=1
+                counts['new_unchanged']-=1
     final=n.git_candidate(reader,parent,states['legacy'],next_registry,changes,current)
     before=reader.tree(parent);after=reader.tree(final['candidate_commit']);files={r.GET+'/'+row['path']:reader.read(final['candidate_commit'],r.GET+'/'+row['path'],n.MAX_STATE if row['path'] in (a.STATE,n.STATE) else asset_cap(row['path'])) for row in final['changes']}
     rows=[{**row,'path':r.GET+'/'+row['path']} for row in final['changes']]
@@ -223,6 +232,47 @@ def new_baselines(reader,registry,parent,remote):
         if len(data)!=size or total>m.MAX_CHANGED_BYTES or a.sha(data)!=row['mirror_sha256']:m.fail('manual_readback')
         m.import_blob(reader.local,data,blob)
 
+def read_saved_asset(reader,parent,path):
+    import get_canonical_assets as assets
+    if not assets.PATH.fullmatch(path):m.fail('manual_scope')
+    loader=getattr(reader,'_get_asset_readers',{}).get(parent)
+    return loader(path) if loader else reader.read(parent,r.GET+'/'+path,assets.MAX_ASSET)
+
+
+def bind_asset_reader(reader,remote,metadata,token,root,parent):
+    """Fetch only exact missing asset OIDs from this already observed parent."""
+    import get_canonical_assets as assets
+    downloaded={};total=0
+    def read(path):
+        nonlocal total
+        if not assets.PATH.fullmatch(path):m.fail('manual_scope')
+        full=r.GET+'/'+path;row=metadata.get(full)
+        if (not row or row[:2]!=('100644','blob') or type(row[3]) is not int
+                or not 0<row[3]<=assets.MAX_ASSET or reader.tree(parent).get(full)!=tuple(row[:3])):
+            m.fail('manual_readback')
+        blob=a.checked(row[2],40)
+        probe=reader.local.command('cat-file','--batch-check=%(objectname) %(objecttype) %(objectsize)',data=(blob+'\n').encode())
+        if probe.returncode or probe.stderr:m.fail('manual_readback')
+        missing=probe.stdout==(blob+' missing\n').encode()
+        if not missing and probe.stdout!=(blob+' blob '+str(row[3])+'\n').encode():m.fail('manual_readback')
+        if missing:
+            if blob not in downloaded:
+                if len(downloaded)>=128 or total+row[3]>m.MAX_CHANGED_BYTES:m.fail('manual_budget')
+                downloaded[blob]=row[3];total+=row[3]
+            elif downloaded[blob]!=row[3]:m.fail('manual_readback')
+            fetched=m.fetch_selected(remote,{full:row},token,root/('canonical-asset-'+blob))
+            data=fetched.get(full)
+            if not isinstance(data,bytes) or len(data)!=row[3] or r.oid(data)!=blob:m.fail('manual_readback')
+            assets.verify(path,data)
+            m.import_blob(reader.local,data,blob)
+        data=reader.read(parent,full,assets.MAX_ASSET)
+        if len(data)!=row[3]:m.fail('manual_readback')
+        assets.verify(path,data)
+        return data
+    if not hasattr(reader,'_get_asset_readers'):reader._get_asset_readers={}
+    reader._get_asset_readers[parent]=read
+
+
 def load_current(reader,remote,token,root,parent):
     metadata=remote.check_source_budget(parent);prefix=r.GET+'/'
     selected={p:row for p,row in metadata.items() if n.is_markdown(p) or p in (prefix+a.STATE,prefix+n.STATE)}
@@ -239,6 +289,7 @@ def load_current(reader,remote,token,root,parent):
             elif line!=(blob+' blob '+str(sizes[blob])).encode():m.fail('manual_readback')
     missing={p:row for p,row in selected.items() if row[2] in missing_ids}
     for p,data in m.fetch_selected(remote,missing,token,root/'canonical-current').items():m.import_blob(reader.local,data,missing[p][2])
+    bind_asset_reader(reader,remote,metadata,token,root,parent)
     return n.git_inventory(reader,parent)
 
 def run(token,source,expected_parent,*,legacy_sha,registry_sha=None,apply=False,approved_payload_sha256=None,checkpoint=None,work=None):

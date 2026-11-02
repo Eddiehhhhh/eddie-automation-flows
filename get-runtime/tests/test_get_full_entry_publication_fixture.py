@@ -45,7 +45,10 @@ class FullEntry(unittest.TestCase):
    for note in notes:
     path=n.new_path(note,note['id']);raw=n.render_exact(note,path)
     preview[note['id']]={'entry':{'filePath':path,'sourceVersion':n.raw.raw_source_version(note['updated_at']),'sourceContentHash':n.raw._source_content_hash(note),'sourceSummaryHash':n.raw._source_content_hash(note)},'bytes':raw,'anchor':{'commit':parent,'state_sha256':'4'*64,'blob':n.legacy.retention.oid(raw)}}
-   source=assets.SourceWithAssets(Source(notes),root/'disposable-assets',fetch=lambda url,max_bytes:(b'image','image/png'))
+   def initial_fetch(url,max_bytes):
+    if '.mp3' in url: raise TimeoutError('synthetic media timeout')
+    return b'image','image/png'
+   source=assets.SourceWithAssets(Source(notes),root/'disposable-assets',fetch=initial_fetch)
    plan,files=entry.prepare(reader,evidence,parent,source,approved_rules_sha256=entry.rules_sha256(),preview=preview,bootstrap=bootstrap)
    self.assertEqual(len(plan['proposed_content_ids']),10)
    pending=[(p,data) for p,data in files.items() if p.endswith('.pending.json')]
@@ -59,11 +62,35 @@ class FullEntry(unittest.TestCase):
      if self.head!=before:raise RuntimeError('race')
      reader.local.run('merge-base','--is-ancestor',before,after);self.head=after
     def commit(self,commit):return {'tree':reader.local.run('rev-parse',commit+'^{tree}').decode().strip(),'parents':reader.local.run('rev-list','--parents','-n','1',commit).decode().split()[1:]}
+   # A trusted historical note without any generated block is discovered even
+   # when both the source timestamp and source summary remain unchanged.
+   historical,historical_files=entry.prepare(reader,evidence,parent,Source(notes),approved_rules_sha256=entry.rules_sha256(),preview=preview,bootstrap=bootstrap)
+   historical_remote=Remote()
+   m.publish(reader,historical_remote,historical,historical_files,n.legacy.sha(n.legacy.encoded(historical)),lambda commit,values:{p:reader.read(commit,p,assets.MAX_ASSET) for p in values},checkpoint=lambda pl:None,writers_guard=lambda:None,verifier=lambda rd,pl,fs:entry.verify_plan(rd,evidence,pl,fs,entry.rules_sha256(),bootstrap=bootstrap))
+   historical_registry=json.loads(historical_files['Raw/03 Get/'+n.STATE])
+   historical_path='Raw/03 Get/'+historical_registry['newById']['1']['filePath']
+   original=historical_files[historical_path];self.assertNotIn(assets.MARKER.encode(),original)
+   discover=assets.SourceWithAssets(Source(notes),root/'historical-assets',fetch=lambda url,max_bytes:(b'media','audio/mpeg') if '.mp3' in url else (b'image','image/png'))
+   recovered,recovered_files=entry.prepare(reader,evidence,historical_remote.head,discover,approved_rules_sha256=entry.rules_sha256(),anchor={'commit':historical['candidate_commit'],'receipt_sha256':historical['receipt_sha256']},bootstrap=bootstrap)
+   self.assertTrue(recovered_files[historical_path].startswith(original))
+   self.assertTrue(any(p.endswith('.media.json') for p in recovered_files))
+   self.assertEqual(recovered['proposed_content_ids'],['1'])
    remote=Remote()
    result=m.publish(reader,remote,plan,files,n.legacy.sha(n.legacy.encoded(plan)),lambda commit,values:{p:reader.read(commit,p,assets.MAX_ASSET) for p in values},checkpoint=lambda pl:m.write_checkpoint(root/'checkpoint.json',pl),writers_guard=lambda:None,verifier=lambda rd,pl,fs:entry.verify_plan(rd,evidence,pl,fs,entry.rules_sha256(),bootstrap=bootstrap))
    self.assertTrue(result['readback_verified']);self.assertEqual(remote.head,plan['candidate_commit']);self.assertEqual(reader.local.run('rev-parse','HEAD').decode().strip(),parent)
    published_registry=json.loads(reader.read(remote.head,'Raw/03 Get/'+n.STATE,n.MAX_STATE))
    self.assertEqual(published_registry['newById']['1']['source_metadata']['attachments'][0]['url'],notes[0]['attachments'][0]['url'])
+   # Same source version still retries debt, through the complete entry/verifier.
+   retry_source=assets.SourceWithAssets(Source(notes),root/'retry-assets',fetch=lambda url,max_bytes: (b'media','audio/mpeg') if '.mp3' in url else (b'image','image/png'))
+   retry_anchor={'commit':plan['candidate_commit'],'receipt_sha256':plan['receipt_sha256']}
+   retry_plan,retry_files=entry.prepare(reader,evidence,remote.head,retry_source,approved_rules_sha256=entry.rules_sha256(),anchor=retry_anchor,bootstrap=bootstrap)
+   self.assertFalse(any(p.endswith('.pending.json') for p in retry_files))
+   retry_registry=json.loads(retry_files['Raw/03 Get/'+n.STATE])
+   self.assertEqual(retry_registry['media_retry_cursor'],'1')
+   self.assertEqual(retry_registry['scan_cursor'],published_registry['scan_cursor'])
+   retry_path='Raw/03 Get/'+retry_registry['newById']['1']['filePath']
+   self.assertIn(b'[attachment]',retry_files[retry_path]);self.assertNotIn('尚待补全'.encode(),retry_files[retry_path])
+   self.assertEqual(remote.head,plan['candidate_commit'])
    notes[0]['content']='updated source ![x](https://example.com/a.png)';notes[0]['updated_at']='2026-10-14T00:00:00Z'
    anchor={'commit':plan['candidate_commit'],'receipt_sha256':plan['receipt_sha256']}
    second,outputs=entry.prepare(reader,evidence,remote.head,source,approved_rules_sha256=entry.rules_sha256(),anchor=anchor,bootstrap=bootstrap)
