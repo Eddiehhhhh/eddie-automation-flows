@@ -166,9 +166,10 @@ def _forward_policy(policy, capsule):
     # original source run and the exact historical/current template bytes.
     exact_run = capsule.get('run_binding', {}).get('id') == 40657306710
     if exact_run and old.get('controller_template_sha256') == controller.FIXED_TEMPLATE_SHA256:
-        target = '31623366601a23a56033eae8bb3b09bf314919b6c00b4905797eec26b6675df3'
-        template_transition = (policy.get('controller_template_sha256') == target
-            and controller.template_sha256() == target
+        target = policy.get('controller_template_sha256')
+        allowed = ('31623366601a23a56033eae8bb3b09bf314919b6c00b4905797eec26b6675df3',
+                   controller.GITHUB_ONLY_TEMPLATE_SHA256)
+        template_transition = (target in allowed and controller.template_sha256() == target
             and controller.a.sha(controller.policy_template_bytes(old)) == controller.FIXED_TEMPLATE_SHA256)
     stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
     if template_transition: stable.remove('controller_template_sha256')
