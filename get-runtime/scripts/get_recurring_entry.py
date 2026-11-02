@@ -8,7 +8,7 @@ Receipts are integrity/continuity records, not cryptographic authorship claims.
 """
 import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import argparse
 import json
 import os
@@ -25,6 +25,8 @@ RECEIPT = '03 State/canonical-sync-receipt.json'
 FULL_RECEIPT = r.GET + '/' + RECEIPT
 MAX_RECEIPT = 512 * 1024
 MAX_INTERVENING = 1024
+REGISTERED_406_MAX_INTERVENING = 2048
+_REGISTERED_406_HISTORY_SEAL = object()
 BOOTSTRAP = _private_bindings.value('get_recurring_entry', 'BOOTSTRAP')
 STATE_PATHS = {r.GET + '/' + a.STATE, r.GET + '/' + n.STATE}
 RECEIPT_KEYS = {
@@ -79,6 +81,7 @@ class VerifiedHistoryWitness:
     receipt_sequence: int
     observed_commit: str
     record_sha256: str
+    _registration_seal: object = field(default=None, repr=False, compare=False)
 
 
 def select_history_witness(value, *, ancestor=None, observed=None):
@@ -97,11 +100,21 @@ def check_history_witness(value):
     rotation.VerifiedHistoryBundle(value.intervals, rotation._JOINT_SEAL)
 
 
+def history_limit(value, ancestor):
+    witness = select_history_witness(value, ancestor=ancestor)
+    if (type(witness) is VerifiedHistoryWitness
+            and witness._registration_seal is _REGISTERED_406_HISTORY_SEAL
+            and witness.receipt_commit == ancestor):
+        return REGISTERED_406_MAX_INTERVENING
+    return MAX_INTERVENING
+
+
 def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None):
     """Reject an edit-and-revert too, rather than merely comparing tip trees."""
     a.checked(ancestor, 40); a.checked(descendant, 40)
     expected = reader.source_get_tree(ancestor)
     history_witness = select_history_witness(history_witness, ancestor=ancestor)
+    limit = history_limit(history_witness, ancestor)
     if history_witness is not None:
         if type(history_witness) is not VerifiedHistoryWitness:
             fail('entry_history_witness')
@@ -117,7 +130,7 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None)
                 fail('entry_history_witness')
             ancestor = history_witness.observed_commit
     cursor = descendant
-    for _ in range(MAX_INTERVENING + 1):
+    for _ in range(limit + 1):
         if reader.source_get_tree(cursor) != expected:
             fail('entry_foreign_get_change')
         if cursor == ancestor:

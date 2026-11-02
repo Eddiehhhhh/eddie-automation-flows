@@ -9,6 +9,7 @@ import get_private_proof as private_proof
 import get_publication_registered_predecessor as registered_predecessor
 import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import argparse
 import json
@@ -615,6 +616,20 @@ def _history_witness_from_verified(value, verified):
 
 
 
+def _registered_history_witness_from_verified(verified):
+    rows = [row for row in registered_predecessor.registry()
+            if row['run_binding']['id'] == 40657306710 and row['run_binding']['run_attempt'] == 1
+            and verified.get('run_id') == 40657306710 and verified.get('run_attempt') == 1]
+    if len(rows) != 1: fail('provenance_history_witness')
+    row = rows[0]; record = row['get_record']
+    if (verified.get('anchor') != {'commit': record['receipt_commit'], 'receipt_sha256': record['receipt_sha256']}
+            or verified.get('receipt_sequence') != record['receipt_sequence']
+            or verified.get('record_sha256') != record['record_sha256']):
+        fail('provenance_history_witness')
+    witness = _history_witness_from_verified(row, verified)
+    return replace(witness, _registration_seal=entry._REGISTERED_406_HISTORY_SEAL)
+
+
 def verify_history_witness(client, policy, *, candidate_runs_checked):
     """Authenticate the exact registered history fact, not a discovery candidate.
 
@@ -670,6 +685,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
     """
     if type(reserve_next_run) is not bool or type(capture_history_witness) is not bool: fail('provenance_exclusion')
     captured_witness = None
+    registered_witnesses = {}
     candidate_limit = MAX_CANDIDATES - int(reserve_next_run)
     if (exclude_run_id is None) != (exclude_run_attempt is None):
         fail('provenance_exclusion')
@@ -751,6 +767,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
                 continue
             capture = (capture_history_witness and HISTORY_WITNESS is not None
                        and run['id'] == 40088040731 and attempt == 1)
+            capture_registered = capture_history_witness and run['id'] == 40657306710 and attempt == 1
             # Lazy policy validation: ordinary non-witness runs remain original.
             witness_info = _history_witness_registration(policy) if capture else None
             verification_policy = witness_info[1] if capture else policy
@@ -772,7 +789,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
             value = verified_candidate(client, run, verification_policy, run_attempt=attempt,
                                        verified_controllers=verified_controllers,
                                        rejected_controllers=rejected_controllers,
-                                       include_verified_details=capture,
+                                       include_verified_details=capture or capture_registered,
                                        include_idle_checkpoint=bool(rotation_search is not None
                                            and rotation_search['joint'] and located_attempt is not None))
             if value is not None:
@@ -797,6 +814,9 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
                 if capture:
                     registration, _, _ = _history_witness_registration(policy)
                     captured_witness = _history_witness_from_verified(registration, value)
+                if capture_registered:
+                    registered_witnesses[(value['run_id'], value['run_attempt'], value['record_sha256'])] = _registered_history_witness_from_verified(value)
+                if capture or capture_registered:
                     value = {key: item for key, item in value.items() if key != 'verified_details'}
                 if reserve_next_run:
                     # Existence admission only, never publication authority.
@@ -814,6 +834,8 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
         observations, rotation_required=rotation_search is not None)
     if dynamic_history is not None:
         captured_witness = dynamic_history
+    elif capture_history_witness:
+        captured_witness = registered_witnesses.get((chosen['run_id'], chosen['run_attempt'], chosen['record_sha256']), captured_witness)
     return {**chosen, **({'history_witness': captured_witness} if capture_history_witness else {}), 'status': 'public_provenance_verified', 'candidate_runs_checked': checked,
             'publication_records_verified': len(found), 'new_permissions': 0, 'credentials_used': getattr(client, 'credentials_used', 0)}
 

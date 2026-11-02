@@ -297,6 +297,10 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
     if entry.FULL_RECEIPT in reader.tree(parent):
         verified = at_stage('receipt_provenance', provenance.discover, client, policy, exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt, capture_history_witness=True)
         anchor = verified['anchor']; commit = anchor['commit']
+        history_witness = verified.get('history_witness')
+        limit = entry.history_limit(history_witness, commit)
+        if limit > entry.MAX_INTERVENING:
+            at_stage('parent_history', fetch_commit, local, parent, limit + 2)
         fetch_commit(local, commit, entry.MAX_INTERVENING + 2)
         load_receipt(reader, remote, token, root, commit)
         receipt = entry.read_receipt(reader, commit, anchor['receipt_sha256'], policy['get_policy_sha256'])
