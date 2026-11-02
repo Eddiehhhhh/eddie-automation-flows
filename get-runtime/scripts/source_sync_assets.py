@@ -19,6 +19,24 @@ MAX_ASSETS = 128
 AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.amr', '.ogg', '.flac', '.opus'}
 
 
+def valid_ogg_page(data):
+    if len(data) < 27 or data[:5] != b'OggS\x00':
+        return False
+    count = data[26]
+    if len(data) < 27 + count:
+        return False
+    size = 27 + count + sum(data[27:27 + count])
+    if size > len(data):
+        return False
+    expected = int.from_bytes(data[22:26], 'little')
+    crc = 0
+    for index, byte in enumerate(data[:size]):
+        crc ^= (0 if 22 <= index < 26 else byte) << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ (0x04c11db7 if crc & 0x80000000 else 0)) & 0xffffffff
+    return crc == expected
+
+
 class AssetError(RuntimeError):
     pass
 
@@ -257,6 +275,8 @@ class AssetStore:
                     content, mime = self.fetch(url, max_bytes=remaining)
                     if not content or len(content) > remaining:
                         raise AssetError('asset byte limit violated')
+                    if self.allow_media and kind == 'audio' and mime == 'application/octet-stream' and valid_ogg_page(content):
+                        mime = 'audio/ogg'
                     if mime.startswith(('audio/', 'video/')) and not self.allow_media:
                         raise AssetError('audio/video body download is disabled')
                     if media and not mime.startswith(('audio/', 'video/')):
@@ -265,7 +285,7 @@ class AssetStore:
                         raise AssetError('image MIME mismatch')
                     digest = hashlib.sha256(content).hexdigest()
                     # Fixed safe extensions; never use title, Content-Disposition, or URL filenames.
-                    extension = {'image/png':'.png', 'image/jpeg':'.jpg', 'image/webp':'.webp', 'image/gif':'.gif', 'application/pdf':'.pdf'}.get(mime, '.bin')
+                    extension = {'image/png':'.png', 'image/jpeg':'.jpg', 'image/webp':'.webp', 'image/gif':'.gif', 'application/pdf':'.pdf', 'audio/ogg':'.ogg'}.get(mime, '.bin')
                     relative = Path('_assets') / ('images' if kind == 'image' else 'files') / (digest + extension)
                     write_binary(self.root, relative, content)
                     self.bytes += len(content)

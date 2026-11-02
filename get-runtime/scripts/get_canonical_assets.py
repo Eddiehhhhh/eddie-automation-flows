@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit
 MARKER = '<!-- get-cloud-attachments -->'
 MAX_ASSET = 48 * 1024 * 1024
 MEDIA_TYPES = {'audio','local_audio','recorder_audio','recorder_flash_audio','meeting'}
-PATH = re.compile(r'_assets/(?:images|files)/([0-9a-f]{64})\.(?:png|jpg|webp|gif|pdf|bin|json|pending\.json|media\.json)\Z')
+PATH = re.compile(r'_assets/(?:images|files)/([0-9a-f]{64})\.(?:png|jpg|webp|gif|pdf|bin|ogg|json|pending\.json|media\.json)\Z')
 
 
 def references(notes):
