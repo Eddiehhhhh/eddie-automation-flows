@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import traceback
 import get_recurring_runtime as runtime
 import get_recurring_entry as entry
 import get_publication_provenance as provenance
@@ -45,13 +46,15 @@ class IsolatedRemote(runtime.m.Remote):
 
 def main():
     token=os.environ['PRIVATE_VAULT_TOKEN']
-    parent=github('git/ref/heads/main')['object']['sha']
+    main_before=github('git/ref/heads/main')['object']['sha']
+    parent=main_before
     try:
         github('git/refs','POST',{'ref':REF,'sha':parent})
     except RuntimeError:
-        if github('git/ref/heads/'+BRANCH)['object']['sha']!=parent:
-            raise RuntimeError('isolated_branch_not_pristine')
+        parent=github('git/ref/heads/'+BRANCH)['object']['sha']
     remote=IsolatedRemote(None,token)
+    if remote.source_get_tree(parent)!=remote.source_get_tree(main_before):
+        raise RuntimeError('isolated_branch_get_tree_changed')
     text=Path('.github/workflows/get-canonical.yml').read_text()
     policy=json.loads(base64.b64decode(re.search(r"POLICY_B64: '([^']+)'",text).group(1)))
     policy['rules_sha256']=entry.rules_sha256()
@@ -72,8 +75,9 @@ def main():
             target=root/'readback';target.mkdir()
             return runtime.m.fetch_selected(remote,{p:('100644','blob',runtime.r.oid(data),len(data)) for p,data in values.items()},token,target/'files')
         result=runtime.at_stage('publication',runtime.m.publish,reader,remote,plan,files,runtime.a.sha(runtime.a.encoded(plan)),readback,checkpoint=checkpoint,writers_guard=lambda:runtime.m.disabled_writers(token=os.environ.get('GITHUB_TOKEN')),verifier=lambda rd,pl,fs:entry.verify_plan(rd,evidence,pl,fs,policy['rules_sha256'],bootstrap=entry.BOOTSTRAP,history_witness=witness))
-        if github('git/ref/heads/main')['object']['sha']!=parent:
-            raise RuntimeError('production_main_changed_during_probe')
+        main_after=github('git/ref/heads/main')['object']['sha']
+        if remote.source_get_tree(main_after)!=remote.source_get_tree(main_before):
+            raise RuntimeError('production_get_tree_changed_during_probe')
         output={'status':'isolated_full_entry_and_publication_verified','changed_paths':len(files),'result':result,'production_targeted':False,'notion_requested':False}
         Path(os.environ['FULL_PROBE_RESULT']).write_text(json.dumps(output))
         print(json.dumps(output))
@@ -83,5 +87,5 @@ if __name__=='__main__':
     try:main()
     except Exception as exc:
         code=str(exc)
-        print(json.dumps({'status':'isolated_full_entry_probe_failed','stage':getattr(exc,'runtime_stage','probe_setup'),'error':code if code in runtime.PUBLIC_ERROR_CODES or code.startswith('isolated_') else 'unclassified_probe_error'}))
+        print(json.dumps({'status':'isolated_full_entry_probe_failed','stage':getattr(exc,'runtime_stage','probe_setup'),'error':code if code in runtime.PUBLIC_ERROR_CODES or code.startswith('isolated_') else 'unclassified_probe_error','error_class':type(exc).__name__,'frames':[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)[-6:]]}))
         raise SystemExit(1)
