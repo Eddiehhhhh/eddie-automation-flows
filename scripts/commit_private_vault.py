@@ -52,12 +52,13 @@ def main() -> int:
     parser.add_argument("--ref", default="main")
     parser.add_argument("--path", action="append", required=True)
     parser.add_argument("--all", action="store_true", help="Use git add -A for the scoped paths")
+    parser.add_argument("--force", action="store_true", help="Allow explicitly scoped ignored paths")
     args = parser.parse_args()
     vault = Path(args.vault)
 
     require(git(vault, "config", "user.name", "github-actions[bot]"), "configure name")
     require(git(vault, "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"), "configure email")
-    add_args = ["add"] + (["-A"] if args.all else []) + ["--", *args.path]
+    add_args = ["add"] + (["-A"] if args.all else []) + (["-f"] if args.force else []) + ["--", *args.path]
     require(git(vault, *add_args), "stage")
     require_compatible_index_paths(vault)
     staged = git(vault, "diff", "--cached", "--quiet")
