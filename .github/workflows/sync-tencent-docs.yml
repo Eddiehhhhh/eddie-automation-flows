@@ -79,6 +79,13 @@ jobs:
           python scripts/commit_private_vault.py --message "Sync Tencent Docs to Raw" \
             --path "Raw/06 TencentDocs" --path ".github/state/tencent-docs-sync-last-run.json"
 
+      - name: Verify Tencent Docs remote publication
+        if: ${{ success() }}
+        run: |
+          python scripts/run_private_command.py --label "Tencent Docs remote fetch" -- git -C vault fetch origin main
+          python scripts/run_private_command.py --label "Tencent Docs remote readback" -- \
+            git -C vault diff --quiet HEAD origin/main -- "Raw/06 TencentDocs" ".github/state/tencent-docs-sync-last-run.json"
+
       - name: Report safe sync failure code
         if: ${{ failure() }}
         run: |
