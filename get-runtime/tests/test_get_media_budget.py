@@ -50,3 +50,27 @@ class MediaBudget(unittest.TestCase):
    self.assertEqual(out[path],image);self.assertEqual(len(calls),1)
    newreceipt=json.loads(next(v for p,v in out.items() if p.endswith('.media.json')))
    self.assertEqual(sorted(i['mime'] for i in newreceipt['items']),['audio/mpeg','image/png'])
+ def test_large_audio_does_not_consume_image_budget(self):
+  audio=b'a'*46384699;image=b'i'*(8*1024*1024)
+  def fetch(url,max_bytes):
+   data,mime=(audio,'audio/mpeg') if url.endswith('.mp3') else (image,'image/png')
+   if len(data)>max_bytes:raise AssetError('asset exceeds byte limit')
+   return data,mime
+  with tempfile.TemporaryDirectory() as d:
+   src=SourceWithAssets(object(),d,fetch=fetch)
+   files=src.attachment_files({'id':'1','updated_at':'2026-01-01T00:00:00Z','attachments':[{'type':'audio','url':'https://example.test/a.mp3'},{'type':'image','url':'https://example.test/a.png'}]},'x.md')
+   self.assertTrue(any(len(v)==len(audio) for v in files.values()))
+   self.assertTrue(any(len(v)==len(image) for v in files.values()))
+   self.assertFalse(any(p.endswith('.pending.json') for p in files))
+ def test_second_large_audio_pending_image_still_downloaded(self):
+  audio1=b'a'*30391327;audio2=b'b'*46384699;image=b'i'*2048
+  def fetch(url,max_bytes):
+   data,mime=(audio1,'audio/mpeg') if url.endswith('one') else (audio2,'audio/mpeg') if url.endswith('two') else (image,'image/png')
+   if len(data)>max_bytes:raise AssetError('asset exceeds byte limit')
+   return data,mime
+  with tempfile.TemporaryDirectory() as d:
+   src=SourceWithAssets(object(),d,fetch=fetch)
+   files=src.attachment_files({'id':'1','updated_at':'2026-01-01T00:00:00Z','attachments':[{'type':'audio','url':'https://example.test/one'},{'type':'audio','url':'https://example.test/two'},{'type':'image','url':'https://example.test/image'}]},'x.md')
+   self.assertTrue(any(len(v)==len(audio1) for v in files.values()))
+   self.assertTrue(any(len(v)==len(image) for v in files.values()))
+   self.assertTrue(any(p.endswith('.pending.json') for p in files))

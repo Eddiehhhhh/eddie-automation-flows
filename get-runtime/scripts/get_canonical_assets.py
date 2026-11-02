@@ -57,7 +57,7 @@ class SourceWithAssets:
         self.source = source
         self.directory = directory
         self.pending_media = {}
-        self.store = AssetStore(directory, allow_media=download_media, max_run=48 * 1024 * 1024, **({'fetch':fetch} if fetch else {}))
+        self.store = AssetStore(directory, allow_media=download_media, **({'fetch':fetch} if fetch else {}))
 
     def __getattr__(self, name):
         return getattr(self.source, name)

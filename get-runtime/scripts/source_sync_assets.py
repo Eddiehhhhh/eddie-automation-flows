@@ -241,6 +241,7 @@ class AssetStore:
         self.max_file, self.max_run, self.max_assets = max_file, max_run, max_assets
         self.bytes = 0
         self.media_attempts = 0
+        self.media_bytes = 0
         self.memo = {}
 
     def materialize(self, note):
@@ -270,6 +271,7 @@ class AssetStore:
                     if len(self.memo) >= self.max_assets:
                         raise AssetError('asset count limit reached')
                     remaining = min(MAX_MEDIA_BYTES if media and self.allow_media and self.max_file == MAX_FILE_BYTES else self.max_file, self.max_run - self.bytes)
+                    if media: remaining = min(remaining, MAX_MEDIA_BYTES - self.media_bytes)
                     if remaining <= 0:
                         raise AssetError('run byte limit reached')
                     content, mime = self.fetch(url, max_bytes=remaining)
@@ -289,6 +291,7 @@ class AssetStore:
                     relative = Path('_assets') / ('images' if kind == 'image' else 'files') / (digest + extension)
                     write_binary(self.root, relative, content)
                     self.bytes += len(content)
+                    if media: self.media_bytes += len(content)
                     self.memo[url] = {'url':url, 'status':'downloaded', 'path':relative.as_posix(), 'sha256':digest, 'bytes':len(content), 'mime':mime}
                 except (AssetError, TimeoutError, OSError, http.client.HTTPException) as error:
                     if not media: raise
