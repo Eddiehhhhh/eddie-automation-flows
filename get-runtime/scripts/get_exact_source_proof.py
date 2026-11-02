@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import resource
+import re
 import subprocess
 import tempfile
 import time
@@ -69,7 +70,10 @@ def _chain(snapshot, remote, head, observed, origin):
         if len(roots)!=1: raise ValueError('exact_proof_commit')
         if expected in (observed,origin): trees[expected]=roots[0]
         parents=[x[7:].decode() for x in headers if x.startswith(b'parent ')]
-        if len(parents)>1 or index+1<len(chosen) and parents!=[chosen[index+1]]:
+        # Extra merge parents confer no authority; only the authenticated first parent is traversed.
+        if (any(not re.fullmatch('[0-9a-f]{40}', parent) for parent in parents)
+                or len(set(parents)) != len(parents)
+                or index+1<len(chosen) and (not parents or parents[0]!=chosen[index+1])):
             raise ValueError('exact_proof_ancestry')
     if stream.read(1): raise ValueError('exact_proof_commit')
     return trees

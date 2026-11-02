@@ -26,6 +26,31 @@ class SourceProof(unittest.TestCase):
   with tempfile.TemporaryDirectory(dir=self.root) as d:return exact._chain(Path(d),self.remote,head,observed,origin)
  def test_valid_exact_ancestor(self):
   roots=self.chain(self.commits[3],self.commits[2],self.commits[0]);self.assertEqual(set(roots),{self.commits[2],self.commits[0]})
+ def merge(self):
+  self.git('checkout','-qb','side',self.commits[1])
+  (self.repo/'side').write_text('side');self.git('add','side');self.git('commit','-qm','side')
+  side=self.git('rev-parse','HEAD').strip();self.git('checkout','-q','main')
+  self.git('merge','--no-ff','-qm','merge','side')
+  return self.git('rev-parse','HEAD').strip(),side
+ def test_real_merge_preserves_exact_first_parent_proof(self):
+  head,side=self.merge();roots=self.chain(head,self.commits[2],self.commits[0])
+  self.assertEqual(set(roots),{self.commits[2],self.commits[0]})
+ def test_second_merge_parent_never_supplies_missing_ancestor(self):
+  head,side=self.merge()
+  with self.assertRaisesRegex(ValueError,'exact_proof_ancestry'):
+   self.chain(head,side,self.commits[0])
+ def test_authenticated_commits_with_wrong_first_parent_order_rejected(self):
+  original=subprocess.run
+  def reordered(args,**kwargs):
+   result=original(args,**kwargs)
+   if 'rev-list' in args:
+    output=kwargs['stdout'];output.seek(0);lines=output.read().splitlines()
+    lines[1],lines[2]=lines[2],lines[1]
+    output.seek(0);output.truncate();output.write(b'\n'.join(lines)+b'\n')
+   return result
+  with patch.object(exact.subprocess,'run',side_effect=reordered):
+   with self.assertRaisesRegex(ValueError,'exact_proof_ancestry'):
+    self.chain(self.commits[3],self.commits[2],self.commits[0])
  def test_foreign_or_reversed_ancestor_rejected(self):
   with self.assertRaises(ValueError):self.chain(self.commits[3],'0'*40,self.commits[0])
   with self.assertRaises(ValueError):self.chain(self.commits[3],self.commits[0],self.commits[2])
