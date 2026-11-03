@@ -113,6 +113,9 @@ jobs:
             ${{ inputs.flomo_stage_only && 'Raw/01 Flomo' || '' }}
             ${{ inputs.flomo_stage_only && 'Raw/02 Notion/01 Databases/碎片中心/flomo-stage' || '' }}
             ${{ inputs.flomo_stage_only && '.github/state' || '' }}
+            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && '.github/state' || '' }}
+            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && 'Raw/02 Notion/03 State' || '' }}
+            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && 'Raw/02 Notion/云端原文' || '' }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
