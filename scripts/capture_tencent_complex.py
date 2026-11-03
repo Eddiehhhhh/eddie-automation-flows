@@ -432,6 +432,20 @@ def protect_prior(previous, current):
                         raise ValueError("previous image reference missing")
 
 
+
+def source_stamp(call, file_id):
+    info = call("manage.query_file_info", {"file_id": file_id})
+    stamp = info.get("last_modify_time")
+    if info.get("file_id") != file_id or info.get("status") != "normal" or not isinstance(stamp, str) or not stamp.strip() or stamp.strip() == "0":
+        raise ValueError("unverifiable source modification time")
+    return stamp
+
+
+def require_unchanged_source(call, file_id, expected):
+    if source_stamp(call, file_id) != expected:
+        raise ValueError("source changed during capture")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", required=True)
@@ -446,7 +460,9 @@ def main():
         raise ValueError("output already exists")
     token = api.load_token()
     call = lambda op, kwargs: api.mcp_call(op, kwargs, token)
+    initial_stamp = source_stamp(call, file_id)
     snapshot = export(call, file_id)
+    snapshot["source_last_modified"] = initial_stamp
     if args.previous_dir:
         previous = json.loads((Path(args.previous_dir) / "snapshot.json").read_text())
         if not prior_complete(args.previous_dir, previous):
@@ -468,6 +484,7 @@ def main():
             new_entries = {entry["path"]:(entry["size"],entry["sha256"]) for entry in manifest["entries"]}
             previous_reading = Path(args.previous_dir) / "阅读入口.md"
             if old_entries == new_entries and previous_reading.is_file() and previous_reading.read_text(encoding="utf-8") == reading:
+                require_unchanged_source(call, file_id, initial_stamp)
                 print(json.dumps({"unchanged": True, "sheets": len(snapshot["sheets"])}))
                 return
         (staged / "阅读入口.md").write_text(reading, encoding="utf-8")
@@ -475,6 +492,7 @@ def main():
         (staged / "excel-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")))
         if output.exists():
             raise ValueError("output already exists")
+        require_unchanged_source(call, file_id, initial_stamp)
         staged.rename(output)
     print(json.dumps({"sheets": len(snapshot["sheets"]), "entries": len(manifest["entries"]), "source_bytes": metadata["size"]}))
 

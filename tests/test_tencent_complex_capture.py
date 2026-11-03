@@ -132,7 +132,7 @@ class SafetyTests(unittest.TestCase):
         import tempfile, json, os
         from unittest.mock import patch
         import capture_tencent_complex as m
-        snapshot={'file_id':'f','sheets':[{'metadata':{'sheet_id':'s','sheet_name':'A','sheet_type':'worksheet'},'cells':[]}]}
+        snapshot={'file_id':'f','source_last_modified':'1','sheets':[{'metadata':{'sheet_id':'s','sheet_name':'A','sheet_type':'worksheet'},'cells':[]}]}
         old_manifest={'entries':[{'path':'xl/image.png','size':1,'sha256':'a'}]}
         for changed in (False,True):
             with self.subTest(excel_changed=changed),tempfile.TemporaryDirectory() as tmp:
@@ -140,7 +140,7 @@ class SafetyTests(unittest.TestCase):
                 (previous/'snapshot.json').write_text(json.dumps(snapshot));(previous/'excel-manifest.json').write_text(json.dumps(old_manifest));(previous/'阅读入口.md').write_text(m.render_snapshot(snapshot))
                 new_manifest={'entries':[{'path':'xl/image.png','size':1,'sha256':'b' if changed else 'a'}]}
                 argv=['capture','--output-dir',str(out),'--previous-dir',str(previous)]
-                with patch.object(sys,'argv',argv),patch.dict(os.environ,{'TENCENT_COMPLEX_FILE_ID':'f'}),patch.object(m.api,'load_token',return_value='fixture'),patch.object(m,'export',return_value=snapshot),patch.object(m,'prior_complete',return_value=True),patch.object(m,'protect_prior'),patch.object(m,'download_official_export',return_value={'size':1,'sha256':'fixture'}) as download,patch.object(m,'unpack_official_export',return_value=new_manifest),patch.object(m,'verify_sheet_names'):
+                with patch.object(sys,'argv',argv),patch.dict(os.environ,{'TENCENT_COMPLEX_FILE_ID':'f'}),patch.object(m.api,'load_token',return_value='fixture'),patch.object(m.api,'mcp_call',return_value={'file_id':'f','last_modify_time':'1','status':'normal'}),patch.object(m,'export',return_value=snapshot),patch.object(m,'prior_complete',return_value=True),patch.object(m,'protect_prior'),patch.object(m,'download_official_export',return_value={'size':1,'sha256':'fixture'}) as download,patch.object(m,'unpack_official_export',return_value=new_manifest),patch.object(m,'verify_sheet_names'):
                     m.main()
                 download.assert_called_once();self.assertEqual(out.exists(),changed)
 
@@ -184,3 +184,28 @@ class SafetyTests(unittest.TestCase):
             if op=='sheet.get_merged_cells':return {'merged_cells':[]}
             if op=='sheet.get_cell_data':return {'cells':[] if args['include_formula'] else [{'row':0,'col':0,'value_type':'STRING','string_value':'x'}]}
         with self.assertRaises(ValueError):export(call,'fixture')
+
+    def test_source_stamp_requires_exact_live_identity_and_timestamp(self):
+        from capture_tencent_complex import source_stamp
+        valid={'file_id':'f','status':'normal','last_modify_time':'1234567890123'}
+        self.assertEqual(source_stamp(lambda *_:valid,'f'),'1234567890123')
+        for change in ({'file_id':'other'},{'status':'deleted'},{'last_modify_time':''},{'last_modify_time':'0'},{'last_modify_time':None}):
+            value={**valid,**change}
+            with self.subTest(change=change),self.assertRaises(ValueError):source_stamp(lambda *_:value,'f')
+
+    def test_changed_source_never_publishes_or_claims_unchanged(self):
+        import tempfile, json, os
+        from unittest.mock import patch
+        import capture_tencent_complex as m
+        snapshot={'file_id':'f','source_last_modified':'100','sheets':[{'metadata':{'sheet_id':'s','sheet_name':'A','sheet_type':'worksheet'},'cells':[]}]}
+        manifest={'entries':[{'path':'xl/image.png','size':1,'sha256':'a'}]}
+        for with_prior in (False,True):
+            with self.subTest(with_prior=with_prior),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);previous=root/'previous';previous.mkdir();out=root/'out'
+                (previous/'snapshot.json').write_text(json.dumps(snapshot));(previous/'excel-manifest.json').write_text(json.dumps(manifest));(previous/'阅读入口.md').write_text(m.render_snapshot(snapshot))
+                before=(previous/'snapshot.json').read_bytes();argv=['capture','--output-dir',str(out)]
+                if with_prior:argv+=['--previous-dir',str(previous)]
+                stamps=[{'file_id':'f','last_modify_time':'100','status':'normal'},{'file_id':'f','last_modify_time':'101','status':'normal'}]
+                with patch.object(sys,'argv',argv),patch.dict(os.environ,{'TENCENT_COMPLEX_FILE_ID':'f'}),patch.object(m.api,'load_token',return_value='fixture'),patch.object(m.api,'mcp_call',side_effect=stamps),patch.object(m,'export',return_value=snapshot),patch.object(m,'prior_complete',return_value=True),patch.object(m,'protect_prior'),patch.object(m,'download_official_export',return_value={'size':1,'sha256':'fixture'}),patch.object(m,'unpack_official_export',return_value=manifest),patch.object(m,'verify_sheet_names'):
+                    with self.assertRaisesRegex(ValueError,'source changed during capture'):m.main()
+                self.assertFalse(out.exists());self.assertEqual((previous/'snapshot.json').read_bytes(),before)
