@@ -1,23 +1,15 @@
-name: Cloud read-only acceptance
+name: Tencent complex private proof
 on:
-  push:
-    branches: [codex/cloud-readonly-acceptance]
-    paths:
-      - scripts/cloud_acceptance.py
-      - scripts/cloud_private_checkout.py
-      - tests/test_cloud_acceptance.py
-      - tests/test_cloud_private_checkout.py
-      - .github/workflows/cloud-readonly-acceptance.yml
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: cloud-readonly-acceptance
+  group: eddie-private-vault-writers
   cancel-in-progress: false
 jobs:
-  verify:
+  proof:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v7
         with:
@@ -25,13 +17,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - name: Test acceptance boundaries
-        run: python -m unittest discover -s tests -p 'test_cloud*.py' -v
-      - name: Check out existing private snapshot
+      - name: Run proof boundary tests
+        run: python3 -m unittest discover -s tests -p 'test_tencent_complex*.py' -q
+      - name: Run isolated private proof
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-        run: python scripts/cloud_private_checkout.py --destination vault
-      - name: Run deterministic slices with no writes
-        run: python scripts/cloud_acceptance.py --vault vault --output /tmp/cloud-acceptance.json
-      - name: Publish only allowlisted status
-        run: cat /tmp/cloud-acceptance.json >> "$GITHUB_STEP_SUMMARY"
+          TENCENT_DOCS_TOKEN: ${{ secrets.TENCENT_DOCS_TOKEN }}
+          TENCENT_PROOF_NONCE: '202611030001'
+        run: python3 scripts/run_private_command.py --label 'Tencent private proof' -- python3 scripts/tencent_complex_proof.py
