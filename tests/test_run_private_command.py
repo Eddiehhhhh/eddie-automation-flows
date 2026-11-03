@@ -36,6 +36,18 @@ class RunPrivateCommandTests(unittest.TestCase):
         self.assertIn(CANARY, captured)
         self.assertEqual(mode, 0o600)
 
+    def test_timeout_stops_command_without_exposing_private_output(self):
+        child = f"import sys, time; print({CANARY!r}); print({CANARY!r}, file=sys.stderr); time.sleep(30)"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--label", "canary", "--timeout", "0.1", "--", sys.executable, "-c", child],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 124)
+        self.assertNotIn(CANARY, result.stdout + result.stderr)
+        self.assertIn("timed out", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

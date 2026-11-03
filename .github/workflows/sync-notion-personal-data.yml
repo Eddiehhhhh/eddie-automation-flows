@@ -393,7 +393,7 @@ jobs:
         run: |
           args=(--apply --max-pages "$NOTION_SOURCE_MAX_PAGES")
           if test -n "$NOTION_SOURCE_KEY"; then args+=(--source-key "$NOTION_SOURCE_KEY"); fi
-          python scripts/run_private_command.py --label "Complete original Notion sources" -- \
+          python scripts/run_private_command.py --label "Complete original Notion sources" --timeout 900 -- \
             python scripts/sync_notion_sources_to_raw.py "${args[@]}"
 
       - name: Capture complete film originals through existing caller
