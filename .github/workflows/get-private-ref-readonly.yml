@@ -102,9 +102,10 @@ jobs:
                   print('private_git_history_proof=registered_record_unavailable')
                   raise SystemExit(1)
               record = rows[0]['get_record']
+              observed, origin = record['observed_main_commit'], record['receipt_commit']
               with tempfile.TemporaryDirectory(prefix='private-git-proof-') as directory:
                   exact_proof._chain(Path(directory), remote, os.environ['EXPECTED_MAIN_SHA'],
-                                     record['observed_main_commit'], record['receipt_commit'])
+                                     observed, origin)
               print('private_git_history_proof=success')
           except subprocess.TimeoutExpired:
               print('private_git_history_proof=timeout')
@@ -114,6 +115,29 @@ jobs:
                          'exact_proof_head', 'exact_proof_ancestry', 'exact_proof_commit'}
               code = str(error)
               print('private_git_history_proof=' + (code if code in allowed else 'unverified'))
+              if code == 'exact_proof_ancestry' and 'observed' in locals():
+                  env = retention.safe_environment(token)
+                  env['GIT_NO_LAZY_FETCH'] = '1'
+                  with tempfile.TemporaryDirectory(prefix='private-git-ancestry-') as directory:
+                      repo = Path(directory)
+                      def git(*args, capture=False):
+                          return subprocess.run(
+                              ['git', '-C', str(repo), *args], env=env,
+                              stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=120, check=True,
+                              preexec_fn=exact_proof._cap_file)
+                      git('init', '--bare', '--quiet')
+                      git('-c', 'protocol.version=2', 'fetch', '--depth=4096',
+                          '--filter=tree:0', '--no-tags', '--no-recurse-submodules',
+                          retention.REMOTE_URL, '+refs/heads/main:refs/heads/exact-proof')
+                      commits = git('rev-list', '--first-parent', '--max-count=4096',
+                                     os.environ['EXPECTED_MAIN_SHA'], capture=True).stdout.decode().splitlines()
+                      has_observed = observed in commits
+                      has_origin = origin in commits
+                      order_ok = has_observed and has_origin and commits.index(observed) <= commits.index(origin)
+                      print('private_git_ancestry=observed:' + ('yes' if has_observed else 'no')
+                            + ',origin:' + ('yes' if has_origin else 'no')
+                            + ',order:' + ('yes' if order_ok else 'no'))
               raise SystemExit(1)
           except Exception as error:
               print('private_git_history_proof=setup_error class=' + type(error).__name__)
