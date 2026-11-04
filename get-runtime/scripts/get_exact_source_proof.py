@@ -69,7 +69,7 @@ def _chain(snapshot, remote, head, observed, origin):
         if len(roots)!=1: raise ValueError('exact_proof_commit')
         if expected in (observed,origin): trees[expected]=roots[0]
         parents=[x[7:].decode() for x in headers if x.startswith(b'parent ')]
-        if len(parents)>1 or index+1<len(chosen) and parents!=[chosen[index+1]]:
+        if index+1<len(chosen) and (not parents or parents[0]!=chosen[index+1]):
             raise ValueError('exact_proof_ancestry')
     if stream.read(1): raise ValueError('exact_proof_commit')
     return trees
