@@ -86,6 +86,7 @@ jobs:
 
           sys.path.insert(0, str(Path('runtime/get-runtime/scripts').resolve()))
           import get_private_preview_retention as retention
+          import get_exact_source_proof as exact_proof
 
           token = os.environ.get('PRIVATE_VAULT_TOKEN')
           try:
@@ -100,7 +101,7 @@ jobs:
                       ['git', '-C', str(repo), *args], env=env,
                       stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, timeout=remaining, check=True,
-                      preexec_fn=retention._cap_file)
+                      preexec_fn=exact_proof._cap_file)
               with tempfile.TemporaryDirectory(prefix='private-git-probe-') as directory:
                   repo = Path(directory)
                   run(repo, 'init', '--bare', '--quiet')
