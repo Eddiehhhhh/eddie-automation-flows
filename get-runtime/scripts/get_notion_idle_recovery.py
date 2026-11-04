@@ -166,7 +166,7 @@ def _forward_policy(policy, capsule):
     # original source run and the exact historical/current template bytes.
     exact_run = capsule.get('run_binding', {}).get('id') == 40657306710
     if exact_run and old.get('controller_template_sha256') == controller.FIXED_TEMPLATE_SHA256:
-        target = '31623366601a23a56033eae8bb3b09bf314919b6c00b4905797eec26b6675df3'
+        target = '1ad7db46e341a8af8bec96e1794793b5ea761534fd62b8b1995f03f393fe3814'
         template_transition = (policy.get('controller_template_sha256') == target
             and controller.template_sha256() == target
             and controller.a.sha(controller.policy_template_bytes(old)) == controller.FIXED_TEMPLATE_SHA256)
