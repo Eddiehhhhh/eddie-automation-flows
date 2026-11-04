@@ -158,6 +158,23 @@ class StageTests(unittest.TestCase):
         self.assertFalse((self.root / bridge.STATE).exists())
         self.mocks['retrieve_block_children'].assert_not_called()
 
+    def test_incremental_success_is_separate_from_historical_completeness(self):
+        history_only_gap = {
+            'complete': False, 'capture_complete': True, 'pending': 0, 'held': {},
+            'original_source': {'complete': False}, 'formal_current': {'complete': False},
+        }
+        self.assertTrue(bridge.incremental_complete(history_only_gap))
+        self.assertEqual(bridge.sync_exit_code(history_only_gap, apply=True), 0)
+        capture_pending = {
+            'complete': False, 'capture_complete': False, 'pending': 1, 'held': {},
+        }
+        self.assertFalse(bridge.incremental_complete(capture_pending))
+        self.assertEqual(bridge.sync_exit_code(capture_pending, apply=True), 2)
+        self.assertFalse(bridge.incremental_complete({
+            'complete': False, 'capture_complete': True, 'pending': 0, 'held': {'memo': 'source_or_stage_failed'},
+        }))
+        self.assertEqual(bridge.sync_exit_code(capture_pending, apply=False), 0)
+
     def test_apply_retains_body_properties_tags_and_local_mapping(self):
         result = self.run_sync(apply=True)
         self.assertTrue(result['complete'])
