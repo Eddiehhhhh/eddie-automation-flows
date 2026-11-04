@@ -327,7 +327,7 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
 def run(token, source, *, policy, approved_policy_sha256, remote=None, public_client=None,
         expected_parent=None, apply=False, scope=None, approved_scope_sha256=None,
         run_context=None, trigger='manual', checkpoint=None, on_publication=None,
-        sink=None, writers_guard=None, work=None, bootstrap=entry.BOOTSTRAP):
+        sink=None, writers_guard=None, work=None, bootstrap=entry.BOOTSTRAP, source_id=None):
     """Injected I/O; source/selection/rendering/state/CAS remain shared engine code.
 
     on_publication receives a validated counts/hash-only marker after readback.
@@ -336,6 +336,8 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
     """
     policy = at_stage('policy', validate_policy, policy, approved_policy_sha256, bootstrap)
     if trigger not in ('manual', 'schedule'):
+        fail('runtime_scope')
+    if source_id is not None and trigger != 'manual':
         fail('runtime_scope')
     if expected_parent is not None:
         a.checked(expected_parent, 40)
@@ -365,7 +367,7 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
             exclude_run_attempt=run_context['run_attempt'] if run_context else None)
         at_stage('remote_guard', m.guard, remote, parent)
         plan, files = at_stage('canonical_prepare', entry.prepare, reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
-            anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger, history_witness=history_witness)
+            anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger, history_witness=history_witness, source_id=source_id)
         at_stage('remote_guard', m.guard, remote, parent)
         result = at_stage('candidate_report', entry.public_report, plan, files)
         if result['status'] != 'recurring_local_candidate_verified':
@@ -478,6 +480,10 @@ def main(argv=None):
         if args.publication_file and not args.apply:
             fail('runtime_scope')
         policy = validate_policy(m.strict_capture_json(a.bounded_file(args.policy, 16384), 16384), args.approved_policy_sha256, entry.BOOTSTRAP)
+        source_id = os.environ.get('GET_SINGLE_NOTE_ID') or None
+        single_mode = os.environ.get('GET_SINGLE_NOTE_MODE', 'false') == 'true'
+        if single_mode != (source_id is not None) or (source_id is not None and (args.trigger != 'manual' or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch')):
+            fail('runtime_scope')
         scope = None; run_context = None
         if args.apply:
             if bool(args.scope) == args.scope_from_policy:
@@ -519,7 +525,7 @@ def main(argv=None):
             apply=args.apply, scope=scope, approved_scope_sha256=args.approved_scope_sha256,
             run_context=run_context, trigger=args.trigger, checkpoint=checkpoint if args.apply else None,
             on_publication=emit if args.apply else None, public_client=public_client,
-            writers_guard=writers_guard)
+            writers_guard=writers_guard, source_id=source_id)
     except (Exception, SystemExit) as exc:
         result = failure(exc, attempt_started=attempt_started)
         if 'source' in locals() and isinstance(source, SourceObserver):

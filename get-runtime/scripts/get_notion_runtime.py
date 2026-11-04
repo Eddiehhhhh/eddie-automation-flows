@@ -238,10 +238,13 @@ def queue_limit(state):
     return MAX_RUN_RECORDS
 
 
-def png_batch_ids(state):
+def png_batch_ids(state,only_note_id=None):
     pending=state['engine_state']['journal']
-    if pending is not None:return list(pending['plan']['publication']['records'])
+    if pending is not None:
+        return outbox.single_note_selection(state,only_note_id,resume=True) if only_note_id is not None else list(pending['plan']['publication']['records'])
     if state.get('last_enqueued_publication')!=state.get('observed_publication_tip'):return []
+    exact=outbox.single_note_selection(state,only_note_id) if only_note_id is not None else None
+    if exact is not None:return exact
     only=expired_recovery.only_note_id(state)
     if only is not None:return [only]
     order=state['rotation_order']
@@ -276,7 +279,7 @@ def observe_expired_png(current, loaded, publication, request, writers_guard):
     return result
 
 
-def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,previous,loaded_assets=None,history_witness=None):
+def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,writers_guard,previous,loaded_assets=None,history_witness=None,only_note_id=None):
     state,sha=store.read()
     selected=png_selected(pub.descriptor)
     if not selected:return pub,None,previous,None,writers_guard,None
@@ -297,7 +300,7 @@ def png_context(local,remote,root,store,request,pub,policy,policy_hash,apply,wri
         resolver=session.advance_uploads() if preparation['upload_candidates'] else png_image.Resolver(loaded.evidence,png_store.upload_receipts(state,asset_key=asset_key),current_commit=lambda:loaded.snapshot_head)
         state,sha=store.read()
         # Upload CAS changes the outer hash; the original queue descriptor is stale.
-        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state),history_witness=history_witness)
+        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state),history_witness=history_witness,only_note_id=only_note_id)
         session.publication=pub
     image_adapter=png_image.SnapshotAdapter(resolver,store.read,request=request,asset_get=png_image.AssetGet(),previous=previous)
     def candidates(old,new):
@@ -369,12 +372,13 @@ def incremental_scope_for(publication, journal):
     return None
 
 
-def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writers_guard,initial_factory=initial_inputs,create_recovery=None,approved_recovery_sha=None,loaded_assets=None,history_witness=None):
+def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writers_guard,initial_factory=initial_inputs,create_recovery=None,approved_recovery_sha=None,loaded_assets=None,history_witness=None,only_note_id=None):
     property_runtime.check_dependency()
     state,sha=store.read();outbox.check_state(state)
     if sha!=outbox.digest(state):fail('notion_state_anchor')
     busy=canonical_mode_guard(state,sha)
     if busy is not None:return busy
+    if only_note_id is not None and not initial_done(state):fail('notion_scope')
     isolated=0
     if plan_recovery.validate_initial_state(state,sha):
         candidate=plan_recovery.isolate_outer(state,sha)
@@ -387,17 +391,18 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
     if pending_journal is not None:
         plan=pending_journal['plan'];desc=plan['publication']
         if desc.get('initial_cohort') is not None:
+            if only_note_id is not None:fail('notion_scope')
             pub,scope,ds,counts=initial_resume(local,remote,root,plan,token,policy_hash)
         else:
             source_loader.load_queue_publication(local,remote,token,root,{k:desc[k] for k in ('commit','parent')}|{'receipt_sha256':desc['outbox_receipt_sha256']},policy_hash,history_witness=history_witness)
-            pub=outbox.QueuePublication(local.vault,state,sha,resume=True,history_witness=history_witness);scope={};ds=plan['policy']['data_source_id']
+            pub=outbox.QueuePublication(local.vault,state,sha,resume=True,history_witness=history_witness,only_note_id=only_note_id);scope={};ds=plan['policy']['data_source_id']
     elif not initial_done(state):
         parent=a.checked(local.run('rev-parse',r.MAIN_REF).decode().strip(),40)
         pub,scope,ds,counts=initial_factory(local,remote,parent,request)
     else:
         origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
         chain=source_loader.load_confirmed_chain(local,remote,token,root,tip,origin,state['last_enqueued_publication'] or origin,policy_hash,history_witness=history_witness)
-        candidate=outbox.enqueue(local.vault,state,sha,chain,outbox.digest(chain),history_witness=history_witness)
+        candidate=outbox.enqueue(local.vault,state,sha,chain,outbox.digest(chain),history_witness=history_witness,only_note_id=only_note_id)
         if not e.same(candidate,state):
             if apply:
                 version=store.compare_and_set(sha,candidate);state,sha=store.read()
@@ -405,11 +410,14 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
             else:store=ReadOnlyStore(candidate);state,sha=store.read()
         if state['last_enqueued_publication']!=state['observed_publication_tip']:
             return {'status':'queue_partial','queued':len(state['pending_by_id']),'source_chain_complete':False,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
+        if only_note_id is not None and not outbox.single_note_delivery(state,only_note_id):
+            if only_note_id in state['engine_state']['receipts']:
+                return {'status':'queue_empty','single_note_verified':True,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         if not state['pending_by_id']:
             return {'status':'queue_partial' if state.get('source_state_holds') else 'queue_empty','source_state_unprojected_receipts':len(state.get('source_state_holds',{})),'queued':0,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
-        first=state['pending_by_id'][state['rotation_order'][0]]
+        first=state['pending_by_id'][only_note_id] if only_note_id is not None else state['pending_by_id'][state['rotation_order'][0]]
         source_loader.load_queue_publication(local,remote,token,root,{k:first[k] for k in ('commit','parent','receipt_sha256')},policy_hash,history_witness=history_witness)
-        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state),history_witness=history_witness);scope={}
+        pub=outbox.QueuePublication(local.vault,state,sha,max_records=queue_limit(state),history_witness=history_witness,only_note_id=only_note_id);scope={}
         receipts=state['engine_state']['receipts']
         if receipts:ds=next(iter(receipts.values()))['data_source_id']
         else:ds=next(iter(transport.native.collect(request)['snapshots'].values()))['parent_data_source']
@@ -562,11 +570,15 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         public_client=None,checkpoint_stream=None,work=None,create_recovery=None,approved_recovery_sha=None,
         property_manifest=None,approved_property_manifest_sha256=None,
         historical_manifest=None,approved_historical_manifest_sha256=None,
-        historical_capture=None,approved_historical_capture_sha256=None,compact_proofs=False,fixed_source=False):
+        historical_capture=None,approved_historical_capture_sha256=None,compact_proofs=False,fixed_source=False,single_note_id=None):
     """Real private read/CAS adapter. Default path cannot persist a journal."""
     stage='input';write_possible=False;prior_effects=None
     try:
         if type(apply) is not bool:fail('notion_scope')
+        if single_note_id is not None:
+            p.note_id(single_note_id)
+            if (not apply or os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch'
+                    or fixed_source or any(x is not None for x in (property_manifest,historical_manifest,historical_capture))):fail('notion_scope')
         fixed_selection = fixed_auth.admit(fixed_source, publication_bytes, apply=apply,
             historical_manifest=historical_manifest, historical_capture=historical_capture,
             manifest_sha=approved_historical_manifest_sha256, capture_sha=approved_historical_capture_sha256,
@@ -635,6 +647,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     found=checkpoints.discover_anchor(client,public_policy=public_policy,approved_public_policy_sha256=public_hash,
                         notion_policy_sha256=e.digest(scope_for(public_policy)),exclude_run_id=execution['run_id'] if execution else None,
                         exclude_run_attempt=execution['run_attempt'] if execution else None)
+                if single_note_id is not None and found.get('recovery_anchor') is not None:fail('notion_scope')
                 anchor=found['anchor']
             else:
                 anchor={'commit':entry.BOOTSTRAP['commit'],'state_blob':None,'state_sha256':outbox.digest(outbox.initial_state())}
@@ -888,9 +901,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if tip is not None and preload_state['engine_state']['journal'] is None:
                 origin={'commit':entry.BOOTSTRAP['commit'],'receipt_sha256':None,'sequence':0}
                 preview_chain=source_loader.load_confirmed_chain(local,remote,token,root,tip,origin,preload_state['last_enqueued_publication'] or origin,public_policy['get_policy_sha256'],history_witness=history_witness)
-                preload_state=outbox.enqueue(local.vault,preload_state,preload_sha,preview_chain,outbox.digest(preview_chain),history_witness=history_witness)
+                preload_state=outbox.enqueue(local.vault,preload_state,preload_sha,preview_chain,outbox.digest(preview_chain),history_witness=history_witness,only_note_id=single_note_id)
                 preload_sha=outbox.digest(preload_state)
-            batch=png_batch_ids(preload_state)
+            batch=png_batch_ids(preload_state,single_note_id)
             pending_plan=preload_state['engine_state']['journal']
             batch_descriptor=pending_plan['plan']['publication'] if pending_plan is not None else {'commit':preload_state['pending_by_id'][batch[0]]['commit'] if batch else None,'records':{i:preload_state['pending_by_id'][i] for i in batch}}
             png_pending=png_selected(batch_descriptor)
@@ -906,7 +919,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     first=preload_state['pending_by_id'][batch[0]]
                     row={k:first[k] for k in ('commit','parent','receipt_sha256')}
                 source_loader.load_queue_publication(local,remote,token,root,row,preload_state['policy_sha256'],history_witness=history_witness)
-                before_pub=outbox.QueuePublication(local.vault,preload_state,preload_sha,resume=pending is not None,max_records=queue_limit(preload_state),history_witness=history_witness)
+                before_pub=outbox.QueuePublication(local.vault,preload_state,preload_sha,resume=pending is not None,max_records=queue_limit(preload_state),history_witness=history_witness,only_note_id=single_note_id)
                 loaded_assets=png_loader.load(local,remote,before_pub.descriptor,selected_anchor,selected_anchor_sha,preload_state['policy_sha256'])
             if present and found.get('recovery_anchor')=='exact_run10_acknowledged_create_v1':
                 if not plan_recovery.validate_run10_state(current,sha):fail('notion_state_anchor')
@@ -944,7 +957,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             stage='execute';write_possible=apply
             result=dispatch(local,remote,token,root,store,request,tip=tip,
                 policy_hash=public_policy['get_policy_sha256'] if public_policy else '0'*64,
-                apply=apply,writers_guard=guarded_writers,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,loaded_assets=loaded_assets,history_witness=history_witness)
+                apply=apply,writers_guard=guarded_writers,create_recovery=create_recovery,approved_recovery_sha=approved_recovery_sha,loaded_assets=loaded_assets,history_witness=history_witness,only_note_id=single_note_id)
             stage='final';source_guard()
             # Refresh the separately verified Actions anchor even on a no-op.
             # Identical bytes emit a verified cas_attempts=0 checkpoint; this
@@ -996,6 +1009,13 @@ def main(argv=None):
     parser.add_argument('--apply',action='store_true');parser.add_argument('--scope-from-policy',action='store_true')
     args=parser.parse_args(argv)
     try:
+        single_mode=os.environ.get('GET_SINGLE_NOTE_MODE','').lower()
+        single_id=os.environ.get('GET_SINGLE_NOTE_ID')
+        if single_mode not in ('','false','true'):fail('notion_scope')
+        if single_mode=='true':
+            if os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or not args.apply or os.environ.get('NOTION_MODE','canonical')!='canonical' or not single_id:fail('notion_scope')
+            p.note_id(single_id)
+        elif single_id:fail('notion_scope')
         # Pending production activation is rejected before credential lookup.
         if args.apply and (not PRODUCTION_ACTIVATED or not recurring.PRODUCTION_ACTIVATED):fail('notion_activation_pending')
         if args.apply!=args.scope_from_policy or (not args.apply and (args.publication_file or args.fixed_source)):fail('notion_scope')
@@ -1035,7 +1055,7 @@ def main(argv=None):
             apply=args.apply,public_policy=policy,approved_public_policy_sha256=args.approved_policy_sha256,
             publication_bytes=raw,execution=execution,public_client=public_client,checkpoint_stream=sys.stdout if args.apply else None,create_recovery=recovery,approved_recovery_sha=args.approved_recovery_sha256,property_manifest=property_manifest,approved_property_manifest_sha256=args.approved_property_manifest_sha256,
             historical_manifest=historical_manifest,approved_historical_manifest_sha256=args.approved_historical_manifest_sha256,
-            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True,fixed_source=args.fixed_source)
+            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True,fixed_source=args.fixed_source,single_note_id=single_id)
     except Exception as exc:
         result={'contract':CONTRACT,'status':'failed','stage':'input',**failure_diagnostic(exc),'write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
     import get_private_runtime_report as report

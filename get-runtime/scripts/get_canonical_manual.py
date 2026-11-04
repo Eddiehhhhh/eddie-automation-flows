@@ -30,8 +30,16 @@ def load_states(reader,evidence,parent,current,legacy_sha,registry_sha):
         registry=n.initial_registry(evidence,legacy,legacy_sha,current)
     return legacy,registry
 
-def select_new(items,registry,preview):
+def select_new(items,registry,preview,*,source_id=None,legacy_ids=()):
     candidates=sorted(set(items)-set(registry['reserved'])-set(registry['newById']))
+    if source_id is not None:
+        n.identity(source_id)
+        if source_id not in items or source_id in registry['conflictsById']:
+            m.fail('manual_scope')
+        if source_id in registry['reserved'] and source_id not in legacy_ids:
+            m.fail('manual_scope')
+        selected=[] if source_id in legacy_ids or source_id in registry['newById'] else [source_id]
+        return selected,max(0,len(candidates)-len(selected))
     if preview is not None:
         if len(preview)!=m.CANONICAL_COUNT or registry['newById']:m.fail('manual_scope')
         selected=sorted(preview)
@@ -45,7 +53,17 @@ def canonical_payload(reader,plan,current):
     return {'contract':'get-canonical-approved-payload-1','rules_sha256':m.rules_sha256(),
       'before_get_tree':reader.source_get_tree(plan['parent_commit']),
       'current_sha256':{p:a.sha(v) for p,v in sorted(current.items())},
-      **{k:deepcopy(plan[k]) for k in ('capture_anchor','previous_legacy_sha256','previous_registry_sha256','state_sha256','registry_sha256','changes','counts','source_summary_sha256','detail_receipts_sha256','initial_preview_import','conflict_reason_counts')}}
+      **{k:deepcopy(plan[k]) for k in ('capture_anchor','previous_legacy_sha256','previous_registry_sha256','state_sha256','registry_sha256','changes','counts','source_summary_sha256','detail_receipts_sha256','initial_preview_import','conflict_reason_counts')},
+      'single_source_id':plan['single_source_id'],'single_source_path':plan['single_source_path']}
+
+def verify_single_scope(plan):
+    only_id=plan.get('single_source_id');only_path=plan.get('single_source_path')
+    if (only_id is None)!=(only_path is None):m.fail('manual_single_scope')
+    if only_id is None:return
+    n.identity(only_id);r.safe_path(only_path)
+    content={row['path'] for row in plan['changes']
+             if row['path'] not in {r.GET+'/'+a.STATE,r.GET+'/'+n.STATE}}
+    if content and content!={only_path}:m.fail('manual_single_scope')
 
 def verify_plan(reader,plan,files):
     if plan.get('contract')!=CONTRACT or plan.get('local_proposal_only') is not True or plan.get('apply_ready') is not False:m.fail('manual_plan')
@@ -55,6 +73,7 @@ def verify_plan(reader,plan,files):
     if reader.local.run('rev-parse',commit+'^{tree}').decode().strip()!=plan['candidate_tree']:m.fail('manual_plan')
     changed={p for p in set(before)|set(after) if before.get(p)!=after.get(p)}
     if changed!=set(files) or changed!={x['path'] for x in plan['changes']} or len(changed)!=len(plan['changes']):m.fail('manual_plan')
+    verify_single_scope(plan)
     for row in plan['changes']:
         p=row['path'];r.safe_path(p)
         if not p.startswith(r.GET+'/') or p not in after:m.fail('manual_scope')
@@ -63,14 +82,18 @@ def verify_plan(reader,plan,files):
     if sum(map(len,files.values()))>m.MAX_CHANGED_BYTES or plan['transaction_bytes']!=sum(len(data) for oid,data in {r.oid(v):v for v in files.values()}.items() if oid not in {x[2] for x in before.values()}):m.fail('manual_budget')
     if commit!=parent and reader.local.run('rev-list','--parents','-n','1',commit).decode().split()!=[commit,parent]:m.fail('manual_plan')
 
-def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None,preview=None):
+def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None,preview=None,source_id=None):
     legacy,registry=load_states(reader,evidence,parent,current,legacy_sha,registry_sha)
     first=n.STATE not in current
     if first!=(preview is not None):m.fail('manual_scope')
     summaries,terminal=source.enumerate();items=a.source_snapshot(summaries,terminal)
-    selected,remaining=select_new(items,registry,preview)
-    legacy_needed={i for i,row in legacy['legacyById'].items() if i in items and (raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or a.sha(a.encoded(items[i]))!=row['summary_sha256'])}
-    new_needed={i for i,row in registry['newById'].items() if i in items and (raw_source_version(items[i].get('updated_at'))!=row['source_version'] or n.raw._source_content_hash(items[i])!=row['summary_sha256'])}
+    if source_id is not None:
+        n.identity(source_id)
+        if source_id in legacy['conflictsById'] or source_id in legacy['pending_ids']:
+            m.fail('manual_scope')
+    selected,remaining=select_new(items,registry,preview,source_id=source_id,legacy_ids=legacy['legacyById'])
+    legacy_needed={i for i,row in legacy['legacyById'].items() if (source_id is None or i==source_id) and i in items and (raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or a.sha(a.encoded(items[i]))!=row['summary_sha256'])}
+    new_needed={i for i,row in registry['newById'].items() if (source_id is None or i==source_id) and i in items and (raw_source_version(items[i].get('updated_at'))!=row['source_version'] or n.raw._source_content_hash(items[i])!=row['summary_sha256'])}
     needed=sorted((legacy_needed|new_needed|set(selected))&set(items));details={};receipts={};unavailable=0
     for ident in needed:
         try:
@@ -79,9 +102,19 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
         except RuntimeError as exc:
             if str(exc)!='GetNote HTTP 404':raise
             details[ident]=None;unavailable+=1
-    proposal,states,counts=n.prepare(reader,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,selected_new=selected,preview=preview)
+    proposal,states,counts=n.prepare(reader,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,selected_new=selected,preview=preview,only_id=source_id)
+    single_path=None
+    if source_id is not None:
+        if source_id in states['legacy']['legacyById']:
+            single_path=r.GET+'/'+states['legacy']['legacyById'][source_id]['ownership']['filePath']
+        elif source_id in states['registry']['newById']:
+            single_path=r.GET+'/'+states['registry']['newById'][source_id]['filePath']
+        else:
+            m.fail('manual_scope')
+        content_paths={row['path'] for row in proposal['changes'] if row['path'] not in (a.STATE,n.STATE)}
+        if content_paths and content_paths!={single_path[len(r.GET)+1:]}:m.fail('manual_single_scope')
     next_registry=states['registry']
-    if selected:next_registry['scan_cursor']=selected[-1]
+    if selected and source_id is None:next_registry['scan_cursor']=selected[-1]
     # Materialize the final state once directly on the same parent. The earlier
     # pure candidate is an unreferenced object, not a second reachable snapshot.
     changes={row['path']:reader.read(proposal['candidate_commit'],r.GET+'/'+row['path'],a.owned.MAX_NOTE) for row in proposal['changes'] if row['path'] not in (a.STATE,n.STATE)}
@@ -93,7 +126,7 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     counts.update(legacy_managed=len(states['legacy']['legacyById']),legacy_conflicts=len(states['legacy']['conflictsById']),legacy_pending=len(states['legacy']['pending_ids']),existing_unmanaged=sum(v=='existing_unmanaged' for v in next_registry['reserved'].values()),new_managed=len(next_registry['newById']),new_selected=len(selected),new_remaining=remaining,new_pending=len(next_registry['conflictsById']),source_details=len(details),details_unavailable=unavailable)
     counts.update(n.opaque_counts(next_registry))
     unique={r.oid(data):data for data in files.values()};existing={row[2] for row in before.values()}
-    plan={'contract':CONTRACT,**{k:final[k] for k in ('parent_commit','candidate_commit','candidate_tree','registry_sha256')},'state_sha256':final['legacy_sha256'],'previous_legacy_sha256':legacy_sha,'previous_registry_sha256':registry_sha,'capture_anchor':evidence.anchor,'changes':rows,'counts':counts,'conflict_reason_counts':n.reason_counts(next_registry['conflictsById']),'source_summary_sha256':a.sha(a.encoded(summaries)),'detail_receipts_sha256':a.sha(a.encoded({i:{'semantic_sha256':v['semantic_sha256']} for i,v in receipts.items()})), 'wire_receipts_sha256':a.sha(a.encoded(receipts)),'initial_preview_import':first,'transaction_bytes':sum(len(v) for oid,v in unique.items() if oid not in existing),'local_proposal_only':True,'apply_ready':False}
+    plan={'contract':CONTRACT,**{k:final[k] for k in ('parent_commit','candidate_commit','candidate_tree','registry_sha256')},'state_sha256':final['legacy_sha256'],'previous_legacy_sha256':legacy_sha,'previous_registry_sha256':registry_sha,'capture_anchor':evidence.anchor,'changes':rows,'counts':counts,'conflict_reason_counts':n.reason_counts(next_registry['conflictsById']),'source_summary_sha256':a.sha(a.encoded(summaries)),'detail_receipts_sha256':a.sha(a.encoded({i:{'semantic_sha256':v['semantic_sha256']} for i,v in receipts.items()})), 'wire_receipts_sha256':a.sha(a.encoded(receipts)),'initial_preview_import':first,'transaction_bytes':sum(len(v) for oid,v in unique.items() if oid not in existing),'single_source_id':source_id,'single_source_path':single_path,'local_proposal_only':True,'apply_ready':False}
     plan['approval_payload_sha256']=a.sha(a.encoded(canonical_payload(reader,plan,current)))
     verify_plan(reader,plan,files)
     return plan,files

@@ -343,7 +343,7 @@ def add_receipt(reader, parent, engine_plan, files, receipt_bytes):
     return commit, tree, writes
 
 
-def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=None, preview=None, bootstrap=BOOTSTRAP, trigger='manual', history_witness=None):
+def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=None, preview=None, bootstrap=BOOTSTRAP, trigger='manual', history_witness=None, source_id=None):
     if trigger not in ('manual', 'schedule'):
         fail('entry_trigger')
     policy, previous, states = trust_current(reader, evidence, parent, approved_rules_sha256, anchor, bootstrap=bootstrap, history_witness=history_witness)
@@ -351,12 +351,13 @@ def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=N
     legacy_sha = previous['state_sha256'] if previous else bootstrap['legacy_sha256']
     registry_sha = previous['registry_sha256'] if previous else None
     plan, files = engine.prepare(reader, evidence, parent, current, source, legacy_sha=legacy_sha,
-                                 registry_sha=registry_sha, preview=preview)
+                                 registry_sha=registry_sha, preview=preview, source_id=source_id)
     # The canonical engine is the sole selector/renderer/state transition owner.
     check_counts(plan['counts'], load_states(reader, evidence, plan['candidate_commit'], plan['state_sha256'], plan['registry_sha256']))
     plan['entry_contract'] = CONTRACT
     plan['policy_sha256'] = policy
     plan['engine_approval_payload_sha256'] = plan['approval_payload_sha256']
+    plan['single_source_id'] = source_id
     if not files:
         plan['receipt_sha256'] = anchor['receipt_sha256'] if anchor else None
         plan['receipt_commit'] = anchor['commit'] if anchor else None
@@ -401,6 +402,11 @@ def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstr
     bootstrap_states(reader, evidence, bootstrap)
     if plan.get('entry_contract') != CONTRACT or plan.get('policy_sha256') != policy_sha256(approved_rules_sha256, bootstrap) or approved_rules_sha256 != rules_sha256():
         fail('entry_policy_changed')
+    single_id=plan.get('single_source_id');single_path=plan.get('single_source_path')
+    if (single_id is None)!=(single_path is None):fail('entry_single_scope')
+    if single_id is not None:
+        n.identity(single_id);r.safe_path(single_path)
+        if any(value!=single_id for value in plan.get('proposed_content_ids',[])):fail('entry_single_scope')
     if not files:
         if plan.get('receipt_commit') is not None:
             verify_trusted_publication(reader, evidence, {'commit': plan['receipt_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap, history_witness=history_witness)
@@ -412,7 +418,9 @@ def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstr
         fail('entry_receipt_anchor')
     receipt, _ = verify_trusted_publication(reader, evidence,
         {'commit': plan['candidate_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap, history_witness=history_witness)
-    if receipt['changed_content_ids'] != plan['proposed_content_ids'] or receipt['counts'] != plan['counts'] or receipt['engine_payload_sha256'] != plan['engine_approval_payload_sha256']:
+    if (receipt['changed_content_ids'] != plan['proposed_content_ids'] or receipt['counts'] != plan['counts']
+            or receipt['engine_payload_sha256'] != plan['engine_approval_payload_sha256']
+            or (single_id is not None and any(value!=single_id for value in receipt['changed_content_ids']))):
         fail('entry_plan')
     expected = a.sha(a.encoded({'policy_sha256': plan['policy_sha256'],
         'engine_payload_sha256': plan['engine_approval_payload_sha256'], 'receipt_sha256': plan['receipt_sha256']}))

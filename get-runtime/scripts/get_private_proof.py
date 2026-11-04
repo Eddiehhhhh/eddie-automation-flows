@@ -205,7 +205,11 @@ class PrivateRecords:
     def guard(self):
         m=self._read('metadata',self.remote.metadata)
         if m.get('full_name')!=REPOSITORY or m.get('private') is not True:self._reject('metadata','shape')
-        head=checked(self._read('ref',self.remote.ref,REF),40)
+        head=None
+        for _ in range(2):
+            head=self._read('ref',self.remote.ref,REF)
+            if head is not None:break
+        head=checked(head,40)
         if self.head is None:self.head=head
         elif head!=self.head:self._reject('ref','ancestry')
         return head

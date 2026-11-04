@@ -349,14 +349,20 @@ def record(note,summary,path,data,anchor=None):
       'preview_anchor':deepcopy(anchor),'source_metadata':source_metadata(note)}
 
 
-def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None,allow_fresh_preview=False):
+def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None,allow_fresh_preview=False,only_id=None):
     """Return actual candidate bytes and state; no side effects or source calls."""
     state=validate_registry(registry,registry_sha,evidence,legacy_state,legacy_sha,current)
     items=legacy.source_snapshot(summaries,terminal);preview=preview or {};selected=list(selected_new)
     if len(selected)>MAX_NEW or len(selected)!=len(set(selected)):fail('canonical_selection')
     for ident in selected:identity(ident)
+    if only_id is not None:
+        identity(only_id)
+        if (only_id not in items or only_id in state['conflictsById']
+                or (only_id in state['reserved'] and only_id not in legacy_state['legacyById'])
+                or set(details)-{only_id} or set(selected_new)-{only_id}):fail('identity_reserved')
     present=inventory(current);occupied=set(current);changes={};conflicts=deepcopy(state['conflictsById']);counts=dict.fromkeys(('created','preview_imported','updated','state_only','unchanged','conflicted','detail_required'),0)
     targets=sorted(set(state['newById'])|set(selected))
+    if only_id is not None:targets=[ident for ident in targets if ident==only_id]
     for ident in targets:
         conflicts.pop(ident,None)
         old=state['newById'].get(ident)
@@ -493,7 +499,7 @@ def git_candidate(repo,parent,legacy_state,registry,changes,current):
       'changes':rows,'local_proposal_only':True,'mirror_adopted':False,'apply_ready':False}
 
 
-def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,*,selected_new=(),preview=None):
+def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,*,selected_new=(),preview=None,only_id=None):
     """Single owner dispatcher: legacy spans plus generated-new-note updates.
 
     External anchor hashes come from reviewed immutable receipts, never from
@@ -520,16 +526,19 @@ def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,deta
         registry=initial_registry(evidence,legacy_state,legacy_sha,current);registry_sha=legacy.sha(legacy.encoded(registry))
     if not isinstance(details,dict):fail('canonical_details')
     items=legacy.source_snapshot(summaries,terminal)
-    legacy_needed={i for i,row in legacy_state['legacyById'].items() if i in items and (raw.raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or legacy.sha(legacy.encoded(items[i]))!=row['summary_sha256'])}
+    if only_id is not None:
+        identity(only_id)
+        if only_id not in items or only_id in registry['conflictsById'] or (only_id in registry['reserved'] and only_id not in legacy_state['legacyById']):fail('identity_reserved')
+    legacy_needed={i for i,row in legacy_state['legacyById'].items() if (only_id is None or i==only_id) and i in items and (raw.raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or legacy.sha(legacy.encoded(items[i]))!=row['summary_sha256'])}
     unknown=set(details)-(legacy_needed|set(registry['newById'])|set(selected_new))
     if unknown:fail('canonical_details')
     # Missing legacy detail is an individual unresolved record, never a reason
     # to reroute the identity through the new-note renderer.
-    next_legacy,legacy_changes,old_counts=legacy.propose_updates(evidence,legacy_state,legacy_sha,current,repo,parent,summaries,terminal,{i:details.get(i) for i in legacy_needed})
+    next_legacy,legacy_changes,old_counts=legacy.propose_updates(evidence,legacy_state,legacy_sha,current,repo,parent,summaries,terminal,{i:details.get(i) for i in legacy_needed},only_id=only_id)
     next_sha=legacy.sha(legacy.encoded(next_legacy))
     registry=deepcopy(registry);registry['legacy_state_sha256']=next_sha
     producer_registry_sha=legacy.sha(legacy.encoded(registry))
-    next_registry,new_changes,new_counts=propose_new(evidence,next_legacy,next_sha,registry,producer_registry_sha,current,summaries,terminal,{i:v for i,v in details.items() if i not in legacy_needed},selected_new=selected_new,preview=preview,baseline_errors=baseline_errors,allow_fresh_preview=True)
+    next_registry,new_changes,new_counts=propose_new(evidence,next_legacy,next_sha,registry,producer_registry_sha,current,summaries,terminal,{i:v for i,v in details.items() if i not in legacy_needed},selected_new=selected_new,preview=preview,baseline_errors=baseline_errors,allow_fresh_preview=True,only_id=only_id)
     if set(legacy_changes)&set(new_changes):fail('canonical_owner_overlap')
     plan=git_candidate(repo,parent,next_legacy,next_registry,{**legacy_changes,**new_changes},current)
     return plan,{'legacy':next_legacy,'registry':next_registry},{'legacy_'+k:v for k,v in old_counts.items()}|{'new_'+k:v for k,v in new_counts.items()}

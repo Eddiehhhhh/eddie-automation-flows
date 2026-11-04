@@ -65,6 +65,38 @@ def source_ancestry(reader, ancestor, descendant, history_witness=None):
 class Blocked(ValueError):pass
 def fail(reason):raise Blocked(reason) from None
 
+def single_note_selection(state,note_id,*,resume=False):
+    """Select one exact ID from the current publication; never drain peers."""
+    if note_id is None:return None
+    p.note_id(note_id)
+    journal=state['engine_state']['journal']
+    if journal is not None:
+        records=journal['plan']['publication']['records']
+        if not resume or set(records)!={note_id}:fail('outbox_source_invalid')
+        pending=state['pending_by_id'].get(note_id);tip=state['observed_publication_tip']
+        desc=journal['plan']['publication']
+        if (pending is None or pending['sequence']!=tip['sequence'] or pending['commit']!=tip['commit'] or pending['receipt_sha256']!=tip['receipt_sha256']
+                or desc['commit']!=tip['commit'] or desc['outbox_receipt_sha256']!=tip['receipt_sha256']):fail('outbox_source_invalid')
+        return [note_id]
+    if resume:fail('outbox_state_invalid')
+    pending=state['pending_by_id'].get(note_id)
+    if pending is None:return []
+    tip=state['observed_publication_tip']
+    if pending['sequence']!=tip['sequence'] or pending['commit']!=tip['commit'] or pending['receipt_sha256']!=tip['receipt_sha256']:
+        fail('outbox_source_invalid')
+    return [note_id]
+
+def single_note_delivery(state,note_id):
+    selected=single_note_selection(state,note_id)
+    if selected:return selected
+    if note_id in state['engine_state'].get('receipts',{}):return []
+    fail('outbox_source_invalid')
+
+def single_note_records_allowed(records,note_id):
+    if note_id is not None:
+        p.note_id(note_id)
+        if not isinstance(records,dict) or any(ident!=note_id for ident in records):fail('outbox_source_invalid')
+
 def initial_state():
     return {'contract':CONTRACT,'origin':None,'policy_sha256':None,'last_enqueued_publication':None,
         'observed_publication_tip':None,'pending_by_id':{},'rotation_order':[],'engine_state':e.initial_state()}
@@ -151,7 +183,7 @@ def verified_publication(reader,row,policy,previous=None,budget=None,*,history_w
     if sorted(records)!=receipt['changed_content_ids'] or entry.a.sha(entry.a.encoded(entry.delta(reader,row['parent'],row['commit'])))!=receipt['delta_sha256']:fail('outbox_chain_invalid')
     return receipt,records
 
-def enqueue(root,state,expected_state_sha,chain,expected_chain_sha,*,history_witness=None):
+def enqueue(root,state,expected_state_sha,chain,expected_chain_sha,*,history_witness=None,only_note_id=None):
     """Pure state transition; caller MUST durably CAS this before planning.
 
     A state-only confirmed receipt advances the traversal cursor but adds zero
@@ -185,6 +217,7 @@ def enqueue(root,state,expected_state_sha,chain,expected_chain_sha,*,history_wit
     previous=value['last_enqueued_publication']
     for row in rows:
         receipt,records=verified_publication(reader,row,value['policy_sha256'],previous,budget,history_witness=history_witness)
+        single_note_records_allowed(records,only_note_id)
         e.metadata_pending.retain_source_state_signal(value,row,receipt)
         for ident,source in records.items():
             if ident not in value['pending_by_id']:value['rotation_order'].append(ident)
@@ -206,7 +239,7 @@ class QueuePublication:
     records is a selected subset of that commit's genuine changed_content_ids.
     It NEVER relabels old pending IDs as changes in a newer/state-only commit.
     """
-    def __init__(self,root,state,expected_state_sha,*,resume=False,max_records=e.MAX_RECORDS,history_witness=None):
+    def __init__(self,root,state,expected_state_sha,*,resume=False,max_records=e.MAX_RECORDS,history_witness=None,only_note_id=None):
         if type(max_records) is not int or not 1<=max_records<=e.MAX_RECORDS:fail('outbox_budget')
         check_state(state)
         if digest(state)!=expected_state_sha:fail('outbox_state_changed')
@@ -218,14 +251,18 @@ class QueuePublication:
             if not resume:fail('journal_busy')
             desc=deepcopy(journal['plan']['publication'])
             row={'commit':desc['commit'],'parent':desc['parent'],'receipt_sha256':desc['outbox_receipt_sha256']}
-            wanted=list(desc['records'])
+            wanted=single_note_selection(state,only_note_id,resume=True) if only_note_id is not None else list(desc['records'])
         else:
             if resume:fail('outbox_state_invalid')
             order=state['rotation_order']
             if not order:fail('outbox_empty')
             import get_notion_png_expired_recovery as expired
             selected=expired.only_note_id(state)
-            if selected is not None:
+            exact=single_note_selection(state,only_note_id) if only_note_id is not None else None
+            if exact is not None:
+                if not exact:fail('outbox_empty')
+                order=exact
+            elif selected is not None:
                 if selected not in state['pending_by_id']:fail('outbox_source_invalid')
                 order=[selected]
             first=state['pending_by_id'][order[0]];row={k:first[k] for k in ('commit','parent','receipt_sha256')}

@@ -347,19 +347,23 @@ def source_snapshot(summaries,terminal):
     return out
 
 
-def propose_updates(evidence,state,state_sha,current,repo,prior_commit,summaries,terminal,details):
+def propose_updates(evidence,state,state_sha,current,repo,prior_commit,summaries,terminal,details,*,only_id=None):
     state=validate_state(state,state_sha,evidence);items=source_snapshot(summaries,terminal)
+    if only_id is not None and (not isinstance(only_id,str) or note_identity(only_id)!=only_id):fail('adapter_source_identity')
     if repo.read(prior_commit,retention.GET+'/'+STATE,MAX_STATE)!=encoded(state) or current.get(STATE)!=encoded(state):fail('adapter_state_commit')
     if not isinstance(details,dict):fail('adapter_detail_schema')
     rows=state['legacyById'];conflicts={i:r for i,r in state['conflictsById'].items() if i not in rows}
     changed={};counts={'unchanged':0,'source_version_only':0,'source_updated':0,'conflicted':0,'details_used':0,
       'outside_legacy_cohort':len(set(items)-set(evidence.census['eligible'])-set(evidence.census['pending_ids']))}
+    targets=set(rows) if only_id is None else ({only_id} if only_id in rows else set())
     needed=set()
     for ident,row in rows.items():
+        if ident not in targets:continue
         ownership=row['ownership'];summary=items.get(ident)
         if summary is not None and (raw_source_version(summary.get('updated_at'))!=ownership['source_version'] or sha(encoded(summary))!=row['summary_sha256']):needed.add(ident)
     if set(details)!=needed:fail('adapter_detail_set')
     for ident,row in rows.items():
+        if ident not in targets:continue
         ownership=row['ownership'];path=ownership['filePath'];summary=items.get(ident)
         try:
             baseline=repo.baseline(prior_commit,path,row['baseline_blob'],ownership['mirror_sha256'])
