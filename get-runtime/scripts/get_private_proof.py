@@ -8,6 +8,7 @@ from copy import deepcopy
 import hashlib
 import json
 import re
+import time
 import sys
 from get_mirror_incremental_replay import capture_json_bytes as public_encoded
 
@@ -120,6 +121,7 @@ class PrivateRecords:
         self._tree_limit=depth*(self.limit+3)
         self._tree_cache={}
         self._diagnostic={'stage':'binding','reason':'unverified'}
+        self.expected_head=None
     def _reject(self,stage,reason):
         self._diagnostic={'stage':stage,'reason':reason};fail()
     def _read(self,stage,method,*args):
@@ -206,10 +208,12 @@ class PrivateRecords:
         m=self._read('metadata',self.remote.metadata)
         if m.get('full_name')!=REPOSITORY or m.get('private') is not True:self._reject('metadata','shape')
         head=None
-        for _ in range(2):
+        for attempt in range(2):
             head=self._read('ref',self.remote.ref,REF)
             if head is not None:break
+            if attempt==0:time.sleep(1)
         head=checked(head,40)
+        if self.expected_head is not None and head!=self.expected_head:self._reject('ref','ancestry')
         if self.head is None:self.head=head
         elif head!=self.head:self._reject('ref','ancestry')
         return head

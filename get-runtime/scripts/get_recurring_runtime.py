@@ -355,6 +355,8 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
     if apply:
         at_stage('execution_provenance', provenance.verify_execution, client, policy, run_context, trigger)
     parent = at_stage('remote_guard', m.guard, remote)
+    if isinstance(client, provenance._PublicGithub):
+        client.private_proof_source.expected_head = parent
     if expected_parent is not None and parent != expected_parent:
         m.fail('manual_parent_changed')
     with tempfile.TemporaryDirectory(prefix='get-recurring-runtime-', dir=work) as folder:

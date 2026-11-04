@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import get_private_proof as proof
@@ -27,7 +28,11 @@ class RefSource:
 class PrivateProofRefRetry(unittest.TestCase):
     def test_missing_ref_once_retries_and_accepts_valid_head(self):
         source = RefSource([None, 'a' * 40])
-        self.assertEqual(proof.PrivateRecords(source).guard(), 'a' * 40)
+        records=proof.PrivateRecords(source)
+        records.expected_head='a' * 40
+        with patch.object(proof.time, 'sleep') as sleep:
+            self.assertEqual(records.guard(), 'a' * 40)
+        sleep.assert_called_once_with(1)
         self.assertEqual(source.calls, 2)
 
     def test_persistent_missing_ref_still_fails_closed(self):
@@ -35,6 +40,14 @@ class PrivateProofRefRetry(unittest.TestCase):
         with self.assertRaises(proof.PrivateProofError):
             proof.PrivateRecords(source).guard()
         self.assertEqual(source.calls, 2)
+
+    def test_retry_ref_must_match_previously_guarded_head(self):
+        source=RefSource([None, 'b' * 40])
+        records=proof.PrivateRecords(source)
+        records.expected_head='a' * 40
+        with patch.object(proof.time, 'sleep'), self.assertRaises(proof.PrivateProofError):
+            records.guard()
+        self.assertEqual(source.calls,2)
 
     def test_malformed_ref_is_not_retried(self):
         source = RefSource(['not-a-commit', 'a' * 40])

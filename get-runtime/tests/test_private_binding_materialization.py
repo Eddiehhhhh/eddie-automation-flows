@@ -55,6 +55,18 @@ class Materialization(unittest.TestCase):
         obj=transport.GitHubRemote(None,'synthetic')
         with patch.object(obj,'request',return_value={'truncated':True,'tree':[]}):
             with self.assertRaises(Exception):obj.tree_entries('2'*40,False)
+    def test_missing_main_ref_keeps_safe_http_diagnostic(self):
+        import urllib.error
+        from io import BytesIO
+        import get_private_preview_retention as transport
+        obj=transport.GitHubRemote(None,'synthetic')
+        error=urllib.error.HTTPError('https://api.github.com/example',404,'not found',{},BytesIO())
+        with patch.object(obj.opener,'open',side_effect=error):
+            self.assertIsNone(obj.ref('refs/heads/main'))
+        diagnostic=obj.read_diagnostic()
+        self.assertEqual(diagnostic['http_status'],404)
+        self.assertEqual(diagnostic['error_class'],'http')
+        self.assertEqual(diagnostic['phase'],'open')
     def test_public_rejected(self):
         self.remote.meta['private']=False
         with self.assertRaises(b.BindingError):self.fetch()

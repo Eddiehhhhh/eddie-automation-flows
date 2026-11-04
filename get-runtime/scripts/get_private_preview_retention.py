@@ -360,7 +360,6 @@ class GitHubRemote:
             try:error.close()
             except Exception as close_error:self._read_error(close_error,phase='close');raise
             if missing and status == 404:
-                self._read_failure=None
                 return None
             fail('remote_read_failed')
         except RetentionFailure as error:

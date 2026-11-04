@@ -613,6 +613,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         remote=m.Remote(None,token);parent=m.guard(remote)
         if isinstance(client, provenance._PublicGithub):
             client.private_proof_source=private_proof.PrivateRecords(remote)
+            client.private_proof_source.expected_head=parent
         if fixed_source:
             stage='source'
             fixed_auth.reserve_publication_slot(client, public_policy, execution)
