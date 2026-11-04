@@ -43,6 +43,7 @@ class SourceProof(unittest.TestCase):
   proof=types.SimpleNamespace(pointer=lambda *args:{'digest':exact.ORIGINAL_POINTER_SHA256},sha=lambda raw:'x'*64)
   class Source:
    head='d'*40; remote=None
+   _diagnostic={'stage':'ref','reason':'unverified'}
    def guard(self):return self.head
    def read_node(self,commit):return {'tree':'1'*40,'parent':'2'*40}
    def object(self,*args):return b'receipt'
@@ -51,6 +52,20 @@ class SourceProof(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,'exact_proof_tree'):exact.resolve(Source(),{'digest':exact.ORIGINAL_POINTER_SHA256},{'p':1},row['run_binding'])
   with patch.dict(sys.modules,modules), patch.object(exact,'_chain',return_value={'a'*40:'1'*40,'b'*40:'1'*40}):
    with self.assertRaisesRegex(ValueError,'exact_proof_receipt'):exact.resolve(Source(),{'digest':exact.ORIGINAL_POINTER_SHA256},{'p':1},row['run_binding'])
+ def test_exact_chain_failure_replaces_stale_ref_diagnostic(self):
+  record={'observed_main_commit':'a'*40,'receipt_commit':'b'*40,'receipt_sha256':'c'*64,'receipt_sequence':2}
+  row={'get_record':record,'run_binding':{'id':exact.ORIGINAL_RUN_ID,'run_attempt':1},'public_policy':{'p':1}}
+  registry=types.SimpleNamespace(registry=lambda:[row]);provenance=types.SimpleNamespace(run_binding=lambda run:run)
+  proof=types.SimpleNamespace(pointer=lambda *args:{'digest':exact.ORIGINAL_POINTER_SHA256})
+  class Source:
+   head='d'*40; remote=None; _diagnostic={'stage':'ref','reason':'unverified'}
+   def guard(self):return self.head
+  modules={'get_publication_registered_predecessor':registry,'get_publication_provenance':provenance,'get_private_proof':proof}
+  for error,reason in ((ValueError('exact_proof_ancestry'),'ancestry'),(ValueError('exact_proof_git'),'transport')):
+   source=Source()
+   with patch.dict(sys.modules,modules), patch.object(exact,'_chain',side_effect=error):
+    with self.assertRaises(ValueError):exact.resolve(source,{'digest':exact.ORIGINAL_POINTER_SHA256},{'p':1},row['run_binding'])
+   self.assertEqual(source._diagnostic,{'stage':'ancestry','reason':reason})
  def test_adjacent_run_or_digest_never_selects(self):
   # The early fixed identity test runs before any registry or network access.
   modules={'get_publication_registered_predecessor':types.SimpleNamespace(), 'get_publication_provenance':types.SimpleNamespace(), 'get_private_proof':types.SimpleNamespace()}
