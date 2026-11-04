@@ -321,6 +321,16 @@ def run(root, database_id, api_key, *, apply=False, max_pages=50, downloader=dow
                  property_proof_enabled=property_proof_enabled, property_proof_batch=property_proof_batch)
 
 
+def incremental_complete(result):
+    """Gate the recurring Notion mirror on this capture, not optional history enrichment."""
+    return (result.get('capture_complete') is True and result.get('pending') == 0
+            and not result.get('held'))
+
+
+def sync_exit_code(result, apply):
+    return 0 if incremental_complete(result) or not apply else 2
+
+
 def metadata_fingerprint(page):
     """Compare API-visible values without temporary Notion resource URL churn."""
     def stable(value):
@@ -769,9 +779,11 @@ def main():
                  current_export_enabled=config.get('current_export_enabled', False),
                  property_proof_enabled=config.get('property_proof_enabled', False),
                  property_proof_batch=config.get('property_proof_batch'))
-    print(json.dumps({key: result[key] for key in ('notion_pages', 'flomo_ids', 'flomo_source_pages', 'written', 'unchanged', 'pending',
-        'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete', 'renderer_rewritten', 'property_hydrated')}))
-    return 0 if result['complete'] or not args.apply else 2
+    summary = {key: result[key] for key in ('notion_pages', 'flomo_ids', 'flomo_source_pages', 'written', 'unchanged', 'pending',
+        'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete', 'renderer_rewritten', 'property_hydrated')}
+    summary['incremental_complete'] = incremental_complete(result)
+    print(json.dumps(summary))
+    return sync_exit_code(result, args.apply)
 
 
 if __name__ == '__main__': raise SystemExit(main())
