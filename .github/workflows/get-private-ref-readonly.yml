@@ -3,14 +3,23 @@ name: Verify private vault main ref (read only)
 on:
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   verify-main-ref:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 4
     steps:
+      - name: Check out the reviewed Get runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: 30358ef04b5592065ad4a79321728937657d0b91
+          path: runtime
+          persist-credentials: false
       - name: Read the private main ref with the existing vault token
+        id: private_ref
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: |
@@ -59,4 +68,58 @@ jobs:
               print(f'private_main_ref=invalid http_status={status}')
               raise SystemExit(1)
           print(f'private_main_ref=readable http_status={status} sha_length=40')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('sha=' + obj['sha'] + '\n')
+          PY
+      - name: Reproduce the bounded private Git history fetch
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          EXPECTED_MAIN_SHA: ${{ steps.private_ref.outputs.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          import time
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path('runtime/get-runtime/scripts').resolve()))
+          import get_private_preview_retention as retention
+
+          token = os.environ.get('PRIVATE_VAULT_TOKEN')
+          try:
+              env = retention.safe_environment(token)
+              env['GIT_NO_LAZY_FETCH'] = '1'
+              deadline = time.monotonic() + 120
+              def run(repo, *args, capture=False):
+                  remaining = deadline - time.monotonic()
+                  if remaining <= 0:
+                      raise subprocess.TimeoutExpired(args, 120)
+                  return subprocess.run(
+                      ['git', '-C', str(repo), *args], env=env,
+                      stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, timeout=remaining, check=True,
+                      preexec_fn=retention._cap_file)
+              with tempfile.TemporaryDirectory(prefix='private-git-probe-') as directory:
+                  repo = Path(directory)
+                  run(repo, 'init', '--bare', '--quiet')
+                  run(repo, '-c', 'protocol.version=2', 'fetch', '--depth=4096',
+                      '--filter=tree:0', '--no-tags', '--no-recurse-submodules',
+                      retention.REMOTE_URL, '+refs/heads/main:refs/heads/exact-proof')
+                  fetched = run(repo, 'rev-parse', 'refs/heads/exact-proof', capture=True).stdout.decode().strip()
+                  if fetched != os.environ.get('EXPECTED_MAIN_SHA'):
+                      print('private_git_history_fetch=head_changed')
+                      raise SystemExit(1)
+              print('private_git_history_fetch=success')
+          except subprocess.TimeoutExpired:
+              print('private_git_history_fetch=timeout')
+              raise SystemExit(1)
+          except subprocess.CalledProcessError:
+              print('private_git_history_fetch=nonzero')
+              raise SystemExit(1)
+          except Exception as error:
+              code = type(error).__name__
+              print('private_git_history_fetch=setup_error class=' + code)
+              raise SystemExit(1)
           PY
