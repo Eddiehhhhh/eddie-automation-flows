@@ -26,6 +26,16 @@ class SourceProof(unittest.TestCase):
   with tempfile.TemporaryDirectory(dir=self.root) as d:return exact._chain(Path(d),self.remote,head,observed,origin)
  def test_valid_exact_ancestor(self):
   roots=self.chain(self.commits[3],self.commits[2],self.commits[0]);self.assertEqual(set(roots),{self.commits[2],self.commits[0]})
+ def test_merge_commit_preserves_first_parent_proof(self):
+  first_parent=self.commits[-1]
+  self.git('checkout','-qb','merge-side')
+  (self.repo/'side').write_text('side');self.git('add','side');self.git('commit','-qm','side commit')
+  self.git('checkout','-q','main')
+  (self.repo/'main').write_text('main');self.git('add','main');self.git('commit','-qm','main commit')
+  self.git('merge','--no-ff','-qm','merge side','merge-side')
+  head=self.git('rev-parse','HEAD').strip()
+  roots=self.chain(head,first_parent,self.commits[0])
+  self.assertEqual(set(roots),{first_parent,self.commits[0]})
  def test_foreign_or_reversed_ancestor_rejected(self):
   with self.assertRaises(ValueError):self.chain(self.commits[3],'0'*40,self.commits[0])
   with self.assertRaises(ValueError):self.chain(self.commits[3],self.commits[0],self.commits[2])
