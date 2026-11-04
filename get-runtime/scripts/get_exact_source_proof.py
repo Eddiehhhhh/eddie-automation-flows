@@ -90,7 +90,19 @@ def resolve(source, pointer, policy, run):
     record=rows[0]['get_record']; observed=record['observed_main_commit']; origin=record['receipt_commit']
     source.guard(); head=source.head
     with tempfile.TemporaryDirectory(prefix='get-exact-proof-') as directory:
-        trees=_chain(Path(directory), source.remote, head, observed, origin)
+        source._diagnostic={'stage':'ancestry','reason':'unverified'}
+        try:
+            trees=_chain(Path(directory), source.remote, head, observed, origin)
+        except Exception as error:
+            code=str(error) if isinstance(error,ValueError) else ''
+            reason=('transport' if code in ('exact_proof_git','exact_proof_timeout')
+                    or isinstance(error,(OSError,subprocess.TimeoutExpired)) else
+                    'ancestry' if code in ('exact_proof_head','exact_proof_ancestry') else
+                    'size' if code=='exact_proof_output' else
+                    'hash' if code=='exact_proof_commit' else
+                    'unverified')
+            source._diagnostic={'stage':'ancestry','reason':reason}
+            raise
     # The ordinary source reader authenticates the exact commit, every path
     # component tree, and the receipt bytes with the original bounded checks.
     onode=source.read_node(origin); vnode=source.read_node(observed)
@@ -102,5 +114,7 @@ def resolve(source, pointer, policy, run):
     if (onode['parent']!=receipt.get('parent_commit') or receipt.get('sequence')!=record['receipt_sequence']):
         raise ValueError('exact_proof_receipt')
     source.guard()
-    if source.head!=head: raise ValueError('exact_proof_head')
+    if source.head!=head:
+        source._diagnostic={'stage':'ancestry','reason':'ancestry'}
+        raise ValueError('exact_proof_head')
     return record
