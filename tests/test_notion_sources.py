@@ -307,6 +307,8 @@ class Workflow(unittest.TestCase):
         import re
         text=(Path(__file__).resolve().parents[1]/'.github/workflows/sync-notion-personal-data.yml').read_text()
         steps={p.splitlines()[0]:p for p in text.split('      - name: ')[1:]}
+        fragments_checkout=steps['Check out private vault'].split('sparse-checkout: |',1)[1]
+        self.assertIn("inputs.notion_sources_only && inputs.notion_source_key == 'fragments' && 'Raw/02 Notion/01 Databases/碎片中心/flomo-stage/versions'",fragments_checkout)
         def allowed(name,key='morning',cancelled=False,outcomes=None,enabled=True):
             statuses={'private_checkout':'success','source_selection':'skipped','sources_config':'success','film_source_config':'success','episode_source_config':'success','episode_source_sync':'skipped','sources_requested':'skipped','sources_sync':'failure','film_source_sync':'success','sources_commit':'success','sources_readback':'success'};statuses.update(outcomes or {})
             model=SimpleNamespace(**{k:SimpleNamespace(outcome=v) for k,v in statuses.items()})
