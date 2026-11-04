@@ -71,7 +71,7 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('sha=' + obj['sha'] + '\n')
           PY
-      - name: Reproduce the bounded private Git history fetch
+      - name: Reproduce the exact private history proof without source or destination writes
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           EXPECTED_MAIN_SHA: ${{ steps.private_ref.outputs.sha }}
@@ -81,46 +81,41 @@ jobs:
           import subprocess
           import sys
           import tempfile
-          import time
           from pathlib import Path
 
           sys.path.insert(0, str(Path('runtime/get-runtime/scripts').resolve()))
-          import get_private_preview_retention as retention
           import get_exact_source_proof as exact_proof
+          import get_private_preview_retention as retention
+          import get_private_runtime_bindings as bindings
+          import get_publication_registered_predecessor as registered
 
           token = os.environ.get('PRIVATE_VAULT_TOKEN')
           try:
-              env = retention.safe_environment(token)
-              env['GIT_NO_LAZY_FETCH'] = '1'
-              deadline = time.monotonic() + 120
-              def run(repo, *args, capture=False):
-                  remaining = deadline - time.monotonic()
-                  if remaining <= 0:
-                      raise subprocess.TimeoutExpired(args, 120)
-                  return subprocess.run(
-                      ['git', '-C', str(repo), *args], env=env,
-                      stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                      stderr=subprocess.DEVNULL, timeout=remaining, check=True,
-                      preexec_fn=exact_proof._cap_file)
-              with tempfile.TemporaryDirectory(prefix='private-git-probe-') as directory:
-                  repo = Path(directory)
-                  run(repo, 'init', '--bare', '--quiet')
-                  run(repo, '-c', 'protocol.version=2', 'fetch', '--depth=4096',
-                      '--filter=tree:0', '--no-tags', '--no-recurse-submodules',
-                      retention.REMOTE_URL, '+refs/heads/main:refs/heads/exact-proof')
-                  fetched = run(repo, 'rev-parse', 'refs/heads/exact-proof', capture=True).stdout.decode().strip()
-                  if fetched != os.environ.get('EXPECTED_MAIN_SHA'):
-                      print('private_git_history_fetch=head_changed')
-                      raise SystemExit(1)
-              print('private_git_history_fetch=success')
+              remote = retention.GitHubRemote(None, token)
+              binding_path = Path(os.environ['RUNNER_TEMP']) / 'private-proof' / 'runtime-bindings.json'
+              bindings.bootstrap(remote, str(binding_path))
+              os.environ[bindings.ENV_FILE] = str(binding_path)
+              rows = [row for row in registered.registry()
+                      if row['run_binding'].get('id') == exact_proof.ORIGINAL_RUN_ID
+                      and row['run_binding'].get('run_attempt') == 1]
+              if len(rows) != 1:
+                  print('private_git_history_proof=registered_record_unavailable')
+                  raise SystemExit(1)
+              record = rows[0]['get_record']
+              with tempfile.TemporaryDirectory(prefix='private-git-proof-') as directory:
+                  exact_proof._chain(Path(directory), remote, os.environ['EXPECTED_MAIN_SHA'],
+                                     record['observed_main_commit'], record['receipt_commit'])
+              print('private_git_history_proof=success')
           except subprocess.TimeoutExpired:
-              print('private_git_history_fetch=timeout')
+              print('private_git_history_proof=timeout')
               raise SystemExit(1)
-          except subprocess.CalledProcessError:
-              print('private_git_history_fetch=nonzero')
+          except ValueError as error:
+              allowed = {'exact_proof_git', 'exact_proof_timeout', 'exact_proof_output',
+                         'exact_proof_head', 'exact_proof_ancestry', 'exact_proof_commit'}
+              code = str(error)
+              print('private_git_history_proof=' + (code if code in allowed else 'unverified'))
               raise SystemExit(1)
           except Exception as error:
-              code = type(error).__name__
-              print('private_git_history_fetch=setup_error class=' + code)
+              print('private_git_history_proof=setup_error class=' + type(error).__name__)
               raise SystemExit(1)
           PY
