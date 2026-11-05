@@ -143,6 +143,8 @@ jobs:
                   import get_publication_registered_predecessor as registered
                   import get_notion_idle_rotation as rotation
                   import get_notion_idle_recovery as idle
+                  import get_recurring_entry as entry
+                  import get_recurring_policy_recovery as recovery
                   rows = registered.registry()
                   for row in rows:
                       old = row['public_policy']
@@ -150,6 +152,27 @@ jobs:
                       if old.get('controller_template_sha256') == controller.FIXED_TEMPLATE_SHA256:
                           stable.discard('controller_template_sha256')
                       mismatches = sorted(key for key in stable if policy.get(key) != old[key])
+                      exact_run = row['run_binding']['id'] == 40657306710
+                      old_fixed_template = old.get('controller_template_sha256') == controller.FIXED_TEMPLATE_SHA256
+                      target_template = '1ad7db46e341a8af8bec96e1794793b5ea761534fd62b8b1995f03f393fe3814'
+                      try:
+                          old_template_bytes_valid = controller.a.sha(controller.policy_template_bytes(old)) == controller.FIXED_TEMPLATE_SHA256
+                      except Exception:
+                          old_template_bytes_valid = False
+                      checks = {
+                          'exact_run': exact_run,
+                          'old_fixed_template': old_fixed_template,
+                          'target_policy_template': policy.get('controller_template_sha256') == target_template,
+                          'target_runtime_template': controller.template_sha256() == target_template,
+                          'old_template_bytes_valid': old_template_bytes_valid,
+                          'code_changed': policy.get('code_sha') != old.get('code_sha'),
+                          'rules_current': policy.get('rules_sha256') == entry.rules_sha256(),
+                          'get_policy_current': policy.get('get_policy_sha256') == recovery.current_get_policy(),
+                          'get_policy_changed': policy.get('get_policy_sha256') != old.get('get_policy_sha256'),
+                      }
+                      failed = ','.join(key for key, value in checks.items() if not value) or 'none'
+                      print('registered_forward_checks=' + ','.join(key + ':' + ('yes' if value else 'no') for key, value in checks.items()), flush=True)
+                      print('registered_forward_failed=' + failed, flush=True)
                       print('registered_row=' + str(row['run_binding']['id']) + '/'
                           + str(row['run_binding']['run_attempt']) + ' forward='
                           + ('yes' if idle._forward_policy(policy, row) else 'no')
