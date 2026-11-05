@@ -127,9 +127,9 @@ jobs:
                       original_fail(code)
                   provenance.fail = traced_fail
                   result = provenance.discover(
-                      client, policy, exclude_run_id=41937842038,
-                      exclude_run_attempt=1, reserve_next_run=True)
-                  print('publication_slot_check=' + str(result.get('status', 'verified')))
+                      client, policy, exclude_run_id=41941431387,
+                      exclude_run_attempt=1, capture_history_witness=True)
+                  print('publication_check=' + str(result.get('status', 'verified')))
           except SystemExit:
               raise
           except Exception as error:
@@ -137,6 +137,6 @@ jobs:
               allowed = {'provenance_run_changed', 'provenance_run', 'provenance_job',
                          'provenance_no_verified_publication', 'private_proof_unverified',
                          'provenance_transport', 'provenance_timestamp'}
-              print('publication_slot_check=' + (code if code in allowed else 'failed'))
+              print('publication_check=' + (code if code in allowed else 'failed'))
               raise SystemExit(1)
           PY
