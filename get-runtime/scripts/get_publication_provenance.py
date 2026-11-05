@@ -409,6 +409,16 @@ def run_semantic_binding(run):
     return {k: v for k, v in run_binding(run).items() if k not in ('created_at', 'updated_at')}
 
 
+def _attempt_clock_matches(run, listed, attempt):
+    # Rerun attempt endpoints use the attempt's start time; the run endpoint
+    # keeps the original run creation time.
+    reference = listed['created_at'] if attempt == 1 else run.get('run_started_at')
+    if reference is None:
+        return False
+    delta = timestamp(run['created_at']) - timestamp(reference)
+    return timedelta(0) <= delta <= timedelta(seconds=1)
+
+
 def effective_candidate_policy(policy, run):
     # Negative controller caching and full verification must use the same
     # exact registered policy. A controller rejected under current rules is
@@ -434,7 +444,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     run = check_run_identity(client.json(attempt_path), policy)
     clock_witness = recovery.run53_recovery.clock_witness(run, listed)
     if (run['run_attempt'] != attempt or run_identity(run) != run_identity(listed)
-            or (not timedelta(0) <= timestamp(run['created_at']) - timestamp(listed['created_at']) <= timedelta(seconds=1)
+            or (not _attempt_clock_matches(run, listed, attempt)
                 and clock_witness is None)
             or attempt == listed['run_attempt'] and run_semantic_binding(run) != run_semantic_binding(listed)):
         fail('provenance_run_changed')
