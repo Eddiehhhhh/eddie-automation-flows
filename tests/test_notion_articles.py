@@ -242,32 +242,11 @@ class PaginationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_source_modes_partial_failure_cancellation_and_persistence(self):
+    def test_personal_notion_workflow_no_longer_exports_articles(self):
         text=(Path(__file__).resolve().parents[1]/'.github/workflows/sync-notion-personal-data.yml').read_text()
-        steps={part.splitlines()[0]:part for part in text.split('      - name: ')[1:]}
-        def allowed(name, raw=False, flomo=False, full=False, event='schedule', cancelled=False, overrides=None):
-            outcomes={'private_checkout':'success','source_selection':'skipped','raw16_config':'success',
-                'raw16_requested':'skipped','raw16_sync':'success','raw16_commit':'success','raw16_readback':'success'}
-            outcomes.update(overrides or {})
-            model=SimpleNamespace(**{key:SimpleNamespace(outcome=value) for key,value in outcomes.items()})
-            model.raw16_config.outputs=SimpleNamespace(enabled='true')
-            expression=steps[name].split('        if: ${{ ',1)[1].split(' }}',1)[0]
-            expression=expression.replace('!cancelled()','not cancelled()')
-            expression=re.sub(r'!inputs\.', 'not inputs.', expression).replace('&&','and').replace('||','or')
-            return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(raw16_only=raw,flomo_stage_only=flomo,full_sync=full,messages_only=False, notion_sources_only=False),
-                'github':SimpleNamespace(event_name=event),'cancelled':lambda:cancelled,'success':lambda:True})
-        config='Read private article source configuration'
-        self.assertTrue(allowed(config));self.assertTrue(allowed(config,raw=True,event='workflow_dispatch'))
-        self.assertFalse(allowed(config,event='workflow_dispatch'));self.assertFalse(allowed(config,flomo=True))
-        self.assertFalse(allowed(config,full=True));self.assertFalse(allowed(config,cancelled=True))
-        self.assertFalse(allowed('Sync podcast notes',raw=True))
-        commit='Persist article content and progress'
-        self.assertTrue(allowed(commit,overrides={'raw16_sync':'failure'}))
-        self.assertFalse(allowed(commit,cancelled=True))
-        self.assertFalse(allowed('Verify private article content and state',overrides={'raw16_commit':'failure'}))
-        self.assertTrue(allowed('Report incomplete article source capture',overrides={'raw16_sync':'failure'}))
-        self.assertIn('notion-articles-sync-state.json',steps[commit]);self.assertIn('--verify-remote-state',steps['Verify private article content and state'])
-        self.assertEqual(text.count('cron:'),2)
+        self.assertNotIn('Sync Notion articles', text)
+        self.assertNotIn('sync_notion_articles_to_raw.py', text)
+        self.assertNotIn('Read private article source configuration', text)
 
 
 if __name__=='__main__':unittest.main()

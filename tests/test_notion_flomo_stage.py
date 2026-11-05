@@ -526,28 +526,38 @@ class StageTests(unittest.TestCase):
         self.assertEqual(request.get_method(), 'GET')
         self.assertNotIn('Authorization', dict(request.header_items()))
 
-    def test_workflow_keeps_existing_schedule_and_persists_before_partial_failure(self):
+    def test_workflow_exports_only_flomo_notions_and_persists_partial_results(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/sync-notion-personal-data.yml'
         text = path.read_text()
         self.assertEqual(re.findall(r'    - cron: "([^"]+)"', text), ['20 19 * * *', '20 7 * * *'])
         self.assertIn('  group: eddie-private-vault-writers', text)
+        self.assertIn('    types: [sync-notion-personal-data]', text)
+        self.assertIn('Flomo-only scope', text)
+        self.assertNotIn('notion_sources_only', text)
+        self.assertNotIn('notion_source_key', text)
+        self.assertNotIn('full_sync', text)
+        for forbidden in ('Sync podcast notes', 'Sync workout daily notes', 'Sync douban books',
+                          'Capture complete Notion originals privately', 'Capture complete film originals',
+                          'Capture complete Episode originals', 'Sync Notion articles', 'Sync notehelper messages'):
+            self.assertNotIn(forbidden, text)
         # Inspect these concrete steps; this is not a general YAML parser.
         snippets = text.split('      - name: ')[1:]
         steps = {part.splitlines()[0]: part for part in snippets}
-        stage = steps['Stage Notion flomo content privately']
-        commit = steps['Persist flomo staging and object progress']
-        readback = steps['Verify remote flomo object state']
-        final = steps['Report incomplete flomo staging']
+        stage = steps['Stage Flomo-ID notes from Notion only']
+        commit = steps['Persist Flomo staging and progress']
+        readback = steps['Verify private Flomo state']
+        final = steps['Report incomplete Flomo sync']
         self.assertIn('        continue-on-error: true', stage)
         self.assertIn("!cancelled() && (steps.flomo_sync.outcome == 'success' || steps.flomo_sync.outcome == 'failure')", commit)
-        self.assertLess(text.index('Commit Raw updates'), text.index('Read private flomo stage configuration'))
-        self.assertLess(text.index('Commit Raw updates'), text.index('Stage Notion flomo content privately'))
-        self.assertLess(text.index('Persist flomo staging and object progress'), text.index('Report incomplete flomo staging'))
+        self.assertLess(text.index('Stage Flomo-ID notes from Notion only'), text.index('Persist Flomo staging and progress'))
+        self.assertLess(text.index('Persist Flomo staging and progress'), text.index('Verify private Flomo state'))
+        self.assertLess(text.index('Persist Flomo staging and progress'), text.index('Report incomplete Flomo sync'))
         self.assertIn('notion-flomo-sync-state.json', commit)
-        self.assertIn('Raw/01 Flomo/云端', commit)
-        self.assertIn('.github/state/flomo-cloud-current-state.json', commit)
-        self.assertNotIn('--path "Raw/01 Flomo"', commit)
+        self.assertIn('Raw/02 Notion/01 Databases/碎片中心/flomo-stage', commit)
+        self.assertNotIn('Raw/01 Flomo', commit)
+        self.assertNotIn('flomo-cloud-current-state.json', commit)
         self.assertIn("steps.flomo_commit.outcome == 'success'", readback)
+        self.assertIn('always() && !cancelled()', final)
         self.assertIn('--verify-remote-state', readback)
         self.assertIn("steps.flomo_sync.outcome == 'failure'", final)
         self.assertIn('exit 2', final)
@@ -555,33 +565,24 @@ class StageTests(unittest.TestCase):
     def test_flomo_conditions_preserve_partial_results_without_starting_cancelled_writes(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/sync-notion-personal-data.yml'
         steps = {part.splitlines()[0]: part for part in path.read_text().split('      - name: ')[1:]}
-        names = ['Read private flomo stage configuration', 'Stage Notion flomo content privately',
-                 'Persist flomo staging and object progress', 'Verify remote flomo object state',
-                 'Report incomplete flomo staging']
-        self.assertIn('continue-on-error: true', steps[names[0]])
+        names = ['Stage Flomo-ID notes from Notion only', 'Persist Flomo staging and progress',
+                 'Verify private Flomo state', 'Report incomplete Flomo sync']
         def allowed(name, outcomes=None, cancelled=False):
-            state = {'private_checkout': 'success', 'source_selection': 'skipped',
-                     'flomo_config': 'success', 'flomo_requested': 'skipped',
+            state = {'private_checkout': 'success', 'flomo_config': 'success',
                      'flomo_sync': 'success', 'flomo_commit': 'success', 'flomo_readback': 'success'}
             state.update(outcomes or {})
             model = SimpleNamespace(**{key: SimpleNamespace(outcome=value) for key, value in state.items()})
-            model.flomo_config.outputs = SimpleNamespace(enabled='true' if state['flomo_config'] == 'success' else '')
             expression = steps[name].split('        if: ${{ ', 1)[1].split(' }}', 1)[0]
-            expression = expression.replace('!cancelled()', 'not cancelled()').replace('!inputs.full_sync', 'not inputs.full_sync')
-            expression = expression.replace('!inputs.raw16_only', 'not inputs.raw16_only').replace('!inputs.messages_only', 'not inputs.messages_only').replace('!inputs.notion_sources_only', 'not inputs.notion_sources_only')
+            expression = expression.replace('always()', 'True').replace('!cancelled()', 'not cancelled()')
             expression = expression.replace('&&', 'and').replace('||', 'or')
             return eval(expression, {'__builtins__': {}}, {'steps': model, 'cancelled': lambda: cancelled,
-                'inputs': SimpleNamespace(full_sync=False, flomo_stage_only=False, raw16_only=False, messages_only=False, notion_sources_only=False),
-                'github': SimpleNamespace(event_name='schedule')})
-        # No success() dependency: earlier ordinary source failure can still stage.
-        self.assertTrue(allowed(names[0], {'ordinary_source': 'failure'}))
-        self.assertFalse(allowed(names[1], {'flomo_config': 'failure'}))
-        self.assertTrue(allowed(names[4], {'flomo_config': 'failure', 'flomo_sync': 'skipped', 'flomo_commit': 'skipped'}))
-        self.assertTrue(allowed(names[2], {'flomo_sync': 'failure'}))
-        self.assertTrue(allowed(names[4], {'flomo_sync': 'failure'}))
-        self.assertFalse(allowed(names[3], {'flomo_commit': 'failure'}))
-        self.assertTrue(allowed(names[4], {'flomo_commit': 'failure'}))
-        self.assertFalse(allowed(names[0], {'source_selection': 'failure'}))
+                'steps': model})
+        self.assertFalse(allowed(names[0], {'flomo_config': 'failure'}))
+        self.assertTrue(allowed(names[3], {'flomo_config': 'failure', 'flomo_sync': 'skipped', 'flomo_commit': 'skipped'}))
+        self.assertTrue(allowed(names[1], {'flomo_sync': 'failure'}))
+        self.assertTrue(allowed(names[3], {'flomo_sync': 'failure'}))
+        self.assertFalse(allowed(names[2], {'flomo_commit': 'failure'}))
+        self.assertTrue(allowed(names[3], {'flomo_commit': 'failure'}))
         for name in names:
             self.assertFalse(allowed(name, cancelled=True), name)
 
@@ -597,23 +598,30 @@ class StageTests(unittest.TestCase):
 
     def test_actual_workflow_configuration_script_defaults_off_and_validates(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/sync-notion-personal-data.yml'
-        snippet = path.read_text().split('      - name: Read private flomo stage configuration', 1)[1]
+        snippet = path.read_text().split('      - name: Require Flomo staging configuration', 1)[1]
         script = textwrap.dedent(snippet.split("python - <<'PYTHON'\n", 1)[1].split('          PYTHON', 1)[0])
         config = self.root / '.github/state/notion-flomo-config.json'
-        output = self.root / 'github-output'
-        for value, expected in [(None, 'enabled=false'),
-                                ({'version': 1, 'stage_enabled': False}, 'enabled=false'),
-                                ({'version': 1, 'stage_enabled': True}, 'enabled=true')]:
-            if value is not None:
-                config.parent.mkdir(parents=True, exist_ok=True)
-                config.write_text(json.dumps(value))
-            output.unlink(missing_ok=True)
-            with mock.patch.dict(os.environ, {'VAULT_ROOT': str(self.root), 'GITHUB_OUTPUT': str(output)}):
-                exec(compile(script, 'workflow-flomo-config', 'exec'), {})
-            self.assertEqual(output.read_text().strip(), expected)
-        config.write_text(json.dumps({'version': 1, 'stage_enabled': 'true'}))
-        with mock.patch.dict(os.environ, {'VAULT_ROOT': str(self.root), 'GITHUB_OUTPUT': str(output)}):
-            with self.assertRaises(ValueError): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+        with mock.patch.dict(os.environ, {'VAULT_ROOT': str(self.root)}):
+            with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(json.dumps({'version': 1, 'stage_enabled': False}))
+            with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            approved = {'version': 1, 'database_id': '11233b33-7f23-8024-9555-cb8de8c58e02',
+                        'stage_enabled': True, 'original_source_enabled': False,
+                        'current_export_enabled': False, 'property_proof_enabled': True}
+            config.write_text(json.dumps({**approved, 'database_id': 'wrong-database'}))
+            with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            config.write_text(json.dumps({**approved, 'original_source_enabled': True}))
+            with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            config.write_text(json.dumps({**approved, 'current_export_enabled': True}))
+            with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            config.write_text(json.dumps(approved))
+            exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            config.write_text(json.dumps(approved))
+            exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            config.write_text(json.dumps({'version': 1, 'stage_enabled': True,
+                                          'original_source_enabled': 'true'}))
+            with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
 
     def test_asset_fetch_rejects_credentials_and_private_addresses(self):
         with self.assertRaisesRegex(ValueError, 'unsafe_asset_url'):

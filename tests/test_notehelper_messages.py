@@ -166,29 +166,9 @@ class Wiring(unittest.TestCase):
         for name in ('iteration_incremental_audit.py','iteration_closeout.py'):
             self.assertIn('notehelper_messages.eligible_path(ROOT,path)',(scripts/name).read_text())
         self.assertIn('notehelper_messages.BASE',(scripts/'audit_raw_filenames.py').read_text())
-    def test_workflow_modes_failure_and_same_commit(self):
-        from types import SimpleNamespace
-        import re
+    def test_personal_notion_workflow_no_longer_exports_notehelper_messages(self):
         text=(Path(__file__).resolve().parents[1]/'.github/workflows/sync-notion-personal-data.yml').read_text()
-        steps={part.splitlines()[0]:part for part in text.split('      - name: ')[1:]}
-        def allowed(name,cancelled=False,only=False,overrides=None):
-            outcomes={'private_checkout':'success','source_selection':'skipped','messages_config':'success','messages_sync':'failure','messages_commit':'success','messages_readback':'success','messages_requested':'skipped'}
-            outcomes.update(overrides or {})
-            model=SimpleNamespace(**{key:SimpleNamespace(outcome=value) for key,value in outcomes.items()})
-            model.messages_config.outputs=SimpleNamespace(enabled='true')
-            expression=steps[name].split('        if: ${{ ',1)[1].split(' }}',1)[0]
-            expression=expression.replace('!cancelled()','not cancelled()')
-            expression=re.sub(r'!inputs\.', 'not inputs.', expression).replace('&&','and').replace('||','or')
-            return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(raw16_only=False,flomo_stage_only=False,full_sync=False,messages_only=only, notion_sources_only=False),'github':SimpleNamespace(event_name='workflow_dispatch' if only else 'schedule'),'cancelled':lambda:cancelled})
-        config='Read private message source configuration'
-        self.assertTrue(allowed(config));self.assertTrue(allowed(config,only=True));self.assertFalse(allowed(config,cancelled=True))
-        self.assertIn('continue-on-error: true',steps[config])
-        self.assertTrue(allowed('Persist message content and progress'))
-        self.assertTrue(allowed('Report incomplete message capture'))
-        self.assertFalse(allowed('Collect notehelper messages privately',cancelled=True))
-        self.assertLess(text.index('name: Commit Raw updates'),text.index('name: Collect notehelper messages privately'))
-        commit=steps['Persist message content and progress'];self.assertIn(str(m.BASE),commit);self.assertIn(str(m.STATE),commit)
-        for name in ('Read private article source configuration','Read private flomo stage configuration','Sync podcast notes'):
-            self.assertIn('!inputs.messages_only',steps[name])
+        self.assertNotIn('sync_notehelper_messages_to_raw.py', text)
+        self.assertNotIn('Read private message source configuration', text)
 
 if __name__=='__main__':unittest.main()

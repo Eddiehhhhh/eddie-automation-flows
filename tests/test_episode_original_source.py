@@ -130,18 +130,9 @@ class EpisodeOriginals(unittest.TestCase):
             m.main()
         verify.assert_called_once_with(self.root,m.EPISODE_BASE,m.EPISODE_STATE)
 
-    def test_episode_workflow_reuses_writer_and_persists_partial_content_with_state(self):
+    def test_personal_notion_workflow_no_longer_exports_episodes(self):
         text=(Path(__file__).resolve().parents[1]/'.github/workflows/sync-notion-personal-data.yml').read_text()
-        steps={p.splitlines()[0]:p for p in text.split('      - name: ')[1:]}
-        stage=steps['Capture complete Episode originals through existing caller']
-        self.assertIn('--original-source-only --max-pages "$NOTION_SOURCE_MAX_PAGES"',stage)
-        self.assertIn('!cancelled()',stage);self.assertIn('continue-on-error: true',stage)
-        config=steps['Read private complete Episode source configuration'];self.assertIn("inputs.notion_source_key == 'episode'",config)
-        commit=steps['Persist complete originals and durable progress']
-        self.assertIn(str(m.EPISODE_BASE),commit);self.assertIn(str(m.EPISODE_STATE),commit)
-        self.assertIn("steps.episode_source_sync.outcome == 'failure'",commit)
-        self.assertLess(text.index('name: Commit Raw updates'),text.index('name: Capture complete Episode originals'))
-        self.assertIn("steps.episode_source_sync.outcome == 'failure'",steps['Report incomplete original source capture'])
-        self.assertEqual(text.count('- cron:'),2);self.assertIn('group: eddie-private-vault-writers',text)
+        self.assertNotIn('sync_my_podcast_to_raw.py', text)
+        self.assertNotIn('Capture complete Episode originals', text)
 
 if __name__=='__main__':unittest.main()
