@@ -9,7 +9,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
-NOTE_ID = '1926189798138765296'
+NOTE_ID = '1234567890'
 PAGE_ID = '11111111111141118111111111111111'
 SOURCE_ID = '22222222222242228222222222222222'
 _PREEXISTING_MODULES = set(sys.modules)
@@ -87,7 +87,7 @@ def canonical_note(**updates):
         'created_at': '2026-11-05T13:14:15+08:00',
         'updated_at': '2026-11-05T13:16:17+08:00',
         'tags': ['新标签'], 'topics': ['新主题'], 'is_child_note': False,
-        'parent_id': '1926189798138765297', 'children_ids': ['1926189798138765298'],
+        'parent_id': '1234567891', 'children_ids': ['1234567892'],
         'share_id': 'share-id',
         'web_url': 'https://example.invalid/source', 'web_domain': 'example.invalid',
         'web_excerpt': '网页摘录', 'audio_url': 'https://example.invalid/audio.mp3',
