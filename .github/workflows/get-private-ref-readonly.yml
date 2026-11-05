@@ -142,6 +142,19 @@ jobs:
                   client.private_proof_source = resolver
                   import get_publication_registered_predecessor as registered
                   import get_notion_idle_rotation as rotation
+                  import get_notion_idle_recovery as idle
+                  rows = registered.registry()
+                  for row in rows:
+                      old = row['public_policy']
+                      stable = set(old) - {'code_sha', 'rules_sha256', 'get_policy_sha256'}
+                      if old.get('controller_template_sha256') == controller.FIXED_TEMPLATE_SHA256:
+                          stable.discard('controller_template_sha256')
+                      mismatches = sorted(key for key in stable if policy.get(key) != old[key])
+                      print('registered_row=' + str(row['run_binding']['id']) + '/'
+                          + str(row['run_binding']['run_attempt']) + ' forward='
+                          + ('yes' if idle._forward_policy(policy, row) else 'no')
+                          + ' stable_fields=' + (','.join(mismatches) or 'match'), flush=True)
+                  print('registered_row_count=' + str(len(rows)), flush=True)
                   registered_locator = registered.discovery_locator(policy)
                   print('registered_locator=' + ('none' if registered_locator is None else
                       str(registered_locator[0]) + '/' + str(registered_locator[1])), flush=True)
