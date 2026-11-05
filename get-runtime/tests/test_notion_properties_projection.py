@@ -52,6 +52,7 @@ try:
     import get_notion_incremental_properties as incremental
     import get_notion_metadata_pending as metadata_pending
     import get_notion_property_transaction as property_transaction
+    import get_notion_creation_properties as creation_properties
 finally:
     for name, original in _ORIGINALS.items():
         if original is None:
@@ -110,6 +111,17 @@ def project(data, ident, projection, timestamps=None, source_metadata=None):
 
 
 class NotionPropertyProjection(unittest.TestCase):
+    def test_creation_scope_binds_attachment_metadata_export(self):
+        new_scope = creation_properties.SCOPE
+        self.assertEqual(new_scope['registry_export'], 'timestamps_and_attachment_metadata')
+        class Engine:
+            def fail(self, reason): raise ValueError(reason)
+        with patch.object(creation_properties.tx, 'engine', return_value=Engine()):
+            self.assertEqual(creation_properties.validate(new_scope), new_scope)
+            old_scope = {**new_scope, 'registry_export': 'timestamps_only'}
+            with self.assertRaisesRegex(ValueError, 'approval_missing'):
+                creation_properties.validate(old_scope)
+
     def test_registry_attachment_metadata_uses_exact_verified_source_row(self):
         raw = json.dumps({'newById': {NOTE_ID: {
             'baseline_blob': 'b' * 40, 'mirror_sha256': 'c' * 64,

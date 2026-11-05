@@ -12,7 +12,7 @@ SCOPE = {'contract': 'get-notion-canonical-create-properties-2',
     'source': 'verified_canonical_publication', 'schema_options': 'notion_add_if_authorized',
     'timestamps': 'explicit_offset_or_exact_bound_registry',
     'missing_values': 'hold_without_coercion', 'content_gate': 'unchanged',
-    'registry_export': 'timestamps_only'}
+    'registry_export': 'timestamps_and_attachment_metadata'}
 
 
 def validate(scope):
