@@ -128,34 +128,14 @@ jobs:
           title='艾迪宇宙云端同步验收（2026-11-05）'
           marker='验收标记：get-cloud-sync-20261105'
           content="用于验证 Get 笔记 → 私有 GitHub → Notion 的云端自动同步。$marker。由验收流程创建，保留为链路记录。"
-          TEST_TITLE="$title" TEST_MARKER="$marker" TEST_NOTE_ID_FILE="$RUNNER_TEMP/get-test-note-id" python - <<'PY'
-          import os
-          import sys
-          from pathlib import Path
-
-          sys.path.insert(0, str(Path("scripts").resolve()))
-          import sync_getnote_to_raw as getnote
-
-          try:
-              notes = getnote.fetch_note_list(os.environ["GETNOTE_API_KEY"], os.environ["GETNOTE_CLIENT_ID"])
-              matches = [
-                  getnote.note_id_from(note)
-                  for note in notes
-                  if note.get("title") == os.environ["TEST_TITLE"]
-                  and isinstance(note.get("content"), str)
-                  and os.environ["TEST_MARKER"] in note["content"]
-              ]
-              if len(matches) > 1:
-                  raise ValueError("duplicate test notes")
-              Path(os.environ["TEST_NOTE_ID_FILE"]).write_text(matches[0] if matches else "")
-          except Exception as error:
-              raise SystemExit(f"Complete Get note lookup failed ({type(error).__name__})") from None
-          print(f"Enumerated {len(notes)} Get notes; exact test-marker matches: {len(matches)}")
-          PY
-          note_id=$(cat "$RUNNER_TEMP/get-test-note-id")
-          note_action=reused
+          http_status=$(curl --silent --show-error --max-time 20 --noproxy '*' \
+            --output "$RUNNER_TEMP/get-note-list.json" --write-out '%{http_code}' \
+            --request GET 'https://openapi.biji.com/open/api/v1/resource/note/list' \
+            --header "Authorization: $GETNOTE_API_KEY" \
+            --header "X-Client-ID: $GETNOTE_CLIENT_ID")
+          test "$http_status" = 200 || { echo "Get note list failed (HTTP $http_status)" >&2; exit 1; }
+          note_id=$(jq -er --arg title "$title" --arg marker "$marker" 'if .success == true and (.data.notes | type == "array") then ([.data.notes[] | select(.title == $title and (.content | type == "string") and (.content | contains($marker))) | .note_id] | unique | if length > 1 then error("duplicate test notes") elif length == 1 then (.[0] | select(type == "string" and test("^[0-9]{1,64}$"))) else "" end) else error("invalid Get list response") end' "$RUNNER_TEMP/get-note-list.json")
           if test -z "$note_id"; then
-            note_action=created
             payload=$(jq -nc --arg title "$title" --arg content "$content" '{title:$title,content:$content,note_type:"plain_text",tags:["云端同步验收"],parent_id:0}')
             http_status=$(curl --silent --show-error --max-time 20 --noproxy '*' \
               --output "$RUNNER_TEMP/get-created-note.json" --write-out '%{http_code}' \
@@ -169,7 +149,7 @@ jobs:
           fi
           echo "::add-mask::$note_id"
           echo "note_id=$note_id" >> "$GITHUB_OUTPUT"
-          echo "Test note $note_action."
+          echo "Created one Get test note."
       - name: Emit verified canonical publication anchor
         id: get_sync
         if: ${{ github.event_name == 'schedule' || (inputs.notion_mode != 'historical-capture' && inputs.notion_mode != 'historical-apply') }}
