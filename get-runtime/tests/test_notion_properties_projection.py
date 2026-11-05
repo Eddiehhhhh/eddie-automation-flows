@@ -51,6 +51,7 @@ try:
     import get_notion_live_transport as transport
     import get_notion_incremental_properties as incremental
     import get_notion_metadata_pending as metadata_pending
+    import get_notion_property_transaction as property_transaction
 finally:
     for name, original in _ORIGINALS.items():
         if original is None:
@@ -100,12 +101,55 @@ def canonical_note(**updates):
         for key, value in fields.items()) + '---\n正文保留可读').encode()
 
 
+def project(data, ident, projection, timestamps=None, source_metadata=None):
+    if source_metadata is None:
+        source_metadata = {'attachments': [{
+            'type': 'audio', 'url': 'https://example.invalid/audio.mp3',
+            'title': 'sample audio', 'duration': 8151120}]}
+    return props.project(data, ident, projection, timestamps, source_metadata)
+
+
 class NotionPropertyProjection(unittest.TestCase):
+    def test_registry_attachment_metadata_uses_exact_verified_source_row(self):
+        raw = json.dumps({'newById': {NOTE_ID: {
+            'baseline_blob': 'b' * 40, 'mirror_sha256': 'c' * 64,
+            'filePath': '01 语音记录/录音卡.md',
+            'source_metadata': {'attachments': [{
+                'type': 'audio', 'url': 'https://example.invalid/audio.mp3',
+                'title': 'sample audio', 'duration': 8151120}]},
+        }}}, separators=(',', ':')).encode()
+        registry_blob = 'a' * 40
+
+        class Engine:
+            class P:
+                git_blob = staticmethod(lambda data: registry_blob)
+            p = P()
+            digest = staticmethod(lambda data: __import__('hashlib').sha256(data).hexdigest())
+            def fail(self, reason): raise ValueError(reason)
+
+        class Repo:
+            read = staticmethod(lambda commit, path, limit: raw)
+
+        class Publication:
+            descriptor = {'commit': 'd' * 40,
+                          'content_tree': {props.REGISTRY: registry_blob}}
+            repo = Repo()
+            check_assets = staticmethod(lambda assets: None)
+
+        selected = {NOTE_ID: {'blob': 'b' * 40, 'sha256': 'c' * 64,
+                              'path': 'Raw/03 Get/01 语音记录/录音卡.md'}}
+        binding = {'path': props.REGISTRY, 'blob': registry_blob,
+                   'sha256': Engine.digest(raw)}
+        with patch.object(property_transaction, 'engine', return_value=Engine()):
+            _, source_metadata = property_transaction.registry_source_values(
+                Publication(), binding, selected)
+        self.assertEqual(source_metadata[NOTE_ID]['attachments'][0]['duration'], 8151120)
+
     def test_all_canonical_source_attributes_have_typed_projection(self):
         actual_schema = schema()
         projection = props.schema_projection(actual_schema)
         self.assertEqual(set(projection), set(props.FIELDS))
-        desired, held = props.project(canonical_note(), NOTE_ID, projection)
+        desired, held = project(canonical_note(), NOTE_ID, projection)
         self.assertEqual(held, {})
         self.assertEqual(set(desired), set(props.FIELDS))
         self.assertEqual(desired['笔记类型'], {'type': 'select', 'select': {'name': 'recorder_audio'}})
@@ -115,6 +159,8 @@ class NotionPropertyProjection(unittest.TestCase):
         self.assertEqual(desired['音频时长']['number'], 12.5)
         self.assertEqual(desired['附件链接']['rich_text'][0]['text']['content'],
                          '["https://example.invalid/attachment.pdf"]')
+        self.assertEqual(desired['附件原始属性']['rich_text'][0]['text']['content'],
+                         '[{"type":"audio","url":"https://example.invalid/audio.mp3","title":"sample audio","duration":8151120}]')
         self.assertEqual(props.value(desired['创建时间原值'])['rich_text'][0]['text']['content'],
                          '2026-11-05T13:14:15+08:00')
         self.assertEqual(props.value(desired['创建时间'])['date']['start'],
@@ -124,24 +170,24 @@ class NotionPropertyProjection(unittest.TestCase):
         before = props.schema_projection(schema({'标签': ['existing'], '主题': ['topic']}))
         after = props.schema_projection(schema({'标签': ['existing', 'new'], '主题': ['topic', 'next']}))
         self.assertEqual(before, after)
-        desired, held = props.project(canonical_note(), NOTE_ID, before)
+        desired, held = project(canonical_note(), NOTE_ID, before)
         self.assertEqual(held, {})
         self.assertEqual(desired['标签']['multi_select'], [{'name': '新标签'}])
         self.assertEqual(desired['主题']['multi_select'], [{'name': '新主题'}])
 
     def test_multiselect_comma_and_unknown_note_type_are_held(self):
-        desired, held = props.project(canonical_note(tags=['bad,tag']), NOTE_ID,
-                                      props.schema_projection(schema()))
+        desired, held = project(canonical_note(tags=['bad,tag']), NOTE_ID,
+                                props.schema_projection(schema()))
         self.assertNotIn('标签', desired)
         self.assertEqual(held['标签'], 'property_source_invalid')
-        desired, held = props.project(canonical_note(note_type='unexpected'), NOTE_ID,
-                                      props.schema_projection(schema()))
+        desired, held = project(canonical_note(note_type='unexpected'), NOTE_ID,
+                                props.schema_projection(schema()))
         self.assertNotIn('笔记类型', desired)
         self.assertEqual(held['笔记类型'], 'property_source_invalid')
 
     def test_explicit_empty_values_project_and_only_managed_values_clear(self):
         projection = props.schema_projection(schema())
-        desired, held = props.project(canonical_note(tags=[], source='', note_type='',
+        desired, held = project(canonical_note(tags=[], source='', note_type='',
             web_url='', audio_duration=None, children_ids=[]), NOTE_ID, projection)
         self.assertEqual(held, {})
         self.assertEqual(desired['标签']['multi_select'], [])
@@ -165,7 +211,7 @@ class NotionPropertyProjection(unittest.TestCase):
         import hashlib
         data = canonical_note(audio_transcript='转写' * 17000)
         projection = props.schema_projection(schema())
-        desired, held = props.project(data, NOTE_ID, projection)
+        desired, held = project(data, NOTE_ID, projection)
         self.assertIn('音频转写', desired)
         self.assertNotIn('音频转写', held)
         self.assertIn('标签', desired)
@@ -181,20 +227,34 @@ class NotionPropertyProjection(unittest.TestCase):
             def fail(self, reason): raise ValueError(reason)
         class Publication:
             descriptor = {'records': {NOTE_ID: {'blob': 'b' * 40}}, 'commit': 'a' * 40}
-        metadata = (projection, {}, {NOTE_ID: {}}, {'schema_sha256': 'c' * 64,
+        metadata = (projection, {}, {NOTE_ID: {'attachments': []}}, {NOTE_ID: {}}, {'schema_sha256': 'c' * 64,
             'registry': None})
         with patch.object(metadata_pending, 'engine', return_value=Engine()):
             facet = metadata_pending.facet(Publication(), NOTE_ID, data,
                 {'title_property': '标题'}, metadata, {'property_receipts': {},
                     'metadata_results': {}})
         self.assertIn('音频转写', facet['desired'])
+        self.assertEqual(facet['desired']['附件原始属性']['rich_text'][0]['text']['content'], '[]')
         self.assertNotIn('音频转写', facet['held'])
         self.assertIn('标签', facet['desired'])
+
+    def test_creation_fields_receives_registry_attachment_values(self):
+        metadata = (props.schema_projection(schema()), {},
+            {NOTE_ID: {'attachments': [{'type': 'audio', 'duration': 8151120}]}},
+            {NOTE_ID: {}}, {'schema_sha256': 'c' * 64, 'registry': None})
+        desired, held, schema_sha, assets = property_transaction.creation_fields(
+            None, NOTE_ID, canonical_note(), metadata)
+        self.assertIn('附件原始属性', desired)
+        self.assertEqual(desired['附件原始属性']['rich_text'][0]['text']['content'],
+                         '[{"type":"audio","duration":8151120}]')
+        self.assertEqual(held, {})
+        self.assertEqual(schema_sha, 'c' * 64)
+        self.assertEqual(assets, {})
 
     def test_total_property_budget_holds_only_overflow_field(self):
         data = canonical_note(source='a' * 150_000, web_excerpt='b' * 150_000,
             audio_transcript='c' * 150_000)
-        desired, held = props.project(data, NOTE_ID, props.schema_projection(schema()))
+        desired, held = project(data, NOTE_ID, props.schema_projection(schema()))
         self.assertLessEqual(len(props.p.encoded(desired)), props.MAX_PROPERTIES_BYTES)
         self.assertIn('来源', desired)
         self.assertIn('网页摘要', desired)
@@ -203,10 +263,16 @@ class NotionPropertyProjection(unittest.TestCase):
 
     def test_missing_empty_source_stays_held(self):
         data = canonical_note().replace('tags: ["新标签"]\n'.encode(), b'')
-        desired, held = props.project(data, NOTE_ID,
+        desired, held = project(data, NOTE_ID,
             props.schema_projection(schema()))
         self.assertNotIn('标签', desired)
         self.assertEqual(held['标签'], 'property_source_missing')
+
+    def test_attachment_metadata_requires_verified_registry_value(self):
+        desired, held = props.project(canonical_note(), NOTE_ID,
+            props.schema_projection(schema()))
+        self.assertNotIn('附件原始属性', desired)
+        self.assertEqual(held['附件原始属性'], 'property_source_missing')
 
     def test_option_refusal_requires_exact_403_and_unchanged_readback(self):
         marker = props.confirmed_option_refusal('property_option_permission_denied', 403,
@@ -317,7 +383,7 @@ class NotionPropertyProjection(unittest.TestCase):
             metadata_pending.CONTRACT}))
 
     def test_date_wire_truncates_only_native_date_and_keeps_exact_shadow(self):
-        desired, held = props.project(canonical_note(), NOTE_ID,
+        desired, held = project(canonical_note(), NOTE_ID,
                                       props.schema_projection(schema()))
         self.assertEqual(held, {})
         date_properties = {'创建时间': desired['创建时间']}
@@ -399,7 +465,7 @@ class MultiSelectOptionRefusal(unittest.TestCase):
             encoded = staticmethod(lambda value: json.dumps(value,
                 sort_keys=True, separators=(',', ':')).encode())
             def fail(self, reason): raise ValueError(reason)
-        projected, _ = props.project(canonical_note(audio_transcript='x' * 33000),
+        projected, _ = project(canonical_note(audio_transcript='x' * 33000),
             NOTE_ID, props.schema_projection(schema()))
         row = {'property_only': True, 'note_id': NOTE_ID, 'page_id': PAGE_ID,
             'property_patch': {'标签': {'type': 'multi_select', 'multi_select': []},

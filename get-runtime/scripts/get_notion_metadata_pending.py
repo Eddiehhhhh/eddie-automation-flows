@@ -64,9 +64,10 @@ def facet(publication, ident, data, policy, metadata, state, native_schema=None)
         if metadata is None:
             held.update({name: 'property_schema_changed' for name in required})
         else:
-            projection, times, selected, binding = metadata
+            projection, times, source_metadata, selected, binding = metadata
             if ident not in selected: e.fail('property_source_invalid')
-            projected, failures = props.project(data, ident, projection, times.get(ident))
+            projected, failures = props.project(data, ident, projection, times.get(ident),
+                source_metadata.get(ident))
             desired.update({name: value for name, value in projected.items() if name in required})
             held.update({name: failures[name] for name in required if name in failures})
             schema_sha = binding['schema_sha256']

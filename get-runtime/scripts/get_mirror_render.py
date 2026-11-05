@@ -74,6 +74,7 @@ def render(note,assets,path,*,faithful=False):
  if kind in RECORDINGS and not original:raise ValueError('transcript_pending')
  attachments=note.get('attachments') or []
  links=[a.get('url') for a in attachments if isinstance(a,dict) and a.get('type')=='link' and a.get('url')]
+ audio_url=audio.get('play_url') or note.get('audio_url') or next((a['url'] for a in attachments if isinstance(a,dict) and a.get('type')=='audio' and a.get('url')), '')
  web=note.get('web_page') or {};web=web if isinstance(web,dict) else {}
  weburl=web.get('url') or (links[0] if links else '')
  fields={'source_system':'getnote','note_id':ident,'title':title_for(note),'note_type':kind,
@@ -82,7 +83,7 @@ def render(note,assets,path,*,faithful=False):
   'parent_id':str(note.get('parent_id') or ''),'children_ids':[str(v) for v in note.get('children_ids') or []],
   'share_id':str(note.get('share_id') or ''),'web_url':weburl,'web_domain':urlsplit(weburl).netloc,
   'web_excerpt':web.get('excerpt') or note.get('ref_content') or '',
-  'audio_url':audio.get('play_url') or note.get('audio_url') or '',
+  'audio_url':audio_url,
   'audio_duration':audio.get('duration') or note.get('audio_duration') or 0,
   'audio_transcript':audio.get('transcript') or note.get('audio_transcript') or (original if kind in RECORDINGS | {'audio', 'local_audio'} else ''),
   'attachments':[a.get('url') or '' for a in attachments]}

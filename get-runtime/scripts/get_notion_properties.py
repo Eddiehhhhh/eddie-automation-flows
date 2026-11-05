@@ -37,6 +37,7 @@ FIELDS = {
     '音频时长': ('audio_duration', 'number'),
     '音频转写': ('audio_transcript', 'rich_text'),
     '附件链接': ('attachments', 'rich_text'),
+    '附件原始属性': ('attachment_metadata', 'rich_text'),
 }
 LEGACY_FIELDS = {'创建时间': ('created_at', 'date'), '更新时间': ('updated_at', 'date'),
                  '标签': ('tags', 'multi_select'), '笔记类型': ('note_type', 'select')}
@@ -289,7 +290,7 @@ def _url(raw):
     return raw
 
 
-def project(data, ident, schema, timestamps=None):
+def project(data, ident, schema, timestamps=None, source_metadata=None):
     """Return wire values and held-field reasons, without changing any input."""
     fields = source_fields(data, ident)
     timestamps = timestamps or {}
@@ -297,8 +298,15 @@ def project(data, ident, schema, timestamps=None):
     for name, (source, kind) in FIELDS.items():
         try:
             if name not in schema or schema[name].get('type') != kind: fail('property_schema_changed')
-            if source not in fields: fail('property_source_missing')
-            raw = fields[source]
+            if source == 'attachment_metadata':
+                if not isinstance(source_metadata, dict) or 'attachments' not in source_metadata:
+                    fail('property_source_missing')
+                attachments = source_metadata['attachments']
+                if not isinstance(attachments, list): fail('property_source_invalid')
+                raw = json.dumps(attachments, ensure_ascii=False, separators=(',', ':'))
+            else:
+                if source not in fields: fail('property_source_missing')
+                raw = fields[source]
             if raw is None or raw == '' or raw == []:
                 # An explicitly present empty value is a real source value.
                 # Existing ownership decides later whether it may clear Notion.

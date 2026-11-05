@@ -17,9 +17,9 @@ def engine():
     return get_notion_executor
 
 
-def registry_timestamps(publication, binding, selected):
+def registry_source_values(publication, binding, selected):
     e = engine()
-    if binding is None: return {}
+    if binding is None: return {}, {}
     if (not isinstance(binding, dict) or set(binding) != {'path', 'blob', 'sha256'}
             or binding['path'] != props.REGISTRY): e.fail('property_source_invalid')
     if publication.descriptor['content_tree'].get(props.REGISTRY) != binding['blob']: e.fail('property_source_invalid')
@@ -33,7 +33,7 @@ def registry_timestamps(publication, binding, selected):
         return result
     try: registry = json.loads(data, object_pairs_hook=unique)
     except Exception: e.fail('property_source_invalid')
-    result = {}
+    timestamps, source_metadata = {}, {}
     for ident, source in selected.items():
         row = registry.get('newById', {}).get(ident)
         if row is None: continue
@@ -43,9 +43,17 @@ def registry_timestamps(publication, binding, selected):
         times = row.get('source_metadata', {}).get('timestamps', {})
         if not isinstance(times, dict) or set(times) - {'created_at', 'edited_at', 'record_updated_at'}: e.fail('property_source_invalid')
         # record_updated_at is sync freshness, never user modification time.
-        result[ident] = {k: times[k] for k in ('created_at', 'edited_at') if k in times}
+        timestamps[ident] = {k: times[k] for k in ('created_at', 'edited_at') if k in times}
+        metadata = row.get('source_metadata')
+        if not isinstance(metadata, dict): e.fail('property_source_invalid')
+        if 'attachments' in metadata:
+            attachments = metadata['attachments']
+            if (not isinstance(attachments, list) or len(attachments) > 100
+                    or any(not isinstance(item, dict) for item in attachments)):
+                e.fail('property_source_invalid')
+            source_metadata[ident] = {'attachments': deepcopy(attachments)}
     publication.check_assets({binding['path']: binding['blob']})
-    return result
+    return timestamps, source_metadata
 
 
 def context(publication, schema, manifest, approved_manifest_sha256, policy):
@@ -71,8 +79,8 @@ def context(publication, schema, manifest, approved_manifest_sha256, policy):
         row = {k: binding[k] for k in ('path', 'blob', 'sha256')}
         if publication.descriptor['records'].get(ident) != row: e.fail('source_invalid')
         selected[ident] = row
-    times = registry_timestamps(publication, manifest['registry'], selected)
-    return projection, times, selected
+    times, source_metadata = registry_source_values(publication, manifest['registry'], selected)
+    return projection, times, source_metadata, selected
 
 
 def prepare(publication, state, expected_state_sha, snapshots, schema, manifest,
@@ -81,7 +89,7 @@ def prepare(publication, state, expected_state_sha, snapshots, schema, manifest,
     e = engine()
     e.check_state(state)
     if e.digest(state) != expected_state_sha or state['journal'] is not None: e.fail('state_changed')
-    projection, times, selected = context(publication, schema, manifest, approved_manifest_sha256, policy)
+    projection, times, source_metadata, selected = context(publication, schema, manifest, approved_manifest_sha256, policy)
     source = manifest['data_source_id']
     records = []; skipped_conflicts = []
     for ident, source_row in sorted(selected.items()):
@@ -99,7 +107,7 @@ def prepare(publication, state, expected_state_sha, snapshots, schema, manifest,
                 or owned['data_source_id'] != source or owned['md_blob'] != source_row['blob']): e.fail('missing_block_ownership')
         if e.plan_recovery.held(state, ident, view['page_id']): e.fail('unresolved_operation')
         if prior and (prior['page_id'] != view['page_id'] or prior['data_source_id'] != source): e.fail('missing_block_ownership')
-        desired, held = props.project(data, ident, projection, times.get(ident))
+        desired, held = props.project(data, ident, projection, times.get(ident), source_metadata.get(ident))
         managed_before = deepcopy(prior['managed']) if prior else {}
         adoption = manifest['records'][ident].get('property_adoption')
         if adoption is not None:
@@ -276,9 +284,9 @@ def execute_row(row, plan, publication, api, store, value, version, counts, writ
 
 
 def creation_fields(publication, ident, data, metadata):
-    projection, times, selected, manifest = metadata
+    projection, times, source_metadata, selected, manifest = metadata
     if ident not in selected: return {}, {}, None, {}
-    desired, held = props.project(data, ident, projection, times.get(ident))
+    desired, held = props.project(data, ident, projection, times.get(ident), source_metadata.get(ident))
     assets = {} if manifest['registry'] is None else {props.REGISTRY: manifest['registry']['blob']}
     return desired, held, manifest['schema_sha256'], assets
 
