@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import MagicMock
 from pathlib import Path
@@ -28,6 +29,44 @@ def note(ident, kind='plain_text'):
 
 
 class GetSampleTests(unittest.TestCase):
+    def test_cloud_test_note_lookup_reuses_and_validates_exact_match(self):
+        template = (Path(__file__).resolve().parents[1] / 'get-runtime/.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
+        step = template.split('      - name: Create one real Get sync test note', 1)[1].split('      - name:', 1)[0]
+        code = step.split("python - <<'PY'\n", 1)[1].split('\n          PY', 1)[0]
+        code = textwrap.dedent(code)
+        title, marker = 'fixed test', 'fixed marker'
+
+        def run_lookup(note_ids, note_file):
+            notes = [{'note_id': ident, 'title': title, 'content': marker} for ident in note_ids]
+            env = {'TEST_TITLE': title, 'TEST_MARKER': marker,
+                   'TEST_NOTE_ID_FILE': str(note_file), 'GETNOTE_API_KEY': 'test-key',
+                   'GETNOTE_CLIENT_ID': 'test-client'}
+            with patch.object(g, 'fetch_note_list', return_value=notes), \
+                 patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(code, '<controller-note-lookup>', 'exec'), {})
+
+        with tempfile.TemporaryDirectory() as directory:
+            note_file = Path(directory) / 'note-id'
+            run_lookup(['123456789'], note_file)
+            self.assertEqual(note_file.read_text(), '123456789')
+
+            note_file.unlink()
+            with self.assertRaisesRegex(SystemExit, 'Complete Get note lookup failed \(ValueError\)'):
+                run_lookup(['123456789', '987654321'], note_file)
+            self.assertFalse(note_file.exists())
+
+            with self.assertRaisesRegex(SystemExit, 'Complete Get note lookup failed \(ValueError\)'):
+                run_lookup(['123456789\nGITHUB_OUTPUT=bad'], note_file)
+            self.assertFalse(note_file.exists())
+
+    def test_cloud_test_note_uses_complete_paginated_lookup(self):
+        template = (Path(__file__).resolve().parents[1] / 'get-runtime/.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
+        step = template.split('      - name: Create one real Get sync test note', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('fetch_note_list(', step)
+        self.assertIn('max_pages=None', step)
+        self.assertIn('duplicate test notes', step)
+        self.assertNotIn("/open/api/v1/resource/note/list", step)
+
     def test_authenticated_get_rejects_unlisted_path_before_opening(self):
         with patch.object(g.urllib.request, 'build_opener') as build:
             with self.assertRaisesRegex(ValueError, 'unsupported Get API path'):
