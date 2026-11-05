@@ -1,5 +1,6 @@
 """Only the fixed original source can bridge the two reviewed templates."""
 import ast
+import hashlib
 from pathlib import Path
 import sys
 import types
@@ -9,8 +10,8 @@ from unittest.mock import patch
 class TemplateBinding(unittest.TestCase):
  def test_exact_transition_and_nearby_rejections(self):
   path=Path(__file__).resolve().parents[1]/'scripts/get_notion_idle_recovery.py';tree=ast.parse(path.read_text());node=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='_forward_policy');ns={};exec(compile(ast.Module(body=[node],type_ignores=[]),str(path),'exec'),ns)
-  oldhash='1d568531b4672b89ec80eaa08532e152d9c13a400602cfaf5438a3cd24f73dc5';newhash='1ad7db46e341a8af8bec96e1794793b5ea761534fd62b8b1995f03f393fe3814'
-  ctl=types.SimpleNamespace(fixed_idle_template_transition=lambda a,b:False,FIXED_TEMPLATE_SHA256=oldhash,template_sha256=lambda:newhash,policy_template_bytes=lambda x:b'old',a=types.SimpleNamespace(sha=lambda x:oldhash))
+  oldhash='1d568531b4672b89ec80eaa08532e152d9c13a400602cfaf5438a3cd24f73dc5';newhash=hashlib.sha256((path.parents[1]/'.github/workflow-templates/get-canonical-controller.yml.disabled').read_bytes()).hexdigest()
+  ctl=types.SimpleNamespace(fixed_idle_template_transition=lambda a,b:False,FIXED_TEMPLATE_SHA256=oldhash,template_sha256=lambda:newhash,policy_template_bytes=lambda x:(path.parents[1]/'.github/workflow-templates/get-canonical-controller-fixed-v1.yml.disabled').read_bytes(),a=types.SimpleNamespace(sha=lambda x:hashlib.sha256(x).hexdigest()))
   mods={'get_recurring_controller':ctl,'get_recurring_entry':types.SimpleNamespace(rules_sha256=lambda:'newrules'),'get_recurring_policy_recovery':types.SimpleNamespace(current_get_policy=lambda:'newpolicy')}
   old={'code_sha':'oldcode','rules_sha256':'oldrules','get_policy_sha256':'oldpolicy','controller_template_sha256':oldhash,'repository':'fixed'};new={**old,'code_sha':'newcode','rules_sha256':'newrules','get_policy_sha256':'newpolicy','controller_template_sha256':newhash};row={'public_policy':old,'run_binding':{'id':40657306710}}
   with patch.dict(sys.modules,mods):
