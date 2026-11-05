@@ -68,6 +68,18 @@ def single_parent(reader, commit):
     return rows[1]
 
 
+def mainline_parent(reader, commit, expected_get_tree):
+    a.checked(commit, 40); a.checked(expected_get_tree, 40)
+    rows = reader.local.run('rev-list', '--parents', '-n', '1', commit).decode().split()
+    if not rows or rows[0] != commit or len(rows) not in (2, 3):
+        fail('entry_non_linear_history')
+    parent = rows[1]
+    a.checked(parent, 40)
+    if len(rows) == 3 and reader.source_get_tree(parent) != expected_get_tree:
+        fail('entry_foreign_get_change')
+    return parent
+
+
 @dataclass(frozen=True)
 class VerifiedHistoryWitness:
     """In-memory authority returned only by original publication verification.
@@ -122,7 +134,7 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None)
             fail('entry_foreign_get_change')
         if cursor == ancestor:
             return
-        cursor = single_parent(reader, cursor)
+        cursor = mainline_parent(reader, cursor, expected)
     fail('entry_history_bound')
 
 
