@@ -416,12 +416,13 @@ def run_semantic_binding(run):
 
 def _attempt_clock_matches(run, listed, attempt):
     # Rerun attempt endpoints use the attempt's start time; the run endpoint
-    # keeps the original run creation time.
+    # keeps the original run creation time. GitHub can report a two-second
+    # creation/start gap for a rerun; keep this clock check narrowly bounded.
     reference = listed['created_at'] if attempt == 1 else run.get('run_started_at')
     if reference is None:
         return False
     delta = timestamp(run['created_at']) - timestamp(reference)
-    return timedelta(0) <= delta <= timedelta(seconds=1)
+    return timedelta(0) <= delta <= timedelta(seconds=3)
 
 
 def effective_candidate_policy(policy, run):

@@ -24,6 +24,16 @@ class AttemptClock(unittest.TestCase):
         self.assertTrue(provenance._attempt_clock_matches(attempt, listed, 2))
         self.assertFalse(provenance._attempt_clock_matches(attempt, listed, 1))
 
+    def test_rerun_two_second_creation_start_gap_is_accepted(self):
+        listed = {'created_at': '2026-11-05T15:04:13Z', 'run_started_at': '2026-11-05T15:28:37Z'}
+        attempt = {'created_at': '2026-11-05T15:04:13Z', 'run_started_at': '2026-11-05T15:04:11Z'}
+        self.assertTrue(provenance._attempt_clock_matches(attempt, listed, 2))
+
+    def test_rerun_creation_start_gap_over_three_seconds_fails_closed(self):
+        listed = {'created_at': '2026-11-05T15:04:13Z', 'run_started_at': '2026-11-05T15:28:37Z'}
+        attempt = {'created_at': '2026-11-05T15:04:15Z', 'run_started_at': '2026-11-05T15:04:11Z'}
+        self.assertFalse(provenance._attempt_clock_matches(attempt, listed, 2))
+
     def test_first_attempt_creation_time_uses_run_creation(self):
         listed = {'created_at': '2026-11-04T21:30:28Z'}
         attempt = {'created_at': '2026-11-04T21:30:29Z'}
