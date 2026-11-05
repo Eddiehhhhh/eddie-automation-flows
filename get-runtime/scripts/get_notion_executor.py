@@ -460,8 +460,8 @@ def prepare(publication, state, expected_state_sha, snapshots, policy, *, assets
         if property_schema is not None:
             metadata = creation_properties.context(publication, property_schema, property_create_scope)
     if property_manifest is not None:
-        projection, times, selected = property_transaction.context(publication, property_schema, property_manifest, expected_property_manifest_sha256, policy)
-        metadata = (projection, times, selected, property_manifest)
+        projection, times, source_metadata, selected = property_transaction.context(publication, property_schema, property_manifest, expected_property_manifest_sha256, policy)
+        metadata = (projection, times, source_metadata, selected, property_manifest)
         policy_sha = digest({'policy': policy, 'initial_scope': initial_scope, 'property_manifest_sha256': expected_property_manifest_sha256})
     elif property_create_scope is None and (expected_property_manifest_sha256 is not None or property_schema is not None): fail('approval_missing')
     metadata_completion = metadata_pending.eligible(publication)

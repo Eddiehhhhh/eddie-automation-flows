@@ -40,6 +40,6 @@ def context(publication, schema, scope):
         raw = publication.repo.read(publication.descriptor['commit'], props.REGISTRY, 16 * 1024 * 1024)
         if e.p.git_blob(raw) != blob: e.fail('property_source_invalid')
         binding = {'path': props.REGISTRY, 'blob': blob, 'sha256': e.digest(raw)}
-    times = tx.registry_timestamps(publication, binding, selected)
+    times, source_metadata = tx.registry_source_values(publication, binding, selected)
     # This is an internal projection binding, not a fabricated privacy manifest.
-    return projection, times, selected, {'registry': binding, 'schema_sha256': e.digest(projection)}
+    return projection, times, source_metadata, selected, {'registry': binding, 'schema_sha256': e.digest(projection)}
