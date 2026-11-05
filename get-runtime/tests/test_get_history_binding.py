@@ -87,6 +87,28 @@ class MainlineHistory(unittest.TestCase):
                 with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
                     entry.unchanged_get_history(reader, root, migration, source_id=source_id)
 
+    def test_pilot_migration_allows_later_commits_with_same_get_tree(self):
+        pilot_id = '1234567890'
+        migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
+        before, migration, before_tree, after_tree = migration_data
+        later = 'c' * 40
+        root = '9' * 40
+        reader = Reader({root: [], before: [root], migration: [before], later: [migration]},
+                        {root: before_tree, before: before_tree, migration: after_tree, later: after_tree})
+        with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
+            entry.unchanged_get_history(reader, root, later, source_id=pilot_id)
+
+    def test_pilot_exception_does_not_allow_migration_then_revert(self):
+        pilot_id = '1234567890'
+        migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
+        before, migration, before_tree, after_tree = migration_data
+        later, reverted = 'c' * 40, 'd' * 40
+        reader = Reader({before: [], migration: [before], later: [migration], reverted: [later]},
+                        {before: before_tree, migration: after_tree, later: after_tree, reverted: before_tree})
+        with self.assertRaises(entry.EntryFailure):
+            with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
+                entry.unchanged_get_history(reader, before, reverted, source_id=pilot_id)
+
     def test_pilot_exception_does_not_skip_history_before_migration(self):
         pilot_id = '1234567890'
         migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)

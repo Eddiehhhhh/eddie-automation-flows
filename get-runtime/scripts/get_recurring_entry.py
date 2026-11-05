@@ -131,21 +131,38 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None,
                 fail('entry_history_witness')
             ancestor = history_witness.observed_commit
     cursor = descendant
+    pilot_migration = None
+    pilot_start_allowed = True
     for _ in range(MAX_INTERVENING + 1):
         current = reader.source_get_tree(cursor)
         if current != expected:
-            if source_id != PILOT_SOURCE_ID or type(PILOT_MIGRATION) is not tuple or len(PILOT_MIGRATION) != 4:
+            if pilot_migration is None:
+                if (not pilot_start_allowed or source_id != PILOT_SOURCE_ID or type(PILOT_MIGRATION) is not tuple
+                        or len(PILOT_MIGRATION) != 4):
+                    fail('entry_foreign_get_change')
+                before, migration, before_tree, after_tree = PILOT_MIGRATION
+                if expected != before_tree or current != after_tree:
+                    fail('entry_foreign_get_change')
+                pilot_migration = (before, migration, before_tree, after_tree)
+                pilot_start_allowed = False
+            before, migration, before_tree, after_tree = pilot_migration
+            if current != after_tree:
                 fail('entry_foreign_get_change')
-            before, migration, before_tree, after_tree = PILOT_MIGRATION
-            if (cursor != migration
-                    or expected != before_tree or current != after_tree
-                    or single_parent(reader, cursor) != before):
-                fail('entry_foreign_get_change')
-            cursor = before
+            if cursor == migration:
+                if single_parent(reader, cursor) != before:
+                    fail('entry_foreign_get_change')
+                expected = before_tree
+                cursor = before
+                pilot_migration = None
+            else:
+                cursor = mainline_parent(reader, cursor, after_tree)
             continue
+        if pilot_migration is not None:
+            fail('entry_foreign_get_change')
         if cursor == ancestor:
             return
         cursor = mainline_parent(reader, cursor, expected)
+        pilot_start_allowed = False
     fail('entry_history_bound')
 
 
