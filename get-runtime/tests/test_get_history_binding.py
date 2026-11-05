@@ -73,44 +73,38 @@ class MainlineHistory(unittest.TestCase):
         with self.assertRaises(entry.EntryFailure):
             entry.single_parent(Reader(parents, {self.merge: self.tree}), self.merge)
 
-    def test_exact_single_note_migration_is_allowed_only_for_pilot(self):
-        pilot_id = '1234567890'
+    def test_exact_historical_migration_is_allowed_for_any_current_source_id(self):
         migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
         before, migration, before_tree, after_tree = migration_data
         root = '9' * 40
         reader = Reader({root: [], before: [root], migration: [before]},
                         {root: before_tree, before: before_tree, migration: after_tree})
-        with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
-            entry.unchanged_get_history(reader, root, migration, source_id=pilot_id)
-        for source_id in (None, '1234567891'):
-            with self.subTest(source_id=source_id), self.assertRaises(entry.EntryFailure):
-                with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
+        with patch.object(entry, 'PILOT_MIGRATION', migration_data):
+            for source_id in (None, '1234567890', '1234567891', '1234567892'):
+                with self.subTest(source_id=source_id):
                     entry.unchanged_get_history(reader, root, migration, source_id=source_id)
 
-    def test_pilot_migration_allows_later_commits_with_same_get_tree(self):
-        pilot_id = '1234567890'
+    def test_historical_migration_allows_later_commits_for_a_new_source(self):
         migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
         before, migration, before_tree, after_tree = migration_data
         later = 'c' * 40
         root = '9' * 40
         reader = Reader({root: [], before: [root], migration: [before], later: [migration]},
                         {root: before_tree, before: before_tree, migration: after_tree, later: after_tree})
-        with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
-            entry.unchanged_get_history(reader, root, later, source_id=pilot_id)
+        with patch.object(entry, 'PILOT_MIGRATION', migration_data):
+            entry.unchanged_get_history(reader, root, later, source_id='1234567891')
 
-    def test_pilot_exception_does_not_allow_migration_then_revert(self):
-        pilot_id = '1234567890'
+    def test_historical_exception_does_not_allow_migration_then_revert(self):
         migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
         before, migration, before_tree, after_tree = migration_data
         later, reverted = 'c' * 40, 'd' * 40
         reader = Reader({before: [], migration: [before], later: [migration], reverted: [later]},
                         {before: before_tree, migration: after_tree, later: after_tree, reverted: before_tree})
         with self.assertRaises(entry.EntryFailure):
-            with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
-                entry.unchanged_get_history(reader, before, reverted, source_id=pilot_id)
+            with patch.object(entry, 'PILOT_MIGRATION', migration_data):
+                entry.unchanged_get_history(reader, before, reverted, source_id='1234567891')
 
-    def test_pilot_exception_does_not_skip_history_before_migration(self):
-        pilot_id = '1234567890'
+    def test_historical_exception_does_not_skip_history_before_migration(self):
         migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
         root, before, migration, before_tree, after_tree = ('9' * 40, *migration_data)
         changed_commit = '8' * 40
@@ -118,11 +112,10 @@ class MainlineHistory(unittest.TestCase):
                         {root: before_tree, changed_commit: self.changed,
                          before: before_tree, migration: after_tree})
         with self.assertRaises(entry.EntryFailure):
-            with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
-                entry.unchanged_get_history(reader, root, migration, source_id=pilot_id)
+            with patch.object(entry, 'PILOT_MIGRATION', migration_data):
+                entry.unchanged_get_history(reader, root, migration, source_id='1234567891')
 
-    def test_pilot_exception_rejects_any_other_commit_or_tree(self):
-        pilot_id = '1234567890'
+    def test_historical_exception_rejects_any_other_commit_or_tree(self):
         migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
         before, migration, before_tree, after_tree = migration_data
         other = 'e' * 40
@@ -132,8 +125,20 @@ class MainlineHistory(unittest.TestCase):
             with self.subTest(commit=commit, tree=tree, parent=parent), self.assertRaises(entry.EntryFailure):
                 reader = Reader({before: [], migration: [parent], other: [before]},
                                 {before: before_tree, migration: tree, other: after_tree})
-                with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
-                    entry.unchanged_get_history(reader, before, commit, source_id=pilot_id)
+                with patch.object(entry, 'PILOT_MIGRATION', migration_data):
+                    entry.unchanged_get_history(reader, before, commit, source_id='1234567891')
+
+    def test_exact_historical_migration_does_not_admit_an_unregistered_get_tree(self):
+        migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
+        before, migration, before_tree, after_tree = migration_data
+        later = 'c' * 40
+        root = '9' * 40
+        rogue_tree = '3' * 40
+        reader = Reader({root: [], before: [root], migration: [before], later: [migration]},
+                        {root: before_tree, before: before_tree, migration: after_tree, later: rogue_tree})
+        with patch.object(entry, 'PILOT_MIGRATION', migration_data):
+            with self.assertRaisesRegex(entry.EntryFailure, 'entry_foreign_get_change'):
+                entry.unchanged_get_history(reader, root, later, source_id='1234567891')
 
 
 if __name__ == '__main__':

@@ -25,7 +25,6 @@ RECEIPT = '03 State/canonical-sync-receipt.json'
 FULL_RECEIPT = r.GET + '/' + RECEIPT
 MAX_RECEIPT = 512 * 1024
 MAX_INTERVENING = 1024
-PILOT_SOURCE_ID = _private_bindings.value('get_recurring_entry', 'PILOT_SOURCE_ID')
 PILOT_MIGRATION = _private_bindings.value('get_recurring_entry', 'PILOT_MIGRATION')
 BOOTSTRAP = _private_bindings.value('get_recurring_entry', 'BOOTSTRAP')
 STATE_PATHS = {r.GET + '/' + a.STATE, r.GET + '/' + n.STATE}
@@ -139,7 +138,9 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None,
         current = reader.source_get_tree(cursor)
         if current != expected:
             if pilot_migration is None:
-                if (not pilot_start_allowed or source_id != PILOT_SOURCE_ID or type(PILOT_MIGRATION) is not tuple
+                # This is a fixed historical Get-tree transition in the trusted
+                # lineage, not a transition caused by the current source item.
+                if (not pilot_start_allowed or type(PILOT_MIGRATION) is not tuple
                         or len(PILOT_MIGRATION) != 4):
                     fail('entry_foreign_get_change')
                 before, migration, before_tree, after_tree = PILOT_MIGRATION
