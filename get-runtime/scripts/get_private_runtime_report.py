@@ -14,7 +14,14 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
                   'schedule_enabled':False,'asset_downloads':0,'notion_writes':0,'confirmed_content_ids':0,
                   'opaque_source_fields_rendered':False,'complete_source_rendering_claimed':False,
                   'readback_verified':True,'sink_status':'not_requested'}
-        if all(type(result.get(k)) is type(v) and result[k]==v for k,v in required.items()):return dict(PREPARE)
+        if all(type(result.get(k)) is type(v) and result[k]==v for k,v in required.items()):
+            scope=result.get('source_scope')
+            complete=result.get('catalog_complete')
+            if 'source_scope' not in result and 'catalog_complete' not in result:return dict(PREPARE)
+            if type(complete) is bool and (scope,complete) in (('complete_catalog',True),('single_note',False)):
+                return {**PREPARE,'source_scope':scope,'catalog_complete':complete}
+            return {'contract':CONTRACT,'status':'blocked','business_health_asserted':False,
+                    'complete_library_claimed':False}
     out={'contract':CONTRACT,'status':result.get('status') if isinstance(result.get('status'),str) and result.get('status') in STATUSES else 'blocked',
          'business_health_asserted':False,'complete_library_claimed':False}
     if result.get('execution_status') in ('verified','partial','blocked'):
@@ -48,7 +55,7 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
                 if type(result.get(key)) is bool:
                     out[key] = result[key]
         phase = result.get('source_phase')
-        if phase in ('not_started', 'list', 'detail'):
+        if phase in ('not_started', 'list', 'detail', 'single_detail'):
             out['source_phase'] = phase
         for key in ('source_operation_active', 'source_counters_valid', 'source_deadline_reached'):
             if type(result.get(key)) is bool:

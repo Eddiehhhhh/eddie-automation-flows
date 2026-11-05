@@ -89,11 +89,13 @@ class SingleNoteSelection(unittest.TestCase):
 
     def test_status_only_change_is_valid(self):
         self.verify_scope({'single_source_id': '333', 'single_source_path': 'Raw/03 Get/01 Notes/333.md',
+                           'source_scope': 'single_note', 'catalog_complete': False,
                            'changes': [{'path': 'Raw/03 Get/03 State/canonical-registry.json'}]})
 
     def test_only_the_selected_note_path_is_valid(self):
         path = 'Raw/03 Get/01 Notes/333.md'
         self.verify_scope({'single_source_id': '333', 'single_source_path': path,
+                           'source_scope': 'single_note', 'catalog_complete': False,
                            'changes': [{'path': path}, {'path': 'Raw/03 Get/03 State/canonical-registry.json'}]})
 
     def test_unrelated_note_and_missing_path_fail_closed(self):
@@ -101,9 +103,11 @@ class SingleNoteSelection(unittest.TestCase):
         unrelated = 'Raw/03 Get/01 Notes/444.md'
         with self.assertRaises(ValueError):
             self.verify_scope({'single_source_id': '333', 'single_source_path': selected,
+                               'source_scope': 'single_note', 'catalog_complete': False,
                                'changes': [{'path': unrelated}]})
         with self.assertRaises(ValueError):
-            self.verify_scope({'single_source_id': '333', 'changes': []})
+            self.verify_scope({'single_source_id': '333', 'source_scope': 'single_note',
+                               'catalog_complete': False, 'changes': []})
 
     def test_notion_selects_only_target_from_current_publication(self):
         state = {'engine_state': {'journal': None},

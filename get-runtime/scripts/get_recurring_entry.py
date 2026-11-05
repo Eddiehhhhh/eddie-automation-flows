@@ -37,6 +37,8 @@ RECEIPT_KEYS = {
     'engine_payload_sha256', 'source_summary_sha256', 'detail_receipts_sha256',
     'changed_content_ids', 'counts', 'conflict_reason_counts',
 }
+LEGACY_RECEIPT_KEYS = RECEIPT_KEYS
+RECEIPT_KEYS = RECEIPT_KEYS | {'source_scope'}
 
 
 class EntryFailure(a.ParityFailure):
@@ -216,7 +218,11 @@ def read_receipt(reader, commit, expected_sha, policy):
     if a.sha(raw) != expected_sha:
         fail('entry_receipt_anchor')
     value = m.strict_capture_json(raw, MAX_RECEIPT)
-    if not isinstance(value, dict) or set(value) != RECEIPT_KEYS or a.encoded(value) != raw:
+    if not isinstance(value, dict) or set(value) not in (LEGACY_RECEIPT_KEYS, RECEIPT_KEYS) or a.encoded(value) != raw:
+        fail('entry_receipt_schema')
+    if set(value)==LEGACY_RECEIPT_KEYS:
+        value={**value,'source_scope':'complete_catalog'}
+    if value['source_scope'] not in ('complete_catalog','single_note'):
         fail('entry_receipt_schema')
     if value['contract'] != RECEIPT_CONTRACT or (value['policy_sha256'] != policy
             and not recovery.accepts_receipt(commit, expected_sha, value, policy)):
@@ -234,6 +240,7 @@ def read_receipt(reader, commit, expected_sha, policy):
     ids = value['changed_content_ids']
     if not isinstance(ids, list) or len(ids) > n.MAX_RECORDS or any(not isinstance(i, str) for i in ids) or ids != sorted(set(ids)):
         fail('entry_receipt_schema')
+    if value['source_scope']=='single_note' and len(ids)>1:fail('entry_receipt_schema')
     for ident in ids:
         n.identity(ident)
     counts = value['counts']
@@ -401,6 +408,8 @@ def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=N
     plan['policy_sha256'] = policy
     plan['engine_approval_payload_sha256'] = plan['approval_payload_sha256']
     plan['single_source_id'] = source_id
+    plan['source_scope']='single_note' if source_id is not None else 'complete_catalog'
+    plan['catalog_complete']=source_id is None
     if not files:
         plan['receipt_sha256'] = anchor['receipt_sha256'] if anchor else None
         plan['receipt_commit'] = anchor['commit'] if anchor else None
@@ -418,6 +427,7 @@ def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=N
                'delta_sha256': a.sha(a.encoded(delta(reader, parent, plan['candidate_commit']))),
                'engine_payload_sha256': plan['engine_approval_payload_sha256'],
                'source_summary_sha256': plan['source_summary_sha256'],
+               'source_scope': plan['source_scope'],
                'detail_receipts_sha256': plan['detail_receipts_sha256'],
                'changed_content_ids': ids, 'counts': plan['counts'],
                'conflict_reason_counts': plan['conflict_reason_counts']}
@@ -449,6 +459,9 @@ def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstr
     if (single_id is None)!=(single_path is None):fail('entry_single_scope')
     if single_id != source_id:
         fail('entry_single_scope')
+    if (plan.get('source_scope') != ('single_note' if source_id is not None else 'complete_catalog')
+            or plan.get('catalog_complete') is not (source_id is None)):
+        fail('entry_single_scope')
     if single_id is not None:
         n.identity(single_id);r.safe_path(single_path)
         if any(value!=single_id for value in plan.get('proposed_content_ids',[])):fail('entry_single_scope')
@@ -465,6 +478,7 @@ def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstr
         {'commit': plan['candidate_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap, history_witness=history_witness, source_id=source_id)
     if (receipt['changed_content_ids'] != plan['proposed_content_ids'] or receipt['counts'] != plan['counts']
             or receipt['engine_payload_sha256'] != plan['engine_approval_payload_sha256']
+            or receipt['source_scope'] != plan['source_scope']
             or (single_id is not None and any(value!=single_id for value in receipt['changed_content_ids']))):
         fail('entry_plan')
     expected = a.sha(a.encoded({'policy_sha256': plan['policy_sha256'],
@@ -485,7 +499,8 @@ def confirmed_private_handoff(reader, evidence, plan, files, publication, approv
     verify_plan(reader, evidence, plan, files, approved_rules_sha256, bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
     return {'contract': 'get-confirmed-content-handoff-1', 'commit': plan['candidate_commit'],
             'receipt_commit': plan['receipt_commit'], 'receipt_sha256': plan['receipt_sha256'],
-            'changed_content_ids': list(plan['proposed_content_ids'])}
+            'changed_content_ids': list(plan['proposed_content_ids']),
+            'source_scope': plan['source_scope'], 'catalog_complete': plan['catalog_complete']}
 
 
 def public_report(plan, files):
@@ -514,6 +529,7 @@ def public_report(plan, files):
                       changed_paths=len(files), notes_changed=len(ids),
                       changed_bytes=sum(map(len, files.values())), transaction_bytes=plan['transaction_bytes'],
                       receipt_commit=plan['receipt_commit'], receipt_sha256=plan['receipt_sha256'], policy_sha256=plan['policy_sha256'],
+                      source_scope=plan['source_scope'], catalog_complete=plan['catalog_complete'],
                       asset_downloads=0, notion_writes=0, confirmed_content_ids=0,
                       opaque_source_fields_rendered=False, complete_source_rendering_claimed=False)
         return report
@@ -528,7 +544,7 @@ class SnapshotSource:
             fail('entry_source_schema')
         self.value = value
 
-    def enumerate(self):
+    def enumerate(self, source_id=None):
         return deepcopy(self.value['summaries']), self.value['terminal']
 
     def detail_raw(self, ident):

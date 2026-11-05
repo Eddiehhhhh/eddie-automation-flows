@@ -131,8 +131,10 @@ class SourceObserver:
         self.active = False
         return result
 
-    def enumerate(self):
-        return self._call('list', self.source.enumerate)
+    def enumerate(self, source_id=None):
+        if source_id is None:
+            return self._call('list', self.source.enumerate)
+        return self._call('single_detail', self.source.enumerate, source_id)
 
     def detail_raw(self, ident):
         return self._call('detail', self.source.detail_raw, ident)

@@ -197,7 +197,27 @@ class Source:
         value=strict_capture_json(raw)
         if value.get('success') is False:fail('capture_api_error')
         return raw,value
-    def enumerate(self):
+    def enumerate(self, only_id=None):
+        if only_id is not None:
+            record_path(only_id)
+            raw = self.detail_raw(only_id)
+            value = strict_capture_json(raw)
+            if 'data' in value and set(value) - {'data', 'success', 'error', 'meta', 'request_id'}:
+                fail('capture_invalid_detail')
+            note = value.get('data', value)
+            if not isinstance(note, dict):
+                fail('capture_invalid_detail')
+            if 'note' in note:
+                if set(note) != {'note'}:
+                    fail('capture_invalid_detail')
+                note = note['note']
+            from get_v7_compat import note_identity
+            if not isinstance(note, dict) or note_identity(note) != only_id:
+                fail('capture_detail_identity')
+            from get_mirror_incremental_replay import raw_source_version
+            raw_source_version(note.get('updated_at'))
+            return [note], {'contract': 'get-single-note-source-scope-1',
+                            'note_id': only_id, 'complete_catalog': False}
         items=[];seen=set();cursors=set();cursor=None
         for page in range(150):
             raw,value=self.request(self.transport.LIST_PATH,{} if cursor is None else {'cursor':cursor})

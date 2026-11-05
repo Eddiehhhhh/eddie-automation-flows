@@ -336,19 +336,25 @@ def reconstructed_source(evidence,ident,ownership,baseline):
     return note
 
 
-def source_snapshot(summaries,terminal):
-    if terminal is not True or not isinstance(summaries,list) or not 0<=len(summaries)<=2500:fail('adapter_incomplete_list')
+def source_snapshot(summaries,terminal,*,only_id=None):
+    if not isinstance(summaries,list) or not 0<=len(summaries)<=2500:fail('adapter_incomplete_list')
+    if only_id is None:
+        if terminal is not True:fail('adapter_incomplete_list')
+    elif (not isinstance(terminal,dict) or terminal!={'contract':'get-single-note-source-scope-1',
+            'note_id':only_id,'complete_catalog':False} or len(summaries)!=1):
+        fail('adapter_incomplete_list')
     out={}
     for summary in summaries:
         try:ident=note_identity(summary)
         except (ValueError,AttributeError,TypeError):fail('adapter_source_identity')
+        if only_id is not None and ident!=only_id:fail('adapter_source_identity')
         if ident in out:fail('adapter_duplicate_source')
         raw_source_version(summary.get('updated_at'));out[ident]=summary
     return out
 
 
 def propose_updates(evidence,state,state_sha,current,repo,prior_commit,summaries,terminal,details,*,only_id=None):
-    state=validate_state(state,state_sha,evidence);items=source_snapshot(summaries,terminal)
+    state=validate_state(state,state_sha,evidence);items=source_snapshot(summaries,terminal,only_id=only_id)
     if only_id is not None and (not isinstance(only_id,str) or note_identity(only_id)!=only_id):fail('adapter_source_identity')
     if repo.read(prior_commit,retention.GET+'/'+STATE,MAX_STATE)!=encoded(state) or current.get(STATE)!=encoded(state):fail('adapter_state_commit')
     if not isinstance(details,dict):fail('adapter_detail_schema')

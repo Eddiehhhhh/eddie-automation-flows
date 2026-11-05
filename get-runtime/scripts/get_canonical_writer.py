@@ -101,6 +101,10 @@ def inventory(current, *, only_id=None, known_owners=None, allow_infer=False):
                     and blob==expected_blob and hashlib.sha256(owner_data).hexdigest()==expected_sha256):
                 result[ident]=owner_path
                 continue
+        if only_id is not None:
+            if ident==only_id:fail('canonical_duplicate_identity')
+            result[ident]=None
+            continue
         owner=(known_owners or {}).get(ident)
         owner_path=owner.get('filePath') if isinstance(owner,dict) else None
         suffix='-'+ident+'.md'
@@ -125,7 +129,8 @@ def initial_registry(evidence,legacy_state,legacy_sha,current,*,only_id=None,kno
     reserved={ident:'blocked' for ident in state['conflictsById']}
     reserved.update({ident:'legacy' for ident in state['legacyById']})
     reserved.update({ident:'pending' for ident in state['pending_ids']})
-    reserved.update({ident:'existing_unmanaged' for ident in present if ident not in reserved})
+    reserved.update({ident:'blocked' for ident,path in present.items() if path is None and ident not in reserved})
+    reserved.update({ident:'existing_unmanaged' for ident,path in present.items() if path is not None and ident not in reserved})
     return {'contract':CONTRACT,'local_proposal_only':True,'apply_ready':False,
       'capture_anchor':deepcopy(evidence.anchor),'legacy_state_sha256':legacy_sha,
       'reserved':reserved,'newById':{},'conflictsById':{},'scan_cursor':None}
@@ -148,7 +153,13 @@ def validate_registry(state,expected_sha,evidence,legacy_state,legacy_sha,curren
         identity(ident)
         if not isinstance(row,dict) or set(row)!=keys:fail('canonical_state_schema')
         path=path_ok(row['filePath'])
-        if path in paths or path in legacy_paths or (ident in present and present[ident]!=path):fail('canonical_duplicate_path')
+        ambiguous_unrelated=(only_id is not None and ident!=only_id and present.get(ident,'missing') is None)
+        if (path in paths or path in legacy_paths or (ident in present and present[ident]!=path and not ambiguous_unrelated)):
+            fail('canonical_duplicate_path')
+        if ambiguous_unrelated:
+            blob=current.get(path)
+            if blob is None or legacy.sha(blob)!=row['mirror_sha256'] or legacy_document(blob)[0].get('note_id')!=ident:
+                fail('canonical_duplicate_path')
         paths.add(path)
         for key in ('mirror_sha256','summary_sha256','source_sha256','unknown_sha256'):legacy.checked(row[key],64)
         legacy.checked(row['baseline_blob'],40)
@@ -385,7 +396,7 @@ def record(note,summary,path,data,anchor=None):
 def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None,allow_fresh_preview=False,only_id=None):
     """Return actual candidate bytes and state; no side effects or source calls."""
     state=validate_registry(registry,registry_sha,evidence,legacy_state,legacy_sha,current,only_id=only_id)
-    items=legacy.source_snapshot(summaries,terminal);preview=preview or {};selected=list(selected_new)
+    items=legacy.source_snapshot(summaries,terminal,only_id=only_id);preview=preview or {};selected=list(selected_new)
     if len(selected)>MAX_NEW or len(selected)!=len(set(selected)):fail('canonical_selection')
     for ident in selected:identity(ident)
     if only_id is not None:
@@ -558,7 +569,7 @@ def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,deta
         if registry_sha:fail('canonical_state_hash')
         registry=initial_registry(evidence,legacy_state,legacy_sha,current,only_id=only_id);registry_sha=legacy.sha(legacy.encoded(registry))
     if not isinstance(details,dict):fail('canonical_details')
-    items=legacy.source_snapshot(summaries,terminal)
+    items=legacy.source_snapshot(summaries,terminal,only_id=only_id)
     if only_id is not None:
         identity(only_id)
         if only_id not in items or only_id in registry['conflictsById'] or (only_id in registry['reserved'] and only_id not in legacy_state['legacyById']):fail('identity_reserved')

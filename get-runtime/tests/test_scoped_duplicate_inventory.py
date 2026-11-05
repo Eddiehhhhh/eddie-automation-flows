@@ -1,4 +1,5 @@
 import ast
+from copy import deepcopy
 import hashlib
 from pathlib import Path
 import re
@@ -50,6 +51,46 @@ def scope_validator():
     return namespace['validate_single_note_scope']
 
 
+def initial_registry_function(inventory):
+    path = Path(__file__).resolve().parents[1] / 'scripts/get_canonical_writer.py'
+    tree = ast.parse(path.read_text())
+    node = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == 'initial_registry')
+    namespace = {'legacy': types.SimpleNamespace(validate_state=lambda state, sha, evidence: state),
+                 'inventory': inventory, 'deepcopy': deepcopy, 'CONTRACT': 'test', 'fail': ValueError}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), namespace)
+    return namespace['initial_registry']
+
+
+def validate_registry_function(inventory):
+    path = Path(__file__).resolve().parents[1] / 'scripts/get_canonical_writer.py'
+    tree = ast.parse(path.read_text())
+    node = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == 'validate_registry')
+    ident = '1924184859089342232'
+    def fail(code):
+        raise ValueError(code)
+    def fake_initial(evidence, legacy_state, legacy_sha, current, *, only_id=None, known_owners=None):
+        return {'contract': 'test', 'local_proposal_only': True, 'apply_ready': False,
+                'capture_anchor': evidence.anchor, 'legacy_state_sha256': legacy_sha,
+                'reserved': {}, 'newById': {}, 'conflictsById': {}, 'scan_cursor': None}
+    def fake_document(blob):
+        match = re.search(rb'note_id: ([0-9]+)', blob)
+        return ({'note_id': match.group(1).decode()} if match else {}), None
+    namespace = {
+        'legacy': types.SimpleNamespace(sha=lambda value: 'state-sha' if value == b'state' else hashlib.sha256(value).hexdigest(),
+            encoded=lambda value: b'state', checked=lambda value, width: value,
+            document=None),
+        'raw': types.SimpleNamespace(_raw_valid=lambda value: True, SOURCE_TEXT_FIELDS=set()),
+        'identity': lambda value: value, 'path_ok': lambda value: value,
+        'inventory': lambda current, **kwargs: {ident: None},
+        'initial_registry': fake_initial, 'legacy_document': fake_document,
+        'validate_extensions': lambda *args, **kwargs: None,
+        'owner_budget': lambda value: True, 'deepcopy': deepcopy,
+        'CONTRACT': 'test', 'MAX_STATE': 100000, 'fail': fail,
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), namespace)
+    return namespace['validate_registry'], ident
+
+
 class ScopedDuplicateInventory(unittest.TestCase):
     def setUp(self):
         self.inventory = inventory_function()
@@ -70,34 +111,74 @@ class ScopedDuplicateInventory(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
             self.inventory({self.owner: self.data, self.shadow: self.data})
 
-    def test_single_note_scope_tolerates_only_registered_shadow_pair(self):
+    def test_single_note_scope_blocks_unrelated_duplicate_owner(self):
         found = self.inventory({self.owner: self.data, self.shadow: self.data},
             only_id='99999', known_owners={self.ident: {'filePath': self.owner}})
-        self.assertEqual(found, {self.ident: self.owner})
+        self.assertEqual(found, {self.ident: None})
 
-    def test_pinned_tree_inventory_infers_then_registry_must_confirm_owner(self):
+    def test_single_note_scope_does_not_infer_unrelated_duplicate_owner(self):
         files = {self.owner: self.data, self.shadow: self.data}
-        self.assertEqual(self.inventory(files, only_id='99999', allow_infer=True), {self.ident: self.owner})
-        with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
-            self.inventory(files, only_id='99999')
+        self.assertEqual(self.inventory(files, only_id='99999', allow_infer=True), {self.ident: None})
 
     def test_target_duplicate_or_unregistered_owner_fails(self):
         files = {self.owner: self.data, self.shadow: self.data}
         with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
             self.inventory(files, only_id=self.ident, known_owners={self.ident: {'filePath': self.owner}})
-        with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
-            self.inventory(files, only_id='99999')
+        self.assertEqual(self.inventory(files, only_id='99999'), {self.ident: None})
 
-    def test_unknown_or_extra_duplicate_path_fails(self):
+    def test_unrelated_content_conflict_is_ambiguous_only_in_single_note_scope(self):
+        other = '54321'
+        first = '03 纯文本记录/原稿-'+other+'.md'
+        second = '03 纯文本记录/另一稿-'+other+'.md'
+        files = {first: b'---\nnote_id: '+other.encode()+b'\n---\nA',
+                 second: b'---\nnote_id: '+other.encode()+b'\n---\nB'}
+        with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
+            self.inventory(files)
+        self.assertEqual(self.inventory(files, only_id='99999'), {other: None})
+        with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
+            self.inventory(files, only_id=other)
+        make_registry = initial_registry_function(self.inventory)
+        legacy_state = {'conflictsById': {}, 'legacyById': {}, 'pending_ids': []}
+        evidence = types.SimpleNamespace(anchor={'commit': 'anchor'})
+        state = make_registry(evidence, legacy_state, 'sha', files, only_id='99999')
+        self.assertEqual(state['reserved'], {other: 'blocked'})
+
+    def test_registered_owner_in_unrelated_conflict_must_stay_byte_exact(self):
+        validate, ident = validate_registry_function(self.inventory)
+        owner = '01 语音记录/原稿-'+ident+'.md'
+        shadow = '01 语音记录/原稿.md'
+        owner_data = ('---\nnote_id: '+ident+'\n---\nowner').encode()
+        other_data = ('---\nnote_id: '+ident+'\n---\nother').encode()
+        digest=hashlib.sha256(owner_data).hexdigest()
+        row = {'filePath': owner, 'mirror_sha256': digest, 'baseline_blob': 'b'*40,
+               'source_version': 'v', 'summary_sha256': 'c'*64, 'source_sha256': 'd'*64,
+               'unknown_sha256': 'e'*64, 'text_fields': [], 'created_at': 'v',
+               'preview_anchor': None, 'source_metadata': {}}
+        state = {'contract': 'test', 'local_proposal_only': True, 'apply_ready': False,
+                 'capture_anchor': {'commit': 'anchor'}, 'legacy_state_sha256': 'f'*64,
+                 'newById': {ident: row}, 'reserved': {}, 'conflictsById': {}, 'scan_cursor': None}
+        evidence = types.SimpleNamespace(anchor={'commit': 'anchor'}, census={'eligible': {}})
+        legacy_state = {'legacyById': {}, 'conflictsById': {}, 'pending_ids': []}
+        self.assertEqual(validate(state, 'state-sha', evidence, legacy_state, 'f'*64,
+                                  {owner: owner_data, shadow: other_data}, only_id='99999'), state)
+        for bad_path, bad_data in ((owner+'-changed', owner_data),
+                                   (owner, owner_data.replace(b'owner', b'changed')),
+                                   (owner, owner_data.replace(ident.encode(), b'12345'))):
+            with self.subTest(path=bad_path, data_changed=bad_data != owner_data), self.assertRaisesRegex(ValueError, 'canonical_duplicate_path'):
+                bad_row = {**row, 'filePath': bad_path}
+                validate({**state, 'newById': {ident: bad_row}}, 'state-sha', evidence,
+                         legacy_state, 'f'*64, {owner: bad_data, shadow: other_data}, only_id='99999')
+
+    def test_unknown_or_extra_duplicate_paths_remain_ambiguous_in_single_scope(self):
         data = b'---\nnote_id: 54321\n---\ntext\n'
+        first={self.owner: self.data, self.shadow: self.data, '01 语音记录/额外.md': self.data}
         with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
-            self.inventory({self.owner: self.data, self.shadow: self.data,
-                            '01 语音记录/额外.md': self.data}, only_id='99999',
-                known_owners={self.ident: {'filePath': self.owner}})
+            self.inventory(first)
+        self.assertEqual(self.inventory(first, only_id='99999'), {self.ident: None})
+        second={'01 Notes/two-54321.md': data, '01 Notes/two.md': data}
         with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
-            self.inventory({self.owner: self.data, self.shadow: self.data,
-                            '01 Notes/two-54321.md': data, '01 Notes/two.md': data},
-                only_id='99999', known_owners={self.ident: {'filePath': self.owner}})
+            self.inventory(second)
+        self.assertEqual(self.inventory(second, only_id='99999'), {'54321': None})
 
     def test_case_only_duplicate_is_allowed_only_for_single_note_and_exact_bytes(self):
         files = {self.case_owner: self.case_data, self.case_shadow: self.case_data}
@@ -106,10 +187,8 @@ class ScopedDuplicateInventory(unittest.TestCase):
         self.assertEqual(self.inventory(files, only_id='99999'), {self.case_ident: self.case_owner})
         with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
             self.inventory(files, only_id=self.case_ident)
-        with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
-            self.inventory({self.case_owner: self.case_data, self.case_shadow: self.case_data + b'changed'}, only_id='99999')
-        with self.assertRaisesRegex(ValueError, 'canonical_duplicate_identity'):
-            self.inventory({**files, '03 纯文本记录/third.md': self.case_data}, only_id='99999')
+        self.assertEqual(self.inventory({self.case_owner: self.case_data, self.case_shadow: self.case_data + b'changed'}, only_id='99999'), {self.case_ident: None})
+        self.assertEqual(self.inventory({**files, '03 纯文本记录/third.md': self.case_data}, only_id='99999'), {self.case_ident: None})
 
     def test_case_only_duplicate_paths_and_hashes_stay_pinned(self):
         tree = ast.parse((Path(__file__).resolve().parents[1] / 'scripts/get_canonical_writer.py').read_text())

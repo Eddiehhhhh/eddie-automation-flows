@@ -327,7 +327,12 @@ def verified_prepare_only(raw, policy, run, job, emission):
     value = reports[0]
     import get_private_runtime_report as private_report
     if isinstance(value, dict) and value.get('contract') == private_report.CONTRACT:
-        if value != private_report.PREPARE or policy['controller_template_sha256'] != controller.template_sha256():
+        allowed_reports = (private_report.PREPARE,
+            {**private_report.PREPARE, 'source_scope': 'complete_catalog', 'catalog_complete': True},
+            {**private_report.PREPARE, 'source_scope': 'single_note', 'catalog_complete': False})
+        scoped_valid = (value == private_report.PREPARE
+                        or type(value.get('catalog_complete')) is bool and value in allowed_reports[1:])
+        if not scoped_valid or policy['controller_template_sha256'] != controller.template_sha256():
             fail('provenance_prepare_only')
         return True
     fixed = {'status': 'recurring_candidate_verified', 'main_updated': False,

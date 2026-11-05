@@ -54,12 +54,18 @@ def canonical_payload(reader,plan,current):
       'before_get_tree':reader.source_get_tree(plan['parent_commit']),
       'current_sha256':{p:a.sha(v) for p,v in sorted(current.items())},
       **{k:deepcopy(plan[k]) for k in ('capture_anchor','previous_legacy_sha256','previous_registry_sha256','state_sha256','registry_sha256','changes','counts','source_summary_sha256','detail_receipts_sha256','initial_preview_import','conflict_reason_counts')},
-      'single_source_id':plan['single_source_id'],'single_source_path':plan['single_source_path']}
+      'single_source_id':plan['single_source_id'],'single_source_path':plan['single_source_path'],
+      'source_scope':plan['source_scope'],'catalog_complete':plan['catalog_complete']}
 
 def verify_single_scope(plan):
     only_id=plan.get('single_source_id');only_path=plan.get('single_source_path')
     if (only_id is None)!=(only_path is None):m.fail('manual_single_scope')
-    if only_id is None:return
+    if only_id is None:
+        if plan.get('source_scope')!='complete_catalog' or plan.get('catalog_complete') is not True:
+            m.fail('manual_single_scope')
+        return
+    if plan.get('source_scope')!='single_note' or plan.get('catalog_complete') is not False:
+        m.fail('manual_single_scope')
     n.identity(only_id);r.safe_path(only_path)
     content={row['path'] for row in plan['changes']
              if row['path'] not in {r.GET+'/'+a.STATE,r.GET+'/'+n.STATE}}
@@ -86,7 +92,8 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     legacy,registry=load_states(reader,evidence,parent,current,legacy_sha,registry_sha,source_id=source_id)
     first=n.STATE not in current
     if first!=(preview is not None):m.fail('manual_scope')
-    summaries,terminal=source.enumerate();items=a.source_snapshot(summaries,terminal)
+    summaries,terminal=(source.enumerate() if source_id is None else source.enumerate(source_id))
+    items=a.source_snapshot(summaries,terminal,only_id=source_id)
     if source_id is not None:
         n.identity(source_id)
         if source_id in legacy['conflictsById'] or source_id in legacy['pending_ids']:
@@ -126,7 +133,7 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     counts.update(legacy_managed=len(states['legacy']['legacyById']),legacy_conflicts=len(states['legacy']['conflictsById']),legacy_pending=len(states['legacy']['pending_ids']),existing_unmanaged=sum(v=='existing_unmanaged' for v in next_registry['reserved'].values()),new_managed=len(next_registry['newById']),new_selected=len(selected),new_remaining=remaining,new_pending=len(next_registry['conflictsById']),source_details=len(details),details_unavailable=unavailable)
     counts.update(n.opaque_counts(next_registry))
     unique={r.oid(data):data for data in files.values()};existing={row[2] for row in before.values()}
-    plan={'contract':CONTRACT,**{k:final[k] for k in ('parent_commit','candidate_commit','candidate_tree','registry_sha256')},'state_sha256':final['legacy_sha256'],'previous_legacy_sha256':legacy_sha,'previous_registry_sha256':registry_sha,'capture_anchor':evidence.anchor,'changes':rows,'counts':counts,'conflict_reason_counts':n.reason_counts(next_registry['conflictsById']),'source_summary_sha256':a.sha(a.encoded(summaries)),'detail_receipts_sha256':a.sha(a.encoded({i:{'semantic_sha256':v['semantic_sha256']} for i,v in receipts.items()})), 'wire_receipts_sha256':a.sha(a.encoded(receipts)),'initial_preview_import':first,'transaction_bytes':sum(len(v) for oid,v in unique.items() if oid not in existing),'single_source_id':source_id,'single_source_path':single_path,'local_proposal_only':True,'apply_ready':False}
+    plan={'contract':CONTRACT,**{k:final[k] for k in ('parent_commit','candidate_commit','candidate_tree','registry_sha256')},'state_sha256':final['legacy_sha256'],'previous_legacy_sha256':legacy_sha,'previous_registry_sha256':registry_sha,'capture_anchor':evidence.anchor,'changes':rows,'counts':counts,'conflict_reason_counts':n.reason_counts(next_registry['conflictsById']),'source_summary_sha256':a.sha(a.encoded(summaries)),'detail_receipts_sha256':a.sha(a.encoded({i:{'semantic_sha256':v['semantic_sha256']} for i,v in receipts.items()})), 'wire_receipts_sha256':a.sha(a.encoded(receipts)),'initial_preview_import':first,'transaction_bytes':sum(len(v) for oid,v in unique.items() if oid not in existing),'single_source_id':source_id,'single_source_path':single_path,'source_scope':'single_note' if source_id is not None else 'complete_catalog','catalog_complete':source_id is None,'local_proposal_only':True,'apply_ready':False}
     plan['approval_payload_sha256']=a.sha(a.encoded(canonical_payload(reader,plan,current)))
     verify_plan(reader,plan,files)
     return plan,files
