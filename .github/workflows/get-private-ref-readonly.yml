@@ -122,8 +122,38 @@ jobs:
                   original_fail = provenance.fail
                   def traced_fail(code):
                       if code == 'provenance_run_changed':
-                          frame = sys._getframe(1)
-                          print('run_change_check=' + frame.f_code.co_name + ':' + str(frame.f_lineno), flush=True)
+                          check = 'trace_unavailable'
+                          fields = []
+                          try:
+                              frame = sys._getframe(1)
+                              check = frame.f_code.co_name + ':' + str(frame.f_lineno)
+                              if frame.f_code.co_name == 'verified_candidate':
+                                  local = frame.f_locals
+                                  candidate = local.get('run', {})
+                                  listed = local.get('listed', {})
+                                  identity_keys = ('id', 'workflow_id', 'path', 'head_sha', 'head_branch', 'event')
+                                  semantic_keys = ('id', 'run_attempt', 'workflow_id', 'path', 'head_sha', 'head_branch', 'event', 'status', 'conclusion', 'run_started_at')
+                                  identity_diff = [key for key in identity_keys if candidate.get(key) != listed.get(key)]
+                                  semantic_diff = [key for key in semantic_keys
+                                                   if (key in candidate or key in listed)
+                                                   and candidate.get(key) != listed.get(key)]
+                                  if local.get('run_attempt') != candidate.get('run_attempt'):
+                                      fields.append('attempt')
+                                  if identity_diff:
+                                      fields.append('identity:' + ','.join(identity_diff))
+                                  if semantic_diff:
+                                      fields.append('binding:' + ','.join(semantic_diff))
+                                  if candidate.get('created_at') and listed.get('created_at'):
+                                      delta = (provenance.timestamp(candidate['created_at']) - provenance.timestamp(listed['created_at'])).total_seconds()
+                                      fields.append('created_clock:' + ('outside_1s' if abs(delta) > 1 else 'within_1s'))
+                                  else:
+                                      fields.append('created_clock:unavailable')
+                                  fields.append('clock_witness:' + ('present' if local.get('clock_witness') is not None else 'absent'))
+                                  check = 'verified_candidate:' + str(candidate.get('id', 'unknown')) + '/' + str(local.get('run_attempt', 'unknown'))
+                          except Exception:
+                              check = 'trace_unavailable'
+                              fields = ['trace_unavailable']
+                          print('run_change_check=' + check + ' conditions=' + (','.join(fields) or 'other'), flush=True)
                       original_fail(code)
                   provenance.fail = traced_fail
                   result = provenance.discover(
