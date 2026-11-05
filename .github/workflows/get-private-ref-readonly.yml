@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: 75655ba42d918f066db4904b236c0bfcbce5f922
+          ref: 2c549d7e816563cf858102f88dbe48a28146346d
           path: runtime
           persist-credentials: false
       - name: Check out the current Get controller policy
@@ -79,7 +79,7 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('sha=' + obj['sha'] + '\n')
           PY
-      - name: Reproduce the failed publication-slot check (read only)
+      - name: Validate and render the next runtime policy (read only)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
@@ -113,8 +113,29 @@ jobs:
                   os.environ[bindings.ENV_FILE] = str(binding_path)
                   import get_private_proof as proof
                   import get_publication_provenance as provenance
+                  import get_recurring_controller as controller
 
+                  old_policy_sha = policy_sha
+                  policy['code_sha'] = '2c549d7e816563cf858102f88dbe48a28146346d'
+                  policy_bytes = provenance.a.encoded(policy)
+                  policy_sha = provenance.a.sha(policy_bytes)
                   policy = provenance.validate_policy(policy, policy_sha)
+                  scope_sha = provenance.a.sha(
+                      provenance.a.encoded(controller.scope_for(policy, policy_sha)))
+                  rendered = controller.render(policy, policy_sha, scope_sha, scheduled=False)
+                  expected = (workflow
+                      .replace("ref: '75655ba42d918f066db4904b236c0bfcbce5f922'", "ref: '2c549d7e816563cf858102f88dbe48a28146346d'")
+                      .replace("RUNTIME_SHA: '75655ba42d918f066db4904b236c0bfcbce5f922'", "RUNTIME_SHA: '2c549d7e816563cf858102f88dbe48a28146346d'")
+                      .replace("POLICY_B64: '" + re.search(r"POLICY_B64: '([^']+)'", workflow).group(1) + "'", "POLICY_B64: '" + base64.b64encode(policy_bytes).decode('ascii') + "'")
+                      .replace(old_policy_sha, policy_sha)
+                      .replace(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1), scope_sha))
+                  print('candidate_policy_b64=' + base64.b64encode(policy_bytes).decode('ascii'))
+                  print('candidate_policy_sha256=' + policy_sha)
+                  print('candidate_scope_sha256=' + scope_sha)
+                  if rendered.decode('utf-8') != expected:
+                      print('rendered_controller_matches=no')
+                      raise SystemExit(1)
+                  print('rendered_controller_matches=yes')
                   client = provenance.PublicGithub(github_token)
                   resolver = proof.PrivateRecords(remote)
                   resolver.expected_head = remote.ref('refs/heads/main')
