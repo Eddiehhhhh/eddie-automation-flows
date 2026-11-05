@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import email.message
 import io
@@ -41,7 +42,18 @@ class GetSampleTests(unittest.TestCase):
         self.assertIn('if: always()', summary)
         self.assertIn('no-safe-aggregate', summary)
         self.assertIn('read_step_outcome', summary)
-        self.assertNotIn('result["content"]', summary)
+        self.assertIn('print(json.dumps(summary, indent=2))', summary)
+        source = summary.split("          python - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        source = '\n'.join(line[10:] for line in source.splitlines())
+        tree = ast.parse(source)
+        allowed = next(node.value for node in tree.body
+                       if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == 'allowed'
+                               for target in node.targets))
+        self.assertEqual(ast.literal_eval(allowed), (
+            'source', 'scope', 'source_complete', 'status', 'sample_pages_limit',
+            'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes',
+            'published', 'run', 'exit'))
 
     def test_authenticated_get_rejects_unlisted_path_before_opening(self):
         with patch.object(g.urllib.request, 'build_opener') as build:
