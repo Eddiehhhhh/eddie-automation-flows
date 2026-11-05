@@ -26,7 +26,8 @@ MAX_STATE=8*1024*1024
 MAX_OPAQUE=2*1024*1024
 # shortcut: tolerate these nine audited shadows only for one manual note; remove after archive cleanup.
 SCOPED_DUPLICATE_IDS=frozenset({'1924184859089342232','1924119735570829080','1924112797051401776','1924184859086196504','1924015120906723728','1924014242584480304','1924015139158424456','1924015124127042096','1924015158487980720'})
-# This case-only unmanaged pair stays strict except for a manual single-note run; both pinned hashes and the registered path must match.
+# Preserve this unmanaged pair's reserved classification during isolated runs;
+# both pinned hashes and both exact paths must still match. It is never writable.
 SCOPED_CASE_DUPLICATES={'f5536f23631233577ac2a37f15fa0e09':('03 纯文本记录/Untitled.md','03 纯文本记录/untitled.md','7b147f377c1137c45612e2ed9f828d3150aba1ce','07e67e4d9a54928d56cfc75e9a9de2b00fc2e70a0f8e1127e9574533745583c4')}
 PREVIEW = _private_bindings.value('get_canonical_writer', 'PREVIEW')
 PREVIEW_STATE='03 State/cloud-sync-state.json'
@@ -75,7 +76,7 @@ def owner_budget(identities):
     return len(values)<=MAX_EXISTING_OWNERS and sum(api_identity(i) for i in values)<=MAX_RECORDS
 
 
-def inventory(current, *, only_id=None, known_owners=None, allow_infer=False):
+def inventory(current, *, only_id=None, known_owners=None, allow_infer=False, isolate_duplicates=False):
     """All current Get Markdown bytes must come from one externally pinned tree."""
     paths_by_id={}
     for path,data in current.items():
@@ -93,7 +94,7 @@ def inventory(current, *, only_id=None, known_owners=None, allow_infer=False):
             result[ident]=paths[0]
             continue
         case_duplicate=SCOPED_CASE_DUPLICATES.get(ident)
-        if only_id is not None and ident!=only_id and case_duplicate:
+        if (only_id is not None or isolate_duplicates) and ident!=only_id and case_duplicate:
             owner_path,shadow_path,expected_blob,expected_sha256=case_duplicate
             owner_data=current.get(owner_path);shadow_data=current.get(shadow_path)
             blob=hashlib.sha1(b'blob '+str(len(owner_data)).encode()+b'\0'+owner_data).hexdigest() if isinstance(owner_data,bytes) else None
@@ -103,6 +104,11 @@ def inventory(current, *, only_id=None, known_owners=None, allow_infer=False):
                 continue
         if only_id is not None:
             if ident==only_id:fail('canonical_duplicate_identity')
+            result[ident]=None
+            continue
+        if isolate_duplicates:
+            # No duplicate becomes a writable owner. Preserve the whole pinned
+            # tree and let the dispatcher hold this ID while processing others.
             result[ident]=None
             continue
         owner=(known_owners or {}).get(ident)
@@ -125,7 +131,7 @@ def inventory(current, *, only_id=None, known_owners=None, allow_infer=False):
 
 
 def initial_registry(evidence,legacy_state,legacy_sha,current,*,only_id=None,known_owners=None):
-    state=legacy.validate_state(legacy_state,legacy_sha,evidence);present=inventory(current,only_id=only_id,known_owners=known_owners)
+    state=legacy.validate_state(legacy_state,legacy_sha,evidence);present=inventory(current,only_id=only_id,known_owners=known_owners,isolate_duplicates=only_id is None)
     reserved={ident:'blocked' for ident in state['conflictsById']}
     reserved.update({ident:'legacy' for ident in state['legacyById']})
     reserved.update({ident:'pending' for ident in state['pending_ids']})
@@ -147,13 +153,13 @@ def validate_registry(state,expected_sha,evidence,legacy_state,legacy_sha,curren
     if set(new)&authoritative:fail('canonical_owner_overlap')
     if {i:k for i,k in base['reserved'].items() if i not in new}!=reserved:fail('canonical_reserved_changed')
     if state['legacy_state_sha256']!=legacy_sha:fail('canonical_legacy_binding')
-    present=inventory(current,only_id=only_id,known_owners=new);paths=set();legacy_paths={row['filePath'] for row in evidence.census['eligible'].values()}
+    present=inventory(current,only_id=only_id,known_owners=new,isolate_duplicates=only_id is None);paths=set();legacy_paths={row['filePath'] for row in evidence.census['eligible'].values()}
     keys={'filePath','mirror_sha256','baseline_blob','source_version','summary_sha256','source_sha256','unknown_sha256','text_fields','created_at','preview_anchor','source_metadata'}
     for ident,row in new.items():
         identity(ident)
         if not isinstance(row,dict) or set(row)!=keys:fail('canonical_state_schema')
         path=path_ok(row['filePath'])
-        ambiguous_unrelated=(only_id is not None and ident!=only_id and present.get(ident,'missing') is None)
+        ambiguous_unrelated=(ident!=only_id and present.get(ident,'missing') is None)
         if (path in paths or path in legacy_paths or (ident in present and present[ident]!=path and not ambiguous_unrelated)):
             fail('canonical_duplicate_path')
         if ambiguous_unrelated:
@@ -404,13 +410,14 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
         if (only_id not in items or only_id in state['conflictsById']
                 or (only_id in state['reserved'] and only_id not in legacy_state['legacyById'])
                 or set(details)-{only_id} or set(selected_new)-{only_id}):fail('identity_reserved')
-    present=inventory(current,only_id=only_id,known_owners=state['newById']);occupied=set(current);changes={};conflicts=deepcopy(state['conflictsById']);counts=dict.fromkeys(('created','preview_imported','updated','state_only','unchanged','conflicted','detail_required'),0)
+    present=inventory(current,only_id=only_id,known_owners=state['newById'],isolate_duplicates=only_id is None);occupied=set(current);changes={};conflicts=deepcopy(state['conflictsById']);counts=dict.fromkeys(('created','preview_imported','updated','state_only','unchanged','conflicted','detail_required'),0)
     targets=sorted(set(state['newById'])|set(selected))
     if only_id is not None:targets=[ident for ident in targets if ident==only_id]
     for ident in targets:
         conflicts.pop(ident,None)
         old=state['newById'].get(ident)
         try:
+            if present.get(ident,'missing') is None:fail('identity_reserved')
             if ident in (baseline_errors or {}):fail(baseline_errors[ident])
             if ident in state['reserved']:fail('identity_reserved')
             if ident not in items:fail('source_missing')
@@ -496,7 +503,7 @@ def git_inventory(repo,parent,*,only_id=None):
         if str(exc)=='adapter_tree_budget':fail('canonical_budget')
         raise
     current={path[len(legacy.retention.GET)+1:]:data for path,data in values.items()}
-    inventory(current,only_id=only_id,allow_infer=True)
+    inventory(current,only_id=only_id,allow_infer=True,isolate_duplicates=only_id is None)
     return current
 
 
@@ -578,7 +585,17 @@ def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,deta
     if unknown:fail('canonical_details')
     # Missing legacy detail is an individual unresolved record, never a reason
     # to reroute the identity through the new-note renderer.
-    next_legacy,legacy_changes,old_counts=legacy.propose_updates(evidence,legacy_state,legacy_sha,current,repo,parent,summaries,terminal,{i:details.get(i) for i in legacy_needed},only_id=only_id)
+    present=inventory(current,only_id=only_id,isolate_duplicates=only_id is None)
+    ambiguous_paths={row['ownership']['filePath'] for ident,row in legacy_state['legacyById'].items()
+        if present.get(ident,'missing') is None}
+    class LegacyReadGuard:
+        # The span adapter already records this per-ID conflict and continues.
+        # Stop before reconstructing or proposing any ambiguous legacy owner.
+        def read(self,*args,**kwargs):return repo.read(*args,**kwargs)
+        def baseline(self,commit,path,*args,**kwargs):
+            if path in ambiguous_paths:fail('legacy_structure_ambiguous')
+            return repo.baseline(commit,path,*args,**kwargs)
+    next_legacy,legacy_changes,old_counts=legacy.propose_updates(evidence,legacy_state,legacy_sha,current,LegacyReadGuard(),parent,summaries,terminal,{i:details.get(i) for i in legacy_needed},only_id=only_id)
     next_sha=legacy.sha(legacy.encoded(next_legacy))
     registry=deepcopy(registry);registry['legacy_state_sha256']=next_sha
     producer_registry_sha=legacy.sha(legacy.encoded(registry))

@@ -290,12 +290,33 @@ class API:
         page=native.uuid(page_id)
         if page not in self.known_pages:fail('unread_target')
         if not isinstance(properties,dict) or not properties or set(properties)-set(mapping.FIELDS):fail('invalid_approval')
-        schema=mapping.schema_projection(self.schema())
+        raw_schema=self.schema()
+        schema=mapping.schema_projection(raw_schema)
+        unregistered_options=[]
         for name,value in properties.items():
-            if value.get('type')!=mapping.FIELDS[name][1] or mapping.empty(value):fail('invalid_approval')
-            kind=value['type']
-            options=[value[kind]['name']] if kind=='select' else [x['name'] for x in value[kind]] if kind=='multi_select' else []
-            if any(option not in schema[name]['options'] for option in options):fail('wrong_schema')
-        result=self._write('PATCH','/pages/'+page,{'properties':deepcopy(properties)})
+            try: normalized=mapping.value(value)
+            except ValueError: fail('invalid_approval')
+            if normalized['type']!=mapping.FIELDS[name][1]:fail('invalid_approval')
+            kind=normalized['type']
+            selected=normalized[kind]
+            options=([selected['name']] if kind=='select' and selected is not None
+                else [x['name'] for x in selected] if kind=='multi_select' else [])
+            if kind in ('select','multi_select'):
+                if any(not isinstance(option,str) or not option or len(option)>100 or ',' in option for option in options):fail('wrong_schema')
+                existing={x.get('name') for x in raw_schema[name][kind]['options']}
+                unregistered_options.extend((name,option) for option in options if option not in existing)
+        body={'properties':deepcopy(properties)};path='/pages/'+page
+        try:
+            result=self._write('PATCH',path,body)
+        except WriteFailure as exc:
+            # A 403 for a write containing a new select option is a known
+            # schema-permission refusal, not an uncertain partial write. The
+            # caller binds this exact failure to the request fingerprint and
+            # holds the affected metadata row for operator review.
+            key=fingerprint('PATCH',path,body)
+            if (unregistered_options and exc.status==403
+                    and exc.request_fingerprint==key):
+                raise WriteFailure('property_option_permission_denied',403,key) from None
+            raise
         if result.get('object')!='page' or native.uuid(result.get('id'))!=page or native.uuid(result.get('parent',{}).get('data_source_id'))!=self.source or result.get('archived') is True or result.get('in_trash') is True:fail('write_uncertain')
         return page

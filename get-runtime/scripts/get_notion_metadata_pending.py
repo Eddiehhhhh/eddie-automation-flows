@@ -8,9 +8,17 @@ from copy import deepcopy
 import json
 import get_notion_properties as props
 
-CONTRACT = 'get-notion-metadata-completion-1'
+CONTRACT = 'get-notion-metadata-completion-2'
 REASONS = frozenset(('metadata_sync_pending', 'metadata_evidence_required',
     'title_ownership_required')) | props.REASONS
+LEGACY_CONTRACT = 'get-notion-metadata-completion-1'
+LEGACY_FIELDS = frozenset(('创建时间', '更新时间', '标签', '笔记类型'))
+LEGACY_REASONS = frozenset(('metadata_sync_pending', 'metadata_evidence_required',
+    'title_ownership_required', 'property_schema_changed', 'property_source_invalid',
+    'property_timezone_required', 'property_timestamp_mismatch', 'property_option_missing',
+    'property_manual_edit', 'property_unowned_value', 'property_source_empty',
+    'property_source_missing', 'property_budget', 'property_parser_unavailable',
+    'property_date_projection_invalid'))
 
 
 def engine():
@@ -49,6 +57,7 @@ def facet(publication, ident, data, policy, metadata, state, native_schema=None)
     previous = state.get('metadata_results', {}).get(ident, {})
     required.update(name for name in previous.get('held', {}) if name in props.FIELDS)
     schema_sha = None; assets = {}
+    resolved_option_denials = []
     if metadata is not None:
         required.update(props.FIELDS)
     if required:
@@ -61,13 +70,33 @@ def facet(publication, ident, data, policy, metadata, state, native_schema=None)
             desired.update({name: value for name, value in projected.items() if name in required})
             held.update({name: failures[name] for name in required if name in failures})
             schema_sha = binding['schema_sha256']
+            old = state.get('property_receipts', {}).get(ident, {})
+            if (isinstance(old, dict) and old.get('md_blob') == source['blob']
+                    and isinstance(old.get('held'), dict) and isinstance(native_schema, dict)):
+                for name, reason in old['held'].items():
+                    if reason != 'property_option_permission_denied' or name not in projected:
+                        continue
+                    kind = props.FIELDS[name][1]
+                    if kind not in ('select', 'multi_select'): continue
+                    spec = native_schema.get(name, {})
+                    options = spec.get(kind, {}).get('options', []) if isinstance(spec, dict) else []
+                    available = {item.get('name') for item in options if isinstance(item, dict)}
+                    try:
+                        wanted = props.value(projected[name])[kind]
+                        names = ({wanted['name']} if kind == 'select' and wanted is not None
+                            else {item['name'] for item in wanted} if kind == 'multi_select' else set())
+                    except (TypeError, ValueError, KeyError):
+                        names = set()
+                    if names and names <= available: resolved_option_denials.append(name)
             if binding['registry'] is not None:
                 assets[props.REGISTRY] = binding['registry']['blob']
     result = {'contract': CONTRACT, 'source_commit': publication.descriptor['commit'],
         'md_blob': source['blob'], 'title_property': policy['title_property'],
         'desired': desired, 'held': held, 'required_fields': sorted(required),
         'schema_sha256': schema_sha, 'source_assets': assets,
-        'native_schema_sha256': e.digest(native_schema) if native_schema is not None else None}
+        'resolved_option_denials': sorted(resolved_option_denials),
+        'native_schema_sha256': e.digest(props.native_schema_projection(native_schema))
+            if native_schema is not None else None}
     date_binding = props.date_wire_binding(desired)
     if date_binding is not None: result['date_wire'] = date_binding
     return result
@@ -92,7 +121,8 @@ def record(value, row, plan, snapshot, api, counts):
         try:
             fresh_schema = api.schema()
             same_schema = (e.digest(props.schema_projection(fresh_schema)) == bound['schema_sha256']
-                and (bound.get('native_schema_sha256') is None or e.digest(fresh_schema) == bound['native_schema_sha256']))
+                and (bound.get('native_schema_sha256') is None or e.digest(
+                    props.native_schema_projection(fresh_schema)) == bound['native_schema_sha256']))
         except Exception: same_schema = False
         if not same_schema:
             held.update({name: 'property_schema_changed' for name in bound['desired']})
@@ -165,14 +195,25 @@ def check_results(results):
         'plan_sha256', 'facet_sha256', 'properties_sha256', 'held', 'readback_verified'}
     for ident, row in results.items():
         e.p.note_id(ident)
-        if not isinstance(row, dict) or not keys <= set(row) <= keys | {'property_write_verified'} or row['contract'] != CONTRACT or row['readback_verified'] is not True:
+        if (not isinstance(row, dict) or not keys <= set(row) <= keys | {'property_write_verified'}
+                or row['contract'] not in (CONTRACT, LEGACY_CONTRACT)
+                or row['readback_verified'] is not True):
             e.fail('state_invalid')
         if 'property_write_verified' in row and type(row['property_write_verified']) is not bool:e.fail('state_invalid')
         for key in ('source_commit', 'md_blob'): e.p.hex_hash(row[key], 40)
         for key in ('page_id', 'data_source_id'): e.p.notion_id(row[key])
         for key in ('plan_sha256', 'facet_sha256', 'properties_sha256'): e.p.hex_hash(row[key], 64)
-        if (not isinstance(row['held'], dict) or len(row['held']) > 5
-                or any(not isinstance(name, str) or not name or reason not in REASONS for name, reason in row['held'].items())):
+        legacy = row['contract'] == LEGACY_CONTRACT
+        held_fields = row['held']
+        allowed_reasons = LEGACY_REASONS if legacy else REASONS
+        legacy_extra = ({name for name in held_fields if name not in LEGACY_FIELDS}
+            if isinstance(held_fields, dict) else set())
+        if (not isinstance(held_fields, dict)
+                or len(held_fields) > (5 if legacy else len(props.FIELDS) + 1)
+                or legacy and (len(legacy_extra) > 1 or any(not isinstance(name, str)
+                    or not name or len(name) > 100 for name in legacy_extra))
+                or any(not isinstance(name, str) or not name or reason not in allowed_reasons
+                    for name, reason in held_fields.items())):
             e.fail('state_invalid')
 
 

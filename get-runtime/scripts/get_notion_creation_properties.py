@@ -1,15 +1,15 @@
-"""Fixed four-field scope for NEW pages from verified canonical publications.
+"""Fixed canonical-source metadata scope for NEW verified publications.
 
-No historical selection, schema mutation, identity adoption or independent write.
+No historical selection, explicit schema endpoint, identity adoption or independent write.
 The normal content/privacy gate still decides which immutable note can be sent.
 """
 from copy import deepcopy
 import get_notion_properties as props
 import get_notion_property_transaction as tx
 
-SCOPE = {'contract': 'get-notion-canonical-create-properties-1',
+SCOPE = {'contract': 'get-notion-canonical-create-properties-2',
     'fields': sorted(props.FIELDS), 'target': 'new_pages_only',
-    'source': 'verified_canonical_publication', 'schema_options': 'existing_only',
+    'source': 'verified_canonical_publication', 'schema_options': 'notion_add_if_authorized',
     'timestamps': 'explicit_offset_or_exact_bound_registry',
     'missing_values': 'hold_without_coercion', 'content_gate': 'unchanged',
     'registry_export': 'timestamps_only'}
