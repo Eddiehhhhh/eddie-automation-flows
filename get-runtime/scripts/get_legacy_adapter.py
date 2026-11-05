@@ -118,8 +118,13 @@ class OfflineGit:
             if cursor!=len(result.stdout):fail('adapter_blob_readback')
         return {path:values[blob] for path,blob in paths.items()}
     def source_get_tree(self,commit):
-        self.tree(commit)
-        return checked(self.local.run('rev-parse',commit+':'+retention.GET).decode().strip(),40)
+        # History checks need one subtree identity, not a cached full inventory
+        # for every ancestor. Preserve object-type checks without enumerating it.
+        checked(commit,40)
+        if self.local.run('cat-file','-t',commit).strip()!=b'commit':fail('adapter_anchor')
+        tree=checked(self.local.run('rev-parse',commit+':'+retention.GET).decode().strip(),40)
+        if self.local.run('cat-file','-t',tree).strip()!=b'tree':fail('adapter_source_tree')
+        return tree
     def tree_entries(self,tree,recursive=True):
         rows=[]
         for item in self.local.run('ls-tree','-rlz',checked(tree,40)).split(b'\0'):
