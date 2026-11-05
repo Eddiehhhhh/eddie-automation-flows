@@ -28,6 +28,21 @@ def note(ident, kind='plain_text'):
 
 
 class GetSampleTests(unittest.TestCase):
+    def test_cloud_test_note_reuses_complete_paginated_lookup(self):
+        workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
+        step = workflow.split('      - name: Create one real Get sync test note', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('fetch_note_list(', step)
+        self.assertIn('duplicate test notes', step)
+        self.assertIn('note_action=reused', step)
+
+    def test_shadow_workflow_publishes_only_allowlisted_failure_summary(self):
+        workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/source-sync-shadow.yml').read_text()
+        summary = workflow.split('      - name: Publish aggregate evidence only', 1)[1]
+        self.assertIn('if: always()', summary)
+        self.assertIn('no-safe-aggregate', summary)
+        self.assertIn('read_step_outcome', summary)
+        self.assertNotIn('result["content"]', summary)
+
     def test_authenticated_get_rejects_unlisted_path_before_opening(self):
         with patch.object(g.urllib.request, 'build_opener') as build:
             with self.assertRaisesRegex(ValueError, 'unsupported Get API path'):
