@@ -73,6 +73,7 @@ jobs:
               summary['status'] = 'no-safe-aggregate'
               summary['source'] = 'getnote'
               summary['published'] = False
+          print(json.dumps(summary, indent=2))
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write(json.dumps(summary, indent=2))
               out.write('\n')
