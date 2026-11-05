@@ -5,6 +5,7 @@ are consumed only by CLI entry, never by public Actions provenance. No schedule
 is installed here. A separately reviewed production scope is required for apply.
 """
 import get_private_proof as private_proof
+from copy import deepcopy
 import argparse
 import contextvars
 import math
@@ -295,6 +296,21 @@ def load_receipt(reader, remote, token, root, commit):
         m.import_blob(reader.local, values[entry.FULL_RECEIPT], row[2])
 
 
+def hydrate_baselines(reader, legacy, registry, parent, remote, *, source_id=None):
+    """Download baselines for writable IDs; never narrow trusted state checks."""
+    if source_id is not None:
+        n.identity(source_id)
+        # These are loader-only views, not substitute states for validation or
+        # execution. A new ID has no baseline; an owned ID must still load its
+        # exact pinned path/blob through the unchanged baseline loaders.
+        legacy = {**legacy, 'legacyById': {source_id: deepcopy(legacy['legacyById'][source_id])}
+            if source_id in legacy['legacyById'] else {}}
+        registry = {**registry, 'newById': {source_id: deepcopy(registry['newById'][source_id])}
+            if source_id in registry['newById'] else {}}
+    at_stage('legacy_baselines', m.selected_baselines, reader, legacy, parent, remote)
+    at_stage('new_baselines', engine.new_baselines, reader, registry, parent, remote)
+
+
 def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, client, policy, *, bootstrap, exclude_run_id, exclude_run_attempt, source_id=None):
     # Explicit bounded object-only reads; OfflineGit itself cannot lazy fetch.
     at_stage('parent_history', fetch_commit, local, parent, entry.MAX_INTERVENING + 2)
@@ -325,8 +341,7 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
             at_stage('current_inventory', load_inventory, reader, remote, token, root / target, target, source_id=source_id)
     _, _, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
     _, legacy, registry = states
-    at_stage('legacy_baselines', m.selected_baselines, reader, legacy, parent, remote)
-    at_stage('new_baselines', engine.new_baselines, reader, registry, parent, remote)
+    hydrate_baselines(reader, legacy, registry, parent, remote, source_id=source_id)
     preview = None
     if n.STATE not in current:
         _, preview = at_stage('preview_inputs', m.load_canonical_inputs, reader, remote, token, root, parent)
