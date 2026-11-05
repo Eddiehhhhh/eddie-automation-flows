@@ -9,7 +9,7 @@ import json
 
 import get_notion_properties as props
 
-CONTRACT = 'get-notion-property-scope-1'
+CONTRACT = 'get-notion-property-scope-2'
 
 
 def engine():
@@ -152,9 +152,11 @@ def wire(row):
     e = engine()
     if not row.get('property_only') or not isinstance(row.get('property_patch'), dict) or set(row['property_patch']) - set(props.FIELDS): e.fail('approval_missing')
     for name, value in row['property_patch'].items():
-        if value.get('type') != props.FIELDS[name][1] or props.empty(value): e.fail('approval_missing')
+        try: normalized = props.value(value)
+        except ValueError: e.fail('approval_missing')
+        if normalized['type'] != props.FIELDS[name][1]: e.fail('approval_missing')
     body = {'properties': patch_wire_properties(row)}
-    if len(e.encoded(body)) > 32 * 1024: e.fail('request_budget')
+    if len(e.encoded(body)) > min(e.MAX_REQUEST_BYTES, 400_000): e.fail('request_budget')
     return {'method': 'PATCH', 'path': '/pages/' + e.p.notion_id(row['page_id']), 'body': body}
 
 
@@ -196,7 +198,10 @@ def execute_row(row, plan, publication, api, store, value, version, counts, writ
         operation = {'kind': 'properties', 'phase': 'prepared', 'before': snapshot, 'response': None}
         journal['operation'] = operation
         version = store.compare_and_set(version, value)
-    if not isinstance(operation, dict) or set(operation) != {'kind', 'phase', 'before', 'response'} or operation['kind'] != 'properties' or operation['phase'] not in ('prepared', 'in_flight', 'acknowledged'): e.fail('state_invalid')
+    allowed = {'kind', 'phase', 'before', 'response'}
+    if (not isinstance(operation, dict) or set(operation) not in (allowed, allowed | {'write_refusal'})
+            or operation['kind'] != 'properties'
+            or operation['phase'] not in ('prepared', 'in_flight', 'acknowledged', 'refused')): e.fail('state_invalid')
     if e.target_sha(operation['before'], ident, source) != row['before_sha256']: e.fail('state_invalid')
     if operation['phase'] == 'prepared':
         guard()
@@ -217,24 +222,55 @@ def execute_row(row, plan, publication, api, store, value, version, counts, writ
                 counts['write_calls'] -= 1
                 operation['phase'] = 'prepared'; version = store.compare_and_set(version, value)
                 e.fail('request_not_dispatched')
+            except e.transport.WriteFailure as exc:
+                if (str(exc) == 'property_option_permission_denied'
+                        and exc.request_fingerprint == key):
+                    try:
+                        guard()
+                        refused_readback = e.read_target(api, ident, source)
+                        unchanged = e.target_sha(refused_readback, ident, source) == row['before_sha256']
+                    except Exception:
+                        e.fail('uncertain_properties')
+                    refusal = props.confirmed_option_refusal(str(exc), exc.status,
+                        exc.request_fingerprint, key, row['before_sha256'],
+                        e.target_sha(refused_readback, ident, source))
+                    if not unchanged or refusal is None: e.fail('uncertain_properties')
+                    operation['write_refusal'] = refusal
+                    operation.update(phase='refused', response=None)
+                    version = store.compare_and_set(version, value)
+                else:
+                    e.fail('uncertain_properties')
             except Exception:
                 e.fail('uncertain_properties')
-            if response != row['page_id']: e.fail('uncertain_properties')
-            operation.update(phase='acknowledged', response=response)
-            version = store.compare_and_set(version, value)
+            if operation['phase'] != 'refused':
+                if response != row['page_id']: e.fail('uncertain_properties')
+                operation.update(phase='acknowledged', response=response)
+                version = store.compare_and_set(version, value)
     snapshot = e.read_target(api, ident, source)
-    try: verify_after(operation['before'], snapshot, row, source)
-    except e.Blocked:
-        if operation['phase'] == 'in_flight' and e.target_sha(snapshot, ident, source) == row['before_sha256']: e.fail('uncertain_properties')
-        raise
+    refused = operation['phase'] == 'refused'
+    if refused:
+        if (operation.get('write_refusal') != {'reason': 'property_option_permission_denied',
+                'status': 403, 'request_fingerprint': key}
+                or e.target_sha(snapshot, ident, source) != row['before_sha256']):
+            e.fail('uncertain_properties')
+    else:
+        try: verify_after(operation['before'], snapshot, row, source)
+        except e.Blocked:
+            if operation['phase'] == 'in_flight' and e.target_sha(snapshot, ident, source) == row['before_sha256']: e.fail('uncertain_properties')
+            raise
     publication.check(plan['publication']); publication.check_assets(row['source_assets'])
     # Independent metadata receipt: content anchors and body ownership unchanged.
+    previous = value.get('property_receipts', {}).get(ident, {})
+    previous_managed = previous.get('managed', {}) if isinstance(previous, dict) else {}
     value.setdefault('property_receipts', {})[ident] = {'contract': props.CONTRACT,
         'page_id': row['page_id'], 'data_source_id': source, 'source_commit': plan['publication']['commit'],
         'md_blob': row['source']['blob'], 'manifest_sha256': plan['property_manifest_sha256'],
-        'managed': deepcopy(row['property_managed']), 'held': deepcopy(row['held_fields']), 'readback_verified': True}
-    counts['updated' if row['property_patch'] else 'noop'] += 1
-    if row['held_fields']: counts['retained_conflicts'] += 1
+        'managed': deepcopy(previous_managed if refused else row['property_managed']),
+        'held': ({**row['held_fields'], **{name: 'property_option_permission_denied'
+            for name in row['property_patch']}} if refused else deepcopy(row['held_fields'])),
+        'readback_verified': True}
+    counts['retained_conflicts' if refused else 'updated' if row['property_patch'] else 'noop'] += 1
+    if row['held_fields'] or refused: counts['retained_conflicts'] += not refused
     journal.update(index=journal['index'] + 1, operation=None)
     return store.compare_and_set(version, value)
 

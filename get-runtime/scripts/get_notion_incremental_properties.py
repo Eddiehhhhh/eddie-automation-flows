@@ -1,4 +1,4 @@
-"""Bounded four-field continuation of a NEW ordinary row's verified body.
+"""Bounded continuation of a NEW ordinary row's verified body.
 
 No second writer, plan row or journal. The old observation facet and create-only
 scope never activate this phase. Source-state-only publication holds are not
@@ -9,12 +9,12 @@ import get_notion_properties as props
 import get_notion_property_transaction as tx
 import get_notion_metadata_pending as metadata
 
-CONTRACT = 'get-notion-incremental-properties-1'
+CONTRACT = 'get-notion-incremental-properties-2'
 KIND = 'body_verified_properties'
 SCOPE = {'contract': CONTRACT, 'fields': sorted(props.FIELDS),
     'target': 'ordinary_outbox_body_verified_pages', 'fill_empty': True,
     'ownership': 'prior_verified_property_receipt_only',
-    'schema_options': 'existing_only', 'title': 'observe_only',
+    'schema_options': 'notion_add_if_authorized', 'title': 'observe_only',
     'source_state_only': 'hold_unprojected'}
 PHASES = frozenset(('body_verified', 'prepared', 'in_flight', 'acknowledged', 'verified'))
 
@@ -52,12 +52,27 @@ def adapter(row, operation):
            if operation['intent']['date_wire'] is not None else {})}
 
 
-def outcome(row, plan, before, prior, schema_ok):
+def outcome(row, plan, before, prior, schema_ok, body_baseline=None):
     e = engine(); bound = row['metadata_completion']
     view = e.target(before, row['note_id'], plan['policy']['data_source_id'])
     held = deepcopy(bound['held'])
     managed = deepcopy(prior.get('managed', {})) if prior else {}
     desired = props.date_wire_properties(bound['desired'], bound.get('date_wire'))
+    if (isinstance(prior, dict) and prior.get('md_blob') == bound['md_blob']
+            and isinstance(prior.get('held'), dict) and isinstance(body_baseline, dict)):
+        for name, reason in prior['held'].items():
+            if (reason != 'property_option_permission_denied' or name not in desired
+                    or name in bound['held'] or name not in body_baseline):
+                continue
+            try:
+                # Keep the denial while source and target are unchanged. A new
+                # source blob, target edit, or explicit receipt repair can retry.
+                actual = props.value(view['properties'].get(name))
+                wanted = props.value(desired[name])
+                if actual != wanted and actual == props.value(body_baseline[name]):
+                    held[name] = reason
+            except ValueError:
+                held[name] = reason
     safe = {name: value for name, value in desired.items() if name in props.FIELDS and name not in held}
     patch, next_managed, conflicts = props.three_way(safe, view['properties'], managed, fill_empty=True)
     held.update(conflicts)
@@ -89,11 +104,24 @@ def outcome(row, plan, before, prior, schema_ok):
         'managed': next_managed, 'held': held, 'schema_ok': schema_ok}
 
 
+def option_refusal_intent(attempted, prior, reason='property_option_permission_denied'):
+    """Persist a known-rejected whole PATCH as held fields, never as ownership."""
+    if (not isinstance(attempted, dict) or not attempted.get('patch')
+            or reason != 'property_option_permission_denied'):
+        raise ValueError('state_invalid')
+    managed = deepcopy(prior.get('managed', {})) if isinstance(prior, dict) else {}
+    held = deepcopy(attempted['held'])
+    held.update({name: reason for name in attempted['patch']})
+    return {'patch': {}, 'date_wire': None,
+        'request_fingerprint': attempted['request_fingerprint'],
+        'managed': managed, 'held': held, 'schema_ok': True}
+
+
 def validate_operation(operation, row, plan, value):
     e = engine(); check_plan(plan)
     keys = {'kind', 'phase', 'body_receipt', 'before', 'prior_properties',
         'plan_sha256', 'facet_sha256', 'intent', 'response'}
-    if (not isinstance(operation, dict) or set(operation) != keys or operation['kind'] != KIND
+    if (not isinstance(operation, dict) or set(operation) not in (keys, keys | {'write_refusal'}) or operation['kind'] != KIND
             or operation['phase'] not in PHASES or row['action'] == 'blocked'
             or operation['plan_sha256'] != e.digest(plan)
             or operation['facet_sha256'] != e.digest(row.get('metadata_completion'))):
@@ -126,12 +154,28 @@ def validate_operation(operation, row, plan, value):
     if prior is not None and any(prior.get(key) != body[key] for key in ('page_id', 'data_source_id')):
         e.fail('state_invalid')
     if operation['phase'] == 'body_verified':
-        if operation['intent'] is not None or operation['response'] is not None: e.fail('state_invalid')
+        if operation['intent'] is not None or operation['response'] is not None or 'write_refusal' in operation: e.fail('state_invalid')
         return
     intent = operation['intent']
+    if 'write_refusal' in operation:
+        refusal = operation['write_refusal']
+        attempted = outcome(row, plan, operation['before'], prior, True,
+            operation['body_receipt'].get('properties_baseline'))
+        attempted_operation = {**operation, 'intent': attempted}
+        attempted_spec = tx.wire(adapter(row, attempted_operation))
+        attempted_key = e.transport.fingerprint(attempted_spec['method'], attempted_spec['path'], attempted_spec['body'])
+        if (not isinstance(refusal, dict) or set(refusal) != {'reason', 'status', 'request_fingerprint'}
+                or refusal != {'reason': 'property_option_permission_denied', 'status': 403,
+                    'request_fingerprint': attempted_key}
+                or operation['phase'] != 'verified' or operation['response'] is not None
+                or not e.same(intent, option_refusal_intent(attempted, prior))):
+            e.fail('state_invalid')
+        tx.wire(adapter(row, operation))
+        return
     if (not isinstance(intent, dict) or intent.get('schema_ok') not in (True, False, None)
             or type(intent.get('schema_ok')) not in (bool, type(None))
-            or not e.same(intent, outcome(row, plan, operation['before'], prior, intent['schema_ok']))):
+            or not e.same(intent, outcome(row, plan, operation['before'], prior, intent['schema_ok'],
+                body['properties_baseline']))):
         e.fail('state_invalid')
     tx.wire(adapter(row, operation))
     if operation['phase'] in ('prepared', 'in_flight') and operation['response'] is not None: e.fail('state_invalid')
@@ -143,7 +187,8 @@ def validate_operation(operation, row, plan, value):
 def same_schema(api, bound):
     e = engine(); schema = api.schema()
     return (e.digest(props.schema_projection(schema)) == bound['schema_sha256']
-        and (bound.get('native_schema_sha256') is None or e.digest(schema) == bound['native_schema_sha256']))
+        and (bound.get('native_schema_sha256') is None or e.digest(
+            props.native_schema_projection(schema)) == bound['native_schema_sha256']))
 
 
 def finish(row, plan, publication, api, store, value, version, counts,
@@ -181,7 +226,8 @@ def finish(row, plan, publication, api, store, value, version, counts,
     if operation['phase'] == 'body_verified':
         # A source-held field/title does not suppress safe siblings. A fully
         # held/no-write outcome avoids another full native/image read.
-        preview = outcome(row, plan, operation['before'], operation['prior_properties'], True)
+        preview = outcome(row, plan, operation['before'], operation['prior_properties'], True,
+            operation['body_receipt'].get('properties_baseline'))
         schema_ok = None
         if bound['schema_sha256'] is not None and (preview['patch'] or not preview['held']):
             try: schema_ok = same_schema(api, bound)
@@ -195,7 +241,8 @@ def finish(row, plan, publication, api, store, value, version, counts,
         elif bound['schema_sha256'] is not None:
             # Equality/known holds do not authorize a request.
             schema_ok = None
-        operation['intent'] = outcome(row, plan, operation['before'], operation['prior_properties'], schema_ok)
+        operation['intent'] = outcome(row, plan, operation['before'], operation['prior_properties'], schema_ok,
+            operation['body_receipt'].get('properties_baseline'))
         operation['phase'] = 'prepared'
         if operation['intent']['patch']:
             version = store.compare_and_set(version, value)
@@ -220,11 +267,39 @@ def finish(row, plan, publication, api, store, value, version, counts,
             counts['write_calls'] -= 1
             operation['phase'] = 'prepared'; version = store.compare_and_set(version, value)
             e.fail('request_not_dispatched')
+        except e.transport.WriteFailure as exc:
+            if (str(exc) == 'property_option_permission_denied'
+                    and exc.request_fingerprint == key):
+                # A classified Notion 403 proves this exact PATCH was rejected.
+                # Persist that as held only after the target still matches the
+                # pre-write snapshot; otherwise the request outcome is uncertain.
+                try:
+                    guard(page=False)
+                    refused_readback = e.read_target(api, ident, source)
+                    unchanged = (e.target_sha(refused_readback, ident, source)
+                        == e.target_sha(operation['before'], ident, source))
+                except Exception:
+                    e.fail('uncertain_properties')
+                refusal = props.confirmed_option_refusal(str(exc), exc.status,
+                    exc.request_fingerprint, key,
+                    e.target_sha(operation['before'], ident, source),
+                    e.target_sha(refused_readback, ident, source))
+                if not unchanged or refusal is None: e.fail('uncertain_properties')
+                attempted = intent
+                operation['write_refusal'] = refusal
+                operation['intent'] = option_refusal_intent(attempted, operation['prior_properties'])
+                operation.update(phase='verified', response=None)
+                version = store.compare_and_set(version, value)
+                intent = operation['intent']; wire_row = adapter(row, operation)
+                snapshot = refused_readback
+            else:
+                e.fail('uncertain_properties')
         except Exception:
             e.fail('uncertain_properties')
-        if response != operation['body_receipt']['page_id']: e.fail('uncertain_properties')
-        operation.update(phase='acknowledged', response=response)
-        version = store.compare_and_set(version, value)
+        if operation['phase'] != 'verified':
+            if response != operation['body_receipt']['page_id']: e.fail('uncertain_properties')
+            operation.update(phase='acknowledged', response=response)
+            version = store.compare_and_set(version, value)
     if intent['patch']:
         # Unknown/acknowledged attempts only reconcile. Never call PATCH again.
         guard(page=False)
