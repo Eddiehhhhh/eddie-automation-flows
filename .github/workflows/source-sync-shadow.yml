@@ -66,7 +66,7 @@ jobs:
               result = {}
           allowed = ('source', 'scope', 'source_complete', 'status', 'sample_pages_limit',
                      'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes',
-                     'published', 'run', 'exit')
+                     'changed_file_categories', 'published', 'run', 'exit')
           summary = {k: result[k] for k in allowed if k in result}
           summary['read_step_outcome'] = os.environ['READ_OUTCOME']
           if not result:
