@@ -140,6 +140,22 @@ jobs:
                   resolver = proof.PrivateRecords(remote)
                   resolver.expected_head = remote.ref('refs/heads/main')
                   client.private_proof_source = resolver
+                  import get_publication_registered_predecessor as registered
+                  import get_notion_idle_rotation as rotation
+                  registered_locator = registered.discovery_locator(policy)
+                  print('registered_locator=' + ('none' if registered_locator is None else
+                      str(registered_locator[0]) + '/' + str(registered_locator[1])), flush=True)
+                  original_source_search = rotation.source_search
+                  def traced_source_search(search_client, search_policy, listed, *, exclude=None):
+                      result = original_source_search(search_client, search_policy, listed, exclude=exclude)
+                      if result is None:
+                          print('rotation_locator=none', flush=True)
+                      else:
+                          proposal = result['proposal']
+                          print('rotation_locator=' + str(result['locator'][0]) + '/' + str(result['locator'][1])
+                              + ' proposal=' + ('none' if proposal is None else str(proposal[0]) + '/' + str(proposal[1])), flush=True)
+                      return result
+                  rotation.source_search = traced_source_search
                   original_fail = provenance.fail
                   def traced_fail(code):
                       if code == 'provenance_run_changed':
