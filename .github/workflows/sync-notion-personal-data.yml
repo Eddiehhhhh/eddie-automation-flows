@@ -72,8 +72,8 @@ jobs:
               "original_source_enabled", "current_export_enabled", "property_proof_enabled"
           )):
               raise SystemExit("Private Flomo configuration is invalid.")
-          if value.get("original_source_enabled") is not False or value.get("current_export_enabled") is not False:
-              raise SystemExit("Direct Flomo API exports must stay disabled; this workflow reads Notion only.")
+          if value.get("original_source_enabled") is not False:
+              raise SystemExit("Direct Flomo API capture must stay disabled; this workflow reads Notion only.")
           PYTHON
 
       - name: Stage Flomo-ID notes from Notion only
@@ -94,7 +94,7 @@ jobs:
         if: ${{ !cancelled() && (steps.flomo_sync.outcome == 'success' || steps.flomo_sync.outcome == 'failure') }}
         run: |
           paths=()
-          for item in "Raw/02 Notion/01 Databases/碎片中心/flomo-stage" ".github/state/notion-flomo-sync-state.json"; do
+          for item in "Raw/02 Notion/01 Databases/碎片中心/flomo-stage" ".github/state/notion-flomo-sync-state.json" "Raw/01 Flomo/云端" ".github/state/flomo-cloud-current-state.json"; do
             if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
           done
           if test "${#paths[@]}" -gt 0; then
