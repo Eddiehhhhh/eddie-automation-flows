@@ -177,6 +177,23 @@ jobs:
                           print('run_change_check=' + check + ' conditions=' + (','.join(fields) or 'other'), flush=True)
                       original_fail(code)
                   provenance.fail = traced_fail
+                  original_candidate = provenance.verified_candidate
+                  def traced_candidate(candidate_client, listed, candidate_policy, **kwargs):
+                      run_id = listed.get('id', 'unknown')
+                      attempt = kwargs.get('run_attempt', listed.get('run_attempt', 'unknown'))
+                      try:
+                          value = original_candidate(candidate_client, listed, candidate_policy, **kwargs)
+                      except Exception as error:
+                          code = str(error)
+                          safe = code if code in {'provenance_run_changed', 'provenance_run', 'provenance_job',
+                              'provenance_record', 'provenance_controller_mismatch', 'provenance_no_verified_publication',
+                              'provenance_transport', 'provenance_logs_unavailable', 'provenance_timestamp'} else 'failed'
+                          print('candidate_check=' + str(run_id) + '/' + str(attempt) + ':' + safe, flush=True)
+                          raise
+                      state = 'verified' if value is not None else 'no_publication'
+                      print('candidate_check=' + str(run_id) + '/' + str(attempt) + ':' + state, flush=True)
+                      return value
+                  provenance.verified_candidate = traced_candidate
                   result = provenance.discover(
                       client, policy, exclude_run_id=41941431387,
                       exclude_run_attempt=1, capture_history_witness=True)
