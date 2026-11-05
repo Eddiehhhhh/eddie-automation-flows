@@ -183,7 +183,7 @@ jobs:
           GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           POLICY_SHA256: 'b7753e2814916030819cd146e9e1313ea53ae5cc37ae8d28a860ea395c384dbe'
-          SCOPE_SHA256: '91d6df5e4981863c5d00d7c236e78cc30616febca486976c7126f5f82d643ab8'
+          SCOPE_SHA256: 'c764c39e61b2d62609e35c2adbb155a488e71f8f3a4ac5b4fda8e7080b9a39f2'
         run: |
           args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
           if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
