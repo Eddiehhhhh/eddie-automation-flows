@@ -53,7 +53,22 @@ class GetSampleTests(unittest.TestCase):
         self.assertEqual(ast.literal_eval(allowed), (
             'source', 'scope', 'source_complete', 'status', 'sample_pages_limit',
             'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes',
-            'published', 'run', 'exit'))
+            'changed_file_categories', 'published', 'run', 'exit'))
+
+    def test_shadow_diff_reports_only_file_categories(self):
+        paths = {
+            'assets': '_assets/images/file.png',
+            'notes': 'Raw/03 Get/01 Notes/private title.md',
+            'recordings': 'Raw/03 Get/99 录音卡/2026/2026-11/note.md',
+            'raw_cache': 'Raw/03 Get/03 State/raw-cache/record.json',
+            'attachment_metadata': 'Raw/03 Get/03 State/attachments/manifest.json',
+            'state': 'Raw/03 Get/03 State/pending.json',
+            'other': 'unexpected.txt',
+        }
+        for category, path in paths.items():
+            with self.subTest(category=category):
+                self.assertEqual(shadow.difference_categories({}, {path: ('new', 1)}), {category: 1})
+                self.assertEqual(shadow.difference_categories({path: ('old', 1)}, {}), {category: 1})
 
     def test_authenticated_get_rejects_unlisted_path_before_opening(self):
         with patch.object(g.urllib.request, 'build_opener') as build:
