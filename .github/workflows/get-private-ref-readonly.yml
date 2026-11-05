@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -78,8 +79,9 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('sha=' + obj['sha'] + '\n')
           PY
-      - name: Verify only the registered historical publication (read only)
+      - name: Reproduce the failed publication-slot check (read only)
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: |
           python - <<'PY'
@@ -100,27 +102,20 @@ jobs:
           policy_b64 = re.search(r"POLICY_B64: '([^']+)'", workflow).group(1)
           policy = json.loads(base64.b64decode(policy_b64, validate=True))
           policy_sha = re.search(r"POLICY_SHA256: '([0-9a-f]{64})'", workflow).group(1)
-          token = os.environ.get('PRIVATE_VAULT_TOKEN')
+          private_token = os.environ.get('PRIVATE_VAULT_TOKEN')
+          github_token = os.environ.get('GITHUB_TOKEN')
 
           try:
               with tempfile.TemporaryDirectory(prefix='registered-proof-') as directory:
                   binding_path = Path(directory) / 'bindings' / 'runtime-bindings.json'
-                  remote = retention.GitHubRemote(None, token)
+                  remote = retention.GitHubRemote(None, private_token)
                   bindings.bootstrap(remote, str(binding_path))
                   os.environ[bindings.ENV_FILE] = str(binding_path)
                   import get_private_proof as proof
                   import get_publication_provenance as provenance
-                  import get_publication_registered_predecessor as registered
 
                   policy = provenance.validate_policy(policy, policy_sha)
-                  rows = registered.registry()
-                  row = next((item for item in rows
-                              if item['run_binding']['id'] == 40657306710
-                              and item['run_binding']['run_attempt'] == 1), None)
-                  if row is None:
-                      print('registered_candidate=unavailable')
-                      raise SystemExit(1)
-                  client = provenance.PublicGithub(token)
+                  client = provenance.PublicGithub(github_token)
                   resolver = proof.PrivateRecords(remote)
                   resolver.expected_head = remote.ref('refs/heads/main')
                   client.private_proof_source = resolver
@@ -131,11 +126,10 @@ jobs:
                           print('run_change_check=' + frame.f_code.co_name + ':' + str(frame.f_lineno), flush=True)
                       original_fail(code)
                   provenance.fail = traced_fail
-                  run = provenance.check_run_identity(
-                      client.json('/actions/runs/40657306710'), policy)
-                  result = provenance.verified_candidate(
-                      client, run, policy, run_attempt=1, include_verified_details=True)
-                  print('registered_candidate=' + ('verified' if result is not None else 'no_publication'))
+                  result = provenance.discover(
+                      client, policy, exclude_run_id=41937842038,
+                      exclude_run_attempt=1, reserve_next_run=True)
+                  print('publication_slot_check=' + str(result.get('status', 'verified')))
           except SystemExit:
               raise
           except Exception as error:
@@ -143,6 +137,6 @@ jobs:
               allowed = {'provenance_run_changed', 'provenance_run', 'provenance_job',
                          'provenance_no_verified_publication', 'private_proof_unverified',
                          'provenance_transport', 'provenance_timestamp'}
-              print('registered_candidate=' + (code if code in allowed else 'failed'))
+              print('publication_slot_check=' + (code if code in allowed else 'failed'))
               raise SystemExit(1)
           PY
