@@ -1,4 +1,4 @@
-name: Sync Notion personal data to Raw
+name: Sync Notion flomo notes to Raw
 
 on:
   schedule:
@@ -7,71 +7,17 @@ on:
     - cron: "20 7 * * *"
   workflow_dispatch:
     inputs:
-      notion_sources_only:
-        description: "Run only the private complete original source adapters"
-        required: false
-        type: boolean
-        default: false
-      notion_source_key:
-        description: "One configured original source key, or douban/episode; empty rotates enabled sources"
-        required: false
-        type: string
-        default: ""
-      notion_source_max_pages:
-        description: "Maximum original pages to attempt within the private time/request budgets"
-        required: false
-        type: string
-        default: "50"
-      messages_only:
-        description: "Run only the private notehelper message collector"
-        required: false
-        type: boolean
-        default: false
-      raw16_only:
-        description: "Run only the private article source collector"
-        required: false
-        type: boolean
-        default: false
-      flomo_stage_only:
-        description: "Run only the private Notion flomo staging candidate"
-        required: false
-        type: boolean
-        default: false
       flomo_max_pages:
-        description: "Maximum changed flomo pages to stage; 0 is unlimited"
+        description: Maximum changed Flomo pages to stage; 0 is unlimited
         required: false
         type: string
         default: "50"
-      checkout_ref:
-        description: "Branch or commit to checkout before running the sync"
-        required: false
-        type: string
-        default: "main"
-      full_sync:
-        description: "Backfill all listened Xiaoyuzhou episodes"
-        required: false
-        type: boolean
-        default: false
-      only_missing:
-        description: "During full sync, skip episodes already written under Raw/13 小宇宙"
-        required: false
-        type: boolean
-        default: true
-      max_episodes:
-        description: "Maximum Xiaoyuzhou episodes to sync in one full backfill run"
-        required: false
-        type: string
-        default: "50"
-      hours_back:
-        description: "Incremental lookback window for Xiaoyuzhou sync"
-        required: false
-        type: string
-        default: "168"
   repository_dispatch:
+    # Keep the existing event type for callers; every trigger runs the same Flomo-only scope.
     types: [sync-notion-personal-data]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: eddie-private-vault-writers
@@ -85,21 +31,10 @@ jobs:
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
       VAULT_ROOT: ${{ github.workspace }}/vault
     steps:
-      - name: Record private writer persistence deadline
-        run: |
-          echo "NOTION_SOURCE_JOB_DEADLINE=$(( $(date +%s) + 2380 ))" >> "$GITHUB_ENV"
-
-      - name: Validate manual source selection
-        id: source_selection
-        if: ${{ github.event_name == 'workflow_dispatch' && ((inputs.notion_sources_only && (inputs.messages_only || inputs.flomo_stage_only || inputs.raw16_only || inputs.full_sync)) || (inputs.notion_source_key != '' && !inputs.notion_sources_only) || (inputs.messages_only && (inputs.flomo_stage_only || inputs.raw16_only || inputs.full_sync)) || (inputs.flomo_stage_only && inputs.full_sync) || (inputs.raw16_only && (inputs.flomo_stage_only || inputs.full_sync))) }}
-        run: |
-          echo "Choose one source-only mode per run."
-          exit 1
-
-      - name: Check out repository
+      - name: Check out automation repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+          ref: main
 
       - name: Check out private vault
         id: private_checkout
@@ -110,339 +45,74 @@ jobs:
           path: vault
           fetch-depth: 1
           sparse-checkout: |
-            ${{ inputs.flomo_stage_only && 'Raw/01 Flomo' || '' }}
-            ${{ inputs.flomo_stage_only && 'Raw/02 Notion/01 Databases/碎片中心/flomo-stage' || '' }}
-            ${{ inputs.notion_sources_only && inputs.notion_source_key == 'fragments' && 'Raw/02 Notion/01 Databases/碎片中心/flomo-stage/versions' || '' }}
-            ${{ inputs.flomo_stage_only && '.github/state' || '' }}
-            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && '.github/state' || '' }}
-            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && 'Raw/02 Notion/03 State' || '' }}
-            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && 'Raw/02 Notion/云端原文' || '' }}
-            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && 'Raw/14 豆瓣影视/云端原文' || '' }}
-            ${{ inputs.notion_sources_only && inputs.notion_source_key != '' && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && 'Raw/13 小宇宙/云端原文' || '' }}
+            .github/state
+            Raw/01 Flomo
+            Raw/02 Notion/01 Databases/碎片中心/flomo-stage
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
-      - name: Sync podcast notes
-        if: ${{ !inputs.notion_sources_only && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
-            args=(--all-current)
-            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.only_missing || 'true' }}" = "true" ]; then
-              args+=(--only-missing)
-            fi
-            max_episodes="${{ github.event_name == 'workflow_dispatch' && inputs.max_episodes || '50' }}"
-            if [ -n "$max_episodes" ] && [ "$max_episodes" != "0" ]; then
-              args+=(--max-episodes "$max_episodes")
-            fi
-            python scripts/run_private_command.py --label "podcast full sync" -- python -u scripts/sync_my_podcast_to_raw.py "${args[@]}"
-          else
-            python scripts/run_private_command.py --label "podcast sync" -- python -u scripts/sync_my_podcast_to_raw.py --hours-back "${{ github.event_name == 'workflow_dispatch' && inputs.hours_back || '168' }}"
-          fi
-
-      - name: Sync workout daily notes
-        if: ${{ !inputs.notion_sources_only && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && !(github.event_name == 'workflow_dispatch' && inputs.full_sync) }}
-        run: |
-          set -euo pipefail
-          python scripts/run_private_command.py --label "workout sync" -- python scripts/sync_notion_workout_daily_to_raw.py
-
-      - name: Sync douban books
-        if: ${{ !inputs.notion_sources_only && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
-        run: |
-          set -euo pipefail
-          python scripts/run_private_command.py --label "douban sync" -- python scripts/sync_notion_douban_to_raw.py
-
-      - name: Commit Raw updates
-        if: ${{ !inputs.notion_sources_only && success() && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only }}
-        run: |
-          target_ref="${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref_name }}"
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full_sync || 'false' }}" = "true" ]; then
-            paths=(--path ".github/state/xiaoyuzhou-sync-state.json" --path "Raw/13 小宇宙")
-          else
-            paths=(--path ".github/state/xiaoyuzhou-sync-state.json" --path "Raw/12 我的运动" --path "Raw/13 小宇宙" --path "Raw/14 豆瓣影视")
-          fi
-          python scripts/commit_private_vault.py --all --ref "$target_ref" \
-            --message "Sync Notion personal data to Raw" "${paths[@]}"
-
-      - name: Read private flomo stage configuration
+      - name: Require Flomo staging configuration
         id: flomo_config
-        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.raw16_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.flomo_stage_only) }}
-        continue-on-error: true
         run: |
           python - <<'PYTHON'
           import json, os
           from pathlib import Path
-          path = Path(os.environ['VAULT_ROOT']) / '.github/state/notion-flomo-config.json'
-          enabled = False
-          if path.exists():
-              value = json.loads(path.read_bytes())
-              if value.get('version') != 1 or type(value.get('stage_enabled')) is not bool:
-                  raise ValueError('Invalid private flomo configuration')
-              if any(type(value.get(key, False)) is not bool for key in ('original_source_enabled', 'current_export_enabled', 'property_proof_enabled')):
-                  raise ValueError('Invalid private flomo original source configuration')
-              enabled = value['stage_enabled']
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
-              stream.write('enabled=' + str(enabled).lower() + '\n')
+          path = Path(os.environ["VAULT_ROOT"]) / ".github/state/notion-flomo-config.json"
+          if not path.is_file():
+              raise SystemExit("Private Flomo configuration is missing.")
+          value = json.loads(path.read_bytes())
+          if value.get("version") != 1 or value.get("stage_enabled") is not True:
+              raise SystemExit("Private Notion Flomo staging is not enabled.")
+          if value.get("database_id") != "11233b33-7f23-8024-9555-cb8de8c58e02":
+              raise SystemExit("Private Notion Flomo staging must target the approved Fragments Center database.")
+          if any(type(value.get(key, False)) is not bool for key in (
+              "original_source_enabled", "current_export_enabled", "property_proof_enabled"
+          )):
+              raise SystemExit("Private Flomo configuration is invalid.")
+          if value.get("original_source_enabled") is not False or value.get("current_export_enabled") is not False:
+              raise SystemExit("Direct Flomo API exports must stay disabled; this workflow reads Notion only.")
           PYTHON
 
-      - name: Require requested flomo stage configuration
-        id: flomo_requested
-        continue-on-error: true
-        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.flomo_stage_only && steps.flomo_config.outputs.enabled != 'true' }}
-        run: |
-          echo "Private flomo stage configuration is not enabled."
-          exit 1
-
-      - name: Stage Notion flomo content privately
+      - name: Stage Flomo-ID notes from Notion only
         id: flomo_sync
-        if: ${{ !cancelled() && steps.flomo_config.outcome == 'success' && steps.flomo_config.outputs.enabled == 'true' }}
         continue-on-error: true
+        if: ${{ !cancelled() && steps.flomo_config.outcome == 'success' }}
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          FLOMO_WEB_ACCESS_TOKEN: ${{ secrets.FLOMO_WEB_ACCESS_TOKEN }}
-          FLOMO_WEB_SIGNING_SUFFIX: ${{ secrets.FLOMO_WEB_SIGNING_SUFFIX }}
           FLOMO_MAX_PAGES: ${{ inputs.flomo_max_pages || '50' }}
         run: |
-          python scripts/run_private_command.py --label "Notion flomo staging" -- \
+          python scripts/run_private_command.py --label "Notion Flomo staging" -- \
             python scripts/sync_notion_flomo_to_raw.py --apply \
             --config "$VAULT_ROOT/.github/state/notion-flomo-config.json" \
             --max-pages "$FLOMO_MAX_PAGES"
 
-      - name: Persist flomo staging and object progress
+      - name: Persist Flomo staging and progress
         id: flomo_commit
         if: ${{ !cancelled() && (steps.flomo_sync.outcome == 'success' || steps.flomo_sync.outcome == 'failure') }}
         run: |
           paths=()
-          for item in "Raw/02 Notion/01 Databases/碎片中心/flomo-stage" ".github/state/notion-flomo-sync-state.json" "Raw/01 Flomo/云端" ".github/state/flomo-cloud-current-state.json"; do
+          for item in "Raw/02 Notion/01 Databases/碎片中心/flomo-stage" ".github/state/notion-flomo-sync-state.json"; do
             if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
           done
           if test "${#paths[@]}" -gt 0; then
             python scripts/commit_private_vault.py --all --ref main \
-              --message "Persist private Notion flomo staging" "${paths[@]}"
+              --message "Persist private Notion Flomo staging" "${paths[@]}"
           fi
 
-      - name: Verify remote flomo object state
+      - name: Verify private Flomo state
         id: flomo_readback
         if: ${{ !cancelled() && steps.flomo_commit.outcome == 'success' }}
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: |
-          python scripts/run_private_command.py --label "Private flomo state readback" -- \
+          python scripts/run_private_command.py --label "Private Flomo state readback" -- \
             python scripts/sync_notion_flomo_to_raw.py --verify-remote-state
 
-      - name: Report incomplete flomo staging
-        if: ${{ !cancelled() && (steps.flomo_config.outcome == 'failure' || steps.flomo_requested.outcome == 'failure' || steps.flomo_sync.outcome == 'failure' || steps.flomo_commit.outcome == 'failure' || steps.flomo_readback.outcome == 'failure') }}
+      - name: Report incomplete Flomo sync
+        if: ${{ always() && !cancelled() && (steps.flomo_config.outcome == 'failure' || steps.flomo_sync.outcome == 'failure' || steps.flomo_commit.outcome == 'failure' || steps.flomo_readback.outcome == 'failure') }}
         run: |
-          echo "Flomo staging is incomplete; inspect the private coverage report and persistence/readback steps."
-          exit 2
-
-      - name: Read private article source configuration
-        id: raw16_config
-        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.messages_only && (github.event_name == 'schedule' || inputs.raw16_only) }}
-        continue-on-error: true
-        run: |
-          python - <<'PYTHON'
-          import json, os
-          from pathlib import Path
-          path = Path(os.environ['VAULT_ROOT']) / '.github/state/notion-articles-config.json'
-          enabled = False
-          if path.exists():
-              value = json.loads(path.read_bytes())
-              if value.get('version') != 1 or type(value.get('enabled')) is not bool:
-                  raise ValueError('Invalid private article configuration')
-              enabled = value['enabled']
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
-              stream.write('enabled=' + str(enabled).lower() + '\n')
-          PYTHON
-
-      - name: Require requested article configuration
-        id: raw16_requested
-        continue-on-error: true
-        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.raw16_only && steps.raw16_config.outputs.enabled != 'true' }}
-        run: |
-          echo "Private article source configuration is not enabled."
-          exit 1
-
-      - name: Collect Notion articles privately
-        id: raw16_sync
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.raw16_config.outcome == 'success' && steps.raw16_config.outputs.enabled == 'true' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-        run: |
-          python scripts/run_private_command.py --label "Notion article source" -- \
-            python scripts/sync_notion_articles_to_raw.py --apply
-
-      - name: Persist article content and progress
-        id: raw16_commit
-        if: ${{ !cancelled() && (steps.raw16_sync.outcome == 'success' || steps.raw16_sync.outcome == 'failure') }}
-        run: |
-          paths=()
-          for item in "Raw/16 笔记同步助手/云端原文" ".github/state/notion-articles-sync-state.json"; do
-            if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
-          done
-          if test "${#paths[@]}" -gt 0; then
-            python scripts/commit_private_vault.py --all --ref main \
-              --message "Persist private Notion article source" "${paths[@]}"
-          fi
-
-      - name: Verify private article content and state
-        id: raw16_readback
-        if: ${{ !cancelled() && steps.raw16_commit.outcome == 'success' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-        run: |
-          python scripts/run_private_command.py --label "Article source readback" -- \
-            python scripts/sync_notion_articles_to_raw.py --verify-remote-state
-
-      - name: Report incomplete article source capture
-        if: ${{ !cancelled() && (steps.raw16_config.outcome == 'failure' || steps.raw16_requested.outcome == 'failure' || steps.raw16_sync.outcome == 'failure' || steps.raw16_commit.outcome == 'failure' || steps.raw16_readback.outcome == 'failure') }}
-        run: |
-          echo "Article source capture is incomplete; inspect private coverage and readback."
-          exit 2
-
-      - name: Read private message source configuration
-        id: messages_config
-        continue-on-error: true
-        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && (github.event_name == 'schedule' || inputs.messages_only) }}
-        run: python scripts/sync_notehelper_messages_to_raw.py --check-config
-
-      - name: Require requested message configuration
-        id: messages_requested
-        continue-on-error: true
-        if: ${{ !inputs.notion_sources_only && !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.messages_only && steps.messages_config.outputs.enabled != 'true' }}
-        run: |
-          echo "Private message configuration is not enabled."
-          exit 1
-
-      - name: Collect notehelper messages privately
-        id: messages_sync
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.messages_config.outcome == 'success' && steps.messages_config.outputs.enabled == 'true' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          NOTEBOOKSYNCER_API_KEY: ${{ secrets.NOTEBOOKSYNCER_API_KEY }}
-        run: |
-          python scripts/run_private_command.py --label "Private message source" -- \
-            python scripts/sync_notehelper_messages_to_raw.py --apply
-
-      - name: Persist message content and progress
-        id: messages_commit
-        if: ${{ !cancelled() && (steps.messages_sync.outcome == 'success' || steps.messages_sync.outcome == 'failure') }}
-        run: |
-          paths=()
-          for item in "Raw/16 笔记同步助手/云端消息" ".github/state/notehelper-messages-state.json"; do
-            if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
-          done
-          if test "${#paths[@]}" -gt 0; then
-            python scripts/commit_private_vault.py --all --ref main \
-              --message "Persist private notehelper messages" "${paths[@]}"
-          fi
-
-      - name: Verify private message content and state
-        id: messages_readback
-        if: ${{ !cancelled() && steps.messages_commit.outcome == 'success' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-        run: |
-          python scripts/run_private_command.py --label "Message source readback" -- \
-            python scripts/sync_notehelper_messages_to_raw.py --verify-remote-state
-
-      - name: Report incomplete message capture
-        if: ${{ !cancelled() && (steps.messages_config.outcome == 'failure' || steps.messages_requested.outcome == 'failure' || steps.messages_sync.outcome == 'failure' || steps.messages_commit.outcome == 'failure' || steps.messages_readback.outcome == 'failure') }}
-        run: |
-          echo "Message capture is incomplete; inspect private coverage and readback."
-          exit 2
-
-      - name: Read private complete source configuration
-        id: sources_config
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
-        run: python scripts/sync_notion_sources_to_raw.py --check-config
-
-      - name: Read private complete film source configuration
-        id: film_source_config
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && (inputs.notion_source_key == '' || inputs.notion_source_key == 'douban') && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
-        run: python scripts/sync_notion_sources_to_raw.py --check-douban-config
-
-      - name: Read private complete Episode source configuration
-        id: episode_source_config
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && !inputs.full_sync && !inputs.flomo_stage_only && !inputs.raw16_only && !inputs.messages_only && (inputs.notion_source_key == '' || inputs.notion_source_key == 'episode') && (github.event_name == 'schedule' || inputs.notion_sources_only) }}
-        run: python scripts/sync_notion_sources_to_raw.py --check-episode-config
-
-      - name: Require requested complete source configuration
-        id: sources_requested
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.private_checkout.outcome == 'success' && steps.source_selection.outcome != 'failure' && inputs.notion_sources_only && ((inputs.notion_source_key == 'douban' && steps.film_source_config.outputs.enabled != 'true') || (inputs.notion_source_key == 'episode' && steps.episode_source_config.outputs.enabled != 'true') || (inputs.notion_source_key != 'douban' && inputs.notion_source_key != 'episode' && steps.sources_config.outputs.enabled != 'true')) }}
-        run: |
-          echo "Requested private original source adapter is not enabled."
-          exit 1
-
-      - name: Capture complete Notion originals privately
-        id: sources_sync
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.sources_config.outcome == 'success' && steps.sources_config.outputs.enabled == 'true' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          NOTION_SOURCE_KEY: ${{ inputs.notion_source_key || '' }}
-          NOTION_SOURCE_MAX_PAGES: ${{ inputs.notion_source_max_pages || '50' }}
-        run: |
-          args=(--apply --max-pages "$NOTION_SOURCE_MAX_PAGES")
-          if test -n "$NOTION_SOURCE_KEY"; then args+=(--source-key "$NOTION_SOURCE_KEY"); fi
-          python scripts/run_private_command.py --label "Complete original Notion sources" --timeout 900 -- \
-            python scripts/sync_notion_sources_to_raw.py "${args[@]}"
-
-      - name: Capture complete film originals through existing caller
-        id: film_source_sync
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.film_source_config.outcome == 'success' && steps.film_source_config.outputs.enabled == 'true' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          NOTION_SOURCE_MAX_PAGES: ${{ inputs.notion_source_max_pages || '50' }}
-        run: |
-          python scripts/run_private_command.py --label "Complete original film source" -- \
-            python scripts/sync_notion_douban_to_raw.py --original-source-only --max-pages "$NOTION_SOURCE_MAX_PAGES"
-
-      - name: Capture complete Episode originals through existing caller
-        id: episode_source_sync
-        continue-on-error: true
-        if: ${{ !cancelled() && steps.episode_source_config.outcome == 'success' && steps.episode_source_config.outputs.enabled == 'true' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          NOTION_SOURCE_MAX_PAGES: ${{ inputs.notion_source_max_pages || '50' }}
-        run: |
-          python scripts/run_private_command.py --label "Complete original Episode source" -- \
-            python scripts/sync_my_podcast_to_raw.py --original-source-only --max-pages "$NOTION_SOURCE_MAX_PAGES"
-
-      - name: Persist complete originals and durable progress
-        id: sources_commit
-        if: ${{ !cancelled() && (steps.sources_sync.outcome == 'success' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'success' || steps.film_source_sync.outcome == 'failure' || steps.episode_source_sync.outcome == 'success' || steps.episode_source_sync.outcome == 'failure') }}
-        run: |
-          paths=()
-          for item in "Raw/02 Notion/云端原文" ".github/state/notion-sources-sync-state.json" "Raw/14 豆瓣影视/云端原文" ".github/state/notion-douban-source-state.json" "Raw/13 小宇宙/云端原文" ".github/state/notion-episode-source-state.json"; do
-            if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
-          done
-          if test "${#paths[@]}" -gt 0; then
-            python scripts/commit_private_vault.py --all --ref main \
-              --message "Persist complete private Notion originals and progress" "${paths[@]}"
-          fi
-
-      - name: Verify complete original source remote state
-        id: sources_readback
-        if: ${{ !cancelled() && steps.sources_commit.outcome == 'success' }}
-        env:
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-        run: |
-          python scripts/run_private_command.py --label "Complete original source readback" -- \
-            python scripts/sync_notion_sources_to_raw.py --verify-remote-state
-
-      - name: Report incomplete original source capture
-        if: ${{ !cancelled() && (steps.sources_config.outcome == 'failure' || steps.film_source_config.outcome == 'failure' || steps.episode_source_config.outcome == 'failure' || steps.sources_requested.outcome == 'failure' || steps.sources_sync.outcome == 'failure' || steps.film_source_sync.outcome == 'failure' || steps.episode_source_sync.outcome == 'failure' || steps.sources_commit.outcome == 'failure' || steps.sources_readback.outcome == 'failure') }}
-        run: |
-          echo "Complete original source capture is partial; inspect private coverage, soft budgets and remote readback."
+          echo "Flomo sync is incomplete; inspect private coverage and persistence/readback steps."
           exit 2

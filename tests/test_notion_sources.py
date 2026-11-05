@@ -302,32 +302,11 @@ class FilmOwner(unittest.TestCase):
 
 
 class Workflow(unittest.TestCase):
-    def test_source_mode_partial_persistence_independent_config_and_cancel(self):
-        from types import SimpleNamespace
-        import re
+    def test_personal_notion_workflow_no_longer_exports_other_notion_databases(self):
         text=(Path(__file__).resolve().parents[1]/'.github/workflows/sync-notion-personal-data.yml').read_text()
-        steps={p.splitlines()[0]:p for p in text.split('      - name: ')[1:]}
-        fragments_checkout=steps['Check out private vault'].split('sparse-checkout: |',1)[1]
-        self.assertIn("inputs.notion_sources_only && inputs.notion_source_key == 'fragments' && 'Raw/02 Notion/01 Databases/碎片中心/flomo-stage/versions'",fragments_checkout)
-        def allowed(name,key='morning',cancelled=False,outcomes=None,enabled=True):
-            statuses={'private_checkout':'success','source_selection':'skipped','sources_config':'success','film_source_config':'success','episode_source_config':'success','episode_source_sync':'skipped','sources_requested':'skipped','sources_sync':'failure','film_source_sync':'success','sources_commit':'success','sources_readback':'success'};statuses.update(outcomes or {})
-            model=SimpleNamespace(**{k:SimpleNamespace(outcome=v) for k,v in statuses.items()})
-            model.sources_config.outputs=SimpleNamespace(enabled='true' if enabled else '')
-            model.film_source_config.outputs=SimpleNamespace(enabled='true')
-            model.episode_source_config.outputs=SimpleNamespace(enabled='true')
-            expression=steps[name].split('        if: ${{ ',1)[1].split(' }}',1)[0].replace('!cancelled()','not cancelled()')
-            expression=re.sub(r'!inputs\.', 'not inputs.',expression).replace('&&','and').replace('||','or')
-            return eval(expression,{'__builtins__':{}},{'steps':model,'inputs':SimpleNamespace(notion_sources_only=True,notion_source_key=key,full_sync=False,flomo_stage_only=False,raw16_only=False,messages_only=False),'github':SimpleNamespace(event_name='workflow_dispatch'),'cancelled':lambda:cancelled})
-        config='Read private complete source configuration';film='Read private complete film source configuration';capture='Capture complete Notion originals privately';commit='Persist complete originals and durable progress'
-        self.assertTrue(allowed(config));self.assertFalse(allowed(config,cancelled=True));self.assertFalse(allowed(film));self.assertTrue(allowed(film,key='douban'));self.assertFalse(allowed(config,key='douban'))
-        self.assertTrue(allowed(capture,outcomes={'film_source_config':'failure'}));self.assertTrue(allowed('Capture complete film originals through existing caller',outcomes={'sources_config':'failure'}))
-        self.assertTrue(allowed(commit));self.assertFalse(allowed(commit,cancelled=True));self.assertTrue(allowed('Report incomplete original source capture'))
-        self.assertLess(text.index('name: Commit Raw updates'),text.index('name: Capture complete Notion originals privately'))
-        for path in (m.BASE,m.STATE,m.DOUBAN_BASE,m.DOUBAN_STATE):self.assertIn(str(path),steps[commit])
-        for name in ('Sync podcast notes','Sync workout daily notes','Sync douban books','Read private flomo stage configuration','Read private article source configuration','Read private message source configuration'):
-            self.assertIn('!inputs.notion_sources_only',steps[name])
-        self.assertIn('continue-on-error: true',steps[config]);self.assertIn('continue-on-error: true',steps[film]);self.assertNotIn('success()',steps[capture])
-        self.assertEqual(text.count('- cron:'),2);self.assertIn('group: eddie-private-vault-writers',text)
+        for forbidden in ('sync_notion_sources_to_raw.py', 'sync_notion_douban_to_raw.py',
+                          'sync_my_podcast_to_raw.py', 'notion_sources_only', 'notion_source_key'):
+            self.assertNotIn(forbidden, text)
 
 
 if __name__=='__main__':unittest.main()
