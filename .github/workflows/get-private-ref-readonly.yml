@@ -97,6 +97,8 @@ jobs:
           sys.path.insert(0, str(runtime_scripts))
           import get_private_preview_retention as retention
           import get_private_runtime_bindings as bindings
+          import get_recurring_entry as entry
+          import get_recurring_policy_recovery as recovery
 
           workflow = Path('automation/.github/workflows/get-canonical.yml').read_text(encoding='utf-8')
           policy_b64 = re.search(r"POLICY_B64: '([^']+)'", workflow).group(1)
@@ -117,6 +119,8 @@ jobs:
 
                   old_policy_sha = policy_sha
                   policy['code_sha'] = '2c549d7e816563cf858102f88dbe48a28146346d'
+                  policy['rules_sha256'] = entry.rules_sha256()
+                  policy['get_policy_sha256'] = recovery.current_get_policy()
                   policy_bytes = provenance.a.encoded(policy)
                   policy_sha = provenance.a.sha(policy_bytes)
                   policy = provenance.validate_policy(policy, policy_sha)
@@ -129,9 +133,6 @@ jobs:
                       .replace("POLICY_B64: '" + re.search(r"POLICY_B64: '([^']+)'", workflow).group(1) + "'", "POLICY_B64: '" + base64.b64encode(policy_bytes).decode('ascii') + "'")
                       .replace(old_policy_sha, policy_sha)
                       .replace(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1), scope_sha))
-                  print('candidate_policy_b64=' + base64.b64encode(policy_bytes).decode('ascii'))
-                  print('candidate_policy_sha256=' + policy_sha)
-                  print('candidate_scope_sha256=' + scope_sha)
                   if rendered.decode('utf-8') != expected:
                       print('rendered_controller_matches=no')
                       raise SystemExit(1)
@@ -150,6 +151,27 @@ jobs:
                       if old.get('controller_template_sha256') == controller.FIXED_TEMPLATE_SHA256:
                           stable.discard('controller_template_sha256')
                       mismatches = sorted(key for key in stable if policy.get(key) != old[key])
+                      exact_run = row['run_binding']['id'] == 40657306710
+                      old_fixed_template = old.get('controller_template_sha256') == controller.FIXED_TEMPLATE_SHA256
+                      target_template = '1ad7db46e341a8af8bec96e1794793b5ea761534fd62b8b1995f03f393fe3814'
+                      try:
+                          old_template_bytes_valid = controller.a.sha(controller.policy_template_bytes(old)) == controller.FIXED_TEMPLATE_SHA256
+                      except Exception:
+                          old_template_bytes_valid = False
+                      checks = {
+                          'exact_run': exact_run,
+                          'old_fixed_template': old_fixed_template,
+                          'target_policy_template': policy.get('controller_template_sha256') == target_template,
+                          'target_runtime_template': controller.template_sha256() == target_template,
+                          'old_template_bytes_valid': old_template_bytes_valid,
+                          'code_changed': policy.get('code_sha') != old.get('code_sha'),
+                          'rules_current': policy.get('rules_sha256') == entry.rules_sha256(),
+                          'get_policy_current': policy.get('get_policy_sha256') == recovery.current_get_policy(),
+                          'get_policy_changed': policy.get('get_policy_sha256') != old.get('get_policy_sha256'),
+                      }
+                      failed = ','.join(key for key, value in checks.items() if not value) or 'none'
+                      print('registered_forward_checks=' + ','.join(key + ':' + ('yes' if value else 'no') for key, value in checks.items()), flush=True)
+                      print('registered_forward_failed=' + failed, flush=True)
                       print('registered_row=' + str(row['run_binding']['id']) + '/'
                           + str(row['run_binding']['run_attempt']) + ' forward='
                           + ('yes' if idle._forward_policy(policy, row) else 'no')
