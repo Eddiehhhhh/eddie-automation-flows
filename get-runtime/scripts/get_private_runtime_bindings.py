@@ -14,7 +14,7 @@ import re
 import stat
 
 CONTRACT = 'get-private-runtime-bindings-1'
-TRUSTED_BUNDLE_SHA256 = 'da4c0aa7a5f1276c48bf177cb112c6f163f5d322652b762ae7f7a2ffc5fd7512'
+TRUSTED_BUNDLE_SHA256 = '9a4abb3b64bfec6532d69c5f65ffb1a2f0182c429dc0b1eedbb6c72ed4aae1c3'
 MAX_BYTES = 1024 * 1024
 ENV_FILE = 'GET_PRIVATE_BINDINGS_FILE'
 _CACHE = None

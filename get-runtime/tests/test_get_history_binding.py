@@ -73,6 +73,46 @@ class MainlineHistory(unittest.TestCase):
         with self.assertRaises(entry.EntryFailure):
             entry.single_parent(Reader(parents, {self.merge: self.tree}), self.merge)
 
+    def test_exact_single_note_migration_is_allowed_only_for_pilot(self):
+        pilot_id = '1234567890'
+        migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
+        before, migration, before_tree, after_tree = migration_data
+        root = '9' * 40
+        reader = Reader({root: [], before: [root], migration: [before]},
+                        {root: before_tree, before: before_tree, migration: after_tree})
+        with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
+            entry.unchanged_get_history(reader, root, migration, source_id=pilot_id)
+        for source_id in (None, '1234567891'):
+            with self.subTest(source_id=source_id), self.assertRaises(entry.EntryFailure):
+                with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
+                    entry.unchanged_get_history(reader, root, migration, source_id=source_id)
+
+    def test_pilot_exception_does_not_skip_history_before_migration(self):
+        pilot_id = '1234567890'
+        migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
+        root, before, migration, before_tree, after_tree = ('9' * 40, *migration_data)
+        changed_commit = '8' * 40
+        reader = Reader({root: [], changed_commit: [root], before: [changed_commit], migration: [before]},
+                        {root: before_tree, changed_commit: self.changed,
+                         before: before_tree, migration: after_tree})
+        with self.assertRaises(entry.EntryFailure):
+            with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
+                entry.unchanged_get_history(reader, root, migration, source_id=pilot_id)
+
+    def test_pilot_exception_rejects_any_other_commit_or_tree(self):
+        pilot_id = '1234567890'
+        migration_data = ('a' * 40, 'b' * 40, '1' * 40, '2' * 40)
+        before, migration, before_tree, after_tree = migration_data
+        other = 'e' * 40
+        for commit, tree, parent in ((other, after_tree, before),
+                                     (migration, '3' * 40, before),
+                                     (migration, after_tree, other)):
+            with self.subTest(commit=commit, tree=tree, parent=parent), self.assertRaises(entry.EntryFailure):
+                reader = Reader({before: [], migration: [parent], other: [before]},
+                                {before: before_tree, migration: tree, other: after_tree})
+                with patch.object(entry, 'PILOT_SOURCE_ID', pilot_id), patch.object(entry, 'PILOT_MIGRATION', migration_data):
+                    entry.unchanged_get_history(reader, before, commit, source_id=pilot_id)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -25,6 +25,8 @@ RECEIPT = '03 State/canonical-sync-receipt.json'
 FULL_RECEIPT = r.GET + '/' + RECEIPT
 MAX_RECEIPT = 512 * 1024
 MAX_INTERVENING = 1024
+PILOT_SOURCE_ID = _private_bindings.value('get_recurring_entry', 'PILOT_SOURCE_ID')
+PILOT_MIGRATION = _private_bindings.value('get_recurring_entry', 'PILOT_MIGRATION')
 BOOTSTRAP = _private_bindings.value('get_recurring_entry', 'BOOTSTRAP')
 STATE_PATHS = {r.GET + '/' + a.STATE, r.GET + '/' + n.STATE}
 RECEIPT_KEYS = {
@@ -109,7 +111,7 @@ def check_history_witness(value):
     rotation.VerifiedHistoryBundle(value.intervals, rotation._JOINT_SEAL)
 
 
-def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None):
+def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None, source_id=None):
     """Reject an edit-and-revert too, rather than merely comparing tip trees."""
     a.checked(ancestor, 40); a.checked(descendant, 40)
     expected = reader.source_get_tree(ancestor)
@@ -130,8 +132,17 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None)
             ancestor = history_witness.observed_commit
     cursor = descendant
     for _ in range(MAX_INTERVENING + 1):
-        if reader.source_get_tree(cursor) != expected:
-            fail('entry_foreign_get_change')
+        current = reader.source_get_tree(cursor)
+        if current != expected:
+            if source_id != PILOT_SOURCE_ID or type(PILOT_MIGRATION) is not tuple or len(PILOT_MIGRATION) != 4:
+                fail('entry_foreign_get_change')
+            before, migration, before_tree, after_tree = PILOT_MIGRATION
+            if (cursor != migration
+                    or expected != before_tree or current != after_tree
+                    or single_parent(reader, cursor) != before):
+                fail('entry_foreign_get_change')
+            cursor = before
+            continue
         if cursor == ancestor:
             return
         cursor = mainline_parent(reader, cursor, expected)
@@ -287,7 +298,7 @@ def verify_trusted_publication(reader, evidence, anchor, policy, bootstrap, *, h
         prior = read_receipt(reader, previous, receipt['previous_receipt_sha256'], policy)
         if prior['sequence'] + 1 != receipt['sequence'] or prior['state_sha256'] != receipt['previous_legacy_sha256'] or prior['registry_sha256'] != receipt['previous_registry_sha256']:
             fail('entry_receipt_anchor')
-    unchanged_get_history(reader, previous, parent, history_witness=history_witness)
+    unchanged_get_history(reader, previous, parent, history_witness=history_witness, source_id=source_id)
     if a.sha(a.encoded(delta(reader, parent, commit))) != receipt['delta_sha256']:
         fail('entry_foreign_delta')
     all_delta = delta(reader, parent, commit, exclude_receipt=False)
@@ -322,7 +333,7 @@ def trust_current(reader, evidence, parent, approved_rules_sha256, anchor=None, 
     else:
         receipt, states = verify_trusted_publication(reader, evidence, anchor, policy, bootstrap, history_witness=history_witness, source_id=source_id)
         trusted = anchor['commit']
-    unchanged_get_history(reader, trusted, parent, history_witness=history_witness)
+    unchanged_get_history(reader, trusted, parent, history_witness=history_witness, source_id=source_id)
     # Equal full Get trees guarantee these exact state/inventory bytes at parent.
     states = load_states(reader, evidence, parent,
         receipt['state_sha256'] if receipt else bootstrap['legacy_sha256'],
@@ -427,7 +438,7 @@ def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstr
     if not files:
         if plan.get('receipt_commit') is not None:
             verify_trusted_publication(reader, evidence, {'commit': plan['receipt_commit'], 'receipt_sha256': plan['receipt_sha256']}, plan['policy_sha256'], bootstrap, history_witness=history_witness, source_id=source_id)
-            unchanged_get_history(reader, plan['receipt_commit'], plan['parent_commit'], history_witness=history_witness)
+            unchanged_get_history(reader, plan['receipt_commit'], plan['parent_commit'], history_witness=history_witness, source_id=source_id)
         if plan.get('proposed_content_ids') != []:
             fail('entry_content_ids')
         return
