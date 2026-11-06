@@ -12,12 +12,12 @@ import get_recurring_runtime as runtime
 
 def category(stderr):
     value = stderr.lower()
+    if any(x in value for x in (b'authentication failed', b'permission denied', b'403', b'could not read username')):
+        return 'authentication_or_permission'
     if any(x in value for x in (b'missing blob', b'missing tree', b'could not read', b'bad object', b'missing object')):
         return 'missing_object'
     if b'shallow' in value:
         return 'shallow_history'
-    if any(x in value for x in (b'authentication failed', b'permission denied', b'403', b'could not read username')):
-        return 'authentication_or_permission'
     if any(x in value for x in (b'connection', b'timed out', b'network', b'resolve host')):
         return 'network'
     if any(x in value for x in (b'stale info', b'fetch first', b'non-fast-forward')):
