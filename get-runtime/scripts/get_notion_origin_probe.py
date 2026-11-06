@@ -168,6 +168,10 @@ def assess(root, notion_token):
         stop('creator_unverified')
     created = time_of(raw_page.get('created_time'))
     edited = time_of(raw_page.get('last_edited_time'))
+    if created < reserved:
+        stop('page_preexisted_attempt')
+    if edited > confirmed:
+        stop('page_edited_after_receipt')
     if not reserved <= created <= edited <= confirmed:
         stop('time_unverified')
     mark('final_readback')
@@ -188,7 +192,8 @@ def main():
         allowed = {'time_unverified', 'read_unverified', 'credential_unavailable',
                    'history_unverified', 'source_changed', 'attempt_unverified',
                    'owned_unverified', 'run_unverified', 'target_unverified',
-                   'creator_unverified', 'concurrent_change'}
+                   'creator_unverified', 'concurrent_change',
+                   'page_preexisted_attempt', 'page_edited_after_receipt'}
         code = str(exc) if isinstance(exc, ValueError) and str(exc) in allowed else 'probe_failed'
         result = {'status': 'origin_proof_blocked', 'reason': code, 'phase': PHASE}
     print(json.dumps(result, separators=(',', ':')))

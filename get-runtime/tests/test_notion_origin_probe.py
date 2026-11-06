@@ -95,7 +95,18 @@ class OriginProbe(unittest.TestCase):
                     '2026-11-06T18:04:07Z': 1793988247,
                     '2026-11-06T18:04:12Z': 1793988252}[value]
         with patch.object(probe, 'time_of', side_effect=times):
-            with self.assertRaisesRegex(ValueError, 'time_unverified'):
+            with self.assertRaisesRegex(ValueError, 'page_edited_after_receipt'):
+                probe.assess(Path('/unused'), 'notion-token')
+
+    def test_created_before_attempt_cannot_promote(self):
+        self.api.page['created_time'] = '2026-11-06T18:04:01Z'
+        def times(value):
+            return {'2026-11-06T18:03:23Z': 1793988203,
+                    '2026-11-06T18:04:24Z': 1793988264,
+                    '2026-11-06T18:04:01Z': 1793988241,
+                    '2026-11-06T18:04:07Z': 1793988247}[value]
+        with patch.object(probe, 'time_of', side_effect=times):
+            with self.assertRaisesRegex(ValueError, 'page_preexisted_attempt'):
                 probe.assess(Path('/unused'), 'notion-token')
 
     def test_source_hash_mismatch_stops_before_notion_read(self):
