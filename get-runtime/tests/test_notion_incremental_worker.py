@@ -91,7 +91,26 @@ class IncrementalWorker(unittest.TestCase):
         self.assertEqual(result['status'], 'created')
         self.assertEqual(result['page_id'], '1' * 32)
         self.assertEqual(result['owned']['target_sha256'], 'c' * 64)
+        self.assertEqual(result['owned']['origin'], 'created')
         verified.assert_called_once()
+
+    def test_legacy_owned_receipt_cannot_authorize_page_update(self):
+        FakeAPI.created = True
+        legacy = {'note_id': self.ident, 'page_id': '1' * 32,
+                  'source_sha256': 'a' * 64, 'target_sha256': 'b' * 64}
+        with self.assertRaisesRegex(ValueError, 'unowned_target'):
+            worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32,
+                       'token', owned=legacy)
+
+    def test_created_origin_survives_identical_repeat(self):
+        FakeAPI.created = True
+        owned = {'note_id': self.ident, 'page_id': '1' * 32,
+                 'source_sha256': hashlib.sha256(self.data).hexdigest(),
+                 'target_sha256': 'c' * 64, 'origin': 'created'}
+        with patch.object(worker, 'verify_note', return_value='c' * 64):
+            result = worker.run(Path('/unused'), self.ident, self.commit,
+                                'b' * 32, 'token', owned=owned)
+        self.assertEqual(result['owned']['origin'], 'created')
 
     def test_changed_existing_page_holds_without_any_write(self):
         FakeAPI.created = True

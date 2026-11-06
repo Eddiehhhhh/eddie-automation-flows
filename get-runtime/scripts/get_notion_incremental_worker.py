@@ -218,9 +218,12 @@ def verify_note(api, ident, page, props, blocks):
     return target_sha(snapshot, props)
 
 
-def owned_receipt(ident, page, data, target):
-    return {'note_id': ident, 'page_id': page,
-            'source_sha256': hashlib.sha256(data).hexdigest(), 'target_sha256': target}
+def owned_receipt(ident, page, data, target, *, created=False):
+    receipt = {'note_id': ident, 'page_id': page,
+               'source_sha256': hashlib.sha256(data).hexdigest(), 'target_sha256': target}
+    if created:
+        receipt['origin'] = 'created'
+    return receipt
 
 
 def attempt_from_main(root, ident):
@@ -246,8 +249,9 @@ def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=
     if matches:
         page = matches[0]
         if owned is not None:
-            if (not isinstance(owned, dict) or set(owned) != {'note_id', 'page_id',
-                    'source_sha256', 'target_sha256'} or owned['note_id'] != ident
+            required = {'note_id', 'page_id', 'source_sha256', 'target_sha256'}
+            if (not isinstance(owned, dict) or set(owned) not in (required, required | {'origin'})
+                    or owned.get('origin', 'created') != 'created' or owned['note_id'] != ident
                     or owned['page_id'] != page or any(not isinstance(owned[key], str)
                     or re.fullmatch(r'[a-f0-9]{64}', owned[key]) is None
                     for key in ('source_sha256', 'target_sha256'))):
@@ -255,6 +259,8 @@ def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=
             source_sha = hashlib.sha256(data).hexdigest()
             if source_sha != owned['source_sha256'] or (isinstance(journal, dict)
                     and journal.get('phase') != 'complete'):
+                if owned.get('origin') != 'created':
+                    stop('unowned_target')
                 import get_notion_incremental_update as update
                 return update.update(root, ident, page, data, props, blocks,
                                      source_id, token, api, owned, journal,
@@ -266,7 +272,8 @@ def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=
                 raise
             raise
         return {'status': 'already_present', 'page_id': page,
-                'owned': owned_receipt(ident, page, data, target)}
+                'owned': owned_receipt(ident, page, data, target,
+                                       created=owned is not None and owned.get('origin') == 'created')}
     if not apply:
         return {'status': 'ready', 'source_blob': hashlib.sha256(data).hexdigest()}
     check_attempt(attempt_from_main(root, ident), ident, data)
@@ -280,7 +287,7 @@ def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=
         stop('write_uncertain')
     target = verify_note(check, ident, page, props, blocks)
     return {'status': 'created', 'page_id': page,
-            'owned': owned_receipt(ident, page, data, target)}
+            'owned': owned_receipt(ident, page, data, target, created=True)}
 
 
 def check_attempt(attempt, ident, data):

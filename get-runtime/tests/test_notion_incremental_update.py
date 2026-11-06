@@ -61,7 +61,8 @@ class OwnedUpdate(unittest.TestCase):
         self.api = FakeAPI()
         self.saved = []
         self.owned = {'note_id': ID, 'page_id': PAGE,
-                      'source_sha256': 'a' * 64, 'target_sha256': 'b' * 64}
+                      'source_sha256': 'a' * 64, 'target_sha256': 'b' * 64,
+                      'origin': 'created'}
         self.patches = [
             patch.object(update.worker, 'target_sha', side_effect=lambda snap, _: 'b' * 64 if snap['tag'] == 'before' else 'c' * 64),
             patch.object(update.worker, 'verify_note', return_value='c' * 64),

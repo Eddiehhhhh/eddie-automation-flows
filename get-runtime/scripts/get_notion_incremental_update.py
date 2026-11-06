@@ -188,7 +188,7 @@ def update(root, ident, page, data, props, blocks, source_id, token, api, owned,
                     stop('manual_edit_or_unknown_write')
                 target = worker.verify_note(api, ident, page, props, blocks)
                 return {'status': 'updated', 'page_id': page,
-                        'owned': worker.owned_receipt(ident, page, data, target),
+                        'owned': worker.owned_receipt(ident, page, data, target, created=True),
                         'journal_complete': {'contract': CONTRACT, 'note_id': ident,
                             'page_id': page, 'source_sha256': source_sha, 'phase': 'complete'}}
             if actual != before or not same_unmanaged(journal['before'], current, set()):
