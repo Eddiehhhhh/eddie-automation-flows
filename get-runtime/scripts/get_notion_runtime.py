@@ -576,7 +576,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
     try:
         if type(apply) is not bool:fail('notion_scope')
         if single_note_id is not None:
-            p.note_id(single_note_id)
+            e.p.note_id(single_note_id)
             if (not apply or os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch'
                     or fixed_source or any(x is not None for x in (property_manifest,historical_manifest,historical_capture))):fail('notion_scope')
         fixed_selection = fixed_auth.admit(fixed_source, publication_bytes, apply=apply,
@@ -1015,7 +1015,7 @@ def main(argv=None):
         if single_mode not in ('','false','true'):fail('notion_scope')
         if single_mode=='true':
             if os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or not args.apply or os.environ.get('NOTION_MODE','canonical')!='canonical' or not single_id:fail('notion_scope')
-            p.note_id(single_id)
+            e.p.note_id(single_id)
         elif single_id:fail('notion_scope')
         # Pending production activation is rejected before credential lookup.
         if args.apply and (not PRODUCTION_ACTIVATED or not recurring.PRODUCTION_ACTIVATED):fail('notion_activation_pending')
