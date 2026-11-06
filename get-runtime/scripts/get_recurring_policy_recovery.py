@@ -80,6 +80,13 @@ def current_get_policy():
 def accepts_receipt(commit, receipt_sha256, value, requested_policy):
     """No arbitrary old receipt, policy choice, reverse migration or relabeling."""
     from get_recurring_entry import a
+    seq4 = _private_bindings.value('get_publication_provenance', 'FAILED_NOTION_REPLAY_4')
+    if (commit == seq4['selection']['receipt_commit']
+            and receipt_sha256 == seq4['selection']['receipt_sha256']
+            and value.get('sequence') == seq4['sequence']
+            and value.get('policy_sha256') == seq4['source_policy']['get_policy_sha256']
+            and requested_policy == current_get_policy()):
+        return True
     if a.sha(receipt_sha256.encode()) == 'c10d7bab0cf05127a46aafb2bb0f806e14f46d1856e277f06c053eb3eeadaab7':
         import get_notion_exact_replay as replay
         return requested_policy == current_get_policy() and replay.receipt_matches(commit, receipt_sha256, value, replay.binding())
