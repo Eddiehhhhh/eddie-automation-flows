@@ -1,0 +1,38 @@
+name: Get private push dry diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: controller
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: '6996669f9f540063de7f31d84a86b45157a97fad'
+          persist-credentials: false
+          path: runtime
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Materialize verified private binding
+        working-directory: runtime/get-runtime
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-push-diagnostic/runtime-bindings.json
+          APPLY: 'false'
+        run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Diagnose dry-run push
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-push-diagnostic/runtime-bindings.json
+          PYTHONPATH: ${{ github.workspace }}/runtime/get-runtime/scripts
+        run: python controller/scripts/get_push_diagnostic.py

@@ -1,0 +1,38 @@
+name: Get private multi-file push probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: controller
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: '476f90f29bce8d3cc907f9cdfae6720361be3f52'
+          persist-credentials: false
+          path: runtime
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Materialize verified private binding
+        working-directory: runtime/get-runtime
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-push-shaped-probe/runtime-bindings.json
+          APPLY: 'false'
+        run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Publish and verify isolated multi-file probe
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-push-shaped-probe/runtime-bindings.json
+          PYTHONPATH: ${{ github.workspace }}/runtime/get-runtime/scripts:${{ github.workspace }}/controller/scripts
+        run: python controller/scripts/get_push_shaped_probe.py

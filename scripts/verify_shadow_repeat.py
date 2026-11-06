@@ -18,6 +18,29 @@ def snapshot(root):
             for p in root.rglob('*') if p.is_file()}
 
 
+def difference_categories(previous, current):
+    counts = {}
+    for path in set(previous) | set(current):
+        if previous.get(path) == current.get(path):
+            continue
+        if '/_assets/' in '/' + path:
+            category = 'assets'
+        elif path.startswith('Raw/03 Get/01 Notes/'):
+            category = 'notes'
+        elif path.startswith('Raw/03 Get/99 录音卡/'):
+            category = 'recordings'
+        elif '/03 State/raw-cache/' in path:
+            category = 'raw_cache'
+        elif '/03 State/attachments/' in path:
+            category = 'attachment_metadata'
+        elif '/03 State/' in path:
+            category = 'state'
+        else:
+            category = 'other'
+        counts[category] = counts.get(category, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--full', action='store_true', help='Explicit full-library acceptance; never the default')
@@ -55,6 +78,7 @@ def main():
         unchanged = current == previous
         print(json.dumps({'source': 'getnote', 'scope': scope, 'source_complete': args.full and unchanged,
                           'status': (scope + '_ok') if unchanged else 'changed-between-runs',
+                          'changed_file_categories': difference_categories(previous, current),
                           'sample_pages_limit': None if args.full else args.sample_pages,
                           'files': len(current), 'fetched': [int(r['fetched']) for r in reports],
                           'written_or_changed': [int(r['written_or_changed']) for r in reports],

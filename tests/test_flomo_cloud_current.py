@@ -92,9 +92,11 @@ class CurrentTests(unittest.TestCase):
         self.capture_original([])
         result=current.export(self.root);text=self.note().read_text()
         self.assertEqual(result['written'],1);self.assertIn('Notion source body',text)
+        self.assertIn('notion_source_page_ids:',text);self.assertIn('page-one',text)
         self.assertIn('not_observed',text);self.assertIn('created_at: "2025-01-02"',text)
         self.assertNotIn('2025-01-02T00:00:00',text)
         self.assertFalse(result['media_complete']);self.assertTrue(result['capture_complete'])
+        self.assertEqual(current.export(self.root)['unchanged'],1)
     def test_multiple_notion_variants_keep_all_bodies_and_links_without_winner(self):
         self.capture_notion(ident='page-two',text='Different manually edited second body',title='Second source')
         self.capture_original([]);current.export(self.root);text=self.note().read_text()

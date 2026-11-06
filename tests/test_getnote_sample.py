@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import email.message
 import io
@@ -66,6 +67,46 @@ class GetSampleTests(unittest.TestCase):
         self.assertIn('max_pages=None', step)
         self.assertIn('duplicate test notes', step)
         self.assertNotIn("/open/api/v1/resource/note/list", step)
+    def test_cloud_test_note_reuses_complete_paginated_lookup(self):
+        workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
+        step = workflow.split('      - name: Create one real Get sync test note', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('fetch_note_list(', step)
+        self.assertIn('duplicate test notes', step)
+        self.assertIn('note_action=reused', step)
+
+    def test_shadow_workflow_publishes_only_allowlisted_failure_summary(self):
+        workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/source-sync-shadow.yml').read_text()
+        summary = workflow.split('      - name: Publish aggregate evidence only', 1)[1]
+        self.assertIn('if: always()', summary)
+        self.assertIn('no-safe-aggregate', summary)
+        self.assertIn('read_step_outcome', summary)
+        self.assertIn('print(json.dumps(summary, indent=2))', summary)
+        source = summary.split("          python - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        source = '\n'.join(line[10:] for line in source.splitlines())
+        tree = ast.parse(source)
+        allowed = next(node.value for node in tree.body
+                       if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == 'allowed'
+                               for target in node.targets))
+        self.assertEqual(ast.literal_eval(allowed), (
+            'source', 'scope', 'source_complete', 'status', 'sample_pages_limit',
+            'files', 'fetched', 'written_or_changed', 'identical_hashes_and_mtimes',
+            'changed_file_categories', 'published', 'run', 'exit'))
+
+    def test_shadow_diff_reports_only_file_categories(self):
+        paths = {
+            'assets': '_assets/images/file.png',
+            'notes': 'Raw/03 Get/01 Notes/private title.md',
+            'recordings': 'Raw/03 Get/99 录音卡/2026/2026-11/note.md',
+            'raw_cache': 'Raw/03 Get/03 State/raw-cache/record.json',
+            'attachment_metadata': 'Raw/03 Get/03 State/attachments/manifest.json',
+            'state': 'Raw/03 Get/03 State/pending.json',
+            'other': 'unexpected.txt',
+        }
+        for category, path in paths.items():
+            with self.subTest(category=category):
+                self.assertEqual(shadow.difference_categories({}, {path: ('new', 1)}), {category: 1})
+                self.assertEqual(shadow.difference_categories({path: ('old', 1)}, {}), {category: 1})
 
     def test_authenticated_get_rejects_unlisted_path_before_opening(self):
         with patch.object(g.urllib.request, 'build_opener') as build:
