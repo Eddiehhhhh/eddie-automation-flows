@@ -309,6 +309,73 @@ class ExactArchiveReplay(unittest.TestCase):
                     self.assertEqual(route.main(args),1)
                 self.assertEqual((verify.call_count,guard.call_count),(1,1))
 
+    def test_authenticated_delivered_checkpoint_keeps_later_journal_and_rejects_drift(self):
+        import get_notion_runtime as receiver
+        selection=self.b['selection']
+        target={'commit':selection['receipt_commit'],'receipt_sha256':selection['receipt_sha256'],'sequence':self.b['sequence']}
+        state={'last_enqueued_publication':target,'observed_publication_tip':target,'pending_by_id':{},
+               'engine_state':{'receipts':{self.nid:{'source_commit':target['commit']}}}}
+        raw=receiver.outbox.encoded(state)
+        anchor={'commit':'c'*40,'state_blob':'d'*40,'state_sha256':receiver.outbox.digest(raw)}
+        loader=Mock()
+        with patch.object(replay,'binding',return_value=self.b), \
+             patch.object(replay,'DELIVERED_ANCHOR_SHA256',replay.e.digest(anchor)), \
+             patch.object(receiver.idle_recovery,'reviewed_baseline',return_value={'anchor':anchor}), \
+             patch.object(receiver.outbox.git,'OfflineGit') as git, \
+             patch.object(receiver.entry,'unchanged_get_history') as history:
+            reader=git.return_value;reader.read.return_value=raw
+            reader.tree.return_value={receiver.outbox.STATE_PATH:('100644','blob',anchor['state_blob'])}
+            self.assertEqual(replay.bridge_state(SimpleNamespace(vault='fixture'),loader,anchor,target['commit']),anchor)
+            history.assert_called_once_with(reader,target['commit'],anchor['commit'])
+            self.assertEqual([c.args[0] for c in loader.call_args_list],[anchor['commit'],target['commit']])
+            for wrong in (('120000','blob',anchor['state_blob']),('100644','blob','0'*40)):
+                with patch.dict(reader.tree.return_value,{receiver.outbox.STATE_PATH:wrong}):
+                    with self.assertRaisesRegex(ValueError,'approval_missing'):
+                        replay.bridge_state(SimpleNamespace(vault='fixture'),loader,anchor,target['commit'])
+            reader.read.return_value=raw+b' '
+            with self.assertRaisesRegex(ValueError,'approval_missing'):
+                replay.bridge_state(SimpleNamespace(vault='fixture'),loader,anchor,target['commit'])
+
+    def test_verified_existing_page_is_reportable_without_another_write(self):
+        import get_notion_runtime as receiver
+        tip={'commit':'a'*40,'receipt_sha256':'a'*64,'sequence':3}
+        state={'origin':tip,'last_enqueued_publication':tip,'observed_publication_tip':tip,
+               'pending_by_id':{'peer':{}},'engine_state':{'journal':None,'receipts':{self.nid:{}},
+               'unresolved_by_id':{key:{} for key in ('one','two','three')}}}
+        holds={k:{'contract':'get-notion-exact-uncertain-hold-1','note_id':k,'effects':'unresolved','retry_allowed':False} for k in state['engine_state']['unresolved_by_id']}
+        store=Mock();store.read.return_value=(state,receiver.outbox.digest(state))
+        with contextlib.ExitStack() as stack:
+            def replace(module,name,**kwargs):
+                return stack.enter_context(patch.object(module,name,**kwargs))
+            replace(receiver._private_bindings,'value',return_value=holds)
+            replace(receiver.historical_active,'inflight_hold',return_value=holds['one'])
+            auth=replace(receiver.authenticated_recovery,'inflight_holds',return_value=[])
+            stack.enter_context(patch.object(receiver.plan_recovery,'HELD_NOTE_SHA256',receiver.e.p.digest('one')))
+            replace(receiver.outbox,'check_state');replace(receiver,'canonical_mode_guard',return_value=None)
+            replace(receiver,'initial_done',return_value=True)
+            replace(receiver.plan_recovery,'validate_initial_state',return_value=False)
+            replace(receiver.source_loader,'load_confirmed_chain',return_value={})
+            replace(receiver.outbox,'enqueue',return_value=state)
+            replace(receiver.property_runtime,'check_dependency')
+            stack.enter_context(patch.object(receiver.entry,'BOOTSTRAP',{'commit':'b'*40}))
+            pipeline=replace(receiver.pipeline,'run',side_effect=AssertionError('duplicate page write'))
+            request=Mock()
+            result=receiver._dispatch(SimpleNamespace(vault='fixture'),None,None,None,store,request,tip=tip,policy_hash='a'*64,
+                apply=True,writers_guard=Mock(),only_note_id=self.nid)
+            self.assertEqual((result['status'],result['single_note_verified'],result['queued']),('queue_empty',True,1))
+            self.assertEqual(receiver.safe_result(result)['unresolved_operations'],3)
+            self.assertEqual(receiver.exit_status(receiver.safe_result(result)),0)
+            for invalid in (4,-1):
+                with self.assertRaisesRegex(ValueError,'notion_scope'):
+                    receiver.safe_result({**result,'unresolved_operations':invalid})
+            auth.return_value=[dict(holds['one'],different=True)]
+            with self.assertRaisesRegex(ValueError,'notion_scope'):receiver.unresolved_report_limit()
+            auth.return_value=[]
+            with self.assertRaisesRegex(ValueError,'state_invalid'):
+                receiver.plan_recovery.validate_holds({**holds,'fourth':dict(holds['one'],note_id='fourth')})
+            pipeline.assert_not_called();request.assert_not_called()
+            store.compare_and_set.assert_not_called()
+
     def test_runtime_verifies_new_writer_and_original_get_separately(self):
         import get_notion_runtime as receiver
         policy={'rules_sha256':'a'*64}

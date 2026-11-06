@@ -412,7 +412,7 @@ def _dispatch(local,remote,token,root,store,request,*,tip,policy_hash,apply,writ
             return {'status':'queue_partial','queued':len(state['pending_by_id']),'source_chain_complete':False,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         if only_note_id is not None and not outbox.single_note_delivery(state,only_note_id):
             if only_note_id in state['engine_state']['receipts']:
-                return {'status':'queue_empty','single_note_verified':True,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
+                return {'status':'queue_empty','single_note_verified':True,'source_chain_complete':True,'queued':len(state['pending_by_id']),'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         if not state['pending_by_id']:
             return {'status':'queue_partial' if state.get('source_state_holds') else 'queue_empty','source_state_unprojected_receipts':len(state.get('source_state_holds',{})),'queued':0,'source_chain_complete':True,'journal_sha256':sha,'write_state':'not_attempted','external_write_attempts':0,'complete_library_claimed':False,**counts}
         first=state['pending_by_id'][only_note_id] if only_note_id is not None else state['pending_by_id'][state['rotation_order'][0]]
@@ -455,7 +455,9 @@ def unresolved_report_limit():
     admission remains plan_recovery.validate_holds with full evidence equality.
     """
     active = historical_active.inflight_hold()
-    registered = ([active] if active else []) + authenticated_recovery.inflight_holds()
+    retained = _private_bindings.value('get_notion_plan_recovery','RETAINED_HOLDS')
+    if not isinstance(retained, dict):fail('notion_scope')
+    registered = ([active] if active else []) + authenticated_recovery.inflight_holds() + list(retained.values())
     rows = {}
     for hold in registered:
         ident = hold['note_id']
@@ -463,7 +465,8 @@ def unresolved_report_limit():
             fail('notion_scope')
         rows[ident] = hold
     plan_recovery.validate_holds(rows)
-    return 1 + len(rows)
+    legacy_present = any(e.p.digest(ident) == plan_recovery.HELD_NOTE_SHA256 for ident in rows)
+    return len(rows) + (0 if legacy_present else 1)
 
 
 def _safe_result(value):
