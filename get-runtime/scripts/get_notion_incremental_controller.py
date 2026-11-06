@@ -25,7 +25,7 @@ HOLD_CODES = frozenset({'source_content_held', 'source_metadata_held',
     'source_properties_held', 'source_too_large', 'existing_content_held',
     'unowned_target', 'manual_edit_or_unknown_write', 'historical_write_held',
     'recording_metadata_held', 'recording_layout_held', 'missing_asset',
-    'existing_note_requires_review'})
+    'existing_note_requires_review', 'existing_content_differs', 'existing_properties_differ'})
 SAFE_ERRORS = HOLD_CODES | frozenset({'invalid_source', 'source_changed',
     'wrong_repository', 'source_missing_or_duplicate', 'source_unregistered',
     'source_conflict', 'source_path_invalid', 'source_timestamp_invalid',
@@ -215,6 +215,7 @@ def run(root, token, limit, apply):
     planned = admission(root, queue(root))
     if not apply:
         ready = verified = held = 0
+        held_reasons = {}
         for ident in planned['pending'][:limit]:
             try:
                 status = worker.run(root, ident, current, source_id, token)['status']
@@ -222,6 +223,7 @@ def run(root, token, limit, apply):
                 if str(exc) not in HOLD_CODES:
                     raise
                 held += 1
+                held_reasons[str(exc)] = held_reasons.get(str(exc), 0) + 1
                 continue
             if status == 'ready':
                 ready += 1
@@ -233,7 +235,7 @@ def run(root, token, limit, apply):
                 stop('target_unverified')
         return {'status': 'dry_run_partial' if held else 'dry_run_ready',
                 'ready': ready, 'verified': verified, 'held': held,
-                'pending': len(planned['pending'])}
+                'pending': len(planned['pending']), 'held_reasons': held_reasons}
     save(root, {QUEUE: planned}, 'Queue verified Get changes for Notion')
     completed = 0
     held = 0

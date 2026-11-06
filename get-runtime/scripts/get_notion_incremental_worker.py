@@ -248,7 +248,7 @@ def run(root, ident, commit, source_id, token, apply=False):
             target = verify_note(api, ident, page, props, blocks)
         except ValueError as exc:
             if str(exc) in ('existing_content_differs', 'existing_properties_differ'):
-                stop('existing_note_requires_review')
+                raise
             raise
         return {'status': 'already_present', 'page_id': page,
                 'owned': owned_receipt(ident, page, data, target)}
