@@ -35,8 +35,12 @@ class PendingGate(unittest.TestCase):
         repo = {'id': 7, 'full_name': gate.provenance.REPOSITORY, 'private': False}
         self.client.runs[run_id] = {'id': run_id, 'repository': dict(repo), 'head_repository': dict(repo), 'workflow_id': workflow}
     def test_published_anchor_and_prior_official_refs_continue(self):
-        self.ref(1, 'c' * 40); self.ref(2, self.api.anchor); self.ref(3, 'd' * 40, workflow=99)
+        self.ref(1, 'c' * 40); self.ref(2, self.api.anchor)
         self.assertEqual(gate.check(self.api, self.client, self.policy, self.parent), self.api.anchor)
+    def test_noncanonical_workflow_with_official_stage_prefix_stops(self):
+        self.ref(3, 'd' * 40, workflow=99)
+        with self.assertRaisesRegex(ValueError, 'pending_unresolved'):
+            gate.check(self.api, self.client, self.policy, self.parent)
     def test_unpublished_official_ref_or_unpublished_fixed_anchor_stops(self):
         self.ref(1, 'c' * 40); self.api.bad_compare.add('c' * 40)
         with self.assertRaisesRegex(ValueError, 'pending_unresolved'):

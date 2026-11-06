@@ -56,7 +56,7 @@ def check(api, client, policy, parent):
                 or type(run.get('workflow_id')) is not int or run['workflow_id'] <= 0):
             fail()
         if run.get('workflow_id') != policy['workflow_id']:
-            continue
+            fail()
         provenance.check_run_identity(run, policy)
         if not ancestor(api, sha, anchor):
             fail()
