@@ -1,6 +1,8 @@
 name: Get notes from private GitHub to Notion
 
 on:
+  schedule:
+    - cron: '20 * * * *'
   workflow_dispatch:
     inputs:
       apply:
@@ -82,7 +84,7 @@ jobs:
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          APPLY: ${{ inputs.apply }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
         run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
       - name: Check queued Get notes
         env:
@@ -90,7 +92,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
-          APPLY: ${{ inputs.apply }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
         run: |
           set -euo pipefail
           args=(--vault vault)
