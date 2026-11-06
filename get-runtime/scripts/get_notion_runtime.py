@@ -1040,7 +1040,7 @@ def main(argv=None):
     args=parser.parse_args(argv)
     try:
         single_mode=os.environ.get('GET_SINGLE_NOTE_MODE','').lower()
-        single_id=os.environ.get('GET_SINGLE_NOTE_ID')
+        single_id=os.environ.get('GET_SINGLE_NOTE_ID') or None
         if single_mode not in ('','false','true'):fail('notion_scope')
         if single_mode=='true':
             if os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or not args.apply or os.environ.get('NOTION_MODE','canonical')!='canonical' or not single_id:fail('notion_scope')
