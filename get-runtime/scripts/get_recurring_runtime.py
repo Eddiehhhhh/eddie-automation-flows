@@ -18,6 +18,7 @@ import tempfile
 import get_publication_provenance as provenance
 import get_recurring_entry as entry
 import get_recurring_controller as controller
+import get_gitdata_staging as staging
 from get_recurring_entry import a, engine, m, n, r
 
 PRODUCTION_ACTIVATED = True  # Changing this requires the final code/rules review.
@@ -28,14 +29,14 @@ SCOPE_KEYS = {'contract', 'production_approved', 'public_policy_sha256', 'rules_
               'notion_scope_contract', 'notion_batch_max', 'notion_journal_path',
               'notion_initial_proof_sha256'}
 ERRORS = {'runtime_activation_pending', 'runtime_scope', 'runtime_context',
-          'runtime_receipt', 'runtime_failed'}
+          'runtime_receipt', 'runtime_failed', 'gitdata_staging_failed'}
 
 # Fixed diagnostics only; private exception text/arguments are never emitted.
 STAGES = frozenset(('policy', 'execution_provenance', 'remote_guard', 'checkout',
     'capture_evidence', 'parent_history', 'bootstrap_history', 'bootstrap_inventory',
     'current_inventory', 'receipt_provenance', 'trusted_inputs', 'trusted_states', 'legacy_baselines',
     'new_baselines', 'preview_inputs', 'canonical_prepare', 'candidate_report',
-    'publication', 'replaced_blob_hydration', 'old_writer_guard', 'credentials', 'source_transport'))
+    'publication', 'gitdata_staging', 'replaced_blob_hydration', 'old_writer_guard', 'credentials', 'source_transport'))
 ENTRY_ERRORS = frozenset(('entry_batch_bound', 'entry_bootstrap_changed',
     'entry_content_ids', 'entry_counts', 'entry_external_anchor_required',
     'entry_foreign_delta', 'entry_foreign_get_change', 'entry_history_bound', 'entry_history_witness',
@@ -429,10 +430,15 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
             return result
         at_stage('replaced_blob_hydration', hydrate_replaced_blobs,
                  reader, remote, token, root / 'replaced-blobs', parent, files)
+        verifier = lambda rd, pl, fs: entry.verify_plan(rd, evidence, pl, fs, policy['rules_sha256'], bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
+        if files:
+            at_stage('gitdata_staging', verifier, reader, plan, files)
+            at_stage('gitdata_staging', lambda: staging.stage(staging.API(token), reader, remote, plan, files,
+                     run_context, lambda commit, selected: m.fetch_selected(remote, selected, token, root / 'staged-readback')))
         def readback(commit, values):
             return m.fetch_selected(remote, {p: ('100644', 'blob', r.oid(data), len(data)) for p, data in values.items()}, token, root / 'readback')
         publication = at_stage('publication', m.publish, reader, remote, plan, files, result['plan_sha256'], readback,
-            checkpoint=checkpoint, verifier=lambda rd, pl, fs: entry.verify_plan(rd, evidence, pl, fs, policy['rules_sha256'], bootstrap=bootstrap, history_witness=history_witness, source_id=source_id),
+            checkpoint=checkpoint, verifier=verifier,
             writers_guard=writers_guard if writers_guard is not None else m.disabled_writers)
         # From this point any local callback failure must preserve actual Get
         # success. The public record contains no note IDs, paths, or source text.

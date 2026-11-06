@@ -14,6 +14,60 @@ import get_private_preview_retention as retention
 
 
 class CasErrorCategory(unittest.TestCase):
+    def test_staging_completes_before_one_cas_and_readback(self):
+        parent, commit, tree = 'a' * 40, 'b' * 40, 'c' * 40
+        files = {'Raw/03 Get/note.md': b'new'}
+        plan = {'parent_commit': parent, 'candidate_commit': commit, 'candidate_tree': tree}
+        state = {'main': parent}
+        reader = types.SimpleNamespace(local=types.SimpleNamespace(run=lambda *args: (commit + ' ' + parent + '\n').encode()))
+        remote = types.SimpleNamespace(commit=lambda oid: {'tree': tree, 'parents': [parent]})
+        remote.cas_main = Mock(side_effect=lambda before, after: state.update(main=after))
+        def guard(_remote, expected=None):
+            if expected is not None and state['main'] != expected: raise ValueError('guard')
+            return state['main']
+        replacements = [
+            (runtime, 'validate_policy', {'return_value': {'rules_sha256': 'f' * 64}}),
+            (runtime, 'validate_scope', {'return_value': None}),
+            (runtime, 'context', {'return_value': {'run_id': 123, 'run_attempt': 1}}),
+            (runtime.provenance, 'verify_execution', {'return_value': None}),
+            (runtime.m, 'guard', {'side_effect': guard}),
+            (runtime.r, 'readback_checkout', {'return_value': object()}),
+            (runtime.m, 'load_evidence', {'return_value': (reader, object(), None)}),
+            (runtime, 'load_trusted_inputs', {'return_value': (None, None, None)}),
+            (runtime.entry, 'prepare', {'return_value': (plan, files)}),
+            (runtime.entry, 'verify_plan', {'return_value': None}),
+            (runtime.entry, 'public_report', {'side_effect': lambda *_: {'status': 'recurring_local_candidate_verified',
+                'plan_sha256': manual.a.sha(manual.a.encoded(plan))}}),
+            (runtime, 'hydrate_replaced_blobs', {'return_value': None}),
+            (runtime.staging, 'API', {'return_value': object()}),
+            (runtime.m, 'fetch_selected', {'return_value': files}),
+            (runtime.provenance, 'publication_record', {'side_effect': ValueError('stop after verified CAS')}),
+        ]
+        with ExitStack() as stack:
+            for target, name, options in replacements: stack.enter_context(patch.object(target, name, **options))
+            staged = stack.enter_context(patch.object(runtime.staging, 'stage', side_effect=lambda *args: self.assertEqual(state['main'], parent)))
+            result = runtime.run('token', object(), policy={}, approved_policy_sha256='d' * 64,
+                remote=remote, public_client=object(), apply=True, scope={}, approved_scope_sha256='e' * 64,
+                run_context={}, checkpoint=lambda _: None, writers_guard=lambda: None,
+                bootstrap={'capture_anchor': {'capture_commit': '1' * 40}})
+        staged.assert_called_once()
+        remote.cas_main.assert_called_once_with(parent, commit)
+        self.assertTrue(result['main_updated'])
+        self.assertTrue(result['readback_verified'])
+        state['main'] = parent
+        remote.cas_main.reset_mock()
+        with ExitStack() as stack:
+            for target, name, options in replacements: stack.enter_context(patch.object(target, name, **options))
+            stack.enter_context(patch.object(runtime.staging, 'stage', side_effect=runtime.staging.StageFailure('gitdata_staging_failed')))
+            with self.assertRaises(runtime.staging.StageFailure) as caught:
+                runtime.run('token', object(), policy={}, approved_policy_sha256='d' * 64,
+                    remote=remote, public_client=object(), apply=True, scope={}, approved_scope_sha256='e' * 64,
+                    run_context={}, checkpoint=lambda _: None, writers_guard=lambda: None,
+                    bootstrap={'capture_anchor': {'capture_commit': '1' * 40}})
+        failure = runtime.failure(caught.exception, attempt_started=False)
+        self.assertEqual((failure['stage'], failure['write_state']), ('gitdata_staging', 'not_attempted'))
+        remote.cas_main.assert_not_called()
+
     def test_replaced_blob_failure_stops_before_publication(self):
         parent = 'a' * 40
         reader = types.SimpleNamespace(local=object())
