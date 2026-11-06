@@ -25,6 +25,8 @@ class FollowupNotion(unittest.TestCase):
         self.assertIn('needs: canonical-get', job)
         self.assertIn("needs.canonical-get.result == 'success'", job)
         self.assertIn("inputs.notion_mode == 'canonical'", job)
+        self.assertIn("inputs.single_note_id == ''", job)
+        self.assertIn('!inputs.create_test_note', job)
         self.assertIn('continue-on-error: true', job)
         self.assertIn('get_notion_incremental_controller as controller', job)
         self.assertIn('RESULT: ${{ job.status }}', job)
