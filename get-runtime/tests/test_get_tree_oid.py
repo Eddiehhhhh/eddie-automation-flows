@@ -78,14 +78,44 @@ class GetTreeOid(unittest.TestCase):
                     self.reader.source_get_tree(bad)
         self.assertEqual(self.reader.cache, {})
 
+    def test_duplicate_raw_or_get_entry_is_rejected(self):
+        def duplicate_tree(name, first, second):
+            prefix = b'40000 ' + name + b'\0'
+            return self.git('hash-object', '-t', 'tree', '--literally', '-w', '--stdin',
+                            data=prefix + bytes.fromhex(first) + prefix + bytes.fromhex(second))
+
+        raw = self.tree([('040000', 'tree', self.get_tree, '03 Get')])
+        other_get = self.tree([('100644', 'blob', self.body, 'other.md')])
+        other_raw = self.tree([('040000', 'tree', other_get, '03 Get')])
+        duplicate_get = duplicate_tree(b'03 Get', self.get_tree, other_get)
+        roots = {'Raw': duplicate_tree(b'Raw', raw, other_raw),
+                 '03 Get': self.tree([('040000', 'tree', duplicate_get, 'Raw')])}
+        for name, root in roots.items():
+            with self.subTest(name=name):
+                commit = self.git('commit-tree', root, '-p', self.base, data=b'duplicate fixture\n')
+                with self.assertRaisesRegex(a.ParityFailure, 'adapter_source_tree'):
+                    self.reader.source_get_tree(commit)
+        self.assertEqual(self.reader.cache, {})
+
     def test_noncommit_missing_and_malformed_inputs_are_rejected(self):
         for value in (self.body, self.get_tree, '0' * 40, 'HEAD', self.base + ':Raw'):
             with self.subTest(value=value):
                 with self.assertRaises((a.ParityFailure, a.retention.RetentionFailure)):
                     self.reader.source_get_tree(value)
         missing = self.commit(None, self.base)
-        with self.assertRaises(a.retention.RetentionFailure):
+        with self.assertRaisesRegex(a.ParityFailure, 'adapter_source_tree'):
             self.reader.source_get_tree(missing)
+        self.assertEqual(self.reader.cache, {})
+
+    def test_tree_mode_pointing_to_actual_blob_is_rejected_at_either_level(self):
+        for name in (b'Raw', b'03 Get'):
+            with self.subTest(name=name):
+                bad = self.git('hash-object', '-t', 'tree', '--literally', '-w', '--stdin',
+                               data=b'40000 ' + name + b'\0' + bytes.fromhex(self.body))
+                root = bad if name == b'Raw' else self.tree([('040000', 'tree', bad, 'Raw')])
+                commit = self.git('commit-tree', root, '-p', self.base, data=b'wrong object type\n')
+                with self.assertRaisesRegex(a.ParityFailure, 'adapter_source_tree'):
+                    self.reader.source_get_tree(commit)
         self.assertEqual(self.reader.cache, {})
 
     def test_full_tree_and_body_read_keep_existing_validation_and_cache(self):
