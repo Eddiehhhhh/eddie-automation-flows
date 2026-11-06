@@ -55,7 +55,31 @@ def require_missing(local, oids):
         raise ValueError('old_blobs_not_all_missing')
 
 
-def main():
+def require_present(local, oids):
+    output = local.run('cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)',
+                       data=('\n'.join(oids) + '\n').encode()).decode('ascii').splitlines()
+    if output != [oid + ' blob ' + str(NOTE_BYTES) for oid in oids]:
+        raise ValueError('old_blobs_not_all_present')
+
+
+def hydrate_old(local, remote, token, root, paths, oids):
+    if len(paths) != 20 or len(oids) != 20 or len(set(paths)) != 20 or len(set(oids)) != 20:
+        raise ValueError('invalid_old_blob_selection')
+    metadata = {path: ('100644', 'blob', oid, NOTE_BYTES) for path, oid in zip(paths, oids)}
+    values = manual.fetch_selected(remote, metadata, token, root / 'old-probe-blobs')
+    if set(values) != set(paths):
+        raise ValueError('old_blob_readback_mismatch')
+    for index, (path, oid) in enumerate(zip(paths, oids)):
+        data = values[path]
+        if data != synthetic(index, NOTE_BYTES) or retention.oid(data) != oid:
+            raise ValueError('old_blob_readback_mismatch')
+        manual.import_blob(local, data, oid)
+    require_present(local, oids)
+
+
+def main(hydrate=False):
+    if type(hydrate) is not bool:
+        raise ValueError('invalid_probe_mode')
     branch = branch_for(os.environ['GITHUB_RUN_ID'])
     token = os.environ['PRIVATE_VAULT_TOKEN']
     remote = manual.Remote(None, token)
@@ -75,6 +99,11 @@ def main():
         print('old_blobs_missing=20', flush=True)
         if manual.guard(remote) != main or branch_ref(remote, SOURCE_REF) != SOURCE_COMMIT or branch_ref(remote, branch) is not None:
             raise ValueError('probe_guard_changed')
+        if hydrate:
+            hydrate_old(local, remote, token, root, paths, old_oids)
+            if manual.guard(remote) != main or branch_ref(remote, SOURCE_REF) != SOURCE_COMMIT or branch_ref(remote, branch) is not None:
+                raise ValueError('probe_guard_changed')
+            print('old_blobs_hydrated=20', flush=True)
         seeded = run_git(local, 'seed_branch', 'push', '--porcelain', '--no-verify',
                          '--force-with-lease=' + branch + ':', retention.REMOTE_URL, SOURCE_COMMIT + ':' + branch)
         if branch_ref(remote, branch) != SOURCE_COMMIT or not seeded:
@@ -94,9 +123,13 @@ def main():
         changed = local.run('diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', SOURCE_COMMIT, commit)
         if changed.split(b'\0') != [path.encode() for path in paths] + [b'']:
             raise ValueError('probe_delta_mismatch')
-        require_missing(local, old_oids)
+        if hydrate:
+            require_present(local, old_oids)
+        else:
+            require_missing(local, old_oids)
+        state = 'old_blobs_present_before_push' if hydrate else 'old_blobs_missing_before_push'
         print(json.dumps({'changed_paths': len(paths), 'changed_bytes': len(paths) * CHANGED_BYTES,
-                          'old_blobs_missing_before_push': len(old_oids)}, separators=(',', ':')), flush=True)
+                          state: len(old_oids)}, separators=(',', ':')), flush=True)
         if not run_git(local, 'merge_base', 'merge-base', '--is-ancestor', SOURCE_COMMIT, commit):
             raise ValueError('probe_merge_base_failed')
         if manual.guard(remote) != main or branch_ref(remote, SOURCE_REF) != SOURCE_COMMIT or branch_ref(remote, branch) != SOURCE_COMMIT:

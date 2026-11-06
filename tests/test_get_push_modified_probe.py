@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import get_push_modified_probe as probe
 
@@ -29,6 +29,40 @@ class ModifiedBlobProbeTest(unittest.TestCase):
         local = types.SimpleNamespace(run=lambda *args, **kwargs: b'abc blob\n')
         with self.assertRaisesRegex(ValueError, 'old_blobs_not_all_missing'):
             probe.require_missing(local, ['abc'])
+
+    def test_hydration_rejects_wrong_blob_before_import(self):
+        paths = [probe.PREFIX + 'note-%02d.md' % index for index in range(20)]
+        oids = [probe.retention.oid(probe.synthetic(index, probe.NOTE_BYTES)) for index in range(20)]
+        values = {path: probe.synthetic(index, probe.NOTE_BYTES) for index, path in enumerate(paths)}
+        values[paths[0]] = b'incorrect'
+        local = types.SimpleNamespace(run=Mock())
+        with patch.object(probe.manual, 'fetch_selected', return_value=values), \
+                self.assertRaisesRegex(ValueError, 'old_blob_readback_mismatch'):
+            probe.hydrate_old(local, object(), 'dummy', Path('/unused'), paths, oids)
+        local.run.assert_not_called()
+
+    def test_hydration_imports_exact_twenty_blobs_into_same_store(self):
+        paths = [probe.PREFIX + 'note-%02d.md' % index for index in range(20)]
+        values = {path: probe.synthetic(index, probe.NOTE_BYTES) for index, path in enumerate(paths)}
+        oids = [probe.retention.oid(values[path]) for path in paths]
+        class Local:
+            def __init__(self):
+                self.objects = {}
+            def run(self, *args, data=None):
+                if args[0] == 'hash-object':
+                    oid = probe.retention.oid(data); self.objects[oid] = data
+                    return (oid + '\n').encode()
+                if args[0] == 'cat-file':
+                    return ''.join(oid + ' blob ' + str(len(self.objects[oid])) + '\n'
+                                   for oid in data.decode().splitlines()).encode()
+                raise AssertionError('unexpected command')
+        local = Local()
+        with patch.object(probe.manual, 'fetch_selected', return_value=values) as fetch:
+            probe.hydrate_old(local, object(), 'dummy', Path('/unused'), paths, oids)
+        self.assertEqual(set(local.objects), set(oids))
+        metadata = fetch.call_args.args[1]
+        self.assertEqual(metadata, {path: ('100644', 'blob', oid, probe.NOTE_BYTES)
+                                    for path, oid in zip(paths, oids)})
 
     def test_actual_shallow_modified_blob_push_only_changes_probe_branch(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -104,13 +138,17 @@ class ModifiedBlobProbeTest(unittest.TestCase):
                     self.assertIn('probe_ref=parent', output.getvalue())
                     self.assertIn('source_branch=unchanged', output.getvalue())
                     self.assertIn('main=unchanged', output.getvalue())
-                    old_oids = [probe.retention.oid(probe.synthetic(index, probe.NOTE_BYTES)) for index in range(20)]
-                    Local().run('fetch', '--no-filter', '--no-tags', 'origin', *old_oids)
-                    for oid in old_oids:
-                        Local().run('cat-file', '-e', oid)
                     run.reset_mock()
-                    with patch.dict(os.environ, {'GITHUB_RUN_ID': '124'}), patch.object(probe, 'require_missing'):
-                        probe.main()
+                    def fetch_selected(_remote, metadata, _token, _directory):
+                        self.assertEqual(len(metadata), 20)
+                        return {path: git('--git-dir', str(bare), 'cat-file', '-p', row[2])
+                                for path, row in metadata.items()}
+                    with patch.dict(os.environ, {'GITHUB_RUN_ID': '124'}), \
+                            patch.object(probe.manual, 'fetch_selected', side_effect=fetch_selected) as selected:
+                        probe.main(hydrate=True)
+                    self.assertEqual(selected.call_count, 1)
+                    self.assertIn('old_blobs_hydrated=20', output.getvalue())
+                    self.assertIn('"old_blobs_present_before_push":20', output.getvalue())
                     self.assertIn('probe=verified', output.getvalue())
                     self.assertEqual([call.args[1] for call in run.call_args_list], ['seed_branch', 'merge_base', 'update_branch'])
                     self.assertEqual(git('--git-dir', str(bare), 'rev-parse', 'refs/heads/main').decode().strip(), main)
