@@ -75,7 +75,7 @@ jobs:
               assert Path(name).read_text(encoding='utf-8').strip()
           print('Required private-vault rules read.')
           PY
-          python3 scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
+          python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
           grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-notion-preflight.txt"
       - name: Materialize verified private runtime binding
         working-directory: get-runtime/get-runtime
@@ -103,7 +103,7 @@ jobs:
           python3 - <<'PY'
           import sys
           from pathlib import Path
-          sys.path.insert(0, str(Path('scripts').resolve()))
+          sys.path.insert(0, str(Path('Scripts').resolve()))
           from task_guard import guard_directory, release_guard
           from vault_integration_guard import release
           root = Path.cwd()
