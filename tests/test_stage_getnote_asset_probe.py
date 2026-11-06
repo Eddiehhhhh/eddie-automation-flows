@@ -38,6 +38,28 @@ class PrivateGetAssetProbeTests(unittest.TestCase):
                   'path': '_assets/images/a.png', 'sha256': 'a' * 64}],
                 Path('/vault/Raw/03 Get/01 Notes/note.md'))
 
+    def test_image_alias_is_normalized_and_exact_url_alias_rewritten(self):
+        original = 'https://get.invalid/original.png?secret=private'
+        markdown_url = 'https://get.invalid/display.png?other=private'
+        attachments, urls, status = probe.normalize_image_attachments(
+            {'images': [{'original_url': original, 'url': markdown_url}]})
+        self.assertEqual(status, 'ok')
+        self.assertEqual(urls, {original, markdown_url})
+        self.assertEqual(attachments[0]['type'], 'image')
+        rewritten, unmatched, matched = probe.rewrite_remote_image_links(
+            f'![image]({markdown_url})\n',
+            [{'url': original, 'status': 'downloaded', 'path': '_assets/images/a.png',
+              'sha256': 'a' * 64}],
+            Path('/vault/Raw/03 Get/01 Notes/note.md'), attachments)
+        self.assertEqual(unmatched, 0)
+        self.assertIn('../_assets/images/a.png', rewritten)
+        self.assertNotIn(markdown_url, rewritten)
+        self.assertIn(__import__('hashlib').sha256(original.encode()).hexdigest(), matched)
+
+    def test_no_image_descriptor_is_distinguished(self):
+        _, urls, status = probe.normalize_image_attachments({'attachments': []})
+        self.assertEqual((urls, status), (set(), 'no_image_descriptors'))
+
     def test_failure_stage_output_is_fixed_and_private(self):
         with TemporaryDirectory() as temp:
             output_path = Path(temp) / 'github-output'

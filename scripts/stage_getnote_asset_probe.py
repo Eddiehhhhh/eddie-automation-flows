@@ -94,6 +94,54 @@ def detail_failure_category(error: Exception) -> str:
     return 'detail_error'
 
 
+def normalize_image_attachments(note: dict) -> tuple[list[dict], set[str], str]:
+    """Reuse Get's image descriptor aliases without inventing source URLs."""
+    attachments = note.get('attachments') or []
+    if not isinstance(attachments, list):
+        return [], set(), 'invalid_attachment_schema'
+    normalized = list(attachments)
+    image_rows = [item for item in attachments if isinstance(item, dict) and item.get('type') == 'image']
+    for field in ('images', 'files', 'resources'):
+        values = note.get(field) or []
+        if not isinstance(values, list):
+            return [], set(), 'invalid_attachment_schema'
+        for item in values:
+            if not isinstance(item, dict):
+                return [], set(), 'invalid_attachment_schema'
+            mime = item.get('mime') or item.get('mime_type') or item.get('content_type') or ''
+            is_image = field == 'images' or item.get('type') == 'image' or (
+                isinstance(mime, str) and mime.lower().startswith('image/'))
+            if not is_image:
+                continue
+            descriptor = dict(item)
+            descriptor['type'] = 'image'
+            image_rows.append(descriptor)
+            normalized.append(descriptor)
+    urls = set()
+    for item in image_rows:
+        for key in ('original_url', 'url'):
+            value = item.get(key)
+            if isinstance(value, str) and value.startswith(('https://', 'http://')):
+                urls.add(value)
+    if not image_rows:
+        return normalized, urls, 'no_image_descriptors'
+    if not urls:
+        return normalized, urls, 'url_unbound'
+    # Deduplicate aliases by primary URL; preserve every original field in the
+    # raw manifest, but give the downloader one image descriptor per source.
+    unique = []
+    seen = set()
+    for item in normalized:
+        if item.get('type') != 'image':
+            unique.append(item)
+            continue
+        key = item.get('original_url') or item.get('url')
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique, urls, 'ok'
+
+
 def git(root: Path, *args: str, input: bytes | None = None) -> bytes:
     result = subprocess.run(['git', '-C', str(root), *args], input=input,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -171,7 +219,8 @@ def pending_image_candidates(root: Path) -> list[tuple[str, set[str]]]:
     return candidates
 
 
-def rewrite_remote_image_links(markdown: str, image_assets: list[dict], note_path: Path) -> tuple[str, int, set[str]]:
+def rewrite_remote_image_links(markdown: str, image_assets: list[dict], note_path: Path,
+                               descriptors: list[dict] | None = None) -> tuple[str, int, set[str]]:
     """Rewrite only exact Get attachment URLs to their verified local files."""
     raw_dir = next((candidate for candidate in (note_path.parent, *note_path.parents)
                     if candidate.name == '03 Get' and candidate.parent.name == 'Raw'), None)
@@ -186,9 +235,22 @@ def rewrite_remote_image_links(markdown: str, image_assets: list[dict], note_pat
             fail()
         absolute = raw_dir / relative
         local = Path(os.path.relpath(absolute, note_path.parent)).as_posix()
-        if url in by_url and by_url[url] != local:
+        if url in by_url and by_url[url][0] != local:
             fail()
-        by_url[url] = local
+        by_url[url] = (local, url)
+    for descriptor in descriptors or []:
+        if descriptor.get('type') != 'image':
+            continue
+        primary = descriptor.get('original_url') or descriptor.get('url')
+        binding = by_url.get(primary)
+        if binding is None:
+            continue
+        for key in ('original_url', 'url'):
+            alias = descriptor.get(key)
+            if isinstance(alias, str):
+                if alias in by_url and by_url[alias][0] != binding[0]:
+                    fail()
+                by_url[alias] = binding
     unmatched = 0
     matched_urls = set()
     lines = []
@@ -196,28 +258,30 @@ def rewrite_remote_image_links(markdown: str, image_assets: list[dict], note_pat
     for line in markdown.splitlines():
         match = image.fullmatch(line)
         if match and urllib.parse.urlsplit(match[2]).scheme in ('http', 'https'):
-            local = by_url.get(match[2])
-            if local is None:
+            binding = by_url.get(match[2])
+            if binding is None:
                 unmatched += 1
                 lines.append(line)
             else:
-                matched_urls.add(hashlib.sha256(match[2].encode()).hexdigest())
+                local, primary_url = binding
+                matched_urls.add(hashlib.sha256(primary_url.encode()).hexdigest())
                 lines.append(match[1] + urllib.parse.quote(local, safe='/._-') + match[3])
         else:
             lines.append(line)
     return '\n'.join(lines) + ('\n' if markdown.endswith('\n') else ''), unmatched, matched_urls
 
 
-def stage_note(root: Path, note: dict, run_ref: str, base_commit: str) -> dict:
+def stage_note(root: Path, note: dict, run_ref: str, base_commit: str,
+               source_note: dict | None = None) -> dict:
     ident = source.note_id_from(note)
     if not re.fullmatch(r'[0-9]{19}', ident):
         fail()
     index = source.IdentityIndex(source.RAW_DIR, 'getnote', 'note_id', boundary=root)
     note_path = source.output_path_for(note, index)
-    descriptors = note.get('attachments') or []
-    if not isinstance(descriptors, list):
+    descriptors, _, descriptor_status = normalize_image_attachments(note)
+    if descriptor_status != 'ok':
         fail()
-    images = [item for item in descriptors if isinstance(item, dict) and item.get('type') == 'image']
+    images = [item for item in descriptors if item.get('type') == 'image']
     if not images:
         fail()
     # The existing production downloader supplies HTTPS/IP/redirect, byte,
@@ -243,7 +307,7 @@ def stage_note(root: Path, note: dict, run_ref: str, base_commit: str) -> dict:
         note_text = note_path.read_text(encoding='utf-8')
     else:
         note_text = source.render_note(note, assets, note_path)
-    note_text, unmatched, matched_urls = rewrite_remote_image_links(note_text, downloaded, note_path)
+    note_text, unmatched, matched_urls = rewrite_remote_image_links(note_text, downloaded, note_path, images)
     if unmatched:
         # Do not claim the note is ready when a visible image URL has no exact
         # byte-verified descriptor binding.
@@ -282,7 +346,7 @@ def stage_note(root: Path, note: dict, run_ref: str, base_commit: str) -> dict:
     note_bytes = note_path.read_bytes()
     manifest_bytes = manifest_path.read_bytes()
     proof = {'contract': 'getnote-private-asset-probe-1', 'source_id': ident,
-             'source_json_sha256': hashlib.sha256(json_text(note).encode()).hexdigest(),
+             'source_json_sha256': hashlib.sha256(json_text(source_note or note).encode()).hexdigest(),
              'note_path': relative_note, 'note_sha256': hashlib.sha256(note_bytes).hexdigest(),
              'manifest_path': relative_manifest, 'manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest(),
              'assets': sorted(asset_rows, key=lambda row: row['path']), 'ref': run_ref,
@@ -434,6 +498,7 @@ def main() -> int:
     CURRENT_STAGE = 'select_candidate'
     candidates = pending_image_candidates(root)
     selected = None
+    selected_source_note = None
     for ident, markdown_urls in candidates:
         CURRENT_STAGE = 'fetch_get_detail'
         try:
@@ -452,25 +517,20 @@ def main() -> int:
         if detail_id != ident:
             fail()
         CURRENT_FAILURE_CATEGORY = 'validation'
-        descriptors = note.get('attachments') or []
-        if not isinstance(descriptors, list):
-            CURRENT_FAILURE_CATEGORY = 'invalid_attachment_schema'
-            fail()
+        descriptors, descriptor_urls, descriptor_status = normalize_image_attachments(note)
         CURRENT_STAGE = 'match_image_source'
-        image_rows = [item for item in descriptors if isinstance(item, dict) and item.get('type') == 'image']
-        if not image_rows:
-            CURRENT_FAILURE_CATEGORY = 'no_image_descriptors'
+        if descriptor_status != 'ok':
+            CURRENT_FAILURE_CATEGORY = descriptor_status
             continue
-        image_urls = {item.get('original_url') or item.get('url') for item in image_rows
-                      if isinstance(item.get('original_url') or item.get('url'), str)}
-        if markdown_urls and markdown_urls <= image_urls:
-            selected = note
+        if markdown_urls and markdown_urls <= descriptor_urls:
+            selected_source_note = note
+            selected = dict(note, attachments=descriptors)
             break
         CURRENT_FAILURE_CATEGORY = 'url_unbound'
     if selected is None:
         fail()
     CURRENT_STAGE = 'download_bind_attachment'
-    staged = stage_note(root, selected, ref, private_ref_base)
+    staged = stage_note(root, selected, ref, private_ref_base, selected_source_note)
     # stage_note writes only in the isolated runner checkout; the single push
     # targets the run-scoped private branch and is read back above.
     CURRENT_STAGE = 'publish_private_ref'
