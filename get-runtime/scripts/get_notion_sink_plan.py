@@ -223,9 +223,10 @@ def normalize_payload(kind, payload):
         if not isinstance(value['color'], str):
             stop('incomplete_target_read')
         if kind.startswith('heading_'):
-            if value.get('is_toggleable', False) is not False:
+            if type(value.get('is_toggleable', False)) is not bool:
                 stop('incomplete_target_read')
-            value.pop('is_toggleable', None)
+            if value.get('is_toggleable') is False:
+                value.pop('is_toggleable', None)
         if kind == 'to_do' and type(value.get('checked')) is not bool:
             stop('incomplete_target_read')
         if kind == 'code':
