@@ -57,6 +57,7 @@ jobs:
             verify_private_repo|load_credentials|prepare_private_ref|select_candidate|fetch_get_detail|download_bind_attachment|publish_private_ref|unknown) ;;
             *) FAILURE_STAGE=unknown ;;
           esac
+          echo "Get image probe stopped at stage=$FAILURE_STAGE; private output suppressed."
           echo "Get image probe stopped at stage=$FAILURE_STAGE; private output suppressed." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish counts only
