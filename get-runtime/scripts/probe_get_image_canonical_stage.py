@@ -21,7 +21,7 @@ import get_recurring_runtime as runtime
 import sync_getnote_to_raw as sync
 from source_sync_rate import RequestPolicy
 
-PROOF_CONTRACT = 'getnote-private-asset-probe-1'
+PROOF_CONTRACT = 'getnote-private-content-image-probe-1'
 PROOF_COMMIT = '328fe058d8ad3190eeb3cce69a66ff49009c19fd'
 PROOF_ROOT = '.sync/get-notion-asset-probes'
 STAGES = {'proof', 'bindings', 'policy', 'source', 'canonical_prepare', 'private_stage', 'readback'}
@@ -67,6 +67,8 @@ def fetch_proof(api, proof_ref):
     if (proof.get('contract') != PROOF_CONTRACT or proof.get('ref') != proof_ref
             or type(ident) is not str or re.fullmatch(r'[0-9]{19}', ident) is None
             or path != PROOF_ROOT + '/' + ident + '.json'
+            or proof.get('source_field') != 'content_embed'
+            or re.fullmatch(r'[0-9a-f]{64}', proof.get('source_content_sha256', '')) is None
             or not re.fullmatch(r'[0-9a-f]{64}', proof.get('source_json_sha256', ''))
             or not isinstance(proof.get('assets'), list) or len(proof['assets']) != 1
             or not isinstance(proof.get('parent'), str) or re.fullmatch(r'[0-9a-f]{40}', proof['parent']) is None):
@@ -96,7 +98,7 @@ def load_policy():
     return runtime.validate_policy(value, digest.group(1), runtime.entry.BOOTSTRAP), digest.group(1)
 
 
-def extract_candidate(plan, files, source_id, proof, source_json_sha256):
+def extract_candidate(plan, files, source_id, proof, source_json_sha256, source_content_sha256):
     get_root = runtime.r.GET + '/'
     state_path = get_root + runtime.engine.n.STATE
     receipt_path = runtime.entry.FULL_RECEIPT
@@ -117,7 +119,9 @@ def extract_candidate(plan, files, source_id, proof, source_json_sha256):
     markdown = get_root + row['filePath']
     image = images[0]
     proof_asset = proof['assets'][0]
-    if (source_json_sha256 != proof['source_json_sha256']
+    if (proof.get('source_field') != 'content_embed'
+            or source_content_sha256 != proof['source_content_sha256']
+            or source_json_sha256 != proof['source_json_sha256']
             or image.get('asset_sha256') != proof_asset['sha256']
             or image.get('asset_bytes') != proof_asset['bytes']
             or image.get('asset_mime') != proof_asset['mime']):
@@ -256,10 +260,15 @@ def main(argv=None):
             detail = manual.detail_note(source.details[source_id])
             runtime.entry.engine.n.source_note(items.get(source_id), detail)
             source_json_sha256 = hashlib.sha256(sync.json_text(detail).encode('utf-8')).hexdigest()
+            source_content = detail.get('content') if isinstance(detail, dict) else None
+            if not isinstance(source_content, str):
+                fail('canonical_prepare', 'source_content_missing')
+            source_content_sha256 = hashlib.sha256(source_content.encode('utf-8')).hexdigest()
             candidate = {'plan': plan, 'files': files,
                 'parent_tree': reader.local.run('rev-parse', parent + '^{tree}').decode().strip(),
                 'parent_timestamp': reader.local.run('show', '-s', '--format=%ct', parent).decode().strip(),
-                'source_json_sha256': source_json_sha256}
+                'source_json_sha256': source_json_sha256,
+                'source_content_sha256': source_content_sha256}
             captured.update(candidate)
             return plan, files
         def forbid_main_publish(*args, **kwargs):
@@ -279,7 +288,7 @@ def main(argv=None):
         if result.get('status') != 'recurring_candidate_verified' or not captured:
             fail('canonical_prepare')
         image = extract_candidate(captured['plan'], captured['files'], source_id, proof,
-                                  captured['source_json_sha256'])
+                                  captured['source_json_sha256'], captured['source_content_sha256'])
         ref, commit, readback = publish_private_stage(api, token, captured, proof)
         if (set(readback) != set(captured['files'])
                 or readback[image['asset_path']] != captured['files'][image['asset_path']]

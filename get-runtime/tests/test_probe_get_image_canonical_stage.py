@@ -44,11 +44,12 @@ class ProbeStageTests(unittest.TestCase):
         ident = '1234567890123456789'
         ref = 'codex/get-asset-proof-42297879789-1'
         proof = {'contract':probe.PROOF_CONTRACT,'ref':ref,'source_id':ident,
+            'source_field':'content_embed','source_content_sha256':'e'*64,
             'parent':'a'*40,'source_json_sha256':'d'*64,
             'assets':[{'path':'Raw/03 Get/test.png','sha256':'b'*64,
                 'source_url_sha256':'c'*64,'bytes':100,'mime':'image/png'}]}
-        raw = json.dumps(proof,separators=(',',':')).encode()
         class API:
+            def __init__(self,value):self.raw=json.dumps(value,separators=(',',':')).encode()
             def call(self,method,path,**kwargs):
                 if path == '/git/ref/heads/' + ref:
                     return {'ref':'refs/heads/'+ref,'object':{'sha':probe.PROOF_COMMIT,'type':'commit'}}
@@ -56,9 +57,13 @@ class ProbeStageTests(unittest.TestCase):
                     return [{'path':probe.PROOF_ROOT+'/'+ident+'.json','type':'file'}]
                 if path == '/contents/' + probe.PROOF_ROOT+'/'+ident+'.json?ref=' + probe.PROOF_COMMIT:
                     return {'path':probe.PROOF_ROOT+'/'+ident+'.json','encoding':'base64',
-                        'content':base64.b64encode(raw).decode()}
+                        'content':base64.b64encode(self.raw).decode()}
                 raise AssertionError('unexpected private proof request')
-        self.assertEqual(probe.fetch_proof(API(),ref),proof)
+        self.assertEqual(probe.fetch_proof(API(proof),ref),proof)
+        generic_asset_proof=dict(proof,contract='getnote-private-asset-probe-1')
+        with self.assertRaises(probe.ProbeFailure):probe.fetch_proof(API(generic_asset_proof),ref)
+        attachment_only_proof=dict(proof,source_field='attachments')
+        with self.assertRaises(probe.ProbeFailure):probe.fetch_proof(API(attachment_only_proof),ref)
 
     def test_candidate_requires_one_bound_private_image_and_receipt(self):
         ident='1234567890123456789';data=image_fixture.tiny_png();sha=hashlib.sha256(data).hexdigest()
@@ -76,13 +81,18 @@ class ProbeStageTests(unittest.TestCase):
             markdown_path:('![x](../_assets/images/'+sha+'.png)').encode(),asset_path:data}
         plan={'source_scope':'single_note','single_source_id':ident,
             'proposed_content_ids':[ident]}
-        proof={'source_json_sha256':'d'*64,'assets':[{'sha256':sha,'bytes':len(data),'mime':'image/png'}]}
-        self.assertEqual(probe.extract_candidate(plan,files,ident,proof,'d'*64),image)
+        proof={'source_field':'content_embed','source_json_sha256':'d'*64,
+            'source_content_sha256':'e'*64,
+            'assets':[{'sha256':sha,'bytes':len(data),'mime':'image/png'}]}
+        self.assertEqual(probe.extract_candidate(plan,files,ident,proof,'d'*64,'e'*64),image)
         bad=dict(files);bad[asset_path]=b'changed'
-        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,bad,ident,proof,'d'*64)
-        wrong_asset={'source_json_sha256':'d'*64,'assets':[{'sha256':'e'*64,'bytes':len(data),'mime':'image/png'}]}
-        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,wrong_asset,'d'*64)
-        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,proof,'f'*64)
+        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,bad,ident,proof,'d'*64,'e'*64)
+        wrong_asset={'source_field':'content_embed','source_json_sha256':'d'*64,
+            'source_content_sha256':'e'*64,
+            'assets':[{'sha256':'f'*64,'bytes':len(data),'mime':'image/png'}]}
+        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,wrong_asset,'d'*64,'e'*64)
+        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,proof,'f'*64,'e'*64)
+        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,proof,'d'*64,'f'*64)
 
     def test_proof_parent_must_be_candidate_ancestor(self):
         class API:
