@@ -1,4 +1,15 @@
 """Fixed public result projection. No paths, records, titles or caller strings."""
+import re
+
+CAS_GIT_WORDS=frozenset(('auth','branch','connection','curl','denied','disk','error','failed','fatal',
+    'fetch','hook','http','index','large','lock','memory','missing','object','pack','permission',
+    'protocol','push','quota','ref','reject','rejected','remote','rpc','shallow','sideband','signal',
+    'size','space','stale','timeout','unpack','write'))
+
+def git_word_hits(raw):
+    if not isinstance(raw,bytes):return []
+    words=set(re.findall(rb'[a-z]+',raw.lower()))
+    return sorted(word for word in CAS_GIT_WORDS if word.encode('ascii') in words)
 CONTRACT='get-private-runtime-report-2'
 STATUSES=frozenset(('failed','prepared','queue_empty','queue_partial','executed','captured','applied','blocked',
                    'recurring_candidate_verified','recurring_transaction_verified','recurring_failed','notion_probe'))
@@ -50,7 +61,16 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
         for key in ('stdout_category','stderr_category'):
             value=diagnostic.get(key)
             if isinstance(value,str) and value in (*cas_categories,'none'):safe[key]=value
+        for key in ('stdout_words','stderr_words'):
+            value=diagnostic.get(key)
+            if type(value) is list and len(value)<=len(CAS_GIT_WORDS) and all(isinstance(x,str) and x in CAS_GIT_WORDS for x in value) and value==sorted(set(value)):
+                safe[key]=value
         out['cas_diagnostic']=safe
+    metrics=result.get('cas_candidate_metrics')
+    if out['status']=='recurring_failed' and type(metrics) is dict and set(metrics)=={'changed_paths','changed_bytes','transaction_bytes'}:
+        if (type(metrics['changed_paths']) is int and 0<=metrics['changed_paths']<=1000000
+                and all(type(metrics[k]) is int and 0<=metrics[k]<=64*1024*1024 for k in ('changed_bytes','transaction_bytes'))):
+            out['cas_candidate_metrics']=dict(metrics)
     for key in ('external_write_attempts','writes','asset_downloads','notion_writes','confirmed_content_ids','new_selected','notes_changed'):
         value=result.get(key)
         if type(value) is int and 0<=value<=1000000 or key in result and value is None:out[key]=value

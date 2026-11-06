@@ -451,6 +451,9 @@ def failure(exc=None, *, attempt_started=False):
     diagnostic = getattr(exc, 'cas_diagnostic', None)
     if isinstance(diagnostic, dict):
         result['cas_diagnostic'] = diagnostic
+    metrics = getattr(exc, 'cas_candidate_metrics', None)
+    if isinstance(metrics, dict):
+        result['cas_candidate_metrics'] = metrics
     result['failure_kind'] = ('missing_key' if isinstance(exc, KeyError) else
         'invalid_type' if isinstance(exc, TypeError) else
         'invalid_value' if isinstance(exc, ValueError) else

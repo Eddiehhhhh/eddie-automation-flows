@@ -25,7 +25,7 @@ class CasErrorCategory(unittest.TestCase):
 
     def test_cas_failure_retains_one_push_six_reads_and_safe_public_field(self):
         parent, commit = 'a' * 40, 'b' * 40
-        plan = {'parent_commit': parent, 'candidate_commit': commit}
+        plan = {'parent_commit': parent, 'candidate_commit': commit, 'transaction_bytes': 5}
         remote = types.SimpleNamespace(cas_main=Mock(side_effect=manual.CasPushFailure('missing_object',
             {'stage': 'push_exit', 'exit_code': 128, 'stdout_category': 'none', 'stderr_category': 'missing_object'})))
         sleep = Mock()
@@ -43,6 +43,8 @@ class CasErrorCategory(unittest.TestCase):
         self.assertEqual(projected['cas_error_category'], 'missing_object')
         self.assertEqual(projected['cas_diagnostic'], {'stage': 'push_exit', 'exit_code': 128,
                          'stdout_category': 'none', 'stderr_category': 'missing_object'})
+        self.assertEqual(projected['cas_candidate_metrics'], {'changed_paths': 1, 'changed_bytes': 5,
+                                                               'transaction_bytes': 5})
         self.assertNotIn('private-note', str(projected))
 
     def test_real_remote_push_failure_is_classified_without_stderr(self):
@@ -77,6 +79,8 @@ class CasErrorCategory(unittest.TestCase):
         diagnostic = caught.exception.cas_diagnostic
         self.assertEqual((diagnostic['stage'], diagnostic['exit_code'], diagnostic['stdout_category']),
                          ('push_exit', 1, 'size_or_remote_rejection'))
+        self.assertEqual(diagnostic['stdout_words'], ['rejected', 'remote'])
+        self.assertEqual(diagnostic['stderr_words'], ['error', 'failed', 'push'])
         self.assertNotIn('private-note', str(diagnostic))
 
     def test_push_timeout_and_start_errors_have_distinct_fixed_stages(self):
@@ -112,6 +116,22 @@ class CasErrorCategory(unittest.TestCase):
         self.assertEqual(projected['cas_diagnostic'], {'stage': 'push_exit', 'exit_code': 128,
                                                        'stdout_category': 'other'})
         self.assertNotIn('private-note', str(projected))
+
+    def test_word_hits_and_metrics_are_bounded_and_never_echo_raw_output(self):
+        raw = b'fatal: remote rejected private-note https://private.invalid/path auth-token object error'
+        self.assertEqual(manual.diagnostic_report.git_word_hits(raw),
+                         ['auth', 'error', 'fatal', 'object', 'rejected', 'remote'])
+        error = manual.ManualFailure('manual_uncertain_write', 'uncertain', 1)
+        error.cas_diagnostic = {'stage': 'push_exit', 'stdout_words': ['fatal', 'private-note'],
+                                'stderr_words': ['error', 'fatal'], 'extra': raw}
+        error.cas_candidate_metrics = {'changed_paths': 2, 'changed_bytes': 100,
+                                       'transaction_bytes': 64 * 1024 * 1024 + 1}
+        projected = runtime.public_result(runtime.failure(error))
+        self.assertNotIn('stdout_words', projected['cas_diagnostic'])
+        self.assertEqual(projected['cas_diagnostic']['stderr_words'], ['error', 'fatal'])
+        self.assertNotIn('cas_candidate_metrics', projected)
+        self.assertNotIn('private-note', str(projected))
+        self.assertNotIn('private.invalid', str(projected))
 
     def test_unrecognized_category_is_not_exposed(self):
         error = manual.ManualFailure('manual_uncertain_write', 'uncertain', 1)
