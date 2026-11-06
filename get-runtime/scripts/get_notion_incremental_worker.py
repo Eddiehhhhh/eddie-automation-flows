@@ -141,7 +141,7 @@ def desired(data, ident, path, row, schema):
     if recording:
         props.update(recording_properties(data, ident, schema))
         blocks = recording_blocks(blocks)
-    return props, blocks
+    return properties.date_wire_properties(props, properties.date_wire_binding(props)), blocks
 
 
 def recording_properties(data, ident, schema):
