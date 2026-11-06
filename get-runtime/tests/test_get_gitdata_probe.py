@@ -1,0 +1,107 @@
+import base64
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import get_gitdata_probe as probe
+
+
+class GitDataProbe(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.repo), *args], stderr=subprocess.DEVNULL).decode().strip()
+        git('init', '-q')
+        git('config', 'user.name', 'Test')
+        git('config', 'user.email', 'test@example.invalid')
+        (self.repo / 'initial').write_text('initial')
+        git('add', 'initial')
+        git('commit', '-qm', 'initial')
+        self.parent = git('rev-parse', 'HEAD')
+        self.values = {}
+        self.calls = []
+        self.fail_at = None
+        self.wrong_at = None
+        self.drift = False
+        self.ref = None
+        original = probe.git
+        def capture(repo, *args, **kwargs):
+            result = original(repo, *args, **kwargs)
+            if args[0] in ('hash-object', 'write-tree', 'commit-tree'):
+                self.values[args[0]] = result
+            return result
+        self.capture = patch.object(probe, 'git', side_effect=capture)
+        self.capture.start()
+        self.addCleanup(self.capture.stop)
+
+    def call(self, method, path, payload=None, missing=False):
+        self.calls.append((method, path))
+        if path == self.fail_at:
+            raise ValueError('uncertain')
+        if path == self.wrong_at:
+            return {'sha': '0' * 40}
+        if path == '':
+            return {'private': True, 'full_name': probe.REPO}
+        if path == '/git/ref/heads/main':
+            sha = 'f' * 40 if self.drift and self.values.get('commit-tree') else self.parent
+            return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': sha}}
+        if path.startswith('/git/ref/heads/codex/'):
+            return self.ref
+        if path == '/git/blobs':
+            return {'sha': self.values['hash-object']}
+        if path == '/git/trees':
+            return {'sha': self.values['write-tree']}
+        if path == '/git/commits':
+            return {'sha': self.values['commit-tree']}
+        if path == '/git/refs':
+            self.ref = {'ref': payload['ref'], 'object': {'type': 'commit', 'sha': payload['sha']}}
+            return self.ref
+        if path.startswith('/git/commits/'):
+            return {'sha': self.values['commit-tree'], 'tree': {'sha': self.values['write-tree']},
+                    'parents': [{'sha': self.parent}]}
+        if path.startswith('/contents/'):
+            return {'path': path.split('/contents/', 1)[1].split('?')[0],
+                    'sha': self.values['hash-object'], 'type': 'file'}
+        if path.startswith('/git/blobs/'):
+            return {'sha': self.values['hash-object'], 'encoding': 'base64',
+                    'content': base64.b64encode(probe.CONTENT).decode()}
+        raise AssertionError(path)
+
+    def test_local_objects_match_and_only_staging_ref_is_created(self):
+        result = probe.run(self, self.repo, '123', '1')
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual([path for method, path in self.calls if method == 'POST'],
+                         ['/git/blobs', '/git/trees', '/git/commits', '/git/refs'])
+        self.assertEqual(probe.git(self.repo, 'rev-parse', 'HEAD'), self.parent)
+
+    def test_uncertain_write_is_not_retried_and_never_creates_ref(self):
+        self.fail_at = '/git/trees'
+        with self.assertRaisesRegex(ValueError, 'uncertain'):
+            probe.run(self, self.repo, '123', '1')
+        self.assertEqual(self.calls.count(('POST', '/git/trees')), 1)
+        self.assertNotIn(('POST', '/git/refs'), self.calls)
+
+    def test_main_movement_stops_before_staging_ref(self):
+        self.drift = True
+        with self.assertRaisesRegex(ValueError, 'parent_changed'):
+            probe.run(self, self.repo, '123', '1')
+        self.assertNotIn(('POST', '/git/refs'), self.calls)
+
+    def test_object_id_mismatch_stops_before_staging(self):
+        for path in ('/git/blobs', '/git/trees', '/git/commits'):
+            with self.subTest(path=path):
+                self.calls.clear()
+                self.wrong_at = path
+                with self.assertRaisesRegex(ValueError, 'mismatch'):
+                    probe.run(self, self.repo, '123', '1')
+                self.assertNotIn(('POST', '/git/refs'), self.calls)
+
+
+if __name__ == '__main__':
+    unittest.main()
