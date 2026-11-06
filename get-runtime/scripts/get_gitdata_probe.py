@@ -16,6 +16,45 @@ NAME = 'Get local proposal'
 EMAIL = 'get-proposal@example.invalid'
 CONTENT = b'get-git-data-identity-probe-v1\n'
 OID = re.compile(r'^[a-f0-9]{40}$')
+REASONS = {'invalid_oid', 'missing_token', 'run_identity', 'not_private', 'main_ref',
+           'parent_changed', 'ref_exists', 'path_exists', 'timestamp', 'blob_mismatch',
+           'tree_mismatch', 'commit_mismatch', 'ref_mismatch', 'commit_readback',
+           'path_readback', 'blob_readback'}
+GIT_OPS = {'rev-parse', 'ls-tree', 'show', 'read-tree', 'hash-object',
+           'update-index', 'write-tree', 'commit-tree'}
+STAGES = {'repository', 'main_ref', 'staging_ref_read', 'blob_create', 'tree_create',
+          'commit_create', 'staging_ref_create', 'commit_read', 'blob_read', 'path_read',
+          'api_unknown', 'git_unknown'} | {'git_' + op.replace('-', '_') for op in GIT_OPS}
+FAILURES = {'request_budget', 'http_error', 'transport_error', 'response_budget',
+            'response_invalid', 'exit_128', 'exit_nonzero', 'timeout', 'spawn_error', 'invalid_output'}
+
+
+class ProbeFailure(Exception):
+    def __init__(self, stage, reason, status=None):
+        self.stage, self.reason, self.status = stage, reason, status
+
+
+def diagnostic(exc):
+    if isinstance(exc, ProbeFailure):
+        return {'status': 'failed', 'stage': exc.stage if exc.stage in STAGES else 'unknown',
+                'reason': exc.reason if exc.reason in FAILURES else 'unexpected',
+                **({'http_status': exc.status} if exc.reason == 'http_error' and type(exc.status) is int
+                   and 100 <= exc.status <= 599 else {})}
+    reason = str(exc) if type(exc) is ValueError and str(exc) in REASONS else 'unexpected'
+    return {'status': 'failed', 'stage': 'validation', 'reason': reason}
+
+
+def api_stage(method, path):
+    if path == '': return 'repository'
+    if path == '/git/ref/heads/main': return 'main_ref'
+    if path.startswith('/git/ref/heads/codex/'): return 'staging_ref_read'
+    if method == 'POST' and path in ('/git/blobs', '/git/trees', '/git/commits', '/git/refs'):
+        return {'/git/blobs': 'blob_create', '/git/trees': 'tree_create',
+                '/git/commits': 'commit_create', '/git/refs': 'staging_ref_create'}[path]
+    if method == 'GET' and path.startswith('/git/commits/'): return 'commit_read'
+    if method == 'GET' and path.startswith('/git/blobs/'): return 'blob_read'
+    if method == 'GET' and path.startswith('/contents/'): return 'path_read'
+    return 'api_unknown'
 
 
 def checked(value):
@@ -37,9 +76,10 @@ class API:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def call(self, method, path, payload=None, missing=False):
+        stage = api_stage(method, path)
         data = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
         if data is not None and len(data) > 65536:
-            raise ValueError('request_budget')
+            raise ProbeFailure(stage, 'request_budget')
         request = urllib.request.Request('https://api.github.com/repos/' + REPO + path, data=data,
             method=method, headers={'Authorization': 'Bearer ' + self.token,
                 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
@@ -47,23 +87,41 @@ class API:
         try:
             with self.opener.open(request, timeout=30) as response:
                 if response.status not in (200, 201):
-                    raise ValueError('http_status')
+                    raise ProbeFailure(stage, 'http_error', response.status)
                 raw = response.read(1048577)
         except urllib.error.HTTPError as exc:
             if missing and method == 'GET' and exc.code == 404:
                 return None
-            raise ValueError('http_failed') from None
+            raise ProbeFailure(stage, 'http_error', exc.code) from None
+        except ProbeFailure:
+            raise
+        except Exception:
+            raise ProbeFailure(stage, 'transport_error') from None
         if len(raw) > 1048576:
-            raise ValueError('response_budget')
-        value = json.loads(raw)
+            raise ProbeFailure(stage, 'response_budget')
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise ProbeFailure(stage, 'response_invalid') from None
         if not isinstance(value, dict):
-            raise ValueError('response_shape')
+            raise ProbeFailure(stage, 'response_invalid')
         return value
 
 
 def git(repo, *args, data=None, env=None):
-    return subprocess.check_output(['git', '-C', str(repo), *args], input=data,
-                                   env=env, stderr=subprocess.DEVNULL).decode().strip()
+    stage = 'git_' + args[0].replace('-', '_') if args and args[0] in GIT_OPS else 'git_unknown'
+    try:
+        return subprocess.check_output(['git', '-C', str(repo), *args], input=data,
+                                       env=env, stderr=subprocess.DEVNULL, timeout=60).decode().strip()
+    except subprocess.CalledProcessError as exc:
+        reason = 'exit_128' if exc.returncode == 128 else 'exit_nonzero'
+    except subprocess.TimeoutExpired:
+        reason = 'timeout'
+    except OSError:
+        reason = 'spawn_error'
+    except UnicodeError:
+        reason = 'invalid_output'
+    raise ProbeFailure(stage, reason) from None
 
 
 def main_ref(api):
@@ -142,6 +200,7 @@ if __name__ == '__main__':
     try:
         result = run(API(os.environ.get('PRIVATE_VAULT_TOKEN')), Path(os.environ['GITDATA_PROBE_REPO']),
                      os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
-    except Exception:
-        raise SystemExit('gitdata_probe_failed') from None
+    except Exception as exc:
+        print(json.dumps(diagnostic(exc)), flush=True)
+        raise SystemExit(1) from None
     print(json.dumps(result))

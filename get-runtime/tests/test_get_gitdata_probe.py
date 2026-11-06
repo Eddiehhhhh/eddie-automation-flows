@@ -3,8 +3,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import get_gitdata_probe as probe
@@ -101,6 +102,25 @@ class GitDataProbe(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'mismatch'):
                     probe.run(self, self.repo, '123', '1')
                 self.assertNotIn(('POST', '/git/refs'), self.calls)
+
+    def test_diagnostics_are_fixed_and_never_echo_private_errors(self):
+        self.assertEqual(probe.diagnostic(ValueError('blob_mismatch'))['reason'], 'blob_mismatch')
+        self.assertEqual(probe.diagnostic(ValueError('private note'))['reason'], 'unexpected')
+        self.assertNotIn('private note', str(probe.diagnostic(probe.ProbeFailure('private note', 'private note'))))
+        with patch.object(probe.subprocess, 'check_output', side_effect=subprocess.CalledProcessError(128, ['private note'])):
+            with self.assertRaises(probe.ProbeFailure) as caught:
+                probe.git(self.repo, 'read-tree', self.parent)
+        self.assertEqual(probe.diagnostic(caught.exception),
+                         {'status': 'failed', 'stage': 'git_read_tree', 'reason': 'exit_128'})
+
+    def test_http_write_failure_reports_fixed_stage_status_and_is_not_retried(self):
+        api = probe.API('test token')
+        api.opener.open = Mock(side_effect=urllib.error.HTTPError('https://private', 403, 'private note', {}, None))
+        with self.assertRaises(probe.ProbeFailure) as caught:
+            api.call('POST', '/git/trees', {'tree': []})
+        self.assertEqual(probe.diagnostic(caught.exception),
+                         {'status': 'failed', 'stage': 'tree_create', 'reason': 'http_error', 'http_status': 403})
+        api.opener.open.assert_called_once()
 
 
 if __name__ == '__main__':
