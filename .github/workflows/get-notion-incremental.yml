@@ -55,11 +55,11 @@ jobs:
           FAILURE_CATEGORY: ${{ steps.capture.outputs.failure_category }}
         run: |
           case "$FAILURE_STAGE" in
-            verify_private_repo|load_credentials|prepare_private_ref|select_candidate|fetch_get_detail|download_bind_attachment|publish_private_ref|unknown) ;;
+            verify_private_repo|load_credentials|prepare_private_ref|select_candidate|fetch_get_detail|validate_detail_identity|match_image_source|download_bind_attachment|publish_private_ref|unknown) ;;
             *) FAILURE_STAGE=unknown ;;
           esac
           case "$FAILURE_CATEGORY" in
-            validation|auth_denied|not_found|rate_limited|server_error|http_error|api_rejected|transport_error|redirect_blocked|detail_error) ;;
+            validation|auth_denied|not_found|rate_limited|server_error|http_error|api_rejected|transport_error|redirect_blocked|detail_error|detail_identity_mismatch|invalid_attachment_schema|no_image_descriptors|url_unbound) ;;
             *) FAILURE_CATEGORY=validation ;;
           esac
           echo "Get image probe stopped at stage=$FAILURE_STAGE category=$FAILURE_CATEGORY; private output suppressed."

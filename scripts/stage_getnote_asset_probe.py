@@ -33,10 +33,11 @@ MAX_SCAN_BYTES = 8 * 1024 * 1024
 MAX_NOTE_BYTES = 2 * 1024 * 1024
 FAILURE_STAGES = {'verify_private_repo', 'load_credentials', 'prepare_private_ref',
                   'select_candidate', 'fetch_get_detail', 'download_bind_attachment',
-                  'publish_private_ref', 'unknown'}
+                  'validate_detail_identity', 'match_image_source', 'publish_private_ref', 'unknown'}
 FAILURE_CATEGORIES = {'validation', 'auth_denied', 'not_found', 'rate_limited',
                       'server_error', 'http_error', 'api_rejected', 'transport_error',
-                      'redirect_blocked', 'detail_error'}
+                      'redirect_blocked', 'detail_error', 'detail_identity_mismatch',
+                      'invalid_attachment_schema', 'no_image_descriptors', 'url_unbound'}
 RETRYABLE_DETAIL_FAILURES = {'not_found', 'server_error', 'transport_error'}
 CURRENT_STAGE = 'unknown'
 CURRENT_FAILURE_CATEGORY = 'validation'
@@ -442,18 +443,30 @@ def main() -> int:
             if CURRENT_FAILURE_CATEGORY in RETRYABLE_DETAIL_FAILURES:
                 continue
             fail()
-        CURRENT_FAILURE_CATEGORY = 'validation'
-        if source.note_id_from(note) != ident:
+        CURRENT_STAGE = 'validate_detail_identity'
+        CURRENT_FAILURE_CATEGORY = 'detail_identity_mismatch'
+        try:
+            detail_id = source.note_id_from(note)
+        except Exception:
             fail()
+        if detail_id != ident:
+            fail()
+        CURRENT_FAILURE_CATEGORY = 'validation'
         descriptors = note.get('attachments') or []
         if not isinstance(descriptors, list):
+            CURRENT_FAILURE_CATEGORY = 'invalid_attachment_schema'
             fail()
-        image_urls = {item.get('original_url') or item.get('url') for item in descriptors
-                      if isinstance(item, dict) and item.get('type') == 'image'
-                      and isinstance(item.get('original_url') or item.get('url'), str)}
+        CURRENT_STAGE = 'match_image_source'
+        image_rows = [item for item in descriptors if isinstance(item, dict) and item.get('type') == 'image']
+        if not image_rows:
+            CURRENT_FAILURE_CATEGORY = 'no_image_descriptors'
+            continue
+        image_urls = {item.get('original_url') or item.get('url') for item in image_rows
+                      if isinstance(item.get('original_url') or item.get('url'), str)}
         if markdown_urls and markdown_urls <= image_urls:
             selected = note
             break
+        CURRENT_FAILURE_CATEGORY = 'url_unbound'
     if selected is None:
         fail()
     CURRENT_STAGE = 'download_bind_attachment'
