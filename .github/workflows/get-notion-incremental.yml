@@ -59,6 +59,9 @@ jobs:
           GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          # The pinned binding bootstrap requires an explicit reviewed route;
+          # this only permits reading its private capsule, not a Notion write.
+          APPLY: 'true'
         run: |
           set -euo pipefail
           test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
