@@ -10,6 +10,10 @@ on:
         type: boolean
         default: false
         required: true
+      origin_probe:
+        description: Read-only attestation for one existing Get page
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,7 +35,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: 6a659995b9bcf27c484cb088b535ae3c8cd9878f
+          ref: 712e03d1501c3e7b31ec902344a9f05cadae400c
           path: get-runtime
           persist-credentials: false
       - name: Set up Python
@@ -80,6 +84,7 @@ jobs:
           python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
           grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-notion-preflight.txt"
       - name: Materialize verified private runtime binding
+        if: ${{ !inputs.origin_probe }}
         working-directory: get-runtime/get-runtime
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
@@ -87,6 +92,7 @@ jobs:
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
         run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
       - name: Check queued Get notes
+        if: ${{ !inputs.origin_probe }}
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
@@ -103,6 +109,12 @@ jobs:
           controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required'}
           controller.main()
           PY
+      - name: Check one page origin without writing
+        if: ${{ inputs.origin_probe }}
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
+        run: python3 get-runtime/get-runtime/scripts/get_notion_origin_probe.py --vault vault
       - name: Release private write lease
         if: always()
         working-directory: vault
