@@ -17,6 +17,7 @@ RECEIPT = 'Raw/03 Get/03 State/canonical-sync-receipt.json'
 ROOT = '.sync/get-notion-incremental'
 QUEUE = ROOT + '/queue.json'
 CONFIG = ROOT + '/config.json'
+OWNED = ROOT + '/owned'
 SEED = '3760f11239cf72f4f6aac1913d70ddc8ae2253f1'
 CONTRACT = 'get-notion-incremental-queue-1'
 MAX_CHAIN = 24
@@ -176,7 +177,6 @@ def config(root):
 def save(root, changes, message):
     if not changes:
         return head(root)
-    print('save_stage=check_clean', flush=True)
     if git(root, 'status', '--porcelain', '--untracked-files=all'):
         stop('private_checkout_dirty')
     for path, value in changes.items():
@@ -185,32 +185,26 @@ def save(root, changes, message):
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')) + '\n')
-    print('save_stage=add', flush=True)
     subprocess.check_call(['git', '-C', str(root), 'add', '--', *changes],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     staged = subprocess.run(['git', '-C', str(root), 'diff', '--cached', '--quiet']).returncode
     if staged == 0:
-        print('save_stage=no_change', flush=True)
         return head(root)
     if staged != 1:
         stop('private_index_failed')
     subprocess.check_call(['git', '-C', str(root), 'config', 'user.name', 'github-actions[bot]'])
     subprocess.check_call(['git', '-C', str(root), 'config', 'user.email',
                            '41898282+github-actions[bot]@users.noreply.github.com'])
-    print('save_stage=commit', flush=True)
     subprocess.check_call(['git', '-C', str(root), 'commit', '-m', message],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print('save_stage=fetch', flush=True)
     subprocess.check_call(['git', '-C', str(root), 'fetch', 'origin', 'main'],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.check_call(['git', '-C', str(root), 'merge-base', '--is-ancestor', 'origin/main', 'HEAD'],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print('save_stage=push', flush=True)
     subprocess.check_call(['git', '-C', str(root), 'push', 'origin', 'HEAD:main'],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if git(root, 'ls-remote', 'origin', 'refs/heads/main').split()[0] != head(root):
         stop('private_commit_unconfirmed')
-    print('save_stage=confirmed', flush=True)
     return head(root)
 
 
@@ -273,7 +267,7 @@ def run(root, token, limit, apply):
             if result['status'] not in ('created', 'already_present') or not isinstance(result.get('owned'), dict):
                 stop('target_unverified')
             planned['pending'].remove(ident)
-            save(root, {worker.OWNED + '/' + ident + '.json': result['owned'], QUEUE: planned},
+            save(root, {OWNED + '/' + ident + '.json': result['owned'], QUEUE: planned},
                  'Confirm one Get note in Notion')
             completed += 1
         except ValueError as exc:

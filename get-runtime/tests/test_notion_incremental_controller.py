@@ -12,7 +12,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 worker = types.ModuleType('get_notion_incremental_worker')
 worker.ATTEMPTS = '.sync/get-notion-incremental/attempts'
-worker.OWNED = '.sync/get-notion-incremental/owned'
 worker.run = lambda *args, **kwargs: None
 native = types.ModuleType('get_notion_native')
 native.DATA_SOURCE_PIN = '0' * 64
@@ -70,6 +69,24 @@ class AttemptSafety(unittest.TestCase):
     def plan(self):
         return {'contract': controller.CONTRACT, 'receipt_commit': 'a' * 40,
                 'sequence': 4, 'pending': ['1926106578851738352']}
+
+    def test_existing_page_receipt_uses_controller_owned_path(self):
+        planned = self.plan()
+        owned = {'note_id': planned['pending'][0], 'page_id': '1' * 32,
+                 'source_sha256': 'a' * 64, 'target_sha256': 'b' * 64}
+        saves = []
+        with (patch.object(controller, 'head', return_value='b' * 40),
+              patch.object(controller, 'git', return_value='b' * 40 + '\trefs/heads/main'),
+              patch.object(controller, 'config', return_value='c' * 32),
+              patch.object(controller, 'queue', return_value=None),
+              patch.object(controller, 'admission', return_value=planned),
+              patch.object(controller, 'save', side_effect=lambda _root, changes, _message: saves.append(changes) or 'b' * 40),
+              patch.object(controller.worker, 'run', return_value={'status': 'already_present',
+                  'page_id': '1' * 32, 'owned': owned})):
+            result = controller.run(Path('/unused'), 'token', 1, True)
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(saves[-1][controller.OWNED + '/' + owned['note_id'] + '.json'], owned)
+        self.assertEqual(saves[-1][controller.QUEUE]['pending'], [])
 
     def test_existing_marker_never_dispatches_second_create(self):
         ident = '1926106578851738352'
