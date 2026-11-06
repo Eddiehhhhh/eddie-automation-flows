@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import subprocess
 import urllib.parse
@@ -23,10 +24,28 @@ REGISTRY_PATH = 'Raw/03 Get/03 State/canonical-registry.json'
 MAX_MANIFEST = 1024 * 1024
 MAX_REGISTRY = 3 * 1024 * 1024
 MAX_NOTE = 2 * 1024 * 1024
+GET_ROOT = 'Raw/03 Get/'
 
 
 def fail(code: str) -> None:
     raise ValueError(code) from None
+
+
+def canonical_get_asset_path(value: object) -> str:
+    """Map the two exact Get-root representations to one private Git path."""
+    if not isinstance(value, str) or not value or len(value) > 1024 or '\\' in value:
+        fail('manifest_asset_path_invalid')
+    relative = value[len(GET_ROOT):] if value.startswith(GET_ROOT) else value
+    parts = relative.split('/')
+    if (not relative.startswith('_assets/images/')
+            or any(part in ('', '.', '..', '.git') for part in parts)
+            or any(char in relative for char in '*?[]')
+            or any(ord(char) < 32 for char in relative)):
+        fail('manifest_asset_path_invalid')
+    normalized = GET_ROOT + PurePosixPath(relative).as_posix()
+    if value.startswith(GET_ROOT) and normalized != value:
+        fail('manifest_asset_path_invalid')
+    return normalized
 
 
 def git(root: Path, *args: str) -> bytes:
@@ -126,14 +145,14 @@ def verify_proof(root: Path, commit: str, expected_ref: str) -> tuple[str, dict,
     if (not isinstance(row, dict) or not isinstance(embed, dict)
             or embed.get('source_field') != 'content'
             or embed.get('source_content_sha256') != proof.get('source_content_sha256')
-            or embed.get('asset_path') != row.get('path')
+            or canonical_get_asset_path(embed.get('asset_path')) != canonical_get_asset_path(row.get('path'))
             or embed.get('asset_sha256') != row.get('sha256')
             or embed.get('url_sha256') != row.get('source_url_sha256')
             or type(row.get('bytes')) is not int or not 0 < row['bytes'] <= assets.SINGLE_PART_BYTES
             or not re.fullmatch('[0-9a-f]{64}', str(row.get('sha256', '')))
             or not re.fullmatch('[0-9a-f]{64}', str(row.get('source_url_sha256', '')))):
         fail('manifest_proof_mismatch')
-    if (not row['path'].startswith('Raw/03 Get/_assets/images/')
+    if (not row['path'].startswith(GET_ROOT + '_assets/images/')
             or not isinstance(embed.get('url'), str) or not embed['url'].startswith('https://')
             or hashlib.sha256(str(embed.get('url', '')).encode()).hexdigest() != row['source_url_sha256']):
         fail('manifest_source_mismatch')
@@ -142,7 +161,7 @@ def verify_proof(root: Path, commit: str, expected_ref: str) -> tuple[str, dict,
     if not re.search(rb'^!\[[^\]]*\]\(' + re.escape(encoded_asset.encode()) + rb'\)\s*$', note, re.M):
         fail('note_asset_reference_mismatch')
     if (not isinstance(manifest.get('assets'), list) or len(manifest['assets']) != 1
-            or manifest['assets'][0].get('path') != row['path']
+            or canonical_get_asset_path(manifest['assets'][0].get('path')) != canonical_get_asset_path(row['path'])
             or manifest['assets'][0].get('sha256') != row['sha256']
             or manifest['assets'][0].get('bytes') != row['bytes']):
         fail('manifest_asset_mismatch')
