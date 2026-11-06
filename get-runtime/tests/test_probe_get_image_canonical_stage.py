@@ -88,6 +88,9 @@ class ProbeStageTests(unittest.TestCase):
         self.assertIn('probe_get_image_canonical_stage.py',text)
         self.assertIn('private-vault-preflight',text)
         self.assertIn('scripts/task_preflight.py',text)
+        self.assertIn('from task_guard import guard_directory, release_guard',text)
+        self.assertIn("steps.private_preflight.outputs.lease_active == 'true'",text)
+        self.assertNotIn('lease.unlink',text)
 
 
 if __name__ == '__main__':
