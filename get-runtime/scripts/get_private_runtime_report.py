@@ -37,8 +37,20 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
     kind=result.get('failure_kind')
     if isinstance(kind,str) and kind in FAILURE_KINDS:out['failure_kind']=kind
     category=result.get('cas_error_category')
-    if out['status']=='recurring_failed' and category in ('missing_object','shallow_history','authentication_or_permission','network','size_or_remote_rejection','other'):
+    cas_categories=('missing_object','shallow_history','authentication_or_permission','network','size_or_remote_rejection','ref_changed','resource_limit','other')
+    if out['status']=='recurring_failed' and category in cas_categories:
         out['cas_error_category']=category
+    diagnostic=result.get('cas_diagnostic')
+    if out['status']=='recurring_failed' and isinstance(diagnostic,dict) and diagnostic.get('stage') in ('merge_base','push_start','push_exit','push_timeout','push_exception'):
+        safe={'stage':diagnostic['stage']}
+        code=diagnostic.get('exit_code')
+        if type(code) is int and -255<=code<=255:safe['exit_code']=code
+        kind=diagnostic.get('exception')
+        if kind in ('timeout','spawn_error','other'):safe['exception']=kind
+        for key in ('stdout_category','stderr_category'):
+            value=diagnostic.get(key)
+            if isinstance(value,str) and value in (*cas_categories,'none'):safe[key]=value
+        out['cas_diagnostic']=safe
     for key in ('external_write_attempts','writes','asset_downloads','notion_writes','confirmed_content_ids','new_selected','notes_changed'):
         value=result.get(key)
         if type(value) is int and 0<=value<=1000000 or key in result and value is None:out[key]=value

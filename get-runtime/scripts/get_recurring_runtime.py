@@ -448,6 +448,9 @@ def failure(exc=None, *, attempt_started=False):
     category = getattr(exc, 'cas_error_category', None)
     if isinstance(category, str) and category in m.CAS_ERROR_CATEGORIES:
         result['cas_error_category'] = category
+    diagnostic = getattr(exc, 'cas_diagnostic', None)
+    if isinstance(diagnostic, dict):
+        result['cas_diagnostic'] = diagnostic
     result['failure_kind'] = ('missing_key' if isinstance(exc, KeyError) else
         'invalid_type' if isinstance(exc, TypeError) else
         'invalid_value' if isinstance(exc, ValueError) else
