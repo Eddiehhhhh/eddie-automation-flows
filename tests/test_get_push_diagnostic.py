@@ -13,6 +13,7 @@ class ErrorCategories(unittest.TestCase):
         for raw, expected in ((b'fatal: missing blob private-content', 'missing_object'),
                               (b'error: shallow update not allowed', 'shallow_history'),
                               (b'403 private-content', 'authentication_or_permission'),
+                              (b'could not read username private-content', 'authentication_or_permission'),
                               (b'could not resolve host private-content', 'network'),
                               (b'stale info private-content', 'ref_changed'),
                               (b'private-content', 'other')):
