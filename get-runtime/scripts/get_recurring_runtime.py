@@ -35,7 +35,7 @@ STAGES = frozenset(('policy', 'execution_provenance', 'remote_guard', 'checkout'
     'capture_evidence', 'parent_history', 'bootstrap_history', 'bootstrap_inventory',
     'current_inventory', 'receipt_provenance', 'trusted_inputs', 'trusted_states', 'legacy_baselines',
     'new_baselines', 'preview_inputs', 'canonical_prepare', 'candidate_report',
-    'publication', 'old_writer_guard', 'credentials', 'source_transport'))
+    'publication', 'replaced_blob_hydration', 'old_writer_guard', 'credentials', 'source_transport'))
 ENTRY_ERRORS = frozenset(('entry_batch_bound', 'entry_bootstrap_changed',
     'entry_content_ids', 'entry_counts', 'entry_external_anchor_required',
     'entry_foreign_delta', 'entry_foreign_get_change', 'entry_history_bound', 'entry_history_witness',
@@ -296,6 +296,32 @@ def load_receipt(reader, remote, token, root, commit):
         m.import_blob(reader.local, values[entry.FULL_RECEIPT], row[2])
 
 
+def hydrate_replaced_blobs(reader, remote, token, directory, parent, files):
+    """Supply the exact parent blobs needed to push modified paths from a shallow clone."""
+    if any(not isinstance(path, str) or not path.startswith(r.GET + '/') for path in files):
+        fail('runtime_receipt')
+    tree = reader.tree(parent)
+    paths = {path for path in files if path in tree}
+    if not paths:
+        return
+    metadata = remote.check_source_budget(parent)
+    selected = {}
+    for path in paths:
+        row = metadata.get(path)
+        cap = entry.MAX_RECEIPT if path == entry.FULL_RECEIPT else a.MAX_STATE if path in entry.STATE_PATHS else a.owned.MAX_NOTE
+        if (row is None or row[:2] != ('100644', 'blob') or row[:3] != tree[path]
+                or type(row[3]) is not int or not 0 <= row[3] <= cap):
+            fail('runtime_receipt')
+        selected[path] = row
+    values = m.fetch_selected(remote, selected, token, directory)
+    if set(values) != paths:
+        fail('runtime_receipt')
+    for path, data in values.items():
+        if len(data) != selected[path][3]:
+            fail('runtime_receipt')
+        m.import_blob(reader.local, data, selected[path][2])
+
+
 def hydrate_baselines(reader, legacy, registry, parent, remote, *, source_id=None):
     """Download baselines for writable IDs; never narrow trusted state checks."""
     if source_id is not None:
@@ -401,6 +427,8 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
                       production_activated=PRODUCTION_ACTIVATED, sink_status='not_requested')
         if not apply:
             return result
+        at_stage('replaced_blob_hydration', hydrate_replaced_blobs,
+                 reader, remote, token, root / 'replaced-blobs', parent, files)
         def readback(commit, values):
             return m.fetch_selected(remote, {p: ('100644', 'blob', r.oid(data), len(data)) for p, data in values.items()}, token, root / 'readback')
         publication = at_stage('publication', m.publish, reader, remote, plan, files, result['plan_sha256'], readback,
