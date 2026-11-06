@@ -142,7 +142,7 @@ def verify_proof(root: Path, commit: str) -> tuple[str, dict, object, bytes, str
 
 
 def compare_existing_page(root: Path, commit: str, ident: str, note: bytes,
-                          note_path: str, schema: dict, snapshot: dict) -> tuple[bool, bool, int, int, int, str | None]:
+                          note_path: str, schema: dict, snapshot: dict) -> tuple[bool, bool, int, int, int, int, str | None]:
     """Compare all non-image blocks and projected fields without changing Notion."""
     raw_text = note.decode('utf-8')
     proof = committed_json(root, commit, proof_path(root, commit), MAX_MANIFEST)
@@ -151,7 +151,7 @@ def compare_existing_page(root: Path, commit: str, ident: str, note: bytes,
         safe='/._-')
     image_line = re.compile(r'^!\[[^\]]*\]\(' + re.escape(image_reference) + r'\)\s*$', re.M)
     text_without_image, removed = image_line.subn('', raw_text)
-    if removed != 1:
+    if removed < 1:
         fail('note_asset_reference_mismatch')
     registry = committed_json(root, commit, 'Raw/03 Get/03 State/canonical-registry.json', 4 * 1024 * 1024)
     row = (registry.get('newById') or {}).get(ident)
@@ -200,7 +200,7 @@ def compare_existing_page(root: Path, commit: str, ident: str, note: bytes,
                 source_image_matches += 1
         except assets.AssetHeld:
             image_unreadable += 1
-    return content_matches, properties_match, len(image_rows), source_image_matches, image_unreadable, target
+    return content_matches, properties_match, removed, len(image_rows), source_image_matches, image_unreadable, target
 
 
 def main() -> int:
@@ -233,7 +233,7 @@ def main() -> int:
     owner_status = 'not_checked'
     if matches:
         snapshot = api.read_note(ident)
-        content_matches, properties_match, existing_images, matching_images, unreadable_images, target_sha = \
+        content_matches, properties_match, source_image_occurrences, existing_images, matching_images, unreadable_images, target_sha = \
             compare_existing_page(args.vault, args.proof_commit, ident, note, note_path,
                                   api.schema(), snapshot)
         main_before = git(args.vault, 'ls-remote', 'origin', 'refs/heads/main').decode().split()
@@ -266,6 +266,7 @@ def main() -> int:
     result = {'status': 'dry_run_ready' if not matches else 'existing_page_complete' if complete_image_match else 'existing_page_reviewed',
               'notes': 1, 'image_assets': 1, 'image_bytes': len(asset.data),
               'notion_workspace_limit': limit, 'existing_pages': len(matches),
+              'source_image_occurrences': source_image_occurrences if matches else 0,
               'existing_image_blocks': existing_images, 'matching_source_images': matching_images,
               'unreadable_image_blocks': unreadable_images,
               'source_text_matches': content_matches, 'source_properties_match': properties_match,
