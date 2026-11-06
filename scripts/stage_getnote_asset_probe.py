@@ -41,7 +41,9 @@ FAILURE_CATEGORIES = {'validation', 'auth_denied', 'not_found', 'rate_limited',
                       'server_error', 'http_error', 'api_rejected', 'transport_error',
                       'redirect_blocked', 'detail_error', 'detail_identity_mismatch',
                       'invalid_attachment_schema', 'no_image_descriptors', 'url_unbound',
-                      'private_write_failed'}
+                      'private_write_failed', 'git_add_ignored', 'git_add_sparse',
+                      'git_add_pathspec', 'git_add_index_lock', 'git_add_permission',
+                      'git_add_lfs_filter', 'git_add_object_write', 'git_add_other'}
 RETRYABLE_DETAIL_FAILURES = {'not_found', 'server_error', 'transport_error'}
 CURRENT_STAGE = 'unknown'
 CURRENT_FAILURE_CATEGORY = 'validation'
@@ -227,6 +229,36 @@ def git(root: Path, *args: str, input: bytes | None = None) -> bytes:
     if result.returncode:
         fail()
     return result.stdout
+
+
+def classify_git_add_stderr(stderr: bytes) -> str:
+    """Map Git add diagnostics to fixed categories without retaining path text."""
+    message = stderr.decode('utf-8', 'replace').lower()
+    if 'ignored by one of your .gitignore files' in message or 'ignored by .gitignore' in message:
+        return 'git_add_ignored'
+    if 'sparse-checkout' in message or 'sparse checkout' in message:
+        return 'git_add_sparse'
+    if 'pathspec' in message and ('did not match' in message or 'no match' in message):
+        return 'git_add_pathspec'
+    if 'index.lock' in message or 'index file smaller than expected' in message:
+        return 'git_add_index_lock'
+    if 'permission denied' in message or 'operation not permitted' in message:
+        return 'git_add_permission'
+    if 'git-lfs' in message or "filter 'lfs'" in message or 'external filter' in message:
+        return 'git_add_lfs_filter'
+    if ('unable to write' in message or 'failed to write' in message
+            or 'no space left' in message or 'could not create' in message):
+        return 'git_add_object_write'
+    return 'git_add_other'
+
+
+def git_add_paths(root: Path, paths: list[str]) -> None:
+    global CURRENT_FAILURE_CATEGORY
+    result = subprocess.run(['git', '-C', str(root), 'add', '--', *paths],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        CURRENT_FAILURE_CATEGORY = classify_git_add_stderr(result.stderr)
+        fail()
 
 
 def verify_private_repository():
@@ -491,7 +523,7 @@ def publish_private_stage(root: Path, ref: str, paths: list[str]) -> str:
     if changed - allowed:
         fail()
     CURRENT_STAGE = 'git_add_files'
-    git(root, 'add', '--', *paths)
+    git_add_paths(root, paths)
     CURRENT_STAGE = 'verify_staged_index'
     staged = git(root, 'diff', '--cached', '--name-only', '-z').decode().split('\0')
     if {item for item in staged if item} != allowed:

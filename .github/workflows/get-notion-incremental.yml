@@ -63,7 +63,7 @@ jobs:
             *) FAILURE_STAGE=unknown ;;
           esac
           case "$FAILURE_CATEGORY" in
-            validation|auth_denied|not_found|rate_limited|server_error|http_error|api_rejected|transport_error|redirect_blocked|detail_error|detail_identity_mismatch|invalid_attachment_schema|no_image_descriptors|url_unbound|private_write_failed) ;;
+            validation|auth_denied|not_found|rate_limited|server_error|http_error|api_rejected|transport_error|redirect_blocked|detail_error|detail_identity_mismatch|invalid_attachment_schema|no_image_descriptors|url_unbound|private_write_failed|git_add_ignored|git_add_sparse|git_add_pathspec|git_add_index_lock|git_add_permission|git_add_lfs_filter|git_add_object_write|git_add_other) ;;
             *) FAILURE_CATEGORY=validation ;;
           esac
           echo "Get image probe stopped at stage=$FAILURE_STAGE category=$FAILURE_CATEGORY; private output suppressed."

@@ -146,6 +146,23 @@ class PrivateGetAssetProbeTests(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertEqual(probe.detail_failure_category(RuntimeError(message)), expected)
 
+    def test_git_add_stderr_is_reduced_to_fixed_categories(self):
+        cases = {
+            b"The following paths are ignored by one of your .gitignore files: private/path.md": 'git_add_ignored',
+            b"outside of the sparse-checkout definition": 'git_add_sparse',
+            b"pathspec 'private/path.md' did not match any files": 'git_add_pathspec',
+            b"Unable to create '.git/index.lock': File exists": 'git_add_index_lock',
+            b"Permission denied: private/path.md": 'git_add_permission',
+            b"external filter 'git-lfs filter-process' failed": 'git_add_lfs_filter',
+            b"unable to write object: No space left on device": 'git_add_object_write',
+            b"unexpected sensitive diagnostic private/path.md": 'git_add_other',
+        }
+        for stderr, expected in cases.items():
+            with self.subTest(expected=expected):
+                actual = probe.classify_git_add_stderr(stderr)
+                self.assertEqual(actual, expected)
+                self.assertNotIn('private/path.md', actual)
+
     def test_candidate_ids_come_only_from_private_queue_and_are_bounded(self):
         ids = ['1234567890123456789', '2234567890123456789',
                '3234567890123456789', '4234567890123456789']
