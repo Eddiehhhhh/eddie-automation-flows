@@ -1,237 +1,60 @@
-# Local deterministic template only. Publish only after final production approval.
-name: Canonical Get single writer
+name: Get pending read-only probe
 on:
   workflow_dispatch:
-    inputs:
-      apply:
-        description: Apply only under the separately approved recurring scope
-        type: boolean
-        default: false
-        required: true
-      notion_mode:
-        description: Canonical sync or separately registered bounded manual mode
-        type: choice
-        default: canonical
-        required: true
-        options:
-          - canonical
-          - historical-capture
-          - historical-apply
-          - property-apply
-      notion_input_sha256:
-        description: Registered private input digest; empty for canonical
-        type: string
-        default: ''
-        required: false
-      single_note_id:
-        description: Process only this exact Get note ID; requires canonical apply
-        type: string
-        default: ''
-        required: false
-      create_test_note:
-        description: Create one fixed Get note and sync only that note end to end
-        type: boolean
-        default: false
-        required: false
 permissions:
   contents: read
 concurrency:
   group: eddie-private-vault-writers
   cancel-in-progress: false
 jobs:
-  canonical-get:
+  probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-    defaults:
-      run:
-        working-directory: get-runtime
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: Eddiehhhhh/eddie-automation-flows
-          ref: 'c8e94c33d22bcc51ba73ed96147d495881dd7fba'
+          ref: 6a659995b9bcf27c484cb088b535ae3c8cd9878f
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.11'
-      - name: Install verified metadata parser
-        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
-      - name: Verify pinned reviewed runtime
+      - name: Materialize verified binding
+        working-directory: get-runtime
         env:
-          RUNTIME_SHA: 'c8e94c33d22bcc51ba73ed96147d495881dd7fba'
-        run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
-      - name: Validate single-note request
-        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
-        env:
-          SINGLE_NOTE_ID: ${{ inputs.single_note_id }}
-          CREATE_TEST_NOTE: ${{ inputs.create_test_note }}
-          APPLY: ${{ inputs.apply }}
-          NOTION_MODE: ${{ inputs.notion_mode }}
-        run: |
-          test "$APPLY" = true
-          test "$NOTION_MODE" = canonical
-          if test "$CREATE_TEST_NOTE" = true; then
-            test -z "$SINGLE_NOTE_ID"
-          else
-            [[ "$SINGLE_NOTE_ID" =~ ^[0-9]{1,64}$ ]]
-            echo "::add-mask::$SINGLE_NOTE_ID"
-          fi
-      - name: Validate bounded Notion route before Get
-        env:
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
-        run: python scripts/get_notion_route_selection.py
-      - name: Materialize verified private runtime data
-        env:
-          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-        run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
-      - name: Validate complete private Notion route before Get
-        env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
-        run: python scripts/get_notion_controller_route.py --preflight
-      - name: Prepare reviewed public policy
+        run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Verify pending gate and source receipt
+        working-directory: get-runtime
         env:
-          POLICY_B64: 'eyJjb2RlX3NoYSI6ImM4ZTk0YzMzZDIyYmNjNTFiYTczZWQ5NjE0N2Q0OTU4ODFkZDdmYmEiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI2ZWNkZjlhNjhiMWExYzNiMjUxYjAzM2Q2YmVhMWYyYTFkZjgwYTZiMGEzMThmNWIxMDQzYzExZDA1YmM2NTAxIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiJkMzk5MmIwODU1NjA4ZmY5MTM2ZGNjNzViOGM5MDZkODJlNmYxNzk1MDVhZWQzYmZiYTlmYmJiNmRhZjRhMzI0IiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjUxNDQ4NDYwOTQzNDIwNDExMWRhNWZjMTdhYTc2NjhkYTNhODNlODc1ODcyZDliYjBmZjJjY2NjNGU0YWMyMzQiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
-          POLICY_SHA256: '0e081bb2ea8a61fb7960ae2e7ce6c58b8f93e0b29552e49a832dcdeb41d6dd29'
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          POLICY_B64: 'eyJjb2RlX3NoYSI6IjZhNjU5OTk1YjliY2YyN2M0ODRjYjA4OGI1MzVhZTNjOGNkOTg3OGYiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI2ZWNkZjlhNjhiMWExYzNiMjUxYjAzM2Q2YmVhMWYyYTFkZjgwYTZiMGEzMThmNWIxMDQzYzExZDA1YmM2NTAxIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiI4ZGRhZjRiMGViZmJjMWYyNDMzZTYyMWU1YzFiZThjMzczODJkZWM2OWRkMGRhNTc1MDU5NjY1YzExOTc0YzBkIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6ImI3NmU2ZmY4MWQ0MWZmNjY4MDNiMGU2OGQ1ZWQyOGIxYWY4YWI4NmFjZGQ3ZmQ5ZGNlNjcxNjdiOWQxYjQ2ZTUiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
         run: |
-          python - <<'PY'
-          import base64, hashlib, os
-          from pathlib import Path
-          value = base64.b64decode(os.environ['POLICY_B64'], validate=True)
-          assert hashlib.sha256(value).hexdigest() == os.environ['POLICY_SHA256']
-          path = Path(os.environ['RUNNER_TEMP']) / 'get-recurring-public-policy.json'
-          with path.open('xb') as stream:
-              stream.write(value)
-          PY
-      # Reruns must reuse the note ID through single_note_id, never create a duplicate.
-      # Reuse the fixed test note on later runs instead of creating duplicates.
-      - name: Create one real Get sync test note
-        id: create_test_note
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_test_note }}
-        env:
-          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
-          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
-        run: |
-          set -euo pipefail
-          test -n "$GETNOTE_API_KEY"
-          test -n "$GETNOTE_CLIENT_ID"
-          title='艾迪宇宙云端同步验收（2026-11-05）'
-          marker='验收标记：get-cloud-sync-20261105'
-          content="用于验证 Get 笔记 → 私有 GitHub → Notion 的云端自动同步。$marker。由验收流程创建，保留为链路记录。"
-          umask 077
-          TEST_TITLE="$title" TEST_MARKER="$marker" TEST_NOTE_ID_FILE="$RUNNER_TEMP/get-test-note-id" python - <<'PY'
-          import os
-          import re
-          import sys
-          from pathlib import Path
-
-          sys.path.insert(0, str(Path("scripts").resolve()))
-          import sync_getnote_to_raw as getnote
-
+          python3 - <<'PYCODE'
+          import base64, hashlib, json, os, sys, urllib.parse
+          sys.path.insert(0, "scripts")
+          import get_gitdata_staging as staging
+          import get_pending_gate as pending
+          import get_private_runtime_bindings as bindings
+          import get_publication_provenance as provenance
+          import get_recurring_entry as entry
+          import get_recurring_policy_recovery as recovery
           try:
-              notes = getnote.fetch_note_list(
-                  os.environ["GETNOTE_API_KEY"], os.environ["GETNOTE_CLIENT_ID"], max_pages=None
-              )
-              matches = {
-                  getnote.note_id_from(note)
-                  for note in notes
-                  if note.get("title") == os.environ["TEST_TITLE"]
-                  and isinstance(note.get("content"), str)
-                  and os.environ["TEST_MARKER"] in note["content"]
-              }
-              if len(matches) > 1:
-                  raise ValueError("duplicate test notes")
-              note_id = next(iter(matches), "")
-              if note_id and re.fullmatch(r"[0-9]{1,64}", note_id) is None:
-                  raise ValueError("invalid test note ID")
-              Path(os.environ["TEST_NOTE_ID_FILE"]).write_text(note_id, encoding="ascii")
-          except Exception as error:
-              raise SystemExit(f"Complete Get note lookup failed ({type(error).__name__})") from None
-          print(f"Enumerated {len(notes)} Get notes; exact test-marker matches: {len(matches)}")
-          PY
-          note_id=$(cat "$RUNNER_TEMP/get-test-note-id")
-          note_action=reused
-          if test -z "$note_id"; then
-            note_action=created
-            payload=$(jq -nc --arg title "$title" --arg content "$content" '{title:$title,content:$content,note_type:"plain_text",tags:["云端同步验收"],parent_id:0}')
-            http_status=$(curl --silent --show-error --max-time 20 --noproxy '*' \
-              --output "$RUNNER_TEMP/get-created-note.json" --write-out '%{http_code}' \
-              --request POST 'https://openapi.biji.com/open/api/v1/resource/note/save' \
-              --header "Authorization: $GETNOTE_API_KEY" \
-              --header "X-Client-ID: $GETNOTE_CLIENT_ID" \
-              --header 'Content-Type: application/json' \
-              --data "$payload")
-            test "$http_status" = 200 || { echo "Get note creation failed (HTTP $http_status)" >&2; exit 1; }
-            note_id=$(jq -er 'if .success == true and (.data.note_id | type == "string" and test("^[0-9]{1,64}$")) then .data.note_id else error("unexpected Get response") end' "$RUNNER_TEMP/get-created-note.json")
-          fi
-          echo "::add-mask::$note_id"
-          echo "note_id=$note_id" >> "$GITHUB_OUTPUT"
-          echo "Test note $note_action."
-      - name: Emit verified canonical publication anchor
-        id: get_sync
-        if: ${{ github.event_name == 'schedule' || (inputs.notion_mode != 'historical-capture' && inputs.notion_mode != 'historical-apply') }}
-        env:
-          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
-          GITHUB_TOKEN: ${{ github.token }}
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
-          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
-          GET_SINGLE_NOTE_ID: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id || steps.create_test_note.outputs.note_id) || '' }}
-          GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          POLICY_SHA256: '0e081bb2ea8a61fb7960ae2e7ce6c58b8f93e0b29552e49a832dcdeb41d6dd29'
-          SCOPE_SHA256: 'bd3dc5da3c744c2ddbdfb50d7a2ad1860c5ab2d503edc7d7a77070a4c2ebb160'
-        run: |
-          args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
-          if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
-          if test "$APPLY" = true; then
-            args+=(--apply --scope-from-policy --approved-scope-sha256 "$SCOPE_SHA256" --checkpoint "$RUNNER_TEMP/get-recurring-attempt.json" --publication-file "$RUNNER_TEMP/get-canonical-publication.txt")
-          fi
-          python scripts/get_recurring_runtime.py "${args[@]}"
-      - name: Sync confirmed Get content to Notion
-        id: notion_sync
-        if: ${{ (steps.get_sync.outcome == 'success' || (github.event_name == 'workflow_dispatch' && inputs.apply && steps.get_sync.outcome == 'skipped' && (inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply'))) && (github.event_name == 'schedule' || inputs.apply) }}
-        continue-on-error: ${{ !(github.event_name == 'workflow_dispatch' && inputs.apply && (inputs.single_note_id != '' || inputs.create_test_note || inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply')) }}
-        env:
-          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          GITHUB_TOKEN: ${{ github.token }}
-          POLICY_SHA256: '0e081bb2ea8a61fb7960ae2e7ce6c58b8f93e0b29552e49a832dcdeb41d6dd29'
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
-          GET_SINGLE_NOTE_ID: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id || steps.create_test_note.outputs.note_id) || '' }}
-          GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
-        run: |
-          if test "$NOTION_MODE" = canonical; then
-            python scripts/get_notion_runtime.py \
-              --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
-              --approved-policy-sha256 "$POLICY_SHA256" \
-              --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
-              --apply --scope-from-policy
-          elif test "$NOTION_MODE" = historical-capture || test "$NOTION_MODE" = historical-apply; then
-            python scripts/get_notion_controller_route.py \
-              --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
-              --approved-policy-sha256 "$POLICY_SHA256" \
-              --fixed-source --apply --scope-from-policy
-          else
-            python scripts/get_notion_controller_route.py \
-              --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
-              --approved-policy-sha256 "$POLICY_SHA256" \
-              --publication-file "$RUNNER_TEMP/get-canonical-publication.txt" \
-              --apply --scope-from-policy
-          fi
-# Canonical runs retain independent Get and Notion failure reporting. A Notion
-# partial cannot erase a confirmed Get receipt. Fixed archive runs deliberately
-# skip Get and emit only their separate source-auth marker, never a Get receipt.
+              raw = base64.b64decode(os.environ['POLICY_B64'], validate=True)
+              policy = provenance.validate_policy(json.loads(raw), hashlib.sha256(raw).hexdigest())
+              api = staging.API(os.environ['PRIVATE_VAULT_TOKEN'])
+              client = provenance.PublicGithub(os.environ['GITHUB_TOKEN'])
+              main = api.call('GET', '/git/ref/heads/main')['object']['sha']
+              anchor = pending.check(api, client, policy, main)
+              record = bindings.value('get_recurring_policy_recovery', 'SEQ5_BINDING')['record']
+              if anchor != record['receipt_commit']:
+                  raise ValueError('anchor_mismatch')
+              path = urllib.parse.quote(entry.FULL_RECEIPT, safe='/')
+              response = api.call('GET', '/contents/' + path + '?ref=' + anchor)
+              content = base64.b64decode(response['content'], validate=False)
+              digest = hashlib.sha256(content).hexdigest()
+              if not recovery.accepts_receipt(anchor, digest, json.loads(content), policy['get_policy_sha256']):
+                  raise ValueError('receipt_mismatch')
+              print('pending_gate_and_receipt_verified')
+          except Exception:
+              raise SystemExit('pending_gate_or_receipt_failed') from None
+          PYCODE
