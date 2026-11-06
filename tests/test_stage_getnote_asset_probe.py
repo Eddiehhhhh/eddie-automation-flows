@@ -197,6 +197,57 @@ class PrivateGetAssetProbeTests(unittest.TestCase):
         self.assertEqual(len(found), expected_count)
         self.assertEqual([ident for ident, _ in found], ids[:expected_count])
 
+    def test_sparse_checkout_materializes_only_verified_registry_owner(self):
+        import hashlib
+        import json
+
+        ident = '1234567890123456789'
+        relative = '99 录音卡笔记/2026/2026-10/existing.md'
+        repo_path = 'Raw/03 Get/' + relative
+        original = ('---\nsource_system: getnote\nnote_id: "' + ident + '"\n'
+                    '---\n![image](https://get.invalid/image.png)\n').encode()
+        baseline = hashlib.sha1(b'blob ' + str(len(original)).encode() + b'\0' + original).hexdigest()
+        registry = {'newById': {ident: {'filePath': relative, 'baseline_blob': baseline}}}
+
+        def fake_git(_root, *args, input=None):
+            if args == ('show', 'HEAD:' + probe.REGISTRY_PATH):
+                return json.dumps(registry).encode()
+            if args == ('show', 'HEAD:' + repo_path):
+                return original
+            if args == ('hash-object', '--stdin'):
+                return baseline.encode()
+            raise AssertionError('unexpected git command in test')
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(probe, 'git', side_effect=fake_git):
+                owner = probe.materialize_registry_owner(root, ident)
+            self.assertEqual(owner.relative_to(root).as_posix(), repo_path)
+            self.assertEqual(owner.read_bytes(), original)
+            index = probe.source.IdentityIndex(root / 'Raw' / '03 Get', 'getnote', 'note_id', boundary=root)
+            self.assertEqual(index.path(ident, root / 'Raw/03 Get/01 Notes/candidate.md'), owner)
+
+    def test_sparse_checkout_registry_owner_hash_mismatch_fails_closed(self):
+        import json
+
+        ident = '1234567890123456789'
+        relative = '99 录音卡笔记/existing.md'
+        registry = {'newById': {ident: {'filePath': relative, 'baseline_blob': '0' * 40}}}
+        original = b'---\nsource_system: getnote\nnote_id: "' + ident.encode() + b'"\n---\n'
+
+        def fake_git(_root, *args, input=None):
+            if args == ('show', 'HEAD:' + probe.REGISTRY_PATH):
+                return json.dumps(registry).encode()
+            if args == ('show', 'HEAD:Raw/03 Get/' + relative):
+                return original
+            if args == ('hash-object', '--stdin'):
+                return b'1' * 40
+            raise AssertionError('unexpected git command in test')
+
+        with TemporaryDirectory() as temp, patch.object(probe, 'git', side_effect=fake_git):
+            with self.assertRaises(SystemExit):
+                probe.materialize_registry_owner(Path(temp), ident)
+
 
 if __name__ == '__main__':
     unittest.main()

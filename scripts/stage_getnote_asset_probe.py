@@ -20,7 +20,8 @@ import urllib.parse
 
 import sync_getnote_to_raw as source
 from source_sync_assets import AssetStore
-from source_sync_store import attachment_manifest, frontmatter, json_text, write_if_changed
+from source_sync_store import (IdentityIndex, attachment_manifest, frontmatter, json_text,
+                               validate_tree_path, write_if_changed)
 
 PROOF_ROOT = '.sync/get-notion-asset-probes'
 QUEUE_PATH = '.sync/get-notion-incremental/queue.json'
@@ -326,6 +327,46 @@ def pending_image_candidates(root: Path) -> list[tuple[str, set[str]]]:
     return candidates
 
 
+def materialize_registry_owner(root: Path, ident: str) -> Path:
+    """Expose the registry-owned note to sparse checkouts after verifying its blob."""
+    if not re.fullmatch(r'[0-9]{19}', ident):
+        fail()
+    try:
+        registry = json.loads(git(root, 'show', 'HEAD:' + REGISTRY_PATH))
+    except (SystemExit, ValueError, UnicodeError):
+        fail()
+    rows = registry.get('newById') if isinstance(registry, dict) else None
+    row = rows.get(ident) if isinstance(rows, dict) else None
+    relative = row.get('filePath') if isinstance(row, dict) else None
+    expected_blob = row.get('baseline_blob') if isinstance(row, dict) else None
+    raw_parts = relative.split('/') if isinstance(relative, str) else []
+    if (not isinstance(relative, str) or not relative.endswith('.md') or relative.startswith('/')
+            or '\\' in relative or any(part in ('', '.', '..', '.git') for part in raw_parts)
+            or any(char in relative for char in '*?[]') or any(ord(char) < 32 for char in relative)
+            or not isinstance(expected_blob, str) or not re.fullmatch(r'[0-9a-f]{40}', expected_blob)):
+        fail()
+    repo_relative = 'Raw/03 Get/' + relative
+    try:
+        data = git(root, 'show', 'HEAD:' + repo_relative)
+        actual_blob = git(root, 'hash-object', '--stdin', input=data).decode('ascii').strip()
+    except (SystemExit, UnicodeError):
+        fail()
+    if actual_blob != expected_blob or len(data) > MAX_NOTE_BYTES:
+        fail()
+    target = root / repo_relative
+    try:
+        validate_tree_path(root, target)
+    except (OSError, ValueError):
+        fail()
+    if target.exists():
+        if target.is_symlink() or target.read_bytes() != data:
+            fail()
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return target
+
+
 def rewrite_remote_image_links(markdown: str, image_assets: list[dict], note_path: Path,
                                descriptors: list[dict] | None = None) -> tuple[str, int, set[str]]:
     """Rewrite only exact Get attachment URLs to their verified local files."""
@@ -385,8 +426,14 @@ def stage_note(root: Path, note: dict, run_ref: str, base_commit: str,
     ident = source.note_id_from(note)
     if not re.fullmatch(r'[0-9]{19}', ident):
         fail()
-    index = source.IdentityIndex(source.RAW_DIR, 'getnote', 'note_id', boundary=root)
+    # The workflow uses sparse checkout. Read the registry's exact existing
+    # owner from HEAD, verify its baseline blob and ID, then expose only that
+    # file to IdentityIndex. Never let a sparse omission look like a new note.
+    registry_owner = materialize_registry_owner(root, ident)
+    index = IdentityIndex(source.RAW_DIR, 'getnote', 'note_id', boundary=root)
     note_path = source.output_path_for(note, index)
+    if note_path.resolve() != registry_owner.resolve():
+        fail()
     descriptors, _, descriptor_status = normalize_image_attachments(note)
     if descriptor_status != 'ok':
         fail()
