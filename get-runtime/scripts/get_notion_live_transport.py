@@ -321,3 +321,25 @@ class API:
             raise
         if result.get('object')!='page' or native.uuid(result.get('id'))!=page or native.uuid(result.get('parent',{}).get('data_source_id'))!=self.source or result.get('archived') is True or result.get('in_trash') is True:fail('write_uncertain')
         return page
+
+    def update_incremental_properties(self,page_id,patch,managed_names):
+        """Patch only the fields projected by the Get incremental worker."""
+        import get_notion_properties as mapping
+        page=native.uuid(page_id)
+        if page not in self.known_pages or not isinstance(managed_names,set) or not managed_names:
+            fail('unread_target')
+        if (not isinstance(patch,dict) or not patch or '笔记 ID' in patch
+                or not set(patch)<=managed_names):
+            fail('invalid_approval')
+        schema=self.schema()
+        for name,value in patch.items():
+            if name not in schema or not isinstance(schema[name],dict):fail('wrong_schema')
+            try: normalized=mapping.value(value)
+            except ValueError:fail('invalid_approval')
+            if normalized['type']!=schema[name].get('type'):fail('wrong_schema')
+        result=self._write('PATCH','/pages/'+page,{'properties':deepcopy(patch)})
+        if (result.get('object')!='page' or native.uuid(result.get('id'))!=page
+                or native.uuid(result.get('parent',{}).get('data_source_id'))!=self.source
+                or result.get('archived') is True or result.get('in_trash') is True):
+            fail('write_uncertain')
+        return page

@@ -18,6 +18,7 @@ ROOT = '.sync/get-notion-incremental'
 QUEUE = ROOT + '/queue.json'
 CONFIG = ROOT + '/config.json'
 OWNED = ROOT + '/owned'
+UPDATES = ROOT + '/updates'
 SEED = '3760f11239cf72f4f6aac1913d70ddc8ae2253f1'
 CONTRACT = 'get-notion-incremental-queue-1'
 MAX_CHAIN = 24
@@ -219,7 +220,9 @@ def run(root, token, limit, apply):
         held_reasons = {}
         for ident in planned['pending'][:limit]:
             try:
-                status = worker.run(root, ident, current, source_id, token)['status']
+                status = worker.run(root, ident, current, source_id, token,
+                    owned=committed_json(root, OWNED + '/' + ident + '.json', missing=True),
+                    journal=committed_json(root, UPDATES + '/' + ident + '.json', missing=True))['status']
             except ValueError as exc:
                 if str(exc) not in HOLD_CODES:
                     raise
@@ -231,7 +234,7 @@ def run(root, token, limit, apply):
             elif status == 'already_present':
                 verified += 1
             elif status == 'update_ready':
-                held += 1
+                ready += 1
             else:
                 stop('target_unverified')
         return {'status': 'dry_run_partial' if held else 'dry_run_ready',
@@ -246,12 +249,17 @@ def run(root, token, limit, apply):
     for ident in list(planned['pending'])[:limit]:
         current = head(root)
         try:
-            result = worker.run(root, ident, current, source_id, token)
+            owned = committed_json(root, OWNED + '/' + ident + '.json', missing=True)
+            journal_path = UPDATES + '/' + ident + '.json'
+            journal = committed_json(root, journal_path, missing=True)
+            result = worker.run(root, ident, current, source_id, token,
+                owned=owned, journal=journal)
             status = result['status']
             if status == 'update_ready':
-                held += 1
-                defer(ident)
-                continue
+                def persist_update(value):
+                    save(root, {journal_path: value}, 'Reserve or verify one Get to Notion update step')
+                result = worker.run(root, ident, head(root), source_id, token,
+                    apply=True, owned=owned, journal=journal, persist_update=persist_update)
             if status == 'ready':
                 marker_path = worker.ATTEMPTS + '/' + ident + '.json'
                 if committed_json(root, marker_path, missing=True) is not None:
@@ -264,10 +272,13 @@ def run(root, token, limit, apply):
                           'status': 'attempt_reserved'}
                 current = save(root, {marker_path: marker}, 'Reserve one Get to Notion attempt')
                 result = worker.run(root, ident, current, source_id, token, apply=True)
-            if result['status'] not in ('created', 'already_present') or not isinstance(result.get('owned'), dict):
+            if result['status'] not in ('created', 'already_present', 'updated') or not isinstance(result.get('owned'), dict):
                 stop('target_unverified')
             planned['pending'].remove(ident)
-            save(root, {OWNED + '/' + ident + '.json': result['owned'], QUEUE: planned},
+            changes = {OWNED + '/' + ident + '.json': result['owned'], QUEUE: planned}
+            if result['status'] == 'updated':
+                changes[journal_path] = result['journal_complete']
+            save(root, changes,
                  'Confirm one Get note in Notion')
             completed += 1
         except ValueError as exc:

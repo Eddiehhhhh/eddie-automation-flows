@@ -233,7 +233,8 @@ def attempt_from_main(root, ident):
     return value
 
 
-def run(root, ident, commit, source_id, token, apply=False):
+def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=None,
+        persist_update=None):
     path, data, row = source(root, ident, commit)
     request = transport.Transport(token)
     api = transport.API(request, source_id, [ident])
@@ -244,6 +245,20 @@ def run(root, ident, commit, source_id, token, apply=False):
         stop('duplicate_id')
     if matches:
         page = matches[0]
+        if owned is not None:
+            if (not isinstance(owned, dict) or set(owned) != {'note_id', 'page_id',
+                    'source_sha256', 'target_sha256'} or owned['note_id'] != ident
+                    or owned['page_id'] != page or any(not isinstance(owned[key], str)
+                    or re.fullmatch(r'[a-f0-9]{64}', owned[key]) is None
+                    for key in ('source_sha256', 'target_sha256'))):
+                stop('manual_edit_or_unknown_write')
+            source_sha = hashlib.sha256(data).hexdigest()
+            if source_sha != owned['source_sha256'] or (isinstance(journal, dict)
+                    and journal.get('phase') != 'complete'):
+                import get_notion_incremental_update as update
+                return update.update(root, ident, page, data, props, blocks,
+                                     source_id, token, api, owned, journal,
+                                     persist_update if apply else None)
         try:
             target = verify_note(api, ident, page, props, blocks)
         except ValueError as exc:
