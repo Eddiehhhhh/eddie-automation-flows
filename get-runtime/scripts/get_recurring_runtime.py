@@ -376,6 +376,87 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
     return anchor, preview, history_witness
 
 
+class ReplaySource:
+    """Reuse one bounded, exact source observation only for local replanning."""
+    MAX_BYTES = 64 * 1024 * 1024
+
+    def __init__(self, source):
+        self.source = source
+        self.snapshot = None
+        self.details = {}
+        self.bytes = 0
+        self.replaying = False
+
+    def enumerate(self, source_id=None):
+        if self.replaying:
+            if self.snapshot is None or self.snapshot[0] != source_id:
+                fail('runtime_failed')
+            return deepcopy(self.snapshot[1])
+        if self.snapshot is not None:
+            fail('runtime_failed')
+        result = self.source.enumerate() if source_id is None else self.source.enumerate(source_id)
+        if not isinstance(result, tuple) or len(result) != 2:
+            fail('runtime_failed')
+        size = len(a.encoded(list(result)))
+        if size > self.MAX_BYTES:
+            fail('runtime_failed')
+        self.bytes = size
+        self.snapshot = (source_id, deepcopy(result))
+        return deepcopy(result)
+
+    def detail_raw(self, ident):
+        if self.replaying:
+            if ident not in self.details:
+                fail('runtime_failed')
+            value = self.details[ident]
+            if value is None:
+                raise RuntimeError('GetNote HTTP 404')
+            return value
+        if ident in self.details:
+            fail('runtime_failed')
+        try:
+            value = self.source.detail_raw(ident)
+        except RuntimeError as exc:
+            if str(exc) != 'GetNote HTTP 404':
+                raise
+            self.details[ident] = None
+            raise
+        if not isinstance(value, bytes) or self.bytes + len(value) > self.MAX_BYTES:
+            fail('runtime_failed')
+        self.bytes += len(value)
+        self.details[ident] = value
+        return value
+
+    def seal(self):
+        if self.snapshot is None:
+            fail('runtime_failed')
+        self.replaying = True
+
+
+def rebaseline_trees(reader, commit):
+    # Include both Get data/receipt and Notion synchronization state. A
+    # temporary edit and revert is still rejected by the per-commit walk.
+    return (reader.source_get_tree(commit), reader.local.run(
+        'ls-tree', '-z', commit, '--', '.sync/get-notion', '.sync/get-notion-incremental'))
+
+
+def rebaseline_parent(local, reader, remote, old, new):
+    """Only accept a short, linear history with no related state change."""
+    if old == new:
+        return old
+    fetch_commit(local, new, 258)
+    expected = rebaseline_trees(reader, old)
+    cursor = new
+    for _ in range(257):
+        if rebaseline_trees(reader, cursor) != expected:
+            fail('runtime_failed')
+        if cursor == old:
+            m.guard(remote, new)
+            return new
+        cursor = entry.single_parent(reader, cursor)
+    fail('runtime_failed')
+
+
 def run(token, source, *, policy, approved_policy_sha256, remote=None, public_client=None,
         expected_parent=None, apply=False, scope=None, approved_scope_sha256=None,
         run_context=None, trigger='manual', checkpoint=None, on_publication=None,
@@ -417,17 +498,52 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
         local = at_stage('checkout', r.readback_checkout, root / 'objects', bootstrap['capture_anchor']['capture_commit'], token)
         remote.local = local
         reader, evidence, _ = at_stage('capture_evidence', m.load_evidence, local, remote, token, root, parent, anchor=bootstrap['capture_anchor'])
-        anchor, preview, history_witness = at_stage('trusted_inputs', load_trusted_inputs, local, reader, evidence, remote, token, root, parent, client, policy,
-            bootstrap=bootstrap, exclude_run_id=run_context['run_id'] if run_context else None,
-            exclude_run_attempt=run_context['run_attempt'] if run_context else None, source_id=source_id)
-        if anchor is None or anchor['commit'] != expected_anchor or pending.exact_ref(pending_api) != expected_anchor:
-            at_stage('pending_gate', pending.fail)
-        at_stage('remote_guard', m.guard, remote, parent)
-        plan, files = at_stage('canonical_prepare', entry.prepare, reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
-            anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger, history_witness=history_witness, source_id=source_id)
-        at_stage('remote_guard', m.guard, remote, parent)
-        if pending.exact_ref(pending_api) != expected_anchor:
-            at_stage('pending_gate', pending.fail)
+        replay_source = ReplaySource(source)
+        for attempt_index in range(3):
+            latest = at_stage('remote_guard', m.guard, remote)
+            if expected_parent is not None and latest != expected_parent:
+                m.fail('manual_parent_changed')
+            parent = rebaseline_parent(local, reader, remote, parent, latest)
+            if at_stage('pending_gate', pending.check, pending_api, client, policy, parent) != expected_anchor:
+                at_stage('pending_gate', pending.fail)
+            if isinstance(client, provenance._PublicGithub):
+                client.private_proof_source = private_proof.PrivateRecords(remote)
+                client.private_proof_source.expected_head = parent
+            attempt_root = root / ('prepare-' + str(attempt_index))
+            attempt_root.mkdir(mode=0o700)
+            try:
+                anchor, preview, history_witness = at_stage('trusted_inputs', load_trusted_inputs, local, reader, evidence, remote, token, attempt_root, parent, client, policy,
+                    bootstrap=bootstrap, exclude_run_id=run_context['run_id'] if run_context else None,
+                    exclude_run_attempt=run_context['run_attempt'] if run_context else None, source_id=source_id)
+            except private_proof.PrivateProofError:
+                observed = at_stage('remote_guard', m.guard, remote)
+                if observed == parent or attempt_index == 2:
+                    raise
+                continue
+            if anchor is None or anchor['commit'] != expected_anchor or pending.exact_ref(pending_api) != expected_anchor:
+                at_stage('pending_gate', pending.fail)
+            if at_stage('remote_guard', m.guard, remote) != parent:
+                continue
+            plan, files = at_stage('canonical_prepare', entry.prepare, reader, evidence, parent, replay_source, approved_rules_sha256=policy['rules_sha256'],
+                anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger, history_witness=history_witness, source_id=source_id)
+            replay_source.seal()
+            if at_stage('remote_guard', m.guard, remote) != parent:
+                continue
+            if pending.exact_ref(pending_api) != expected_anchor:
+                at_stage('pending_gate', pending.fail)
+            if apply:
+                at_stage('replaced_blob_hydration', hydrate_replaced_blobs,
+                         reader, remote, token, attempt_root / 'replaced-blobs', parent, files)
+                at_stage('gitdata_staging', entry.verify_plan, reader, evidence, plan, files,
+                         policy['rules_sha256'], bootstrap=bootstrap,
+                         history_witness=history_witness, source_id=source_id)
+                if at_stage('remote_guard', m.guard, remote) != parent:
+                    continue
+                if pending.exact_ref(pending_api) != expected_anchor:
+                    at_stage('pending_gate', pending.fail)
+            break
+        else:
+            m.fail('manual_parent_changed')
         result = at_stage('candidate_report', entry.public_report, plan, files)
         if result['status'] != 'recurring_local_candidate_verified':
             at_stage('candidate_report', fail, 'runtime_failed')
@@ -435,8 +551,6 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
                       production_activated=PRODUCTION_ACTIVATED, sink_status='not_requested')
         if not apply:
             return result
-        at_stage('replaced_blob_hydration', hydrate_replaced_blobs,
-                 reader, remote, token, root / 'replaced-blobs', parent, files)
         verifier = lambda rd, pl, fs: entry.verify_plan(rd, evidence, pl, fs, policy['rules_sha256'], bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
         if files:
             at_stage('gitdata_staging', verifier, reader, plan, files)

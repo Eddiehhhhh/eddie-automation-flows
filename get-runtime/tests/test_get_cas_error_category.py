@@ -57,6 +57,7 @@ class CasErrorCategory(unittest.TestCase):
             (runtime.pending, 'check', {'return_value': parent}),
             (runtime.pending, 'exact_ref', {'return_value': parent}),
             (runtime.entry, 'prepare', {'return_value': (plan, files)}),
+            (runtime.ReplaySource, 'seal', {'return_value': None}),
             (runtime.entry, 'verify_plan', {'return_value': None}),
             (runtime.entry, 'public_report', {'side_effect': lambda *_: {'status': 'recurring_local_candidate_verified',
                 'plan_sha256': manual.a.sha(manual.a.encoded(plan))}}),
@@ -108,6 +109,8 @@ class CasErrorCategory(unittest.TestCase):
             (runtime.pending, 'exact_ref', {'return_value': parent}),
             (runtime.staging, 'API', {'return_value': object()}),
             (runtime.entry, 'prepare', {'return_value': (plan, {'Raw/03 Get/note.md': b'new'})}),
+            (runtime.ReplaySource, 'seal', {'return_value': None}),
+            (runtime.entry, 'verify_plan', {'return_value': None}),
             (runtime.entry, 'public_report', {'return_value': {'status': 'recurring_local_candidate_verified', 'plan_sha256': 'b' * 64}}),
             (runtime, 'hydrate_replaced_blobs', {'side_effect': ValueError('runtime_receipt')}),
         ]
