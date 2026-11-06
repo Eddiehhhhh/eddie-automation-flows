@@ -65,10 +65,12 @@ def confirmed_option_refusal(reason, status, request_fingerprint, expected_finge
     return {'reason': reason, 'status': 403, 'request_fingerprint': request_fingerprint}
 
 
-def schema_projection(properties):
+def schema_projection(properties, fields=None, *, include_options=False):
     if not isinstance(properties, dict): fail('property_schema_changed')
+    fields = FIELDS if fields is None else fields
+    if not isinstance(fields, dict) or not fields or type(include_options) is not bool: fail('property_schema_changed')
     result = {}
-    for name, (_, kind) in FIELDS.items():
+    for name, (_, kind) in fields.items():
         prop = properties.get(name)
         if (not isinstance(prop, dict) or prop.get('type') != kind
                 or not isinstance(prop.get('id'), str) or not prop['id']):
@@ -83,6 +85,8 @@ def schema_projection(properties):
                         or not option['id'] or not isinstance(option.get('name'), str)
                         or not option['name'] or option['name'] in values): fail('property_schema_changed')
                 values[option['name']] = option['id']
+            if include_options:
+                row['options'] = dict(sorted(values.items()))
             # Option names are values, not structural schema. Notion can add
             # select/multi-select options on page write when the integration
             # can edit the parent data source. Do not hash this catalog.
@@ -293,6 +297,8 @@ def _url(raw):
 def project(data, ident, schema, timestamps=None, source_metadata=None):
     """Return wire values and held-field reasons, without changing any input."""
     fields = source_fields(data, ident)
+    from get_notion_exact_media_projection import field_view
+    fields, source_metadata = field_view(data, ident, fields, source_metadata)
     timestamps = timestamps or {}
     result, held = {}, {}
     for name, (source, kind) in FIELDS.items():

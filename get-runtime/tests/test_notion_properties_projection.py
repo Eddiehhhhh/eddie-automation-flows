@@ -60,11 +60,32 @@ finally:
         else:
             sys.modules[name] = original
 
+historical_engine = types.ModuleType('get_notion_executor')
+historical_engine.encoded = lambda value: json.dumps(value, sort_keys=True,
+    separators=(',', ':'), ensure_ascii=False).encode()
+historical_engine.digest = lambda value: hashlib.sha256(
+    historical_engine.encoded(value)).hexdigest()
+historical_engine.fail = lambda reason: (_ for _ in ()).throw(ValueError(reason))
+historical_engine.target = lambda snapshot, ident, data_source: None
+historical_engine.GitPublication = type('GitPublication', (), {
+    'check': staticmethod(lambda *args, **kwargs: None),
+    'check_assets': staticmethod(lambda *args, **kwargs: None),
+    'read': staticmethod(lambda *args, **kwargs: b'')})
+_original_historical = sys.modules.pop('get_notion_historical', None)
+try:
+    with patch.dict(sys.modules, {'get_private_runtime_bindings': bindings,
+                                  'get_notion_executor': historical_engine}):
+        import get_notion_historical as historical
+finally:
+    sys.modules.pop('get_notion_historical', None)
+    if _original_historical is not None:
+        sys.modules['get_notion_historical'] = _original_historical
+
 
 def tearDownModule():
     for name in ('get_notion_properties', 'get_notion_live_transport',
                  'get_notion_incremental_properties', 'get_notion_metadata_pending',
-                 'get_notion_sink_plan'):
+                 'get_notion_sink_plan', 'get_notion_historical'):
         if name not in _PREEXISTING_MODULES:
             sys.modules.pop(name, None)
 
@@ -79,6 +100,31 @@ def schema(options=None):
                 {'id': 'opt-' + str(i), 'name': value}
                 for i, value in enumerate(options.get(name, []), 1)]}
         result[name] = item
+    return result
+
+
+def native_database_schema(options=None):
+    result = schema(options)
+    result.update({'笔记 ID': {'id': 'native-note-id', 'type': 'rich_text'},
+                   '标题': {'id': 'native-title-id', 'type': 'title'}})
+    return result
+
+
+def legacy_native_database_schema(options=None):
+    """The exact six-column native shape present in anchored old captures."""
+    options = options or {}
+    result = {
+        '创建时间': {'id': 'legacy-created', 'type': 'date'},
+        '更新时间': {'id': 'legacy-updated', 'type': 'date'},
+        '标签': {'id': 'legacy-tags', 'type': 'multi_select', 'multi_select': {
+            'options': [{'id': 'legacy-tag-' + str(i), 'name': name}
+                        for i, name in enumerate(options.get('标签', ['旧标签']), 1)]}},
+        '笔记类型': {'id': 'legacy-type', 'type': 'select', 'select': {
+            'options': [{'id': 'legacy-kind-' + str(i), 'name': name}
+                        for i, name in enumerate(options.get('笔记类型', ['旧类型']), 1)]}},
+        '笔记 ID': {'id': 'legacy-note-id', 'type': 'rich_text'},
+        '标题': {'id': 'legacy-title-id', 'type': 'title'},
+    }
     return result
 
 
@@ -111,6 +157,73 @@ def project(data, ident, projection, timestamps=None, source_metadata=None):
 
 
 class NotionPropertyProjection(unittest.TestCase):
+    def native_schema_capture(self, properties, *, legacy_state=False):
+        manifest = {'records': {NOTE_ID: {'mode': 'new_numeric'}},
+                    'data_source_id': SOURCE_ID}
+        return {'manifest': manifest,
+            'snapshots': {NOTE_ID: {'complete': True,
+                'native_blocks_available': True, 'identity_query_complete': True,
+                'exact_id_matches': []}},
+            'native_schema_evidence': historical._schema_evidence(properties,
+                allow_legacy_capture=legacy_state)}
+
+    def test_historical_schema_capture_accepts_exact_legacy_and_current_shapes(self):
+        old = legacy_native_database_schema()
+        old_capture = self.native_schema_capture(old, legacy_state=True)
+        # Reproduce the f6e68b5 four-field projection, including select option
+        # name->ID maps, rather than using today's option-independent hash.
+        old_projection = {}
+        for name, (_, kind) in historical.LEGACY_NATIVE_SCHEMA_FIELDS.items():
+            prop = old[name]
+            row = {'id': prop['id'], 'type': kind}
+            if kind in ('select', 'multi_select'):
+                row['options'] = dict(sorted({item['name']: item['id']
+                    for item in prop[kind]['options']}.items()))
+            old_projection[name] = row
+        evidence = old_capture['native_schema_evidence']
+        self.assertEqual(evidence['properties_sha256'], historical.e.digest(old))
+        self.assertEqual(evidence['schema_projection_sha256'], historical.e.digest(old_projection))
+        historical.check_native_schema_capture(old_capture)
+        with self.assertRaisesRegex(ValueError, 'property_schema_changed'):
+            historical.native_schema_evidence(old)
+        with self.assertRaisesRegex(ValueError, 'property_schema_changed'):
+            props.schema_projection(old)
+
+        current = native_database_schema({'标签': ['新标签'], '主题': ['新主题']})
+        current_capture = self.native_schema_capture(current)
+        self.assertEqual(current_capture['native_schema_evidence'],
+                         historical.native_schema_evidence(current))
+        historical.check_native_schema_capture(current_capture)
+        self.assertEqual(set(props.schema_projection(current)), set(props.FIELDS))
+
+    def test_historical_schema_capture_rejects_option_and_field_tampering(self):
+        old = legacy_native_database_schema()
+        for name, mutate in (
+            ('option', lambda value: value['properties']['标签']['multi_select']['options'][0].update(name='被改标签')),
+            ('field_id', lambda value: value['properties']['标签'].update(id='tampered-id')),
+            ('identity_id', lambda value: value['properties']['笔记 ID'].update(id='tampered-id')),
+            ('properties_hash', lambda value: value.update(properties_sha256='0' * 64)),
+            ('projection_hash', lambda value: value.update(schema_projection_sha256='0' * 64)),
+        ):
+            with self.subTest(name=name):
+                capture = self.native_schema_capture(old, legacy_state=True)
+                mutate(capture['native_schema_evidence'])
+                with self.assertRaisesRegex(ValueError, 'state_invalid'):
+                    historical.check_native_schema_capture(capture)
+
+    def test_historical_schema_capture_does_not_accept_unproven_partial_schema(self):
+        old = legacy_native_database_schema()
+        # New API captures are never allowed to use the old compatibility path.
+        with self.assertRaisesRegex(ValueError, 'property_schema_changed'):
+            historical.native_schema_evidence(old)
+        # A mixed/partial current schema is not an evidenced historical shape.
+        partial = native_database_schema()
+        partial.pop('附件原始属性')
+        with self.assertRaisesRegex(ValueError, 'property_schema_changed'):
+            historical.native_schema_evidence(partial)
+        with self.assertRaisesRegex(ValueError, 'property_schema_changed'):
+            historical._schema_evidence(partial, allow_legacy_capture=True)
+
     def test_creation_scope_binds_attachment_metadata_export(self):
         new_scope = creation_properties.SCOPE
         self.assertEqual(new_scope['registry_export'], 'timestamps_and_attachment_metadata')
