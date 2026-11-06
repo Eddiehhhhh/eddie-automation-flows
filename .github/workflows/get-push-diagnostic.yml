@@ -28,6 +28,7 @@ jobs:
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-push-diagnostic/runtime-bindings.json
+          APPLY: 'false'
         run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
       - name: Diagnose dry-run push
         env:
