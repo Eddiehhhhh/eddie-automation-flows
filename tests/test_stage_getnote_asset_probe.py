@@ -163,6 +163,18 @@ class PrivateGetAssetProbeTests(unittest.TestCase):
                 self.assertEqual(actual, expected)
                 self.assertNotIn('private/path.md', actual)
 
+    def test_git_add_sparse_receives_only_exact_paths(self):
+        paths = ['Raw/03 Get/01 Notes/note.md',
+                 'Raw/03 Get/_assets/images/asset.png',
+                 'Raw/03 Get/03 State/attachments/manifest.json',
+                 '.sync/get-notion-asset-probes/proof.json']
+        result = type('Result', (), {'returncode': 0, 'stdout': b'', 'stderr': b''})()
+        with patch.object(probe.subprocess, 'run', return_value=result) as run:
+            probe.git_add_paths(Path('/private/vault'), paths)
+        run.assert_called_once_with(
+            ['git', '-C', '/private/vault', 'add', '--sparse', '--', *paths],
+            stdout=probe.subprocess.PIPE, stderr=probe.subprocess.PIPE)
+
     def test_candidate_ids_come_only_from_private_queue_and_are_bounded(self):
         ids = ['1234567890123456789', '2234567890123456789',
                '3234567890123456789', '4234567890123456789']

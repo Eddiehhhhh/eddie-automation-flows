@@ -254,7 +254,7 @@ def classify_git_add_stderr(stderr: bytes) -> str:
 
 def git_add_paths(root: Path, paths: list[str]) -> None:
     global CURRENT_FAILURE_CATEGORY
-    result = subprocess.run(['git', '-C', str(root), 'add', '--', *paths],
+    result = subprocess.run(['git', '-C', str(root), 'add', '--sparse', '--', *paths],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
         CURRENT_FAILURE_CATEGORY = classify_git_add_stderr(result.stderr)
