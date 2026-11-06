@@ -30,6 +30,21 @@ MAX_CHANGED_BYTES=64*c.MIB
 MAX_MANAGED=1152
 PROTECTED={**c.PROTECTED,c.REF:CAPTURE}
 ERRORS={'manual_failed','manual_target','manual_ref_changed','manual_parent_changed','manual_initial_changed','manual_state_anchor','manual_source_payload','manual_budget','manual_plan','manual_scope','manual_readback','manual_readback_ref','manual_readback_transport','manual_uncertain_write','manual_write_unconfirmed','manual_rollback_conflict','manual_checkpoint','manual_approval_changed','manual_approval_required'}
+CAS_ERROR_CATEGORIES=frozenset(('missing_object','shallow_history','authentication_or_permission','network','size_or_remote_rejection','other'))
+
+def cas_error_category(stderr):
+    value=stderr.lower() if isinstance(stderr,bytes) else b''
+    if any(x in value for x in (b'authentication failed',b'permission denied',b'403',b'could not read username')):return 'authentication_or_permission'
+    if any(x in value for x in (b'missing blob',b'missing tree',b'missing object',b'bad object',b'unable to read',b'could not read')):return 'missing_object'
+    if b'shallow' in value:return 'shallow_history'
+    if any(x in value for x in (b'connection',b'timed out',b'network',b'resolve host',b'broken pipe')):return 'network'
+    if any(x in value for x in (b'file too large',b'exceeds',b'oversized',b'413',b'remote rejected',b'pre-receive hook declined',b'remote unpack failed',b'gh001',b'gh013')):return 'size_or_remote_rejection'
+    return 'other'
+
+class CasPushFailure(Exception):
+    def __init__(self,category):
+        super().__init__('git_operation_failed')
+        self.cas_error_category=category if isinstance(category,str) and category in CAS_ERROR_CATEGORIES else 'other'
 
 class ManualFailure(a.ParityFailure):
     def __init__(self,code,write_state='not_attempted',attempts=0):
@@ -62,7 +77,8 @@ class Remote(c.Remote):
     def cas_main(self,parent,commit):
         a.checked(parent,40);a.checked(commit,40)
         self.local.run('merge-base','--is-ancestor',parent,commit)
-        self.local.run('push','--porcelain','--no-verify','--force-with-lease='+r.MAIN_REF+':'+parent,r.REMOTE_URL,commit+':'+r.MAIN_REF)
+        result=self.local.command('push','--porcelain','--no-verify','--force-with-lease='+r.MAIN_REF+':'+parent,r.REMOTE_URL,commit+':'+r.MAIN_REF)
+        if result.returncode:raise CasPushFailure(cas_error_category(result.stderr))
 
 def guard(remote,parent=None):
     metadata=remote.metadata()
@@ -271,9 +287,12 @@ def publish(reader,remote,plan,files,expected_plan_sha,readback,*,sleep=time.sle
     if checkpoint is None:fail('manual_checkpoint')
     checkpoint(plan)
     guard(remote,parent)
-    uncertain=False;confirmed=False
+    uncertain=False;confirmed=False;cas_category=None
     try:remote.cas_main(parent,commit);confirmed=True
-    except Exception:uncertain=True
+    except Exception as exc:
+        uncertain=True
+        category=getattr(exc,'cas_error_category',None)
+        cas_category=category if isinstance(category,str) and category in CAS_ERROR_CATEGORIES else 'other'
     try:
         for attempt in range(6):
             try:observed=guard(remote)
@@ -287,7 +306,10 @@ def publish(reader,remote,plan,files,expected_plan_sha,readback,*,sleep=time.sle
         expected_parents=reader.local.run('rev-list','--parents','-n','1',commit).decode().strip().split()[1:]
         if actual.get('tree')!=plan['candidate_tree'] or actual.get('parents')!=expected_parents or readback(commit,files)!=files:fail('manual_readback')
         guard(remote,commit)
-    except Exception as exc:fail(str(exc) if str(exc) in ERRORS else 'manual_readback','confirmed' if confirmed else 'uncertain',1)
+    except Exception as exc:
+        failure=ManualFailure(str(exc) if str(exc) in ERRORS else 'manual_readback','confirmed' if confirmed else 'uncertain',1)
+        if cas_category is not None:failure.cas_error_category=cas_category
+        raise failure from None
     return {'main_updated':True,'cas_attempts':1,'readback_verified':True}
 
 
