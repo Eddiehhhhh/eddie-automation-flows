@@ -59,7 +59,7 @@ jobs:
           CANDIDATE_STATS: ${{ steps.capture.outputs.candidate_stats }}
         run: |
           case "$FAILURE_STAGE" in
-            verify_private_repo|load_credentials|prepare_private_ref|select_candidate|fetch_get_detail|validate_detail_identity|match_image_source|download_bind_attachment|publish_private_ref|verify_stage_paths|git_stage_files|commit_stage_files|push_private_ref|readback_private_ref|readback_private_files|readback_private_proof|unknown) ;;
+            verify_private_repo|load_credentials|prepare_private_ref|select_candidate|fetch_get_detail|validate_detail_identity|match_image_source|download_bind_attachment|publish_private_ref|verify_stage_paths|git_add_files|verify_staged_index|commit_stage_files|push_private_ref|readback_private_ref|readback_private_files|readback_private_proof|unknown) ;;
             *) FAILURE_STAGE=unknown ;;
           esac
           case "$FAILURE_CATEGORY" in

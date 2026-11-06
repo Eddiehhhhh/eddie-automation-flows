@@ -34,7 +34,7 @@ MAX_NOTE_BYTES = 2 * 1024 * 1024
 FAILURE_STAGES = {'verify_private_repo', 'load_credentials', 'prepare_private_ref',
                   'select_candidate', 'fetch_get_detail', 'download_bind_attachment',
                   'validate_detail_identity', 'match_image_source', 'publish_private_ref',
-                  'verify_stage_paths', 'git_stage_files', 'commit_stage_files',
+                  'verify_stage_paths', 'git_add_files', 'verify_staged_index', 'commit_stage_files',
                   'push_private_ref', 'readback_private_ref', 'readback_private_files',
                   'readback_private_proof', 'unknown'}
 FAILURE_CATEGORIES = {'validation', 'auth_denied', 'not_found', 'rate_limited',
@@ -490,8 +490,9 @@ def publish_private_stage(root: Path, ref: str, paths: list[str]) -> str:
     # Only this probe's note, manifest, assets and proof may be staged.
     if changed - allowed:
         fail()
-    CURRENT_STAGE = 'git_stage_files'
+    CURRENT_STAGE = 'git_add_files'
     git(root, 'add', '--', *paths)
+    CURRENT_STAGE = 'verify_staged_index'
     staged = git(root, 'diff', '--cached', '--name-only', '-z').decode().split('\0')
     if {item for item in staged if item} != allowed:
         fail()
