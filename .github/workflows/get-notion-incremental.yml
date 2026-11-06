@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: eddie-private-vault-writers
+  group: eddie-get-origin-readonly-probe
   cancel-in-progress: false
 
 jobs:
