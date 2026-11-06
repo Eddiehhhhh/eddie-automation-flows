@@ -112,6 +112,7 @@ jobs:
         if: ${{ inputs.origin_probe }}
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
         run: python3 get-runtime/get-runtime/scripts/get_notion_origin_probe.py --vault vault
