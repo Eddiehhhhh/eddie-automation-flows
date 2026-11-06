@@ -1,5 +1,6 @@
 """CAS diagnostics must not change retry safety or reveal stderr."""
 from pathlib import Path
+from contextlib import ExitStack
 import subprocess
 import sys
 import types
@@ -13,6 +14,38 @@ import get_private_preview_retention as retention
 
 
 class CasErrorCategory(unittest.TestCase):
+    def test_replaced_blob_failure_stops_before_publication(self):
+        parent = 'a' * 40
+        reader = types.SimpleNamespace(local=object())
+        remote = types.SimpleNamespace(cas_main=Mock())
+        plan = {'parent_commit': parent}
+        replacements = [
+            (runtime, 'validate_policy', {'return_value': {'rules_sha256': 'f' * 64}}),
+            (runtime, 'validate_scope', {'return_value': None}),
+            (runtime, 'context', {'return_value': {}}),
+            (runtime.provenance, 'verify_execution', {'return_value': None}),
+            (runtime.m, 'guard', {'return_value': parent}),
+            (runtime.r, 'readback_checkout', {'return_value': object()}),
+            (runtime.m, 'load_evidence', {'return_value': (reader, object(), None)}),
+            (runtime, 'load_trusted_inputs', {'return_value': (None, None, None)}),
+            (runtime.entry, 'prepare', {'return_value': (plan, {'Raw/03 Get/note.md': b'new'})}),
+            (runtime.entry, 'public_report', {'return_value': {'status': 'recurring_local_candidate_verified', 'plan_sha256': 'b' * 64}}),
+            (runtime, 'hydrate_replaced_blobs', {'side_effect': ValueError('runtime_receipt')}),
+        ]
+        with ExitStack() as stack:
+            for target, name, options in replacements:
+                stack.enter_context(patch.object(target, name, **options))
+            publish = stack.enter_context(patch.object(runtime.m, 'publish'))
+            with self.assertRaises(ValueError) as caught:
+                runtime.run('token', object(), policy={}, approved_policy_sha256='c' * 64,
+                            remote=remote, public_client=object(), apply=True, scope={},
+                            approved_scope_sha256='d' * 64, run_context={}, checkpoint=lambda _: None,
+                            bootstrap={'capture_anchor': {'capture_commit': 'e' * 40}})
+        result = runtime.failure(caught.exception, attempt_started=False)
+        self.assertEqual((result['stage'], result['write_state']), ('replaced_blob_hydration', 'not_attempted'))
+        publish.assert_not_called()
+        remote.cas_main.assert_not_called()
+
     def test_stderr_maps_only_to_fixed_categories(self):
         samples = ((b'fatal: missing blob private-note', 'missing_object'),
                    (b'shallow update not allowed private-note', 'shallow_history'),

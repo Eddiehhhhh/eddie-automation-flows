@@ -83,6 +83,44 @@ class BaselineHydration(unittest.TestCase):
         self.assert_downloads(['111', '222', '333', '444'])
         self.assertEqual((self.legacy, self.registry), before)
 
+    def test_publication_hydrates_only_replaced_parent_blobs(self):
+        old = b'previous note'
+        path = runtime.r.GET + '/03 Notes/old.md'
+        new = runtime.r.GET + '/03 Notes/new.md'
+        other = runtime.r.GET + '/03 Notes/unrelated.md'
+        oid = runtime.r.oid(old)
+        tree = {path: ('100644', 'blob', oid), other: ('100644', 'blob', runtime.r.oid(b'other'))}
+        reader = types.SimpleNamespace(tree=lambda commit: tree, local=self.reader.local)
+        remote = types.SimpleNamespace(check_source_budget=lambda commit: {
+            path: ('100644', 'blob', oid, len(old)),
+            other: ('100644', 'blob', tree[other][2], 5)})
+        with patch.object(runtime.m, 'fetch_selected', return_value={path: old}) as fetch:
+            runtime.hydrate_replaced_blobs(reader, remote, 'token', Path('/unused'), self.parent,
+                                           {path: b'updated', new: b'new'})
+        self.assertEqual(set(fetch.call_args.args[1]), {path})
+        self.assertEqual(self.imports, [old])
+        with patch.object(runtime.m, 'fetch_selected', return_value={path: b'wrong size'}):
+            with self.assertRaises(runtime.a.ParityFailure):
+                runtime.hydrate_replaced_blobs(reader, remote, 'token', Path('/unused'), self.parent,
+                                               {path: b'updated'})
+        with patch.object(runtime.m, 'fetch_selected', return_value={path: b'x' * len(old)}):
+            with self.assertRaises(runtime.a.ParityFailure):
+                runtime.hydrate_replaced_blobs(reader, remote, 'token', Path('/unused'), self.parent,
+                                               {path: b'updated'})
+        for bad_row in (('100644', 'blob', '0' * 40, len(old)),
+                        ('100755', 'blob', oid, len(old))):
+            bad_remote = types.SimpleNamespace(check_source_budget=lambda commit: {path: bad_row})
+            with self.subTest(metadata=bad_row[:2]), patch.object(runtime.m, 'fetch_selected') as fetch:
+                with self.assertRaises(runtime.a.ParityFailure):
+                    runtime.hydrate_replaced_blobs(reader, bad_remote, 'token', Path('/unused'),
+                                                   self.parent, {path: b'updated'})
+                fetch.assert_not_called()
+        with patch.object(runtime.m, 'fetch_selected') as fetch:
+            with self.assertRaises(runtime.a.ParityFailure):
+                runtime.hydrate_replaced_blobs(reader, remote, 'token', Path('/unused'), self.parent,
+                                               {'Wiki/unexpected.md': b'updated'})
+            fetch.assert_not_called()
+
     def test_selected_baseline_readback_failure_still_stops(self):
         with patch.object(self.remote, 'request', return_value={'sha': 'wrong'}):
             with self.assertRaises(runtime.a.ParityFailure):
