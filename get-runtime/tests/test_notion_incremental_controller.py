@@ -149,7 +149,8 @@ class AttemptSafety(unittest.TestCase):
                   {'status': 'ready'}, ValueError('recording_layout_held')]) as read):
             result = controller.run(Path('/unused'), 'token', 2, False)
         self.assertEqual(result, {'status': 'dry_run_partial', 'ready': 1,
-                                  'verified': 0, 'held': 1, 'pending': 2})
+                                  'verified': 0, 'held': 1, 'pending': 2,
+                                  'held_reasons': {'recording_layout_held': 1}})
         self.assertEqual(read.call_count, 2)
         save.assert_not_called()
 

@@ -78,7 +78,7 @@ class IncrementalWorker(unittest.TestCase):
     def test_changed_existing_page_holds_without_any_write(self):
         FakeAPI.created = True
         with patch.object(worker, 'verify_note', side_effect=ValueError('existing_content_differs')):
-            with self.assertRaisesRegex(ValueError, 'existing_note_requires_review'):
+            with self.assertRaisesRegex(ValueError, 'existing_content_differs'):
                 worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32, 'token', True)
 
     def test_source_requires_registered_blob_and_no_unresolved_write(self):
