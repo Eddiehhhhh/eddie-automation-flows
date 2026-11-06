@@ -20,6 +20,7 @@ import urllib.request
 import get_legacy_adapter as a
 import get_legacy_capture as c
 import get_private_preview_retention as r
+import get_private_runtime_report as diagnostic_report
 from get_mirror_incremental_replay import strict_capture_json, raw_source_version
 
 CONTRACT='get-legacy-manual-transaction-1'
@@ -94,7 +95,8 @@ class Remote(c.Remote):
                 stdout=cas_error_category(result.stdout) if result.stdout else 'none'
                 stderr=cas_error_category(result.stderr) if result.stderr else 'none'
                 category=stderr if stderr not in ('none','other') else stdout if stdout not in ('none','other') else 'other'
-                raise CasPushFailure(category,{'stage':stage,'exit_code':result.returncode,'stdout_category':stdout,'stderr_category':stderr})
+                raise CasPushFailure(category,{'stage':stage,'exit_code':result.returncode,'stdout_category':stdout,'stderr_category':stderr,
+                    'stdout_words':diagnostic_report.git_word_hits(result.stdout),'stderr_words':diagnostic_report.git_word_hits(result.stderr)})
 
 def guard(remote,parent=None):
     metadata=remote.metadata()
@@ -327,6 +329,9 @@ def publish(reader,remote,plan,files,expected_plan_sha,readback,*,sleep=time.sle
         failure=ManualFailure(str(exc) if str(exc) in ERRORS else 'manual_readback','confirmed' if confirmed else 'uncertain',1)
         if cas_category is not None:failure.cas_error_category=cas_category
         if isinstance(cas_diagnostic,dict):failure.cas_diagnostic=cas_diagnostic
+        if type(plan.get('transaction_bytes')) is int and isinstance(files,dict) and all(isinstance(value,bytes) for value in files.values()):
+            failure.cas_candidate_metrics={'changed_paths':len(files),'changed_bytes':sum(map(len,files.values())),
+                                           'transaction_bytes':plan['transaction_bytes']}
         raise failure from None
     return {'main_updated':True,'cas_attempts':1,'readback_verified':True}
 
