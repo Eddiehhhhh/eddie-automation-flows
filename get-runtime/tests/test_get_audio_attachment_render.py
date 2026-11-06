@@ -22,7 +22,7 @@ class GetAudioAttachmentRender(unittest.TestCase):
             'title': 'sample audio', 'duration': 8151120,
         }
         self.note = {
-            'note_id': '1926189798138765296', 'note_type': 'audio',
+            'note_id': '1234567890', 'note_type': 'audio',
             'created_at': 1760000000000, 'updated_at': 1760000000000,
             'audio': {'original': 'transcript'},
             'attachments': [self.attachment],

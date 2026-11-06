@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -32,6 +33,29 @@ class Transport:
 
 
 class SingleSourceScope(unittest.TestCase):
+    def propose_single(self, only_id):
+        evidence = SimpleNamespace(anchor={}, census={'eligible': {}, 'pending_ids': [], 'summaries': {}},
+                                   initial={}, conflicts={})
+        state = adapter.initial_state(evidence, {})
+        raw = adapter.encoded(state)
+        note = {'note_id': only_id, 'updated_at': '2026-11-05T00:00:00Z'}
+        scope = {'contract': 'get-single-note-source-scope-1', 'note_id': only_id, 'complete_catalog': False}
+        repo = SimpleNamespace(read=lambda *_: raw)
+        return adapter.propose_updates(evidence, state, adapter.sha(raw), {adapter.STATE: raw},
+                                       repo, 'a'*40, [note], scope, {}, only_id=only_id)
+
+    def test_single_new_note_passes_through_real_legacy_proposal(self):
+        state, changed, counts = self.propose_single('123')
+        self.assertEqual(state['legacyById'], {})
+        self.assertEqual(changed, {})
+        self.assertEqual(counts['outside_legacy_cohort'], 1)
+
+    def test_legacy_proposal_rejects_malformed_single_selector(self):
+        for invalid in ('x', '1' * 65):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(adapter.ParityFailure, 'adapter_source_identity'):
+                    self.propose_single(invalid)
+
     def test_snapshot_requires_an_explicit_partial_scope(self):
         note = {'note_id': '123', 'updated_at': '2026-11-05T00:00:00Z'}
         marker = {'contract': 'get-single-note-source-scope-1',
