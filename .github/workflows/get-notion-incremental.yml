@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: 712e03d1501c3e7b31ec902344a9f05cadae400c
+          ref: b70be93aebc81e9f674dacedb658995debb93ed6
           path: get-runtime
           persist-credentials: false
       - name: Set up Python
