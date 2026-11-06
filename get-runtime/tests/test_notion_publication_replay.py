@@ -186,5 +186,94 @@ class PublicationReplay(unittest.TestCase):
         self.raw = b'2026-11-06T01:04:59Z ' + p.MARKER.encode() + p.a.encoded(changed)
         with self.assertRaises(p.ProvenanceFailure): self.verify()
 
+    def _registered_binding(self):
+        selection = {'run_id': 901, 'run_attempt': 1, 'record_sha256': '1'*64,
+            'receipt_commit': '2'*40, 'receipt_sha256': '3'*64}
+        return {'selection': selection, 'sequence': 3, 'job_id': 902,
+            'source_policy': self.policy, 'source_policy_sha256': self.policy_sha}
+
+    def _registered_proof(self, binding):
+        selection = binding['selection']
+        record = {'record_sha256': selection['record_sha256'],
+            'receipt_commit': selection['receipt_commit'], 'receipt_sha256': selection['receipt_sha256'],
+            'receipt_sequence': binding['sequence'], 'main_updated': True, 'cas_attempts': 1,
+            'observed_main_commit': selection['receipt_commit'], 'readback_verified': True}
+        return {'contract': replay.CONTRACT, 'record': record,
+            'source_run_id': selection['run_id'], 'source_run_attempt': selection['run_attempt'],
+            'source_job_id': binding['job_id'], 'source_policy_sha256': binding['source_policy_sha256'],
+            'notion_outcome': 'failure'}
+
+    def _prefer_replay(self, found=(), *, rotation_search=None, reserve=False, exclude=None,
+                       proof=None, verify=None, binding=None):
+        provenance = p
+        fixed = binding or self._registered_binding()
+        fake_exact = types.SimpleNamespace(binding=lambda: deepcopy(fixed))
+        fake_replay = types.SimpleNamespace(CONTRACT=replay.CONTRACT,
+            verify=verify or (lambda *args: deepcopy(proof or self._registered_proof(fixed))))
+        with patch.dict(sys.modules, {'get_notion_exact_replay': fake_exact,
+                                      'get_notion_publication_replay': fake_replay}), \
+             patch.object(provenance.recovery, 'current_get_policy', return_value=self.policy['get_policy_sha256']):
+            return provenance._prefer_registered_replay(self.client, self.policy, list(found),
+                rotation_search=rotation_search, reserve_next_run=reserve,
+                exclude_run_id=exclude[0] if exclude else None,
+                exclude_run_attempt=exclude[1] if exclude else None, checked=2)
+
+    def test_registered_sequence_three_supersedes_older_success_only_after_exact_replay(self):
+        older = {'receipt_sequence': 2, 'anchor': {'commit': '4'*40, 'receipt_sha256': '5'*64}}
+        with patch.object(p, 'verified_candidate', side_effect=AssertionError('must not reclassify source run')):
+            result = self._prefer_replay([older])
+        self.assertEqual((result['receipt_sequence'], result['status'], result['source_proof_contract']),
+            (3, 'registered_replay_anchor_verified', replay.CONTRACT))
+        self.assertEqual(result['anchor'], {'commit': '2'*40, 'receipt_sha256': '3'*64})
+
+    def test_newer_success_and_same_sequence_fork_rules(self):
+        newer = {'receipt_sequence': 4, 'anchor': {'commit': '6'*40, 'receipt_sha256': '7'*64}}
+        with patch.object(p.recovery, 'current_get_policy', side_effect=AssertionError('newer success is sufficient')):
+            self.assertIsNone(self._prefer_replay([newer]))
+        same = {'receipt_sequence': 3, 'anchor': {'commit': '2'*40, 'receipt_sha256': '3'*64}}
+        self.assertIsNone(self._prefer_replay([same]))
+        fork = {'receipt_sequence': 3, 'anchor': {'commit': '8'*40, 'receipt_sha256': '9'*64}}
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_receipt_fork'):
+            self._prefer_replay([fork])
+
+    def test_rotation_reserve_and_current_attempt_never_borrow_fixed_anchor(self):
+        older = {'receipt_sequence': 2, 'anchor': {'commit': '4'*40, 'receipt_sha256': '5'*64}}
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'rotation_source_unverified'):
+            self._prefer_replay([older], rotation_search={'joint': True})
+        self.assertIsNone(self._prefer_replay([older], reserve=True))
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_no_verified_publication'):
+            self._prefer_replay([], exclude=(901, 1))
+
+    def test_fixed_replay_requires_exact_original_proof_fields(self):
+        binding = self._registered_binding()
+        expected = self._registered_proof(binding)
+        for field, bad in [('source_run_id', 999), ('source_run_attempt', 2),
+                           ('source_job_id', 999), ('notion_outcome', 'success'),
+                           ('source_policy_sha256', '0'*64)]:
+            with self.subTest(field=field):
+                changed = {**expected, field: bad}
+                with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_no_verified_publication'):
+                    self._prefer_replay(proof=changed)
+        changed_record = {**expected, 'record': {**expected['record'], 'receipt_sha256': '0'*64}}
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_no_verified_publication'):
+            self._prefer_replay(proof=changed_record)
+
+    def test_fixed_binding_sequence_and_policy_must_match_current_registration(self):
+        binding = self._registered_binding(); binding['sequence'] = 4
+        with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_record'):
+            self._prefer_replay([], binding=binding)
+        with patch.object(p.recovery, 'current_get_policy', return_value='0'*64):
+            # The helper patches this function internally for isolation, so use a
+            # deliberately wrong runtime policy to exercise the production guard.
+            wrong_policy = {**self.policy, 'get_policy_sha256': 'a'*64}
+            fake_exact = types.SimpleNamespace(binding=lambda: self._registered_binding())
+            fake_replay = types.SimpleNamespace(CONTRACT=replay.CONTRACT,
+                verify=lambda *args: self._registered_proof(self._registered_binding()))
+            with patch.dict(sys.modules, {'get_notion_exact_replay': fake_exact,
+                                          'get_notion_publication_replay': fake_replay}):
+                with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_no_verified_publication'):
+                    p._prefer_registered_replay(self.client, wrong_policy, [], rotation_search=None,
+                        reserve_next_run=False, exclude_run_id=None, exclude_run_attempt=None, checked=0)
+
 
 if __name__ == '__main__': unittest.main()

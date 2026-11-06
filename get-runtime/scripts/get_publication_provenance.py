@@ -39,6 +39,7 @@ MAX_RUN_PAGES = 3
 RUN_PAGE_SIZE = 30
 MAX_CANDIDATES = 4
 MAX_SECONDS = 120
+REGISTERED_REPLAY_SEQUENCE = 3
 POLICY_KEYS = {'contract', 'repository', 'repository_id', 'workflow_id', 'workflow_path',
                'head_branch', 'code_sha', 'job_name', 'publication_step_name',
                'rules_sha256', 'get_policy_sha256', 'controller_template_sha256'}
@@ -676,6 +677,79 @@ def select_verified_publication(client, policy, found, observations, *, rotation
     return chosen, history
 
 
+def _registered_replay_selection(policy):
+    """Read the private fixed sequence/receipt coordinate without remote trust."""
+    import get_notion_exact_replay as exact
+    b = exact.binding()
+    if policy.get('get_policy_sha256') != recovery.current_get_policy():
+        fail('provenance_no_verified_publication')
+    return b
+
+
+def _registered_replay_anchor(client, policy, b, *, excluded=None, checked=0):
+    """Verify one fixed Get-success/Notion-failure record, never a successful job."""
+    import get_notion_publication_replay as replay
+    selected = b['selection']
+    if (selected['run_id'], selected['run_attempt']) == excluded:
+        fail('provenance_no_verified_publication')
+    observed = replay.verify(client, b['source_policy'], b['source_policy_sha256'], selected)
+    record = observed['record']
+    if (observed.get('contract') != replay.CONTRACT
+            or observed.get('source_run_id') != selected['run_id']
+            or observed.get('source_run_attempt') != selected['run_attempt']
+            or observed.get('source_job_id') != b['job_id']
+            or observed.get('source_policy_sha256') != b['source_policy_sha256']
+            or observed.get('notion_outcome') != 'failure'
+            or record.get('record_sha256') != selected['record_sha256']
+            or record.get('receipt_commit') != selected['receipt_commit']
+            or record.get('receipt_sha256') != selected['receipt_sha256']
+            or record.get('receipt_sequence') != b['sequence']
+            or not record.get('main_updated') or record.get('cas_attempts') != 1
+            or record.get('observed_main_commit') != selected['receipt_commit']
+            or record.get('readback_verified') is not True):
+        fail('provenance_no_verified_publication')
+    return {'anchor': {'commit': record['receipt_commit'], 'receipt_sha256': record['receipt_sha256']},
+            'receipt_sequence': record['receipt_sequence'], 'record_sha256': record['record_sha256'],
+            'run_id': selected['run_id'], 'run_attempt': selected['run_attempt'],
+            'job_id': observed['source_job_id'], 'source_proof_contract': replay.CONTRACT,
+            'status': 'registered_replay_anchor_verified',
+            'candidate_runs_checked': checked, 'publication_records_verified': 1,
+            'new_permissions': 0, 'credentials_used': getattr(client, 'credentials_used', 0)}
+
+
+def _prefer_registered_replay(client, policy, found, *, rotation_search, reserve_next_run,
+                              exclude_run_id, exclude_run_attempt, checked):
+    """Prefer the fixed sequence only over older ordinary anchors.
+
+    Ordinary candidates remain authoritative at the same sequence when they
+    identify the exact same receipt, and any later sequence wins unchanged.
+    """
+    if reserve_next_run:
+        return None
+    ordinary_max = max((row['receipt_sequence'] for row in found), default=0)
+    if ordinary_max > REGISTERED_REPLAY_SEQUENCE:
+        return None
+    if ordinary_max == REGISTERED_REPLAY_SEQUENCE:
+        fixed = _registered_replay_selection(policy)
+        if fixed['sequence'] != REGISTERED_REPLAY_SEQUENCE:
+            fail('provenance_record')
+        anchor = {'commit': fixed['selection']['receipt_commit'],
+                  'receipt_sha256': fixed['selection']['receipt_sha256']}
+        if any(row['anchor'] != anchor for row in found
+               if row['receipt_sequence'] == REGISTERED_REPLAY_SEQUENCE):
+            fail('provenance_receipt_fork')
+        return None
+    fixed = _registered_replay_selection(policy)
+    if fixed['sequence'] != REGISTERED_REPLAY_SEQUENCE:
+        fail('provenance_record')
+    # A fixed failed-Notion source has no idle-rotation observation and cannot
+    # satisfy a route that explicitly requires one.
+    if rotation_search is not None:
+        fail('rotation_source_unverified')
+    excluded = None if exclude_run_id is None else (exclude_run_id, exclude_run_attempt)
+    return _registered_replay_anchor(client, policy, fixed, excluded=excluded, checked=checked)
+
+
 def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, reserve_next_run=False, capture_history_witness=False):
     """Four candidate slots; one may locate an already registered producer.
 
@@ -824,6 +898,12 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
                 break
         if checked >= candidate_limit:
             break
+    fixed_anchor = _prefer_registered_replay(client, policy, found,
+        rotation_search=rotation_search, reserve_next_run=reserve_next_run,
+        exclude_run_id=exclude_run_id, exclude_run_attempt=exclude_run_attempt,
+        checked=checked)
+    if fixed_anchor is not None:
+        return fixed_anchor
     if not found:
         fail('provenance_no_verified_publication')
     chosen, dynamic_history = select_verified_publication(client, policy, found,
