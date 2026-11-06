@@ -169,7 +169,7 @@ def run(api, repo, run_id, attempt):
     if remote_tree.get('sha') != tree:
         raise ValueError('tree_mismatch')
     actor = {'name': NAME, 'email': EMAIL, 'date': date}
-    remote_commit = api.call('POST', '/git/commits', {'message': MESSAGE, 'tree': tree,
+    remote_commit = api.call('POST', '/git/commits', {'message': MESSAGE + '\n', 'tree': tree,
         'parents': [parent], 'author': actor, 'committer': actor})
     if remote_commit.get('sha') != commit:
         raise ValueError('commit_mismatch')

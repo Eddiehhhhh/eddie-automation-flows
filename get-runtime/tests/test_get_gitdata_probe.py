@@ -31,6 +31,7 @@ class GitDataProbe(unittest.TestCase):
         self.wrong_at = None
         self.drift = False
         self.ref = None
+        self.commit_payload = None
         original = probe.git
         def capture(repo, *args, **kwargs):
             result = original(repo, *args, **kwargs)
@@ -59,6 +60,7 @@ class GitDataProbe(unittest.TestCase):
         if path == '/git/trees':
             return {'sha': self.values['write-tree']}
         if path == '/git/commits':
+            self.commit_payload = payload
             return {'sha': self.values['commit-tree']}
         if path == '/git/refs':
             self.ref = {'ref': payload['ref'], 'object': {'type': 'commit', 'sha': payload['sha']}}
@@ -80,6 +82,9 @@ class GitDataProbe(unittest.TestCase):
         self.assertEqual([path for method, path in self.calls if method == 'POST'],
                          ['/git/blobs', '/git/trees', '/git/commits', '/git/refs'])
         self.assertEqual(probe.git(self.repo, 'rev-parse', 'HEAD'), self.parent)
+        raw = subprocess.check_output(['git', '-C', str(self.repo), 'cat-file', 'commit', self.values['commit-tree']])
+        self.assertEqual(raw.partition(b'\n\n')[2], (probe.MESSAGE + '\n').encode())
+        self.assertEqual(self.commit_payload['message'].encode(), raw.partition(b'\n\n')[2])
 
     def test_uncertain_write_is_not_retried_and_never_creates_ref(self):
         self.fail_at = '/git/trees'
