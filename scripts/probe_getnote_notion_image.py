@@ -70,7 +70,8 @@ def verify_proof(root: Path, commit: str) -> tuple[str, dict, object]:
             or not re.fullmatch('[0-9]{19}', proof['source_id'])):
         fail('proof_binding_invalid')
     note_path, manifest_path = proof.get('note_path'), proof.get('manifest_path')
-    if (not isinstance(note_path, str) or not note_path.startswith('Raw/03 Get/01 Notes/')
+    if (not isinstance(note_path, str)
+            or not note_path.startswith(('Raw/03 Get/01 Notes/', 'Raw/03 Get/99 录音卡/'))
             or not note_path.endswith('.md') or not isinstance(manifest_path, str)
             or not manifest_path.startswith('Raw/03 Get/03 State/attachments/')
             or not manifest_path.endswith('.json')):
