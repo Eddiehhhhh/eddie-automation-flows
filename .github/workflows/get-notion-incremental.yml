@@ -52,13 +52,18 @@ jobs:
         if: failure()
         env:
           FAILURE_STAGE: ${{ steps.capture.outputs.failure_stage }}
+          FAILURE_CATEGORY: ${{ steps.capture.outputs.failure_category }}
         run: |
           case "$FAILURE_STAGE" in
             verify_private_repo|load_credentials|prepare_private_ref|select_candidate|fetch_get_detail|download_bind_attachment|publish_private_ref|unknown) ;;
             *) FAILURE_STAGE=unknown ;;
           esac
-          echo "Get image probe stopped at stage=$FAILURE_STAGE; private output suppressed."
-          echo "Get image probe stopped at stage=$FAILURE_STAGE; private output suppressed." >> "$GITHUB_STEP_SUMMARY"
+          case "$FAILURE_CATEGORY" in
+            validation|auth_denied|not_found|rate_limited|server_error|http_error|api_rejected|transport_error|redirect_blocked|detail_error) ;;
+            *) FAILURE_CATEGORY=validation ;;
+          esac
+          echo "Get image probe stopped at stage=$FAILURE_STAGE category=$FAILURE_CATEGORY; private output suppressed."
+          echo "Get image probe stopped at stage=$FAILURE_STAGE category=$FAILURE_CATEGORY; private output suppressed." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish counts only
         if: success()

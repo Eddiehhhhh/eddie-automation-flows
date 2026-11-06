@@ -43,16 +43,30 @@ class PrivateGetAssetProbeTests(unittest.TestCase):
             output_path = Path(temp) / 'github-output'
             with patch.dict(os.environ, {'GITHUB_OUTPUT': str(output_path)}):
                 old_stage = probe.CURRENT_STAGE
+                old_category = probe.CURRENT_FAILURE_CATEGORY
                 old_reported = probe.FAILURE_REPORTED
                 try:
                     probe.CURRENT_STAGE = 'publish_private_ref'
+                    probe.CURRENT_FAILURE_CATEGORY = 'not_found'
                     probe.FAILURE_REPORTED = False
                     probe.report_failure_stage()
                     probe.report_failure_stage()
-                    self.assertEqual(output_path.read_text(), 'failure_stage=publish_private_ref\n')
+                    self.assertEqual(output_path.read_text(),
+                                     'failure_stage=publish_private_ref\nfailure_category=not_found\n')
                 finally:
                     probe.CURRENT_STAGE = old_stage
+                    probe.CURRENT_FAILURE_CATEGORY = old_category
                     probe.FAILURE_REPORTED = old_reported
+
+    def test_detail_failures_are_reduced_to_static_categories(self):
+        cases = {'GetNote HTTP 401': 'auth_denied', 'GetNote HTTP 404': 'not_found',
+                 'GetNote HTTP 429': 'rate_limited', 'GetNote HTTP 503': 'server_error',
+                 'GetNote API error 10202': 'api_rejected',
+                 'GetNote transport failed': 'transport_error',
+                 'sensitive response body': 'detail_error'}
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(probe.detail_failure_category(RuntimeError(message)), expected)
 
     def test_candidate_ids_come_only_from_private_queue_and_are_bounded(self):
         ids = ['1234567890123456789', '2234567890123456789',

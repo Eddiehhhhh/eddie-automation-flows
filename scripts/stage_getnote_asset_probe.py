@@ -34,7 +34,12 @@ MAX_NOTE_BYTES = 2 * 1024 * 1024
 FAILURE_STAGES = {'verify_private_repo', 'load_credentials', 'prepare_private_ref',
                   'select_candidate', 'fetch_get_detail', 'download_bind_attachment',
                   'publish_private_ref', 'unknown'}
+FAILURE_CATEGORIES = {'validation', 'auth_denied', 'not_found', 'rate_limited',
+                      'server_error', 'http_error', 'api_rejected', 'transport_error',
+                      'redirect_blocked', 'detail_error'}
+RETRYABLE_DETAIL_FAILURES = {'not_found', 'server_error', 'transport_error'}
 CURRENT_STAGE = 'unknown'
+CURRENT_FAILURE_CATEGORY = 'validation'
 FAILURE_REPORTED = False
 
 
@@ -54,13 +59,38 @@ def report_failure_stage():
         return
     path = os.environ.get('GITHUB_OUTPUT')
     stage = CURRENT_STAGE if CURRENT_STAGE in FAILURE_STAGES else 'unknown'
+    category = CURRENT_FAILURE_CATEGORY if CURRENT_FAILURE_CATEGORY in FAILURE_CATEGORIES else 'validation'
     if path:
         try:
             with open(path, 'a', encoding='utf-8') as output:
                 output.write('failure_stage=' + stage + '\n')
+                output.write('failure_category=' + category + '\n')
             FAILURE_REPORTED = True
         except OSError:
             pass
+
+
+def detail_failure_category(error: Exception) -> str:
+    message = str(error)
+    http_match = re.fullmatch(r'GetNote HTTP ([1-5][0-9]{2})', message)
+    if http_match:
+        status = int(http_match[1])
+        if status in (401, 403):
+            return 'auth_denied'
+        if status == 404:
+            return 'not_found'
+        if status == 429:
+            return 'rate_limited'
+        if status >= 500:
+            return 'server_error'
+        return 'http_error'
+    if re.fullmatch(r'GetNote API error [0-9]{1,8}', message):
+        return 'api_rejected'
+    if message == 'GetNote transport failed':
+        return 'transport_error'
+    if message == 'GetNote redirect blocked':
+        return 'redirect_blocked'
+    return 'detail_error'
 
 
 def git(root: Path, *args: str, input: bytes | None = None) -> bytes:
@@ -375,7 +405,7 @@ def publish_private_stage(root: Path, ref: str, paths: list[str]) -> str:
 
 
 def main() -> int:
-    global CURRENT_STAGE
+    global CURRENT_STAGE, CURRENT_FAILURE_CATEGORY
     parser = argparse.ArgumentParser()
     parser.add_argument('--vault', type=Path, default=Path(os.environ.get('VAULT_ROOT', 'vault')))
     args = parser.parse_args()
@@ -405,7 +435,14 @@ def main() -> int:
     selected = None
     for ident, markdown_urls in candidates:
         CURRENT_STAGE = 'fetch_get_detail'
-        note = source.fetch_note_detail(ident, api_key, client_id)
+        try:
+            note = source.fetch_note_detail(ident, api_key, client_id)
+        except Exception as error:
+            CURRENT_FAILURE_CATEGORY = detail_failure_category(error)
+            if CURRENT_FAILURE_CATEGORY in RETRYABLE_DETAIL_FAILURES:
+                continue
+            fail()
+        CURRENT_FAILURE_CATEGORY = 'validation'
         if source.note_id_from(note) != ident:
             fail()
         descriptors = note.get('attachments') or []
