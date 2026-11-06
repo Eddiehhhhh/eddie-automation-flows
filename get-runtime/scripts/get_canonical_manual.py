@@ -8,12 +8,15 @@ from copy import deepcopy
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 
 import get_canonical_writer as n
 import get_legacy_manual as m
 from get_legacy_manual import a,c,r,strict_capture_json,raw_source_version
+import get_inline_image_assets as inline_images
+import source_sync_assets as source_assets
 
 CONTRACT='get-canonical-manual-transaction-1'
 MAX_NEW=50
@@ -29,6 +32,7 @@ def load_states(reader,evidence,parent,current,legacy_sha,registry_sha,*,source_
     else:
         if registry_sha:m.fail('manual_state_anchor')
         registry=n.initial_registry(evidence,legacy,legacy_sha,current,only_id=source_id)
+    n.verify_registered_asset_refs(reader,parent,registry,source_id=source_id)
     return legacy,registry
 
 def select_new(items,registry,preview,*,source_id=None,legacy_ids=()):
@@ -59,6 +63,7 @@ def canonical_payload(reader,plan,current):
       'source_scope':plan['source_scope'],'catalog_complete':plan['catalog_complete']}
 
 def verify_single_scope(plan, *, with_recurring_receipt=False):
+    import re
     only_id=plan.get('single_source_id');only_path=plan.get('single_source_path')
     if (only_id is None)!=(only_path is None):m.fail('manual_single_scope')
     if only_id is None:
@@ -72,7 +77,8 @@ def verify_single_scope(plan, *, with_recurring_receipt=False):
     if with_recurring_receipt:
         state_paths.add(r.GET+'/'+RECURRING_RECEIPT)
     content = {row['path'] for row in plan['changes'] if row['path'] not in state_paths}
-    if content and content!={only_path}:m.fail('manual_single_scope')
+    assets={p for p in content if re.fullmatch(r'Raw/03 Get/_assets/images/[0-9a-f]{64}\.(?:png|jpg|webp|gif)',p)}
+    if len(assets)>8 or content-{only_path}-assets:m.fail('manual_single_scope')
 
 def verify_plan(reader,plan,files,*,with_recurring_receipt=False):
     if plan.get('contract')!=CONTRACT or plan.get('local_proposal_only') is not True or plan.get('apply_ready') is not False:m.fail('manual_plan')
@@ -86,10 +92,26 @@ def verify_plan(reader,plan,files,*,with_recurring_receipt=False):
     for row in plan['changes']:
         p=row['path'];r.safe_path(p)
         if not p.startswith(r.GET+'/') or p not in after:m.fail('manual_scope')
-        data=files[p];cap=n.MAX_STATE if p in (r.GET+'/'+a.STATE,r.GET+'/'+n.STATE) else a.owned.MAX_NOTE
+        data=files[p];cap=n.MAX_STATE if p in (r.GET+'/'+a.STATE,r.GET+'/'+n.STATE) else 16*1024*1024 if '/_assets/images/' in p else a.owned.MAX_NOTE
         if not isinstance(data,bytes) or len(data)>cap or before.get(p,[None,None,None])[2]!=row['before_blob'] or after[p]!=('100644','blob',r.oid(data)) or row['after_blob']!=r.oid(data) or row['sha256']!=a.sha(data) or row['bytes']!=len(data) or reader.read(commit,p,cap)!=data:m.fail('manual_plan')
     if sum(map(len,files.values()))>m.MAX_CHANGED_BYTES or plan['transaction_bytes']!=sum(len(data) for oid,data in {r.oid(v):v for v in files.values()}.items() if oid not in {x[2] for x in before.values()}):m.fail('manual_budget')
     if commit!=parent and reader.local.run('rev-list','--parents','-n','1',commit).decode().split()!=[commit,parent]:m.fail('manual_plan')
+
+def prepare_with_media_budget(reader,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,*,selected_new,preview,source_id,media_by_id,media_errors):
+    """Hold only image-heavy notes when the complete transaction exceeds budget."""
+    active=dict(media_by_id);errors=dict(media_errors)
+    while True:
+        try:
+            return n.prepare(reader,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,
+                selected_new=selected_new,preview=preview,only_id=source_id,
+                media_by_id=active,media_errors=errors)
+        except n.raw.ParityFailure as exc:
+            if str(exc)!='canonical_budget' or not active:raise
+            # Retry from the same parent with the largest image payload held.
+            # No source calls or remote writes occur in this loop.
+            ident=max(active,key=lambda key:(sum(len(data) for data in active[key]['files'].values()),key))
+            del active[ident]
+            errors[ident]='asset_materialization_required'
 
 def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None,preview=None,source_id=None):
     legacy,registry=load_states(reader,evidence,parent,current,legacy_sha,registry_sha,source_id=source_id)
@@ -112,7 +134,42 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
         except RuntimeError as exc:
             if str(exc)!='GetNote HTTP 404':raise
             details[ident]=None;unavailable+=1
-    proposal,states,counts=n.prepare(reader,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,selected_new=selected,preview=preview,only_id=source_id)
+    media_by_id={}
+    media_errors={}
+    # Only canonical new-note owners are eligible in this first image lane.
+    # Existing legacy/manual attachment policy remains unchanged.
+    with tempfile.TemporaryDirectory(prefix='get-inline-assets-') as media_tmp:
+        store=source_assets.AssetStore(Path(media_tmp)/'assets',max_file=16*1024*1024,max_run=64*1024*1024,max_assets=128)
+        for ident in sorted((set(new_needed)|set(selected)) & set(details)):
+            if details.get(ident) is None:continue
+            try:
+                source_note=n.source_note(items[ident],details[ident])
+                body=source_note.get('content') if isinstance(source_note.get('content'),str) else ''
+                references=inline_images.extract(body)
+                if not references:continue
+                if ident in registry['newById']:
+                    note_path=registry['newById'][ident]['filePath']
+                elif preview is not None and ident in preview:
+                    note_path=preview[ident]['entry']['filePath']
+                else:
+                    note_path=n.new_path(source_note,ident)
+                _,assets,manifest=inline_images.materialize_body(body,note_path,store)
+                if len(assets)!=len(references):raise ValueError('asset_materialization_required')
+                files={};bound=[]
+                for ref,asset,row in zip(references,assets,manifest['images']):
+                    data=(store.root/asset['path']).read_bytes()
+                    if len(data)!=asset['bytes'] or a.sha(data)!=asset['sha256']:raise ValueError('asset_materialization_required')
+                    full_path=r.GET+'/'+asset['path']
+                    bound.append({**row,'asset_path':full_path,'asset_blob':r.oid(data)})
+                    files[full_path]=data
+                media_by_id[ident]={'manifest':{'contract':manifest['contract'],'images':bound},'files':files}
+            except (inline_images.ImageReferenceError,source_assets.AssetError,n.raw.ParityFailure,
+                    ValueError,TypeError,OSError):
+                # A bad/expired image affects this note only. The canonical
+                # proposal records a per-ID hold; sibling notes still proceed.
+                media_errors[ident]='asset_materialization_required'
+        proposal,states,counts=prepare_with_media_budget(reader,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,
+            selected_new=selected,preview=preview,source_id=source_id,media_by_id=media_by_id,media_errors=media_errors)
     single_path=None
     if source_id is not None:
         if source_id in states['legacy']['legacyById']:
@@ -122,16 +179,17 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
         else:
             m.fail('manual_scope')
         content_paths={row['path'] for row in proposal['changes'] if row['path'] not in (a.STATE,n.STATE)}
-        if content_paths and content_paths!={single_path[len(r.GET)+1:]}:m.fail('manual_single_scope')
+        content_assets={p for p in content_paths if re.fullmatch(r'_assets/images/[0-9a-f]{64}\.(?:png|jpg|webp|gif)',p)}
+        if len(content_assets)>inline_images.MAX_IMAGES_PER_NOTE or content_paths-{single_path[len(r.GET)+1:]}-content_assets:m.fail('manual_single_scope')
     next_registry=states['registry']
     if selected and source_id is None:next_registry['scan_cursor']=selected[-1]
     # Materialize the final state once directly on the same parent. The earlier
     # pure candidate is an unreferenced object, not a second reachable snapshot.
-    changes={row['path']:reader.read(proposal['candidate_commit'],r.GET+'/'+row['path'],a.owned.MAX_NOTE) for row in proposal['changes'] if row['path'] not in (a.STATE,n.STATE)}
+    changes={row['path']:reader.read(proposal['candidate_commit'],r.GET+'/'+row['path'],16*1024*1024 if '/_assets/images/' in row['path'] else a.owned.MAX_NOTE) for row in proposal['changes'] if row['path'] not in (a.STATE,n.STATE)}
     final=n.git_candidate(reader,parent,states['legacy'],next_registry,changes,current)
-    before=reader.tree(parent);after=reader.tree(final['candidate_commit']);files={r.GET+'/'+row['path']:reader.read(final['candidate_commit'],r.GET+'/'+row['path'],n.MAX_STATE if row['path'] in (a.STATE,n.STATE) else a.owned.MAX_NOTE) for row in final['changes']}
+    before=reader.tree(parent);after=reader.tree(final['candidate_commit']);files={r.GET+'/'+row['path']:reader.read(final['candidate_commit'],r.GET+'/'+row['path'],n.MAX_STATE if row['path'] in (a.STATE,n.STATE) else 16*1024*1024 if '/_assets/images/' in row['path'] else a.owned.MAX_NOTE) for row in final['changes']}
     rows=[{**row,'path':r.GET+'/'+row['path']} for row in final['changes']]
-    all_owned={r.GET+'/'+row['ownership']['filePath'] for row in legacy['legacyById'].values()}|{r.GET+'/'+row['filePath'] for row in next_registry['newById'].values()}|{r.GET+'/'+a.STATE,r.GET+'/'+n.STATE}
+    all_owned={r.GET+'/'+row['ownership']['filePath'] for row in legacy['legacyById'].values()}|{r.GET+'/'+row['filePath'] for row in next_registry['newById'].values()}|{image['asset_path'] for row in next_registry['newById'].values() for image in (row.get('source_metadata',{}).get('inline_images') or {}).get('images',[])}|{r.GET+'/'+a.STATE,r.GET+'/'+n.STATE}
     if not set(files)<=all_owned or any(p not in after for p in files):m.fail('manual_scope')
     counts.update(legacy_managed=len(states['legacy']['legacyById']),legacy_conflicts=len(states['legacy']['conflictsById']),legacy_pending=len(states['legacy']['pending_ids']),existing_unmanaged=sum(v=='existing_unmanaged' for v in next_registry['reserved'].values()),new_managed=len(next_registry['newById']),new_selected=len(selected),new_remaining=remaining,new_pending=len(next_registry['conflictsById']),source_details=len(details),details_unavailable=unavailable)
     counts.update(n.opaque_counts(next_registry))

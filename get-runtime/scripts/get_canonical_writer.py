@@ -2,17 +2,20 @@
 
 Legacy updates remain delegated to the reviewed span adapter. This module plans
 only absent/newly managed files, with immutable preview and external state
-anchors. Publication, schedules, assets and Notion are deliberately separate.
+anchors. Publication, schedules and Notion remain separate. Inline image bytes
+are only materialized into the private candidate and its registry proof.
 """
 import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
 from pathlib import Path
 import hashlib
 import json
+import os
 import re
 
 import get_legacy_adapter as legacy
 import get_mirror_incremental_replay as raw
+import get_inline_image_assets as inline_images
 from get_mirror_render import render,validate_note_shape,transcript_pending,CATEGORIES,safe_filename,title_for
 from get_v7_compat import note_identity
 from source_sync_mirror_replay import legacy_document
@@ -23,6 +26,8 @@ MAX_RECORDS=2500
 MAX_EXISTING_OWNERS=5000
 MAX_NEW=50
 MAX_STATE=8*1024*1024
+MAX_TRANSACTION_BYTES=64*1024*1024
+MAX_RECEIPT_RESERVE=512*1024
 MAX_OPAQUE=2*1024*1024
 # shortcut: tolerate these nine audited shadows only for one manual note; remove after archive cleanup.
 SCOPED_DUPLICATE_IDS=frozenset({'1924184859089342232','1924119735570829080','1924112797051401776','1924184859086196504','1924015120906723728','1924014242584480304','1924015139158424456','1924015124127042096','1924015158487980720'})
@@ -268,6 +273,67 @@ def source_metadata(note):
     if opaque:result['opaque_top_level']=deepcopy(opaque)
     return result
 
+def validate_inline_image_manifest(value):
+    if value is None:return None
+    if not isinstance(value,dict) or set(value)!={'contract','images'} or value.get('contract')!='get-inline-image-manifest-1' or not isinstance(value.get('images'),list) or len(value['images'])>inline_images.MAX_IMAGES_PER_NOTE:fail('source_metadata_shape')
+    paths={}
+    for row in value['images']:
+        keys={'reference_sha256','source_sha256','asset_path','asset_blob','asset_sha256','asset_bytes','asset_mime'}
+        if not isinstance(row,dict) or set(row)!=keys:fail('source_metadata_shape')
+        for key,width in (('reference_sha256',64),('source_sha256',64),('asset_sha256',64),('asset_blob',40)):
+            legacy.checked(row[key],width)
+        path=legacy.path_ok(row['asset_path'])
+        physical=(row['asset_blob'],row['asset_sha256'],row['asset_bytes'],row['asset_mime'])
+        if (not path.startswith('Raw/03 Get/_assets/images/')
+                or not re.fullmatch(r'Raw/03 Get/_assets/images/[0-9a-f]{64}\.(?:png|jpg|webp|gif)',path)
+                or type(row['asset_bytes']) is not int or not 1<=row['asset_bytes']<=16*1024*1024
+                or row['asset_mime'] not in {'image/png','image/jpeg','image/webp','image/gif'}):fail('source_metadata_shape')
+        extension={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','image/gif':'.gif'}[row['asset_mime']]
+        if not path.endswith(row['asset_sha256']+extension):fail('source_metadata_shape')
+        if path in paths and paths[path]!=physical:fail('source_metadata_shape')
+        paths[path]=physical
+    return value
+
+def verify_registered_asset_refs(reader,commit,registry,*,source_id=None):
+    """Verify every trusted registry asset still exists at its pinned Git OID."""
+    try:tree=reader.tree(commit)
+    except Exception:fail('canonical_state_hash')
+    rows=registry.get('newById',{})
+    if source_id is not None:rows={source_id:rows[source_id]} if source_id in rows else {}
+    for row in rows.values():
+        manifest=(row.get('source_metadata',{}).get('inline_images') or {})
+        for image in manifest.get('images',[]):
+            path=legacy.path_ok(image['asset_path'])
+            if tree.get(path)!=('100644','blob',image['asset_blob']):
+                fail('canonical_state_hash')
+    return True
+
+def validate_media_payload(note,path,media):
+    """Revalidate caller-prepared image bytes against authenticated source text."""
+    body=note.get('content') if isinstance(note.get('content'),str) else ''
+    refs=inline_images.extract(body)
+    if not refs:
+        if media is not None:fail('asset_materialization_required')
+        return deepcopy(note),None,{}
+    if not isinstance(media,dict) or set(media)!={'manifest','files'} or not isinstance(media['files'],dict):fail('asset_materialization_required')
+    manifest=validate_inline_image_manifest(media['manifest'])
+    if manifest is None or len(manifest['images'])!=len(refs):fail('asset_materialization_required')
+    rows=manifest['images'];replacements=[];files={}
+    for ref,row in zip(refs,rows):
+        if (row['reference_sha256']!=ref['reference_sha256'] or row['source_sha256']!=ref['source_sha256']
+                or row['asset_path'] not in media['files']):fail('asset_materialization_required')
+        data=media['files'][row['asset_path']]
+        if (not isinstance(data,bytes) or len(data)!=row['asset_bytes']
+                or hashlib.sha256(data).hexdigest()!=row['asset_sha256']
+                or legacy.retention.oid(data)!=row['asset_blob']):fail('asset_materialization_required')
+        try:inline_images.validate_image_bytes(data,row['asset_mime'])
+        except ValueError:fail('asset_materialization_required')
+        replacements.append(os.path.relpath(row['asset_path'][len('Raw/03 Get/'):],Path(path).parent.as_posix()))
+        files[row['asset_path'][len('Raw/03 Get/'):]]=data
+    if set(media['files'])!={row['asset_path'] for row in rows}:fail('asset_materialization_required')
+    rendered=deepcopy(note);rendered['content']=inline_images.rewrite(body,refs,replacements)
+    return rendered,manifest,files
+
 def metadata_missing(before,after):
     if isinstance(before,dict):
         return not isinstance(after,dict) or any(k not in after or metadata_missing(v,after[k]) for k,v in before.items())
@@ -282,9 +348,10 @@ def immutable_unknown_hash(note):
     return raw._source_unknown_hash(value)
 
 def validate_extensions(note,*,metadata_only=False):
-    if metadata_only and set(note)-EXTENSIONS-{'tags','topics','attachments','audio','opaque_top_level'}:fail('canonical_state_schema')
+    if metadata_only and set(note)-EXTENSIONS-{'tags','topics','attachments','audio','opaque_top_level','inline_images'}:fail('canonical_state_schema')
     if metadata_only:
         if 'opaque_top_level' in note:validate_opaque(note['opaque_top_level'])
+        if 'inline_images' in note:validate_inline_image_manifest(note['inline_images'])
         validate_note_shape(note);validate_collections(note)
         if 'audio' in note and (not isinstance(note['audio'],dict) or set(note['audio'])!={'sentences'}):fail('canonical_state_schema')
     sentences=(note.get('audio') or {}).get('sentences')
@@ -362,8 +429,18 @@ def text_fields(note):
     return sorted(fields)
 
 
-def render_exact(note,path):
-    data,fields=render(note,[],Path(path),faithful=True)
+def render_exact(note,path,*,prepared_media=None):
+    refs=inline_images.extract(note.get('content') if isinstance(note.get('content'),str) else '')
+    if refs:
+        display,_,_=validate_media_payload(note,path,prepared_media)
+        if not isinstance(note.get('title'),str) or not note['title'].strip():
+            # Never derive a persisted title from a signed image URL in the
+            # source Markdown. Keep the body image, but use a safe fallback.
+            display['title']='图片笔记'
+    else:
+        if prepared_media is not None:fail('asset_materialization_required')
+        display=deepcopy(note)
+    data,fields=render(display,[],Path(path),faithful=True)
     # Preserve exact human-supplied title/tag/topic text, while keeping the
     # shared preview's readable derived fallback for absent/empty titles.
     head,sep,body=data.partition('\n---\n')
@@ -386,20 +463,27 @@ def render_exact(note,path):
 def new_path(note,ident):
     category=CATEGORIES.get(note.get('note_type'))
     if not category:fail('source_shape_unsupported')
-    title=safe_filename(title_for(note));suffix='-'+ident+'.md';budget=255-len(suffix.encode())
+    refs=inline_images.extract(note.get('content') if isinstance(note.get('content'),str) else '')
+    if refs and (not isinstance(note.get('title'),str) or not note['title'].strip()):
+        title=safe_filename('图片笔记')
+    else:
+        title=safe_filename(title_for(note))
+    suffix='-'+ident+'.md';budget=255-len(suffix.encode())
     while len(title.encode())>budget:title=title[:-1]
     return path_ok(category+'/'+title+suffix)
 
 
-def record(note,summary,path,data,anchor=None):
+def record(note,summary,path,data,anchor=None,inline_manifest=None):
+    metadata=source_metadata(note)
+    if inline_manifest is not None:metadata['inline_images']=deepcopy(inline_manifest)
     return {'filePath':path,'mirror_sha256':legacy.sha(data),'baseline_blob':legacy.retention.oid(data),
       'source_version':raw.raw_source_version(note['updated_at']),'summary_sha256':raw._source_content_hash(summary),
       'source_sha256':raw._source_content_hash(note),'unknown_sha256':immutable_unknown_hash(note),
       'text_fields':text_fields(note),'created_at':raw.raw_source_version(note['created_at']),
-      'preview_anchor':deepcopy(anchor),'source_metadata':source_metadata(note)}
+      'preview_anchor':deepcopy(anchor),'source_metadata':metadata}
 
 
-def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None,allow_fresh_preview=False,only_id=None):
+def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,summaries,terminal,details,*,selected_new=(),preview=None,baseline_errors=None,allow_fresh_preview=False,only_id=None,media_by_id=None,media_errors=None):
     """Return actual candidate bytes and state; no side effects or source calls."""
     state=validate_registry(registry,registry_sha,evidence,legacy_state,legacy_sha,current,only_id=only_id)
     items=legacy.source_snapshot(summaries,terminal,only_id=only_id);preview=preview or {};selected=list(selected_new)
@@ -413,6 +497,9 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
     present=inventory(current,only_id=only_id,known_owners=state['newById'],isolate_duplicates=only_id is None);occupied=set(current);changes={};conflicts=deepcopy(state['conflictsById']);counts=dict.fromkeys(('created','preview_imported','updated','state_only','unchanged','conflicted','detail_required'),0)
     targets=sorted(set(state['newById'])|set(selected))
     if only_id is not None:targets=[ident for ident in targets if ident==only_id]
+    media_by_id=media_by_id or {}
+    media_errors=media_errors or {}
+    if not isinstance(media_by_id,dict) or set(media_by_id)-set(targets) or not isinstance(media_errors,dict) or set(media_errors)-set(targets):fail('canonical_details')
     for ident in targets:
         conflicts.pop(ident,None)
         old=state['newById'].get(ident)
@@ -432,13 +519,16 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
             if not old and not owner_budget(set(state['reserved'])|set(state['newById'])|{ident}):fail('canonical_budget')
             if ident not in details:counts['detail_required']+=1;fail('detail_required')
             note=source_note(summary,details[ident])
+            if ident in media_errors:fail('asset_materialization_required')
             if old:
                 if json_header(before)['note_type']!=note.get('note_type'):fail('source_note_type_changed')
                 if raw.raw_source_version(note['created_at'])!=old['created_at']:fail('source_created_changed')
                 if immutable_unknown_hash(note)!=old['unknown_sha256']:fail('source_unknown_changed')
-                if metadata_missing(old['source_metadata'],source_metadata(note)):fail('source_field_missing')
+                old_metadata=deepcopy(old['source_metadata']);old_metadata.pop('inline_images',None)
+                if metadata_missing(old_metadata,source_metadata(note)):fail('source_field_missing')
                 if set(old['text_fields'])-set(text_fields(note)):fail('source_text_missing')
-                data=render_exact(note,path)
+                prepared=media_by_id.get(ident)
+                data=render_exact(note,path,prepared_media=prepared)
                 # No silently emptied named metadata or removed fields.
                 old_fields=json_header(before);new_fields=json_header(data)
                 empty=(None,'',[],{},0,False)
@@ -447,7 +537,8 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
             elif ident in preview:
                 saved=preview[ident];entry=saved['entry'];path=path_ok(entry['filePath'])
                 if path in occupied:fail('destination_collision')
-                data=render_exact(note,path)
+                prepared=media_by_id.get(ident)
+                data=render_exact(note,path,prepared_media=prepared)
                 exact=(token==entry['sourceVersion'] and raw._source_content_hash(note)==entry['sourceContentHash'] and raw._source_content_hash(summary)==entry['sourceSummaryHash'] and data==saved['bytes'])
                 if exact:outcome='preview_imported'
                 else:
@@ -457,16 +548,24 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
                     # from its fully validated current source without rewriting it.
                     path=new_path(note,ident)
                     if path in occupied:fail('destination_collision')
-                    data=render_exact(note,path);outcome='created'
+                    data=render_exact(note,path,prepared_media=media_by_id.get(ident));outcome='created'
                 anchor=saved['anchor']
             else:
                 category=CATEGORIES.get(note.get('note_type'))
                 if not category:fail('source_shape_unsupported')
                 path=new_path(note,ident)
                 if path in occupied:fail('destination_collision')
-                data=render_exact(note,path);anchor=None;outcome='created'
+                data=render_exact(note,path,prepared_media=media_by_id.get(ident));anchor=None;outcome='created'
             if len(data)>legacy.owned.MAX_NOTE:fail('canonical_note_budget')
-            state['newById'][ident]=record(note,summary,path,data,anchor);changes[path]=data;occupied.add(path);counts[outcome]+=1
+            prepared=media_by_id.get(ident)
+            manifest=validate_media_payload(note,path,prepared)[1] if prepared is not None else None
+            state['newById'][ident]=record(note,summary,path,data,anchor,manifest);changes[path]=data;occupied.add(path);counts[outcome]+=1
+            if prepared is not None:
+                for asset_path,asset_data in prepared['files'].items():
+                    rel=asset_path[len('Raw/03 Get/'):]
+                    previous=changes.get(rel)
+                    if previous is not None and previous!=asset_data:fail('canonical_alias')
+                    changes[rel]=asset_data
         except (raw.ParityFailure,ValueError,TypeError) as exc:
             reason=str(exc)
             conflicts[ident]=reason if re.fullmatch('[a-z_]{1,64}',reason or '') else 'source_shape_unsupported'
@@ -515,10 +614,19 @@ def git_candidate(repo,parent,legacy_state,registry,changes,current):
     if set(current)!=evaluated:fail('canonical_current_set')
     for rel,value in current.items():
         if before.get(prefix+legacy.path_ok(rel))!=('100644','blob',legacy.retention.oid(value)):fail('canonical_parent_changed')
-    allowed={row['ownership']['filePath'] for row in legacy_state['legacyById'].values()}|{row['filePath'] for row in registry['newById'].values()}
+    owned_assets={image['asset_path'][len(prefix):] for row in registry['newById'].values()
+                  for image in (row.get('source_metadata',{}).get('inline_images') or {}).get('images',[])}
+    allowed={row['ownership']['filePath'] for row in legacy_state['legacyById'].values()}|{row['filePath'] for row in registry['newById'].values()}|owned_assets
     if set(changes)-allowed:fail('canonical_write_scope')
     for rel,data in changes.items():
-        if not isinstance(data,bytes) or len(data)>legacy.owned.MAX_NOTE:fail('canonical_note_budget')
+        cap=16*1024*1024 if rel in owned_assets else legacy.owned.MAX_NOTE
+        if not isinstance(data,bytes) or len(data)>cap:fail('canonical_note_budget')
+        if rel in owned_assets:
+            old=before.get(prefix+legacy.path_ok(rel))
+            if old is not None:
+                if old[:2]!=('100644','blob'):fail('canonical_alias')
+                existing=repo.read(parent,prefix+rel,cap)
+                if existing!=data:fail('canonical_alias')
     relative={**changes,legacy.STATE:legacy.encoded(legacy_state),STATE:legacy.encoded(registry)}
     if any(len(relative[x])>MAX_STATE for x in (STATE,legacy.STATE)):fail('canonical_budget')
     writes={};rows=[];wanted=dict(before)
@@ -528,7 +636,10 @@ def git_candidate(repo,parent,legacy_state,registry,changes,current):
         if old is not None and old[:2]!=('100644','blob'):fail('canonical_alias')
         writes[path]=value;wanted[path]=('100644','blob',blob)
         rows.append({'path':rel,'before_blob':old[2] if old else None,'after_blob':blob,'sha256':legacy.sha(value),'bytes':len(value)})
-    if sum(len(x) for x in writes.values())>64*1024*1024 or len(writes)>MAX_RECORDS+2:fail('canonical_budget')
+    # The recurring owner adds an immutable receipt after this candidate is
+    # prepared. Reserve its maximum size so images cannot leave a candidate
+    # that only overflows when the receipt is attached.
+    if sum(len(x) for x in writes.values())>MAX_TRANSACTION_BYTES-MAX_RECEIPT_RESERVE or len(writes)>MAX_RECORDS+2:fail('canonical_budget')
     if writes:
         with tempfile.TemporaryDirectory(prefix='get-canonical-index-') as folder:
             env=dict(local.env,GIT_INDEX_FILE=str(Path(folder)/'index'))
@@ -550,7 +661,7 @@ def git_candidate(repo,parent,legacy_state,registry,changes,current):
       'changes':rows,'local_proposal_only':True,'mirror_adopted':False,'apply_ready':False}
 
 
-def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,*,selected_new=(),preview=None,only_id=None):
+def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,details,*,selected_new=(),preview=None,only_id=None,media_by_id=None,media_errors=None):
     """Single owner dispatcher: legacy spans plus generated-new-note updates.
 
     External anchor hashes come from reviewed immutable receipts, never from
@@ -601,7 +712,7 @@ def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,deta
     next_sha=legacy.sha(legacy.encoded(next_legacy))
     registry=deepcopy(registry);registry['legacy_state_sha256']=next_sha
     producer_registry_sha=legacy.sha(legacy.encoded(registry))
-    next_registry,new_changes,new_counts=propose_new(evidence,next_legacy,next_sha,registry,producer_registry_sha,current,summaries,terminal,{i:v for i,v in details.items() if i not in legacy_needed},selected_new=selected_new,preview=preview,baseline_errors=baseline_errors,allow_fresh_preview=True,only_id=only_id)
+    next_registry,new_changes,new_counts=propose_new(evidence,next_legacy,next_sha,registry,producer_registry_sha,current,summaries,terminal,{i:v for i,v in details.items() if i not in legacy_needed},selected_new=selected_new,preview=preview,baseline_errors=baseline_errors,allow_fresh_preview=True,only_id=only_id,media_by_id=media_by_id,media_errors=media_errors)
     if set(legacy_changes)&set(new_changes):fail('canonical_owner_overlap')
     plan=git_candidate(repo,parent,next_legacy,next_registry,{**legacy_changes,**new_changes},current)
     return plan,{'legacy':next_legacy,'registry':next_registry},{'legacy_'+k:v for k,v in old_counts.items()}|{'new_'+k:v for k,v in new_counts.items()}
