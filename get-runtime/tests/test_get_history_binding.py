@@ -194,6 +194,22 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
                     ('a' * 40, 'b' * 64, receipt, 'e' * 64)):
                 self.assertFalse(entry.recovery.accepts_receipt(commit, digest, value, policy))
 
+    def test_sequence_six_receipt_requires_exact_evidence(self):
+        seq6 = {'record': {'receipt_commit': 'a' * 40, 'receipt_sha256': 'b' * 64,
+                           'receipt_sequence': 6, 'policy_sha256': 'c' * 64}}
+        def value(_module, key):
+            if key == 'SEQ6_BINDING': return seq6
+            if key == 'SEQ5_BINDING': return {}
+            return {'selection': {'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64},
+                    'sequence': 4, 'source_policy': {'get_policy_sha256': 'f' * 64}}
+        with patch.object(entry.recovery._private_bindings, 'value', side_effect=value), \
+                patch.object(entry.recovery, 'current_get_policy', return_value='d' * 64):
+            receipt = {'sequence': 6, 'policy_sha256': 'c' * 64}
+            self.assertTrue(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, receipt, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, {**receipt, 'sequence': 5}, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('e' * 40, 'b' * 64, receipt, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'e' * 64, receipt, 'd' * 64))
+
     def test_sequence_five_policy_transition_requires_exact_run_identity(self):
         import get_recurring_controller as controller_module
         old = {'code_sha': 'a' * 40, 'rules_sha256': 'b' * 64, 'get_policy_sha256': 'c' * 64,

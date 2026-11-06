@@ -35,6 +35,8 @@ def template_sha256():
     return a.sha(template_bytes())
 
 
+PRE_DECOUPLE_TEMPLATE_SHA256 = '6ecdf9a68b1a1c3b251b033d6bea1f2a1df80a6b0a318f5b1043c11d05bc6501'
+
 PRE_PRIVATE_TEMPLATE_SHA256 = '9555eb4a70a35381505a46d767aa17663489e4e4548c3803d8c16a2a90cfb4f9'
 
 PRE_FIXED_TEMPLATE_SHA256 = '17520052435895138a6529f3a84958dddb8cc50b9c23b07e63c12e52c8f8f178'
@@ -56,7 +58,7 @@ def fixed_idle_template_transition(old, new):
 
 
 def historical_template_digests():
-    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256, PRE_FIXED_TEMPLATE_SHA256, FIXED_TEMPLATE_SHA256)
+    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256, PRE_FIXED_TEMPLATE_SHA256, FIXED_TEMPLATE_SHA256, PRE_DECOUPLE_TEMPLATE_SHA256)
 
 
 def policy_template_bytes(policy):
@@ -66,6 +68,11 @@ def policy_template_bytes(policy):
     current = template_bytes()
     if digest == a.sha(current):
         return current
+    if digest == PRE_DECOUPLE_TEMPLATE_SHA256:
+        raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-before-decouple.yml.disabled').read_bytes()
+        if len(raw) > MAX_CONTROLLER or a.sha(raw) != PRE_DECOUPLE_TEMPLATE_SHA256:
+            p.fail('provenance_controller_template')
+        return raw
     if digest == FIXED_TEMPLATE_SHA256:
         raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-fixed-v1.yml.disabled').read_bytes()
         if len(raw) > MAX_CONTROLLER or a.sha(raw) != FIXED_TEMPLATE_SHA256:
