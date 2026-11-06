@@ -97,7 +97,33 @@ jobs:
           set -euo pipefail
           args=(--vault vault)
           if test "$APPLY" = true; then args+=(--apply); fi
-          python3 get-runtime/get-runtime/scripts/get_notion_incremental_controller.py "${args[@]}"
+          if test "$APPLY" = true; then
+            python3 get-runtime/get-runtime/scripts/get_notion_incremental_controller.py "${args[@]}"
+          else
+            python3 - "${args[@]}" <<'PY'
+          import json
+          import subprocess
+          import sys
+          import get_notion_incremental_controller as controller
+
+          def diagnose(phase, function):
+              def wrapped(*args, **kwargs):
+                  try:
+                      return function(*args, **kwargs)
+                  except Exception as error:
+                      if isinstance(error, ValueError) and str(error) in controller.HOLD_CODES:
+                          raise
+                      kinds = {ValueError: 'value', TypeError: 'type', KeyError: 'key',
+                               subprocess.CalledProcessError: 'git', OSError: 'os'}
+                      print(json.dumps({'phase': phase, 'category': kinds.get(type(error), 'other')}), file=sys.stderr)
+                      raise
+              return wrapped
+
+          controller.admission = diagnose('admission', controller.admission)
+          controller.worker.run = diagnose('worker', controller.worker.run)
+          controller.main()
+          PY
+          fi
       - name: Release private write lease
         if: always()
         working-directory: vault
