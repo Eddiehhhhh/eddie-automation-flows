@@ -35,6 +35,8 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
                     'complete_library_claimed':False}
     out={'contract':CONTRACT,'status':result.get('status') if isinstance(result.get('status'),str) and result.get('status') in STATUSES else 'blocked',
          'business_health_asserted':False,'complete_library_claimed':False}
+    if out['status'] == 'recurring_transaction_verified' and result.get('stage_ref_cleanup') in ('removed', 'retained_or_unknown'):
+        out['stage_ref_cleanup'] = result['stage_ref_cleanup']
     if result.get('execution_status') in ('verified','partial','blocked'):
         out['execution_status']=result['execution_status']
         reason=result.get('execution_reason')

@@ -14,6 +14,26 @@ import get_private_preview_retention as retention
 
 
 class CasErrorCategory(unittest.TestCase):
+    def test_pending_gate_stops_before_source_and_publication(self):
+        parent = 'a' * 40
+        remote = types.SimpleNamespace(cas_main=Mock())
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(runtime, 'validate_policy', return_value={}))
+            stack.enter_context(patch.object(runtime, 'validate_scope', return_value=None))
+            stack.enter_context(patch.object(runtime, 'context', return_value={}))
+            stack.enter_context(patch.object(runtime.provenance, 'verify_execution', return_value=None))
+            stack.enter_context(patch.object(runtime.m, 'guard', return_value=parent))
+            stack.enter_context(patch.object(runtime.staging, 'API', return_value=object()))
+            stack.enter_context(patch.object(runtime.pending, 'check', side_effect=ValueError('pending_unresolved')))
+            source = stack.enter_context(patch.object(runtime.entry, 'prepare'))
+            publish = stack.enter_context(patch.object(runtime.m, 'publish'))
+            with self.assertRaises(ValueError) as caught:
+                runtime.run('token', object(), policy={}, approved_policy_sha256='c' * 64,
+                            remote=remote, public_client=object(), apply=True, scope={},
+                            approved_scope_sha256='d' * 64, run_context={}, checkpoint=lambda _: None)
+        self.assertEqual(runtime.failure(caught.exception, attempt_started=False)['stage'], 'pending_gate')
+        source.assert_not_called(); publish.assert_not_called(); remote.cas_main.assert_not_called()
+
     def test_staging_completes_before_one_cas_and_readback(self):
         parent, commit, tree = 'a' * 40, 'b' * 40, 'c' * 40
         files = {'Raw/03 Get/note.md': b'new'}
@@ -33,7 +53,9 @@ class CasErrorCategory(unittest.TestCase):
             (runtime.m, 'guard', {'side_effect': guard}),
             (runtime.r, 'readback_checkout', {'return_value': object()}),
             (runtime.m, 'load_evidence', {'return_value': (reader, object(), None)}),
-            (runtime, 'load_trusted_inputs', {'return_value': (None, None, None)}),
+            (runtime, 'load_trusted_inputs', {'return_value': ({'commit': parent}, None, None)}),
+            (runtime.pending, 'check', {'return_value': parent}),
+            (runtime.pending, 'exact_ref', {'return_value': parent}),
             (runtime.entry, 'prepare', {'return_value': (plan, files)}),
             (runtime.entry, 'verify_plan', {'return_value': None}),
             (runtime.entry, 'public_report', {'side_effect': lambda *_: {'status': 'recurring_local_candidate_verified',
@@ -81,7 +103,10 @@ class CasErrorCategory(unittest.TestCase):
             (runtime.m, 'guard', {'return_value': parent}),
             (runtime.r, 'readback_checkout', {'return_value': object()}),
             (runtime.m, 'load_evidence', {'return_value': (reader, object(), None)}),
-            (runtime, 'load_trusted_inputs', {'return_value': (None, None, None)}),
+            (runtime, 'load_trusted_inputs', {'return_value': ({'commit': parent}, None, None)}),
+            (runtime.pending, 'check', {'return_value': parent}),
+            (runtime.pending, 'exact_ref', {'return_value': parent}),
+            (runtime.staging, 'API', {'return_value': object()}),
             (runtime.entry, 'prepare', {'return_value': (plan, {'Raw/03 Get/note.md': b'new'})}),
             (runtime.entry, 'public_report', {'return_value': {'status': 'recurring_local_candidate_verified', 'plan_sha256': 'b' * 64}}),
             (runtime, 'hydrate_replaced_blobs', {'side_effect': ValueError('runtime_receipt')}),

@@ -19,6 +19,7 @@ import get_publication_provenance as provenance
 import get_recurring_entry as entry
 import get_recurring_controller as controller
 import get_gitdata_staging as staging
+import get_pending_gate as pending
 from get_recurring_entry import a, engine, m, n, r
 
 PRODUCTION_ACTIVATED = True  # Changing this requires the final code/rules review.
@@ -29,14 +30,14 @@ SCOPE_KEYS = {'contract', 'production_approved', 'public_policy_sha256', 'rules_
               'notion_scope_contract', 'notion_batch_max', 'notion_journal_path',
               'notion_initial_proof_sha256'}
 ERRORS = {'runtime_activation_pending', 'runtime_scope', 'runtime_context',
-          'runtime_receipt', 'runtime_failed', 'gitdata_staging_failed'}
+          'runtime_receipt', 'runtime_failed', 'gitdata_staging_failed', 'pending_unresolved'}
 
 # Fixed diagnostics only; private exception text/arguments are never emitted.
 STAGES = frozenset(('policy', 'execution_provenance', 'remote_guard', 'checkout',
     'capture_evidence', 'parent_history', 'bootstrap_history', 'bootstrap_inventory',
     'current_inventory', 'receipt_provenance', 'trusted_inputs', 'trusted_states', 'legacy_baselines',
     'new_baselines', 'preview_inputs', 'canonical_prepare', 'candidate_report',
-    'publication', 'gitdata_staging', 'replaced_blob_hydration', 'old_writer_guard', 'credentials', 'source_transport'))
+    'publication', 'pending_gate', 'gitdata_staging', 'replaced_blob_hydration', 'old_writer_guard', 'credentials', 'source_transport'))
 ENTRY_ERRORS = frozenset(('entry_batch_bound', 'entry_bootstrap_changed',
     'entry_content_ids', 'entry_counts', 'entry_external_anchor_required',
     'entry_foreign_delta', 'entry_foreign_get_change', 'entry_history_bound', 'entry_history_witness',
@@ -405,6 +406,8 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
     if apply:
         at_stage('execution_provenance', provenance.verify_execution, client, policy, run_context, trigger)
     parent = at_stage('remote_guard', m.guard, remote)
+    pending_api = staging.API(token)
+    expected_anchor = at_stage('pending_gate', pending.check, pending_api, client, policy, parent)
     if isinstance(client, provenance._PublicGithub):
         client.private_proof_source.expected_head = parent
     if expected_parent is not None and parent != expected_parent:
@@ -417,10 +420,14 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
         anchor, preview, history_witness = at_stage('trusted_inputs', load_trusted_inputs, local, reader, evidence, remote, token, root, parent, client, policy,
             bootstrap=bootstrap, exclude_run_id=run_context['run_id'] if run_context else None,
             exclude_run_attempt=run_context['run_attempt'] if run_context else None, source_id=source_id)
+        if anchor is None or anchor['commit'] != expected_anchor or pending.exact_ref(pending_api) != expected_anchor:
+            at_stage('pending_gate', pending.fail)
         at_stage('remote_guard', m.guard, remote, parent)
         plan, files = at_stage('canonical_prepare', entry.prepare, reader, evidence, parent, source, approved_rules_sha256=policy['rules_sha256'],
             anchor=anchor, preview=preview, bootstrap=bootstrap, trigger=trigger, history_witness=history_witness, source_id=source_id)
         at_stage('remote_guard', m.guard, remote, parent)
+        if pending.exact_ref(pending_api) != expected_anchor:
+            at_stage('pending_gate', pending.fail)
         result = at_stage('candidate_report', entry.public_report, plan, files)
         if result['status'] != 'recurring_local_candidate_verified':
             at_stage('candidate_report', fail, 'runtime_failed')
@@ -433,8 +440,8 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
         verifier = lambda rd, pl, fs: entry.verify_plan(rd, evidence, pl, fs, policy['rules_sha256'], bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
         if files:
             at_stage('gitdata_staging', verifier, reader, plan, files)
-            at_stage('gitdata_staging', lambda: staging.stage(staging.API(token), reader, remote, plan, files,
-                     run_context, lambda commit, selected: m.fetch_selected(remote, selected, token, root / 'staged-readback')))
+            at_stage('gitdata_staging', lambda: staging.stage(pending_api, reader, remote, plan, files,
+                     run_context, lambda commit, selected: m.fetch_selected(remote, selected, token, root / 'staged-readback'), expected_anchor))
         def readback(commit, values):
             return m.fetch_selected(remote, {p: ('100644', 'blob', r.oid(data), len(data)) for p, data in values.items()}, token, root / 'readback')
         publication = at_stage('publication', m.publish, reader, remote, plan, files, result['plan_sha256'], readback,
@@ -457,6 +464,11 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
             result.update(publication_output='failed', sink_status='not_started')
             return result
         result['publication_output'] = 'confirmed'
+        if files and on_publication is not None:
+            try:
+                result['stage_ref_cleanup'] = staging.cleanup_run_ref(pending_api, remote, run_context, plan['candidate_commit'])
+            except Exception:
+                result['stage_ref_cleanup'] = 'retained_or_unknown'
         if sink is not None and handoff['changed_content_ids']:
             result['notion_writes'] = None  # Callback owns its independently verified outcome.
             try:

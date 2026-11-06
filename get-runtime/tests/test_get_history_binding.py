@@ -176,6 +176,45 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
             self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'e' * 64, receipt, 'd' * 64))
             self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, receipt, 'e' * 64))
 
+    def test_only_exact_sequence_five_receipt_crosses_policy(self):
+        record = {'receipt_commit': 'a' * 40, 'receipt_sha256': 'b' * 64,
+                  'receipt_sequence': 5, 'policy_sha256': 'c' * 64}
+        seq5 = {'record': record}
+        seq4 = {'selection': {'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64},
+                'sequence': 4, 'source_policy': {'get_policy_sha256': 'f' * 64}}
+        def value(_module, key): return seq5 if key == 'SEQ5_BINDING' else seq4
+        receipt = {'sequence': 5, 'policy_sha256': 'c' * 64}
+        with patch.object(entry.recovery._private_bindings, 'value', side_effect=value), \
+                patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {'receipt_commit': 'f' * 40}), \
+                patch.object(entry.recovery, 'current_get_policy', return_value='d' * 64):
+            self.assertTrue(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, receipt, 'd' * 64))
+            for commit, digest, value, policy in (('e' * 40, 'b' * 64, receipt, 'd' * 64),
+                    ('a' * 40, 'e' * 64, receipt, 'd' * 64),
+                    ('a' * 40, 'b' * 64, {'sequence': 6, 'policy_sha256': 'c' * 64}, 'd' * 64),
+                    ('a' * 40, 'b' * 64, receipt, 'e' * 64)):
+                self.assertFalse(entry.recovery.accepts_receipt(commit, digest, value, policy))
+
+    def test_sequence_five_policy_transition_requires_exact_run_identity(self):
+        import get_recurring_controller as controller_module
+        old = {'code_sha': 'a' * 40, 'rules_sha256': 'b' * 64, 'get_policy_sha256': 'c' * 64,
+               'controller_template_sha256': 'd' * 64, 'stable': 'unchanged'}
+        record = {'run_id': 123, 'run_attempt': 1, 'controller_sha': 'e' * 40}
+        seq5 = {'record': record, 'public_policy': old, 'public_sha256': entry.a.sha(entry.a.encoded(old))}
+        new = {**old, 'code_sha': 'f' * 40, 'rules_sha256': '1' * 64, 'get_policy_sha256': '2' * 64}
+        run = {'id': 123, 'run_attempt': 1, 'head_sha': 'e' * 40, 'event': 'workflow_dispatch'}
+        with patch.object(entry.recovery._private_bindings, 'value', return_value=seq5), \
+                patch.object(entry.recovery.historical_active, 'candidate_policy', side_effect=lambda p, r: (p, False)), \
+                patch.object(entry.recovery.idle_recovery, 'candidate_policy', side_effect=lambda p, r: (p, False)), \
+                patch.object(entry.recovery, 'old_public_policy', return_value=old), \
+                patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {'run_id': 999}), \
+                patch.object(entry.recovery, 'current_get_policy', return_value='2' * 64), \
+                patch.object(entry, 'rules_sha256', return_value='1' * 64), \
+                patch.object(controller_module, 'template_sha256', return_value='d' * 64), \
+                patch.object(controller_module, 'historical_template_digests', return_value=()):
+            self.assertEqual(entry.recovery.candidate_policy(new, run), (old, True))
+            for key, value in (('id', 124), ('run_attempt', 2), ('head_sha', '0' * 40), ('event', 'schedule')):
+                self.assertFalse(entry.recovery.candidate_policy(new, {**run, key: value})[1])
+
 
 if __name__ == '__main__':
     unittest.main()

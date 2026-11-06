@@ -9,6 +9,7 @@ import urllib.request
 
 import get_legacy_manual as m
 import get_private_preview_retention as r
+import get_pending_gate as pending
 
 MAX_BYTES = m.MAX_CHANGED_BYTES
 MAX_REQUEST = 4 * ((MAX_BYTES + 2) // 3) + 1048576
@@ -37,7 +38,7 @@ class API:
         self.token = token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def call(self, method, path, payload=None, missing=False):
+    def call(self, method, path, payload=None, missing=False, list_result=False):
         data = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
         if data is not None and len(data) > MAX_REQUEST:
             fail()
@@ -48,6 +49,8 @@ class API:
         try:
             with self.opener.open(request, timeout=60) as response:
                 if response.status not in (200, 201):
+                    fail()
+                if list_result and response.headers.get('Link'):
                     fail()
                 raw = response.read(1048577)
         except urllib.error.HTTPError as exc:
@@ -62,12 +65,15 @@ class API:
             value = json.loads(raw)
         except (ValueError, UnicodeError):
             fail()
-        if not isinstance(value, dict):
+        if not isinstance(value, list if list_result else dict):
             fail()
         return value
 
+    def list_stage_refs(self):
+        return self.call('GET', '/git/matching-refs/heads/codex/get-stage-', list_result=True)
 
-def stage(api, reader, remote, plan, files, run_context, readback):
+
+def stage(api, reader, remote, plan, files, run_context, readback, expected_anchor):
     parent = m.a.checked(plan['parent_commit'], 40)
     commit = m.a.checked(plan['candidate_commit'], 40)
     tree = m.a.checked(plan['candidate_tree'], 40)
@@ -137,3 +143,46 @@ def stage(api, reader, remote, plan, files, run_context, readback):
     if readback(commit, selected) != files:
         fail()
     m.guard(remote, parent)
+    if pending.exact_ref(api) != expected_anchor:
+        pending.fail()
+    reader.local.run('merge-base', '--is-ancestor', expected_anchor, commit)
+    try:
+        remote.local.command('push', '--porcelain', '--no-verify',
+            '--force-with-lease=' + pending.REF + ':' + expected_anchor,
+            r.REMOTE_URL, commit + ':' + pending.REF)
+    except Exception:
+        pass
+    if pending.exact_ref(api) != commit:
+        pending.fail()
+    m.guard(remote, parent)
+
+
+def cleanup_run_ref(api, remote, run_context, commit):
+    """One exact-lease deletion after confirmed main readback and publication marker."""
+    run_id = run_context['run_id']
+    if type(run_id) is not int or not 1 <= run_id <= 10**20:
+        fail()
+    m.a.checked(commit, 40)
+    ref = 'refs/heads/codex/get-stage-' + str(run_id)
+    path = '/git/ref/' + ref.removeprefix('refs/')
+    observed = api.call('GET', path, missing=True)
+    if (not isinstance(observed, dict) or observed.get('ref') != ref
+            or observed.get('object', {}).get('type') != 'commit'
+            or observed.get('object', {}).get('sha') != commit
+            or pending.exact_ref(api) != commit):
+        return 'retained_or_unknown'
+    main = m.guard(remote)
+    if not pending.ancestor(api, commit, main):
+        return 'retained_or_unknown'
+    try:
+        result = remote.local.command('push', '--porcelain', '--no-verify',
+            '--force-with-lease=' + ref + ':' + commit, r.REMOTE_URL, ':' + ref)
+    except Exception:
+        result = None
+    try:
+        observed = api.call('GET', path, missing=True)
+    except Exception:
+        return 'retained_or_unknown'
+    if result is not None and result.returncode == 0 and observed is None:
+        return 'removed'
+    return 'retained_or_unknown'

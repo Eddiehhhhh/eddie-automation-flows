@@ -80,6 +80,14 @@ def current_get_policy():
 def accepts_receipt(commit, receipt_sha256, value, requested_policy):
     """No arbitrary old receipt, policy choice, reverse migration or relabeling."""
     from get_recurring_entry import a
+    seq5 = _private_bindings.value('get_recurring_policy_recovery', 'SEQ5_BINDING')
+    if isinstance(seq5, dict) and 'record' in seq5:
+        record = seq5['record']
+        if (commit == record['receipt_commit'] and receipt_sha256 == record['receipt_sha256']
+                and value.get('sequence') == record['receipt_sequence']
+                and value.get('policy_sha256') == record['policy_sha256']
+                and requested_policy == current_get_policy()):
+            return True
     seq4 = _private_bindings.value('get_publication_provenance', 'FAILED_NOTION_REPLAY_4')
     if (commit == seq4['selection']['receipt_commit']
             and receipt_sha256 == seq4['selection']['receipt_sha256']
@@ -116,6 +124,12 @@ def candidate_policy(policy, run):
     old = old_public_policy()
     run_id, attempt, controller = ORIGINAL_RUN_ID, ORIGINAL_RUN_ATTEMPT, ORIGINAL_CONTROLLER_SHA
     event = 'workflow_dispatch'
+    seq5 = _private_bindings.value('get_recurring_policy_recovery', 'SEQ5_BINDING')
+    if isinstance(seq5, dict) and 'record' in seq5 and run.get('id') == seq5['record']['run_id']:
+        old = deepcopy(seq5['public_policy'])
+        if entry.a.sha(entry.a.encoded(old)) != seq5['public_sha256']:
+            raise ValueError('recovery_policy_changed')
+        run_id, attempt, controller = (seq5['record'][k] for k in ('run_id', 'run_attempt', 'controller_sha'))
     if run.get('id') == NOOP_RUN_ID:
         old = noop_public_policy()
         run_id, attempt, controller = NOOP_RUN_ID, NOOP_RUN_ATTEMPT, NOOP_CONTROLLER_SHA
@@ -153,6 +167,11 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id, *, job=None, raw=None, run=None):
     from get_publication_provenance import fail
+    seq5 = _private_bindings.value('get_recurring_policy_recovery', 'SEQ5_BINDING')
+    if isinstance(seq5, dict) and 'record' in seq5 and record['run_id'] == seq5['record']['run_id']:
+        if job_id != seq5['job_id'] or record != seq5['record']:
+            fail('provenance_record')
+        return
     if historical_active.registered_run(record['run_id']):
         historical_active.verify_original_record(record, job_id, job=job, raw=raw, run=run)
         return

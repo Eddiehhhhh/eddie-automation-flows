@@ -47,9 +47,21 @@ class Staging(unittest.TestCase):
         self.reader = type('Reader', (), {'local': self.local})()
         self.ref = None; self.calls = []; self.wrong = None; self.uncertain = False; self.moved = False
         self.ref_unconfirmed = False; self.move_after_blob = False
+        self.anchor = self.parent; self.main = self.parent; self.push_calls = []; self.push_uncertain = False; self.push_unconfirmed = False; self.delete_uncertain = False
         self.remote = type('Remote', (), {})()
+        self.remote.local = self.local
+        def command(*args):
+            self.push_calls.append(args)
+            if args[-1].startswith(':'):
+                if self.delete_uncertain: raise RuntimeError('unknown')
+                self.ref = None
+                return type('Result', (), {'returncode': 0})()
+            if self.push_unconfirmed: raise RuntimeError('unknown')
+            self.anchor = self.plan['candidate_commit']
+            if self.push_uncertain: raise RuntimeError('unknown')
+        self.local.command = command
         self.remote.metadata = lambda: {'full_name': staging.r.REPOSITORY, 'private': True}
-        self.remote.ref = lambda name: ('f' * 40 if self.moved else self.parent) if name == staging.r.MAIN_REF else staging.m.PROTECTED[name]
+        self.remote.ref = lambda name: ('f' * 40 if self.moved else self.main) if name == staging.r.MAIN_REF else staging.m.PROTECTED[name]
         self.remote.commit = lambda oid: {'tree': tree, 'parents': [self.parent]}
         self.remote.check_source_budget = lambda oid: {p: ('100644', 'blob', staging.r.oid(data), len(data)) for p, data in self.files.items()}
         self.readback = lambda oid, selected: dict(self.files)
@@ -57,7 +69,10 @@ class Staging(unittest.TestCase):
 
     def call(self, method, path, payload=None, missing=False):
         self.calls.append((method, path))
-        if method == 'GET': return self.ref
+        if method == 'GET':
+            if path.endswith('/heads/codex/get-pending'):
+                return {'ref': staging.pending.REF, 'object': {'type': 'commit', 'sha': self.anchor}}
+            return self.ref
         if path == self.wrong: return {'sha': '0' * 40}
         if path == '/git/blobs':
             if self.move_after_blob: self.moved = True
@@ -72,13 +87,15 @@ class Staging(unittest.TestCase):
         raise AssertionError(path)
 
     def run_stage(self):
-        staging.stage(self, self.reader, self.remote, self.plan, self.files, self.context, self.readback)
+        staging.stage(self, self.reader, self.remote, self.plan, self.files, self.context, self.readback, self.parent)
 
     def test_stages_only_exact_verified_candidate_without_main_write(self):
         self.run_stage()
         self.assertEqual([p for method, p in self.calls if method == 'POST'],
                          ['/git/blobs', '/git/blobs', '/git/trees', '/git/commits', '/git/refs'])
         self.assertEqual(self.remote.ref(staging.r.MAIN_REF), self.parent)
+        self.assertEqual(len(self.push_calls), 1)
+        self.assertIn('--force-with-lease=' + staging.pending.REF + ':' + self.parent, self.push_calls[0])
 
     def test_object_mismatch_and_existing_ref_stop_without_ref_write(self):
         for wrong in ('/git/blobs', '/git/trees', '/git/commits'):
@@ -98,9 +115,38 @@ class Staging(unittest.TestCase):
         self.uncertain = True
         self.run_stage()
         self.assertEqual(self.calls.count(('POST', '/git/refs')), 1)
+        self.ref = None; self.calls.clear(); self.push_calls.clear(); self.anchor = self.parent
+        self.uncertain = False; self.push_uncertain = True
+        self.run_stage()
+        self.assertEqual(len(self.push_calls), 1)
+        self.push_uncertain = False
         self.ref = None; self.calls.clear(); self.ref_unconfirmed = True
+        self.anchor = self.parent
         with self.assertRaises(staging.StageFailure): self.run_stage()
         self.assertEqual(self.calls.count(('POST', '/git/refs')), 1)
+
+    def test_unconfirmed_fixed_ref_update_never_retries_or_reaches_main(self):
+        self.push_unconfirmed = True
+        with self.assertRaisesRegex(ValueError, 'pending_unresolved'): self.run_stage()
+        self.assertEqual(len(self.push_calls), 1)
+        self.assertEqual(self.anchor, self.parent)
+        self.assertEqual(self.remote.ref(staging.r.MAIN_REF), self.parent)
+
+    def test_cleanup_only_own_verified_run_ref_after_main_publication(self):
+        self.run_stage(); self.main = self.plan['candidate_commit']; self.push_calls.clear()
+        self.assertEqual(staging.cleanup_run_ref(self, self.remote, self.context, self.main), 'removed')
+        ref = 'refs/heads/codex/get-stage-123'
+        self.assertEqual(self.push_calls, [('push', '--porcelain', '--no-verify',
+            '--force-with-lease=' + ref + ':' + self.main, staging.r.REMOTE_URL, ':' + ref)])
+        self.assertEqual(self.anchor, self.main)
+
+    def test_uncertain_cleanup_never_retries_and_keeps_fixed_ref(self):
+        self.run_stage(); self.main = self.plan['candidate_commit']; self.push_calls.clear()
+        self.delete_uncertain = True
+        self.assertEqual(staging.cleanup_run_ref(self, self.remote, self.context, self.main), 'retained_or_unknown')
+        self.assertEqual(len(self.push_calls), 1)
+        self.assertIsNotNone(self.ref)
+        self.assertEqual(self.anchor, self.main)
 
     def test_main_change_and_readback_mismatch_stop(self):
         self.moved = True
