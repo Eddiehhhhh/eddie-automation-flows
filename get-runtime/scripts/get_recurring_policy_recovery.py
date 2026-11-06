@@ -79,6 +79,10 @@ def current_get_policy():
 
 def accepts_receipt(commit, receipt_sha256, value, requested_policy):
     """No arbitrary old receipt, policy choice, reverse migration or relabeling."""
+    from get_recurring_entry import a
+    if a.sha(receipt_sha256.encode()) == 'c10d7bab0cf05127a46aafb2bb0f806e14f46d1856e277f06c053eb3eeadaab7':
+        import get_notion_exact_replay as replay
+        return requested_policy == current_get_policy() and replay.receipt_matches(commit, receipt_sha256, value, replay.binding())
     if idle_recovery.accepts_receipt(commit, receipt_sha256, value, requested_policy):
         return True
     if (commit == SEQUENCE_TWO_RECORD['receipt_commit']

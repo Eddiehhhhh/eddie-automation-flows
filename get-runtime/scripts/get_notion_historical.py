@@ -314,35 +314,60 @@ def check_captures(captures):
 
 SCHEMA_CAPTURE_CONTRACT = 'get-notion-native-schema-capture-1'
 
+# Historical native witnesses captured before the expanded Get database schema.
+# The six native columns are accepted only while checking an already anchored
+# state record; fresh API captures still require every current column.
+LEGACY_NATIVE_SCHEMA_FIELDS = {
+    '创建时间': ('created_at', 'date'),
+    '更新时间': ('updated_at', 'date'),
+    '标签': ('tags', 'multi_select'),
+    '笔记类型': ('note_type', 'select'),
+}
 
-def native_schema_evidence(properties):
-    """Validate properties returned by native API.schema; no inferred IDs."""
+
+def _schema_evidence(properties, *, allow_legacy_capture=False):
+    """Compute witness hashes; legacy is confined to already stored captures."""
     from get_notion_properties import schema_projection
     if not isinstance(properties, dict) or len(e.encoded(properties)) > 256 * 1024:
         e.fail('property_schema_changed')
     identity = properties.get('笔记 ID')
-    titles = [value for value in properties.values()
+    titles = [(name, value) for name, value in properties.items()
               if isinstance(value, dict) and value.get('type') == 'title']
     if (not isinstance(identity, dict) or identity.get('type') != 'rich_text'
             or not isinstance(identity.get('id'), str) or not identity['id']
-            or len(titles) != 1 or not isinstance(titles[0].get('id'), str)
-            or not titles[0]['id']):
+            or len(titles) != 1 or not isinstance(titles[0][1].get('id'), str)
+            or not titles[0][1]['id']):
         e.fail('property_schema_changed')
-    projection = schema_projection(properties)
+    legacy_keys = set(LEGACY_NATIVE_SCHEMA_FIELDS) | {'笔记 ID', titles[0][0]}
+    if allow_legacy_capture and set(properties) == legacy_keys:
+        projection = schema_projection(properties, fields=LEGACY_NATIVE_SCHEMA_FIELDS,
+                                       include_options=True)
+    else:
+        projection = schema_projection(properties)
     return {'contract': SCHEMA_CAPTURE_CONTRACT, 'properties': deepcopy(properties),
             'properties_sha256': e.digest(properties),
             'schema_projection_sha256': e.digest(projection)}
 
 
+def native_schema_evidence(properties):
+    """Capture only today's full native schema; never accept an old API read."""
+    return _schema_evidence(properties)
+
+
 def check_native_schema_capture(value):
-    """A schema witness is tied to one exact all-new capture, never ownership."""
+    """Check a witness in authenticated state; legacy hash is state-anchor-bound.
+
+    Legacy captures are read only from the RemoteJournal-anchored outer state.
+    Fresh API reads go through native_schema_evidence(), which requires every
+    current field. The properties hash below is re-derived including options.
+    """
     manifest = value['manifest']
     if creation_ids(manifest) != set(manifest['records']):
         e.fail('state_invalid')
     evidence = value.get('native_schema_evidence')
     if (not isinstance(evidence, dict)
             or set(evidence) != {'contract', 'properties', 'properties_sha256', 'schema_projection_sha256'}
-            or evidence != native_schema_evidence(evidence.get('properties'))):
+            or evidence != _schema_evidence(evidence.get('properties'), allow_legacy_capture=True)):
         e.fail('state_invalid')
     for ident, snapshot in value['snapshots'].items():
         if (not isinstance(snapshot, dict) or snapshot.get('complete') is not True

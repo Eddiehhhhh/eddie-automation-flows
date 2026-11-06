@@ -570,11 +570,20 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         public_client=None,checkpoint_stream=None,work=None,create_recovery=None,approved_recovery_sha=None,
         property_manifest=None,approved_property_manifest_sha256=None,
         historical_manifest=None,approved_historical_manifest_sha256=None,
-        historical_capture=None,approved_historical_capture_sha256=None,compact_proofs=False,fixed_source=False,single_note_id=None):
+        historical_capture=None,approved_historical_capture_sha256=None,compact_proofs=False,fixed_source=False,single_note_id=None,exact_archive_replay=False):
     """Real private read/CAS adapter. Default path cannot persist a journal."""
     stage='input';write_possible=False;prior_effects=None
     try:
-        if type(apply) is not bool:fail('notion_scope')
+        if type(apply) is not bool or type(exact_archive_replay) is not bool:fail('notion_scope')
+        replay_scope = None
+        if exact_archive_replay:
+            import get_notion_exact_replay as replay
+            if (not apply or fixed_source or any(x is not None for x in (publication_bytes,
+                    single_note_id, create_recovery, approved_recovery_sha, property_manifest,
+                    historical_manifest, historical_capture, expected_parent))):
+                fail('notion_scope')
+            replay_scope = replay.admission()
+            single_note_id = replay_scope['note_id']
         if single_note_id is not None:
             e.p.note_id(single_note_id)
             if (not apply or os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch'
@@ -606,7 +615,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if execution is None or checkpoint_stream is None:fail('notion_context')
             recurring.context(public_policy,execution)
             provenance.verify_execution(client,public_policy,execution,'schedule' if os.environ.get('GITHUB_EVENT_NAME')=='schedule' else 'manual')
-            if not fixed_source:
+            if not fixed_source and replay_scope is None:
                 record=provenance.parse_record(publication_bytes,public_policy,{'id':execution['run_id'],'run_attempt':execution['run_attempt'],'head_sha':execution['controller_sha']})
                 tip={'commit':record['receipt_commit'],'receipt_sha256':record['receipt_sha256'],'sequence':record['receipt_sequence']}
         stage='writers';writers_guard()
@@ -614,6 +623,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
         if isinstance(client, provenance._PublicGithub):
             client.private_proof_source=private_proof.PrivateRecords(remote)
             client.private_proof_source.expected_head=parent
+        if replay_scope is not None:
+            stage='source'
+            tip = replay.origin(client, execution, replay_scope)
         if fixed_source:
             stage='source'
             fixed_auth.reserve_publication_slot(client, public_policy, execution)
@@ -641,6 +653,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             def guarded_writers():source_guard();return writers_guard()
             stage='journal'
             present=outbox.STATE_PATH in reader.tree(parent)
+            if replay_scope is not None:
+                if not present:fail('notion_state_anchor')
+                replay_blob = replay.read_source(local, remote, token, root, tip, replay_scope)
             if present:
                 if public_policy is None:fail('notion_state_anchor')
                 found=idle_recovery.reviewed_baseline_anchor(reader.read(parent,outbox.STATE_PATH,outbox.MAX_STATE),public_policy,modes)
@@ -648,8 +663,12 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                     found=checkpoints.discover_anchor(client,public_policy=public_policy,approved_public_policy_sha256=public_hash,
                         notion_policy_sha256=e.digest(scope_for(public_policy)),exclude_run_id=execution['run_id'] if execution else None,
                         exclude_run_attempt=execution['run_attempt'] if execution else None)
-                if single_note_id is not None and found.get('recovery_anchor') is not None:fail('notion_scope')
+                reviewed_replay = (replay_scope is not None and
+                    found.get('recovery_anchor') == idle_recovery.REVIEWED_BASELINE_TAG)
+                if single_note_id is not None and found.get('recovery_anchor') is not None and not reviewed_replay:fail('notion_scope')
                 anchor=found['anchor']
+                if reviewed_replay:
+                    anchor = replay.bridge_state(local, loader, anchor, tip['commit'])
             else:
                 anchor={'commit':entry.BOOTSTRAP['commit'],'state_blob':None,'state_sha256':outbox.digest(outbox.initial_state())}
             confirm=lambda receipt:False
@@ -690,6 +709,13 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if all(mode is None for mode in modes):
                 busy=canonical_mode_guard(current,sha)
                 if busy is not None:return busy
+            if replay_scope is not None:
+                if not initial_done(current):fail('notion_scope')
+                replay.target_guard(current, request, replay_scope, replay_blob)
+                source_guard(parent); writers_guard()
+                fixed_auth.emit(checkpoint_stream, {**execution,
+                    'rules_sha256':public_policy['rules_sha256'], 'notion_policy_sha256':e.digest(scope_for(public_policy)),
+                    'public_policy_sha256':public_hash}, ('historical-apply', replay.SELECTION, None))
             old_journal=current['engine_state']['journal']
             recovery_mode_guard(current, found if present else {}, modes)
             historical_active.check_mode(current, found if present else {}, historical_manifest,
@@ -966,6 +992,8 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if apply and durable.anchor['state_blob'] is not None:
                 verified,verified_sha=durable.read()
                 if durable.compare_and_set(verified_sha,verified)!=verified_sha:fail('notion_state_anchor')
+            if replay_scope is not None and exit_status(result) == 0:
+                replay.target_guard(verified, request, replay_scope, replay_blob, final=True)
             safe=safe_result(result)
             safe.update(journal_commits=durable.commits_attempted,source_parent=parent,
                 notion_requests=getattr(request,'attempts',0),production_activated=PRODUCTION_ACTIVATED)
@@ -1002,6 +1030,7 @@ def main(argv=None):
     source=parser.add_mutually_exclusive_group()
     source.add_argument('--publication-file',type=Path)
     source.add_argument('--fixed-source',action='store_true')
+    source.add_argument('--exact-archive-replay', action='store_true')
     parser.add_argument('--expected-parent')
     parser.add_argument('--recovery',type=Path);parser.add_argument('--approved-recovery-sha256')
     parser.add_argument('--property-manifest',type=Path);parser.add_argument('--approved-property-manifest-sha256')
@@ -1019,7 +1048,7 @@ def main(argv=None):
         elif single_id:fail('notion_scope')
         # Pending production activation is rejected before credential lookup.
         if args.apply and (not PRODUCTION_ACTIVATED or not recurring.PRODUCTION_ACTIVATED):fail('notion_activation_pending')
-        if args.apply!=args.scope_from_policy or (not args.apply and (args.publication_file or args.fixed_source)):fail('notion_scope')
+        if args.apply!=args.scope_from_policy or (not args.apply and (args.publication_file or args.fixed_source or args.exact_archive_replay)):fail('notion_scope')
         policy=None;execution=None;raw=None;recovery=None;property_manifest=None;historical_manifest=None;historical_capture=None
         modes=(args.property_manifest,args.historical_manifest,args.historical_capture)
         if sum(mode is not None for mode in modes)>1 or any(mode is not None for mode in modes) and (args.recovery or args.approved_recovery_sha256 or not args.policy):fail('notion_scope')
@@ -1043,7 +1072,7 @@ def main(argv=None):
             if e.digest(recovery)!=args.approved_recovery_sha256:fail('notion_scope')
         if args.policy:policy=m.strict_capture_json(a.bounded_file(args.policy,16384),16384)
         if args.apply:
-            if args.policy is None or (args.publication_file is None and not args.fixed_source):fail('notion_scope')
+            if args.policy is None or (args.publication_file is None and not args.fixed_source and not args.exact_archive_replay):fail('notion_scope')
             if os.environ.get('GITHUB_REPOSITORY')!=provenance.REPOSITORY or os.environ.get('GITHUB_WORKFLOW_REF')!=provenance.REPOSITORY+'/'+policy['workflow_path']+'@refs/heads/'+policy['head_branch'] or os.environ.get('GITHUB_REF')!='refs/heads/'+policy['head_branch'] or os.environ.get('GITHUB_EVENT_NAME') not in ('schedule','workflow_dispatch'):fail('notion_context')
             execution={'run_id':int(os.environ.get('GITHUB_RUN_ID','0')),'run_attempt':int(os.environ.get('GITHUB_RUN_ATTEMPT','0')),'code_sha':recurring.executed_code_sha(),'controller_sha':os.environ.get('GITHUB_SHA')}
             raw=a.bounded_file(args.publication_file,8192) if args.publication_file else None
@@ -1056,7 +1085,7 @@ def main(argv=None):
             apply=args.apply,public_policy=policy,approved_public_policy_sha256=args.approved_policy_sha256,
             publication_bytes=raw,execution=execution,public_client=public_client,checkpoint_stream=sys.stdout if args.apply else None,create_recovery=recovery,approved_recovery_sha=args.approved_recovery_sha256,property_manifest=property_manifest,approved_property_manifest_sha256=args.approved_property_manifest_sha256,
             historical_manifest=historical_manifest,approved_historical_manifest_sha256=args.approved_historical_manifest_sha256,
-            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True,fixed_source=args.fixed_source,single_note_id=single_id)
+            historical_capture=historical_capture,approved_historical_capture_sha256=args.approved_historical_capture_sha256,compact_proofs=True,fixed_source=args.fixed_source,single_note_id=single_id,exact_archive_replay=args.exact_archive_replay)
     except Exception as exc:
         result={'contract':CONTRACT,'status':'failed','stage':'input',**failure_diagnostic(exc),'write_state':'unknown' if args.apply else 'not_attempted','external_write_attempts':None if args.apply else 0}
     import get_private_runtime_report as report

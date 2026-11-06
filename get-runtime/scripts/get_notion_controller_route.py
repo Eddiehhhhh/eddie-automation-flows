@@ -34,6 +34,10 @@ def preflight(event, apply, mode, expected):
             private_input.anchor_for(member)
         return historical.CAPTURE_CONTRACT
     if mode == 'historical-apply':
+        from get_notion_exact_replay import SELECTION, CONTRACT, binding
+        if expected == SELECTION:
+            binding()
+            return CONTRACT
         for member in historical.apply_members(expected):
             private_input.anchor_for(member)
             private_input.creation_property_for(member)
@@ -76,6 +80,12 @@ def dispatch(mode, expected, contract, args):
             e.fail('approval_missing')
     elif args.publication_file is None:
         e.fail('approval_missing')
+    from get_notion_exact_replay import CONTRACT as replay_contract
+    if contract == replay_contract:
+        if not fixed: e.fail('approval_missing')
+        import get_notion_runtime as runtime
+        return runtime.main(['--policy', str(args.policy), '--approved-policy-sha256',
+            args.approved_policy_sha256, '--exact-archive-replay', '--apply', '--scope-from-policy'])
     remote = private_input.remote_module.GitHubRemote(None, os.environ.get('PRIVATE_VAULT_TOKEN'))
     data = (private_input.read_capture_selection(remote, expected)
             if mode == 'historical-capture'

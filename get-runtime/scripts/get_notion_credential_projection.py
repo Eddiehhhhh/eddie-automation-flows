@@ -29,7 +29,8 @@ def render_body(data, ident, body):
     if not isinstance(ident, str):
         raise ValueError('content_review_required')
     if _sha(ident.encode()) != NOTE_SHA256:
-        return body
+        from get_notion_exact_media_projection import body_view
+        return body_view(data, ident, body)
     if (not isinstance(data, bytes) or not isinstance(body, str)
             or _sha(data) != SOURCE_SHA256
             or _sha(body.encode()) != BODY_SHA256):

@@ -179,7 +179,27 @@ class Loader:
             fail('source_chain_invalid')
         return value
 
+    def _registered_interval(self, ancestor, descendant):
+        self.commit(ancestor)
+        self.commit(descendant)
+        # The journal loader can supply both endpoints in separate shallow
+        # histories. Hydrate only the fixed descendant's commit/tree metadata.
+        if (Path(self.local.vault) / '.git/shallow').exists():
+            first_parents = self.local.run('rev-list', '--first-parent',
+                '--max-count=' + str(entry.MAX_INTERVENING + 1), descendant)
+            if ancestor.encode() not in first_parents.splitlines():
+                self.fetch(descendant)
+        return entry.unchanged_get_history(self.reader, ancestor, descendant)
+
     def unchanged(self, ancestor, descendant):
+        if entry.a.sha((ancestor + ':' + descendant).encode()) == 'd4d6d9162693bbd80f61223f4717efc2fecc31b4fc0eb4b58f60ff684f09b3b9':
+            # Same exact predecessor interval that the original Get writer
+            # checked. Re-run every first-parent Get tree and the pinned pilot.
+            import get_notion_exact_replay as replay
+            bound = replay.binding()
+            if (ancestor, descendant) != (bound['previous_commit'], bound['parent']):
+                fail('source_foreign_get_change')
+            return self._registered_interval(ancestor, descendant)
         self.commit(ancestor); cursor = descendant
         expected = self.reader.source_get_tree(ancestor)
         witness = entry.select_history_witness(self.history_witness, ancestor=ancestor)
