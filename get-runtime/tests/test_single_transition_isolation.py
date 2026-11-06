@@ -142,6 +142,24 @@ class SingleTransitionIsolation(unittest.TestCase):
         with self.assertRaises(canon.raw.ParityFailure):
             check(altered, after, self.target)
 
+    def test_full_sync_preserves_only_unchanged_reported_local_conflict(self):
+        candidate, after = self.prepare_candidate()
+        held = deepcopy(after)
+        held[2]['conflictsById']['11111'] = 'local_note_edited'
+        self.assertEqual(entry.transition(self.reader, self.repo.evidence, self.parent, candidate,
+                                         self.before, held), [self.target])
+        for change in ('row', 'bytes', 'missing_conflict'):
+            bad = deepcopy(held)
+            if change == 'row':
+                bad[2]['newById']['11111']['mirror_sha256'] = '0' * 64
+            elif change == 'bytes':
+                bad[0][self.rel] += b'changed'
+            else:
+                del bad[2]['conflictsById']['11111']
+            with self.subTest(change=change), self.assertRaises(canon.raw.ParityFailure):
+                entry.transition(self.reader, self.repo.evidence, self.parent, candidate,
+                                 self.before, bad)
+
 
 if __name__ == '__main__':
     unittest.main()

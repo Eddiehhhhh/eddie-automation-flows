@@ -280,16 +280,20 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
     preserved = set()
     for ident, previous in old_registry['newById'].items():
         row = registry['newById'][ident]
-        if single_content and ident != source_id:
-            rel = previous['filePath']
-            path = r.GET + '/' + rel
-            data = current.get(rel)
+        rel = previous['filePath']
+        path = r.GET + '/' + rel
+        data = current.get(rel)
+        held_unchanged = (registry['conflictsById'].get(ident) == 'local_note_edited'
+                          and row == previous and path not in changed_paths and data is not None
+                          and before_states[0].get(rel) == data
+                          and reader.tree(before).get(path) == ('100644', 'blob', r.oid(data)))
+        if (single_content and ident != source_id) or held_unchanged:
             if (row != previous or path in changed_paths or data is None
                     or before_states[0].get(rel) != data
                     or reader.tree(before).get(path) != ('100644', 'blob', r.oid(data))):
                 fail('entry_ownership_changed')
             # The complete delta proves the same mode and blob at the new tip.
-            # Preserve these bytes; only the selected owner can be updated.
+            # Preserve these bytes; an externally edited owner cannot be overwritten.
             preserved.add(ident)
             continue
         if any(row[k] != previous[k] for k in ('filePath', 'created_at', 'preview_anchor', 'unknown_sha256')) or not set(previous['text_fields']) <= set(row['text_fields']) or n.metadata_missing(previous['source_metadata'], row['source_metadata']):
