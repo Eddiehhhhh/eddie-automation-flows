@@ -1,0 +1,112 @@
+name: Get notes from private GitHub to Notion
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Write verified pending Get notes to Notion
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      GIT_TERMINAL_PROMPT: '0'
+      CODEX_THREAD_ID: get-notion-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out verified runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: cc47a59426caa790b443632af8cb2fb9daaa0e54
+          path: get-runtime
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Install verified metadata parser
+        working-directory: get-runtime/get-runtime
+        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
+      - name: Check out private vault without media blobs
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
+          gh auth setup-git --hostname github.com
+          git init -q vault
+          git -C vault remote add origin https://github.com/Eddiehhhhh/eddie-llm-wiki.git
+          git -C vault config core.sparseCheckout true
+          cat > vault/.git/info/sparse-checkout <<'SPARSE'
+          /AGENTS.md
+          /Wiki/
+          /Schema/
+          /scripts/
+          /Scripts/
+          /.github/
+          /.sync/get-notion/
+          /.sync/get-notion-incremental/
+          /Raw/03 Get/03 State/
+          SPARSE
+          git -C vault fetch --filter=blob:none --no-tags origin refs/heads/main
+          git -C vault checkout -q -b main FETCH_HEAD
+          test "$(git -C vault rev-parse --is-shallow-repository)" = false
+          test "$(git -C vault rev-parse origin/main)" = "$(git -C vault rev-parse HEAD)"
+          test -z "$(git -C vault status --porcelain --untracked-files=all)"
+      - name: Read rules and acquire private write lease
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('AGENTS.md', 'Wiki/索引.md', 'Wiki/06 Systems/01 Routing/规则入口索引.md'):
+              assert Path(name).read_text(encoding='utf-8').strip()
+          print('Required private-vault rules read.')
+          PY
+          python3 scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
+          grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-notion-preflight.txt"
+      - name: Materialize verified private runtime binding
+        working-directory: get-runtime/get-runtime
+        env:
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+        run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Check queued Get notes
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          args=(--vault vault)
+          if test "$APPLY" = true; then args+=(--apply); fi
+          python3 get-runtime/get-runtime/scripts/get_notion_incremental_controller.py "${args[@]}"
+      - name: Release private write lease
+        if: always()
+        working-directory: vault
+        run: |
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          from task_guard import guard_directory, release_guard
+          from vault_integration_guard import release
+          root = Path.cwd()
+          release(root)
+          release_guard(guard_directory(root))
+          PY
