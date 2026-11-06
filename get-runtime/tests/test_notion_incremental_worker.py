@@ -51,6 +51,24 @@ class IncrementalWorker(unittest.TestCase):
         result = worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32, 'token')
         self.assertEqual(result['status'], 'ready')
 
+    def test_new_page_dates_use_existing_notion_minute_wire_projection(self):
+        self.patches[1].stop()
+        data = b'---\ntitle: "Sample"\n---\nbody'
+        fields = {'note_type': 'plain_text', 'created_at': '2026-11-05 05:08:58',
+                  'updated_at': '2026-11-05 05:08:58'}
+        dates = {'创建时间': {'type': 'date', 'date': {'start': '2026-11-05T05:08:58+08:00'}},
+                 '更新时间': {'type': 'date', 'date': {'start': '2026-11-05T05:08:58+08:00'}}}
+        row = {'source_metadata': {'timestamps': {'created_at': '2026-11-05T05:08:58.224+08:00',
+                                                   'edited_at': '2026-11-05T05:08:58.224+08:00'}}}
+        with patch.object(worker.properties, 'source_fields', return_value=fields), \
+                patch.object(worker.properties, 'schema_projection', return_value={}), \
+                patch.object(worker.properties, 'project', return_value=(dates, {})), \
+                patch.object(worker.sink, 'render_markdown', return_value=([self.blocks[0]], [], [])):
+            props, _ = worker.desired(data, self.ident, 'Raw/03 Get/note.md', row,
+                                      {'标题': {'type': 'title'}})
+        self.assertEqual(props['创建时间']['date']['start'], '2026-11-04T21:08:00.000Z')
+        self.assertEqual(props['更新时间']['date']['start'], '2026-11-04T21:08:00.000Z')
+
     def test_attempt_from_another_run_cannot_create(self):
         reserved = {'note_id': self.ident,
                     'source_sha256': worker.hashlib.sha256(self.data).hexdigest(),
