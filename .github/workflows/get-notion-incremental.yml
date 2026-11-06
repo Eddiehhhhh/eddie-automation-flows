@@ -2,7 +2,8 @@ name: Get notes from private GitHub to Notion
 
 on:
   schedule:
-    - cron: '20 * * * *'
+    # Backup for queued notes when Get could not run.
+    - cron: '20 */6 * * *'
   workflow_dispatch:
     inputs:
       apply:
