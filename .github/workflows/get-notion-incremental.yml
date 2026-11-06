@@ -97,7 +97,12 @@ jobs:
           set -euo pipefail
           args=(--vault vault)
           if test "$APPLY" = true; then args+=(--apply); fi
-          python3 get-runtime/get-runtime/scripts/get_notion_incremental_controller.py "${args[@]}"
+          python3 - "${args[@]}" <<'PY'
+          import get_notion_incremental_controller as controller
+          # A note needing content review must not block unrelated verified notes.
+          controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required'}
+          controller.main()
+          PY
       - name: Release private write lease
         if: always()
         working-directory: vault
