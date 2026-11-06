@@ -1,0 +1,62 @@
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import stage_getnote_asset_probe as probe
+
+
+class PrivateGetAssetProbeTests(unittest.TestCase):
+    def test_run_ref_is_limited_to_probe_namespace(self):
+        self.assertEqual(probe.safe_ref('codex/get-asset-proof-12345-1'),
+                         'codex/get-asset-proof-12345-1')
+        for value in ('main', 'codex/get-asset-proof-', 'codex/other-123', '../main'):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                probe.safe_ref(value)
+
+    def test_only_exact_source_url_is_rewritten(self):
+        source_url = 'https://get.example/private-image?signature=do-not-print'
+        markdown = f'![diagram]({source_url})\n\n![other](https://elsewhere.invalid/x.png)\n'
+        assets = [{'url': source_url, 'status': 'downloaded', 'path': '_assets/images/a.png',
+                   'sha256': 'a' * 64}]
+        rewritten, unmatched, matched = probe.rewrite_remote_image_links(
+            markdown, assets, Path('/vault/Raw/03 Get/01 Notes/note.md'))
+        self.assertIn('![diagram](../_assets/images/a.png)', rewritten)
+        self.assertIn('![other](https://elsewhere.invalid/x.png)', rewritten)
+        self.assertEqual(unmatched, 1)
+        self.assertEqual(matched, {__import__('hashlib').sha256(source_url.encode()).hexdigest()})
+        self.assertNotIn(source_url, rewritten)
+
+    def test_non_downloaded_asset_fails_closed(self):
+        with self.assertRaises(SystemExit):
+            probe.rewrite_remote_image_links(
+                '![x](https://example.invalid/a.png)',
+                [{'url': 'https://example.invalid/a.png', 'status': 'not-downloaded',
+                  'path': '_assets/images/a.png', 'sha256': 'a' * 64}],
+                Path('/vault/Raw/03 Get/01 Notes/note.md'))
+
+    def test_candidate_ids_come_only_from_private_queue_and_are_bounded(self):
+        ids = ['1234567890123456789', '2234567890123456789',
+               '3234567890123456789', '4234567890123456789']
+        queue = {'pending': ids}
+        registry = {'newById': {ident: {'filePath': '01 Notes/note-' + ident + '.md'} for ident in ids}}
+        payloads = {
+            probe.QUEUE_PATH: __import__('json').dumps(queue).encode(),
+            probe.REGISTRY_PATH: __import__('json').dumps(registry).encode(),
+        }
+        for ident in ids:
+            payloads['Raw/03 Get/01 Notes/note-' + ident + '.md'] = (
+                '---\nnote_id: "' + ident + '"\n---\n![img](https://get.invalid/' + ident + '.png)\n').encode()
+        def fake_git(_root, *args, **_kwargs):
+            if args[0:2] == ('cat-file', '-s'):
+                return str(len(payloads[args[-1].removeprefix('HEAD:')])).encode()
+            return payloads[args[-1].removeprefix('HEAD:')]
+        with patch.object(probe, 'git', side_effect=fake_git):
+            found = probe.pending_image_candidates(Path('/private/vault'))
+        self.assertEqual(len(found), probe.MAX_CANDIDATES)
+        self.assertEqual([ident for ident, _ in found], ids[:probe.MAX_CANDIDATES])
+
+
+if __name__ == '__main__':
+    unittest.main()
