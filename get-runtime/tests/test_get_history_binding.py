@@ -164,5 +164,18 @@ class MainlineHistory(unittest.TestCase):
                 entry.unchanged_get_history(reader, root, later, source_id='1234567891')
 
 
+class FailedNotionReceiptPolicy(unittest.TestCase):
+    def test_only_registered_sequence_four_receipt_crosses_policy(self):
+        binding = {'selection': {'receipt_commit': 'a' * 40, 'receipt_sha256': 'b' * 64},
+                   'sequence': 4, 'source_policy': {'get_policy_sha256': 'c' * 64}}
+        receipt = {'sequence': 4, 'policy_sha256': 'c' * 64}
+        with patch.object(entry.recovery._private_bindings, 'value', return_value=binding), \
+                patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {'receipt_commit': 'f' * 40}), \
+                patch.object(entry.recovery, 'current_get_policy', return_value='d' * 64):
+            self.assertTrue(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, receipt, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'e' * 64, receipt, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, receipt, 'e' * 64))
+
+
 if __name__ == '__main__':
     unittest.main()
