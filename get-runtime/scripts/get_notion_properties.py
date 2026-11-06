@@ -50,6 +50,17 @@ REASONS = frozenset(('property_schema_changed', 'property_source_invalid',
     'property_date_projection_invalid', 'property_option_permission_denied'))
 
 
+NOTE_TYPE_LABELS = {
+    'audio': '音频笔记',
+    'local_audio': '本地音频笔记',
+    'plain_text': '文字笔记',
+    'link': '链接笔记',
+    'img_text': '图文笔记',
+    'recorder_audio': '录音卡笔记',
+    'recorder_flash_audio': '录音卡闪念笔记',
+}
+
+
 def fail(reason):
     raise ValueError(reason if reason in REASONS else 'property_source_invalid') from None
 
@@ -329,11 +340,9 @@ def project(data, ident, schema, timestamps=None, source_metadata=None):
                 payload = {'start': zoned_date(raw, timestamps.get(key))}
             elif kind == 'select':
                 if not isinstance(raw, str) or raw != raw.strip() or len(raw) > 100: fail('property_source_invalid')
-                if ',' in raw or (source == 'note_type' and raw not in {
-                    'audio', 'plain_text', 'link', 'img_text', 'recorder_audio',
-                    'recorder_flash_audio', 'local_audio'}):
+                if ',' in raw or (source == 'note_type' and raw not in NOTE_TYPE_LABELS):
                     fail('property_source_invalid')
-                payload = {'name': raw}
+                payload = {'name': NOTE_TYPE_LABELS[raw] if source == 'note_type' else raw}
             elif kind == 'multi_select':
                 raw = tag_names(raw)
                 payload = [{'name': x} for x in sorted(raw)]

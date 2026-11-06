@@ -277,7 +277,7 @@ class NotionPropertyProjection(unittest.TestCase):
         desired, held = project(canonical_note(), NOTE_ID, projection)
         self.assertEqual(held, {})
         self.assertEqual(set(desired), set(props.FIELDS))
-        self.assertEqual(desired['笔记类型'], {'type': 'select', 'select': {'name': 'recorder_audio'}})
+        self.assertEqual(desired['笔记类型'], {'type': 'select', 'select': {'name': '录音卡笔记'}})
         self.assertEqual(desired['标签']['multi_select'], [{'name': '新标签'}])
         self.assertEqual(desired['主题']['multi_select'], [{'name': '新主题'}])
         self.assertFalse(desired['是否子笔记']['checkbox'])
