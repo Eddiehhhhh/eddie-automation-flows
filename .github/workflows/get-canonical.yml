@@ -33,6 +33,8 @@ on:
         type: boolean
         default: false
         required: false
+  schedule:
+    - cron: '17 * * * *'
 permissions:
   contents: read
 concurrency:
@@ -51,7 +53,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: '6a659995b9bcf27c484cb088b535ae3c8cd9878f'
+          ref: '4e280c2970285469f5eddf0cba31e1742a1fae10'
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -60,7 +62,7 @@ jobs:
         run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
       - name: Verify pinned reviewed runtime
         env:
-          RUNTIME_SHA: '6a659995b9bcf27c484cb088b535ae3c8cd9878f'
+          RUNTIME_SHA: '4e280c2970285469f5eddf0cba31e1742a1fae10'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Validate single-note request
         if: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
@@ -79,6 +81,7 @@ jobs:
             echo "::add-mask::$SINGLE_NOTE_ID"
           fi
       - name: Validate bounded Notion route before Get
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.notion_mode != 'canonical' }}
         env:
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
@@ -93,6 +96,7 @@ jobs:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
       - name: Validate complete private Notion route before Get
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.notion_mode != 'canonical' }}
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
@@ -101,8 +105,8 @@ jobs:
         run: python scripts/get_notion_controller_route.py --preflight
       - name: Prepare reviewed public policy
         env:
-          POLICY_B64: 'eyJjb2RlX3NoYSI6IjZhNjU5OTk1YjliY2YyN2M0ODRjYjA4OGI1MzVhZTNjOGNkOTg3OGYiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI2ZWNkZjlhNjhiMWExYzNiMjUxYjAzM2Q2YmVhMWYyYTFkZjgwYTZiMGEzMThmNWIxMDQzYzExZDA1YmM2NTAxIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiI4ZGRhZjRiMGViZmJjMWYyNDMzZTYyMWU1YzFiZThjMzczODJkZWM2OWRkMGRhNTc1MDU5NjY1YzExOTc0YzBkIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6ImI3NmU2ZmY4MWQ0MWZmNjY4MDNiMGU2OGQ1ZWQyOGIxYWY4YWI4NmFjZGQ3ZmQ5ZGNlNjcxNjdiOWQxYjQ2ZTUiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
-          POLICY_SHA256: 'b58c841dcfc2f3952bf4d956012d86158c171d540b6c06227bd3bfe52097b47f'
+          POLICY_B64: 'eyJjb2RlX3NoYSI6IjRlMjgwYzI5NzAyODU0NjlmNWVkZGYwY2JhMzFlMTc0MmExZmFlMTAiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiJhMDJjZDYzZjRlZjA1NzM2OWQ5OWY2NGRhOWMyMmQ1NGVhM2E2NTliOWVlMDViNmQ2NzI4MzZjZDcyZTVhMjUzIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiIxMDU4ZjU4NWQ5OTE2MGM1NGI5OGZlNzI5NWRjMWY3NzUyY2QxMzk1OGNmNzc3OTZlODYwMzRmYWI2ZWNiNDhjIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6ImUxZjFkZTc4M2I5ZDQyMjFlY2E0NmMxNTg5NGY4ZGU5YTRlMGM4ZjlmOGYwZGU3MmQ2MGM3NTZkMDRmZDE3NWMiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
+          POLICY_SHA256: 'a70d8fcf6af284ca4aeb7b853be4aea79a0bb66a21c9bc952dee807368af30d2'
         run: |
           python - <<'PY'
           import base64, hashlib, os
@@ -189,8 +193,8 @@ jobs:
           GET_SINGLE_NOTE_ID: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id || steps.create_test_note.outputs.note_id) || '' }}
           GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          POLICY_SHA256: 'b58c841dcfc2f3952bf4d956012d86158c171d540b6c06227bd3bfe52097b47f'
-          SCOPE_SHA256: '00e26cd4136da09d3864d57b87091c7e7ae249fcb66c2ea260bafd12409da585'
+          POLICY_SHA256: 'a70d8fcf6af284ca4aeb7b853be4aea79a0bb66a21c9bc952dee807368af30d2'
+          SCOPE_SHA256: 'b730b78c0da16f3bc383916567302c8455e576e2d649a5e4aec0f53a9839cf40'
         run: |
           args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
           if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
@@ -200,14 +204,13 @@ jobs:
           python scripts/get_recurring_runtime.py "${args[@]}"
       - name: Sync confirmed Get content to Notion
         id: notion_sync
-        if: ${{ (steps.get_sync.outcome == 'success' || (github.event_name == 'workflow_dispatch' && inputs.apply && steps.get_sync.outcome == 'skipped' && (inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply'))) && (github.event_name == 'schedule' || inputs.apply) }}
-        continue-on-error: ${{ !(github.event_name == 'workflow_dispatch' && inputs.apply && (inputs.single_note_id != '' || inputs.create_test_note || inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply')) }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply && inputs.notion_mode != 'canonical' && (steps.get_sync.outcome == 'success' || (steps.get_sync.outcome == 'skipped' && (inputs.notion_mode == 'historical-capture' || inputs.notion_mode == 'historical-apply'))) }}
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          POLICY_SHA256: 'b58c841dcfc2f3952bf4d956012d86158c171d540b6c06227bd3bfe52097b47f'
+          POLICY_SHA256: 'a70d8fcf6af284ca4aeb7b853be4aea79a0bb66a21c9bc952dee807368af30d2'
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
           NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
@@ -235,3 +238,128 @@ jobs:
 # Canonical runs retain independent Get and Notion failure reporting. A Notion
 # partial cannot erase a confirmed Get receipt. Fixed archive runs deliberately
 # skip Get and emit only their separate source-auth marker, never a Get receipt.
+
+  notion-incremental:
+    needs: canonical-get
+    if: ${{ needs.canonical-get.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply && inputs.notion_mode == 'canonical' && inputs.single_note_id == '' && !inputs.create_test_note)) }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      GIT_TERMINAL_PROMPT: '0'
+      CODEX_THREAD_ID: get-notion-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out verified runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: '4e280c2970285469f5eddf0cba31e1742a1fae10'
+          path: get-runtime
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Install verified metadata parser
+        working-directory: get-runtime/get-runtime
+        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
+      - name: Check out private vault without media blobs
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
+          gh auth setup-git --hostname github.com
+          git init -q vault
+          git -C vault remote add origin https://github.com/Eddiehhhhh/eddie-llm-wiki.git
+          git -C vault config core.sparseCheckout true
+          cat > vault/.git/info/sparse-checkout <<'SPARSE'
+          /AGENTS.md
+          /Wiki/
+          /Schema/
+          /scripts/
+          /Scripts/
+          /.github/
+          /.sync/get-notion/
+          /.sync/get-notion-incremental/
+          /Raw/03 Get/03 State/
+          SPARSE
+          git -C vault fetch --filter=blob:none --no-tags origin refs/heads/main
+          git -C vault checkout -q -b main FETCH_HEAD
+          test "$(git -C vault rev-parse --is-shallow-repository)" = false
+          test "$(git -C vault rev-parse origin/main)" = "$(git -C vault rev-parse HEAD)"
+          test -z "$(git -C vault status --porcelain --untracked-files=all)"
+      - name: Read rules and acquire private write lease
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('AGENTS.md', 'Wiki/索引.md', 'Wiki/06 Systems/01 Routing/规则入口索引.md'):
+              assert Path(name).read_text(encoding='utf-8').strip()
+          print('Required private-vault rules read.')
+          PY
+          python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
+          grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-notion-preflight.txt"
+      - name: Materialize verified private runtime binding
+        working-directory: get-runtime/get-runtime
+        env:
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          APPLY: "true"
+        run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Check queued Get notes
+        id: notion_queue
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
+          APPLY: "true"
+        run: |
+          set -euo pipefail
+          args=(--vault vault)
+          if test "$APPLY" = true; then args+=(--apply); fi
+          set +e
+          python3 - "${args[@]}" <<'PY'
+          import get_notion_incremental_controller as controller
+          # A note needing content review must not block unrelated verified notes.
+          controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required'}
+          controller.main()
+          PY
+          result=$?
+          set -e
+          case "$result" in
+            0) echo 'state=complete' >> "$GITHUB_OUTPUT" ;;
+            2) echo 'state=partial' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'state=failed' >> "$GITHUB_OUTPUT" ;;
+          esac
+          exit "$result"
+      - name: Release private write lease
+        if: always()
+        working-directory: vault
+        run: |
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('Scripts').resolve()))
+          from task_guard import guard_directory, release_guard
+          from vault_integration_guard import release
+          root = Path.cwd()
+          release(root)
+          release_guard(guard_directory(root))
+          PY
+      - name: Report independent Notion result
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+          NOTION_STATE: ${{ steps.notion_queue.outputs.state }}
+        run: |
+          case "$RESULT:$NOTION_STATE" in
+            success:complete) message='Get: success; Notion: complete.' ;;
+            failure:partial) message='Get: success; Notion: partial, queued notes remain.' ;;
+            *) message='Get: success; Notion: failed or incomplete; check this job.' ;;
+          esac
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
