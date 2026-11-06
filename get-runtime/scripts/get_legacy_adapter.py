@@ -372,7 +372,8 @@ def source_snapshot(summaries,terminal,*,only_id=None):
 
 def propose_updates(evidence,state,state_sha,current,repo,prior_commit,summaries,terminal,details,*,only_id=None):
     state=validate_state(state,state_sha,evidence);items=source_snapshot(summaries,terminal,only_id=only_id)
-    if only_id is not None and (not isinstance(only_id,str) or note_identity(only_id)!=only_id):fail('adapter_source_identity')
+    if only_id is not None and (not isinstance(only_id, str) or not re.fullmatch(r'[0-9]{1,64}', only_id)):
+        fail('adapter_source_identity')
     if repo.read(prior_commit,retention.GET+'/'+STATE,MAX_STATE)!=encoded(state) or current.get(STATE)!=encoded(state):fail('adapter_state_commit')
     if not isinstance(details,dict):fail('adapter_detail_schema')
     rows=state['legacyById'];conflicts={i:r for i,r in state['conflictsById'].items() if i not in rows}
