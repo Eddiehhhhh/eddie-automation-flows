@@ -104,6 +104,7 @@ jobs:
           import json
           import subprocess
           import sys
+          import traceback
           import get_notion_incremental_controller as controller
 
           def diagnose(phase, function):
@@ -131,6 +132,12 @@ jobs:
                       result = {'phase': phase, 'category': kinds.get(type(error), 'other')}
                       if type(error) is ValueError and str(error) in codes:
                           result['reason'] = str(error)
+                      modules = {'get_notion_incremental_controller.py', 'get_notion_incremental_worker.py',
+                                 'get_notion_sink_plan.py', 'get_notion_live_transport.py',
+                                 'get_notion_properties.py', 'get_notion_native.py'}
+                      result['locations'] = [[frame.filename.rsplit('/', 1)[-1], frame.lineno]
+                                             for frame in traceback.extract_tb(error.__traceback__)
+                                             if frame.filename.rsplit('/', 1)[-1] in modules]
                       print(json.dumps(result), file=sys.stderr)
                       raise
               return wrapped
