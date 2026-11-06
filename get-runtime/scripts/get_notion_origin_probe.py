@@ -26,6 +26,12 @@ RUN_HEAD_SHA = 'cf164aaf7fb1baf56af8d3f74948bc41b66df489'
 ATTEMPT_COMMIT = 'ce806d720381a91bcc94741abfe0e7a6a7a2c21f'
 OWNED_COMMIT = '41b3bb86f355f7de0c1e59a65f7321005dec0ce1'
 REPOSITORY = 'Eddiehhhhh/eddie-automation-flows'
+PHASE = 'start'
+
+
+def mark(phase):
+    global PHASE
+    PHASE = phase
 
 
 def stop(code):
@@ -88,9 +94,11 @@ def introduced_unchanged(root, path, commit):
 
 
 def assess(root, notion_token):
+    mark('private_head')
     head = controller.head(root)
     if controller.git(root, 'ls-remote', 'origin', 'refs/heads/main').split()[0] != head:
         stop('source_changed')
+    mark('receipt_history')
     paths = worker.git(root, 'diff-tree', '--no-commit-id', '--name-only', '-r',
                        ATTEMPT_COMMIT).decode().splitlines()
     if len(paths) != 1 or not paths[0].startswith(worker.ATTEMPTS + '/'):
@@ -118,6 +126,7 @@ def assess(root, notion_token):
                    for key in ('source_sha256', 'target_sha256'))):
         stop('owned_unverified')
     page_id = native.uuid(owned['page_id'])
+    mark('github_run')
     run = fixed_read('https://api.github.com/repos/' + REPOSITORY + '/actions/runs/' + str(RUN_ID),
                      github=True)
     if (run.get('id') != RUN_ID or run.get('run_attempt') != RUN_ATTEMPT
@@ -134,9 +143,11 @@ def assess(root, notion_token):
         stop('time_unverified')
     if not time_of(run.get('created_at')) <= reserved <= confirmed <= time_of(run.get('updated_at')):
         stop('time_unverified')
+    mark('source_note')
     path, data, row = worker.source(root, note_id, head)
     if hashlib.sha256(data).hexdigest() != owned['source_sha256']:
         stop('source_changed')
+    mark('notion_target')
     source_id = controller.config(root)
     api = transport.API(transport.Transport(notion_token), source_id, [note_id])
     props, blocks = worker.desired(data, note_id, path, row, api.schema())
@@ -144,6 +155,7 @@ def assess(root, notion_token):
         stop('target_unverified')
     if worker.verify_note(api, note_id, page_id, props, blocks) != owned['target_sha256']:
         stop('target_unverified')
+    mark('notion_creator')
     raw_page = api.request('GET', '/pages/' + page_id, None)
     bot = fixed_read('https://api.notion.com/v1/users/me', notion_token)
     creator = raw_page.get('created_by')
@@ -158,6 +170,7 @@ def assess(root, notion_token):
     edited = time_of(raw_page.get('last_edited_time'))
     if not reserved <= created <= edited <= confirmed:
         stop('time_unverified')
+    mark('final_readback')
     if api.matches(note_id) != [page_id] or controller.head(root) != head:
         stop('concurrent_change')
     if controller.git(root, 'ls-remote', 'origin', 'refs/heads/main').split()[0] != head:
@@ -177,7 +190,7 @@ def main():
                    'owned_unverified', 'run_unverified', 'target_unverified',
                    'creator_unverified', 'concurrent_change'}
         code = str(exc) if isinstance(exc, ValueError) and str(exc) in allowed else 'probe_failed'
-        result = {'status': 'origin_proof_blocked', 'reason': code}
+        result = {'status': 'origin_proof_blocked', 'reason': code, 'phase': PHASE}
     print(json.dumps(result, separators=(',', ':')))
     return 0 if result['status'] == 'origin_proof_ready' else 2
 
