@@ -203,12 +203,25 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
             return {'selection': {'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64},
                     'sequence': 4, 'source_policy': {'get_policy_sha256': 'f' * 64}}
         with patch.object(entry.recovery._private_bindings, 'value', side_effect=value), \
+                patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {'receipt_commit': 'f' * 40}), \
                 patch.object(entry.recovery, 'current_get_policy', return_value='d' * 64):
             receipt = {'sequence': 6, 'policy_sha256': 'c' * 64}
             self.assertTrue(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, receipt, 'd' * 64))
             self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'b' * 64, {**receipt, 'sequence': 5}, 'd' * 64))
             self.assertFalse(entry.recovery.accepts_receipt('e' * 40, 'b' * 64, receipt, 'd' * 64))
             self.assertFalse(entry.recovery.accepts_receipt('a' * 40, 'e' * 64, receipt, 'd' * 64))
+
+    def test_sequence_six_rejects_other_job_or_record(self):
+        from get_publication_provenance import ProvenanceFailure
+        record = {'run_id': 456, 'receipt_sequence': 6}
+        seq6 = {'record': record, 'job_id': 789}
+        with patch.object(entry.recovery._private_bindings, 'value',
+                          side_effect=lambda _module, key: seq6 if key == 'SEQ6_BINDING' else {}):
+            entry.recovery.verify_original_record(record, 789)
+            with self.assertRaises(ProvenanceFailure):
+                entry.recovery.verify_original_record(record, 790)
+            with self.assertRaises(ProvenanceFailure):
+                entry.recovery.verify_original_record({**record, 'receipt_sequence': 5}, 789)
 
     def test_sequence_five_policy_transition_requires_exact_run_identity(self):
         import get_recurring_controller as controller_module
