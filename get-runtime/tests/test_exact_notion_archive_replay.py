@@ -1,4 +1,7 @@
 import os
+import contextlib
+import io
+import json
 import subprocess
 from pathlib import Path
 import sys
@@ -195,6 +198,36 @@ class ExactArchiveReplay(unittest.TestCase):
             good=run('rev-parse',descendant+'~2').decode().strip()
             loader._registered_interval(good,descendant)
             self.assertEqual(loader.fetches,1)
+
+    def test_workflow_cli_empty_single_id_reaches_current_writer_verification(self):
+        import get_notion_controller_route as route
+        import get_notion_runtime as receiver
+        policy={'workflow_path':'.github/workflows/example.yml','head_branch':'main'}
+        env={'APPLY':'true','NOTION_MODE':'historical-apply','NOTION_INPUT_SHA256':replay.SELECTION,
+             'GET_SINGLE_NOTE_MODE':'false','GET_SINGLE_NOTE_ID':'','GITHUB_EVENT_NAME':'workflow_dispatch',
+             'GITHUB_REPOSITORY':receiver.provenance.REPOSITORY,'GITHUB_REF':'refs/heads/main',
+             'GITHUB_WORKFLOW_REF':receiver.provenance.REPOSITORY+'/'+policy['workflow_path']+'@refs/heads/main',
+             'GITHUB_RUN_ID':'456','GITHUB_RUN_ATTEMPT':'1','GITHUB_SHA':'a'*40,
+             'NOTION_API_KEY':'fixture','GITHUB_TOKEN':'fixture','PRIVATE_VAULT_TOKEN':'fixture'}
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'policy.json';path.write_text(json.dumps(policy))
+            args=['--policy',str(path),'--approved-policy-sha256','a'*64,'--fixed-source','--apply','--scope-from-policy']
+            with patch.dict(os.environ,env), patch.object(replay,'binding',return_value=self.b), \
+                 patch.object(receiver.recurring,'executed_code_sha',return_value='b'*40), \
+                 patch.object(receiver.recurring,'validate_policy',return_value=policy), \
+                 patch.object(receiver.recurring,'context'), \
+                 patch.object(receiver.provenance,'verify_execution') as verify, \
+                 patch.object(receiver.old_writers.WriterGuard,'__call__',side_effect=ValueError('writer_gate_unknown')) as guard, \
+                 contextlib.redirect_stdout(io.StringIO()) as log:
+                self.assertEqual(route.main(args),1)
+                result=json.loads(log.getvalue())
+                self.assertEqual((result['stage'],result['reason']),('writers','writer_gate_unknown'))
+                verify.assert_called_once();guard.assert_called_once()
+                with patch.dict(os.environ,{'GET_SINGLE_NOTE_ID':self.nid}):
+                    self.assertEqual(route.main(args),1)
+                with patch.dict(os.environ,{'GET_SINGLE_NOTE_MODE':'true','GET_SINGLE_NOTE_ID':''}):
+                    self.assertEqual(route.main(args),1)
+                self.assertEqual((verify.call_count,guard.call_count),(1,1))
 
     def test_runtime_verifies_new_writer_and_original_get_separately(self):
         import get_notion_runtime as receiver
