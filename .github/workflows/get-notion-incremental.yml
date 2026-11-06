@@ -115,7 +115,23 @@ jobs:
                           raise
                       kinds = {ValueError: 'value', TypeError: 'type', KeyError: 'key',
                                subprocess.CalledProcessError: 'git', OSError: 'os'}
-                      print(json.dumps({'phase': phase, 'category': kinds.get(type(error), 'other')}), file=sys.stderr)
+                      codes = {'duplicate_id', 'incomplete_source', 'incomplete_target_read',
+                               'id_not_string', 'unmapped_id', 'recording_schema_changed', 'source_timestamps_missing',
+                               'source_title_invalid', 'target_schema_changed', 'property_budget',
+                               'property_date_projection_invalid', 'property_manual_edit',
+                               'property_parser_unavailable', 'property_schema_changed',
+                               'property_source_empty', 'property_source_invalid', 'property_source_missing',
+                               'property_timestamp_mismatch', 'property_timezone_required', 'property_unowned_value',
+                               'identity_query_invalid', 'incomplete_pagination', 'invalid_blocks',
+                               'invalid_children', 'invalid_cohort', 'invalid_route', 'invalid_table',
+                               'malformed_payload', 'missing_credentials', 'pagination_budget',
+                               'read_transport_failed', 'unread_target', 'unsupported_code_color',
+                               'unsupported_prepend', 'unsupported_source_format', 'wrong_database',
+                               'wrong_note_identity', 'wrong_parent', 'wrong_schema'}
+                      result = {'phase': phase, 'category': kinds.get(type(error), 'other')}
+                      if type(error) is ValueError and str(error) in codes:
+                          result['reason'] = str(error)
+                      print(json.dumps(result), file=sys.stderr)
                       raise
               return wrapped
 
