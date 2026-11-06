@@ -84,7 +84,6 @@ jobs:
           python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
           grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-notion-preflight.txt"
       - name: Materialize verified private runtime binding
-        if: ${{ !inputs.origin_probe }}
         working-directory: get-runtime/get-runtime
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
@@ -113,6 +112,7 @@ jobs:
         if: ${{ inputs.origin_probe }}
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
         run: python3 get-runtime/get-runtime/scripts/get_notion_origin_probe.py --vault vault
       - name: Release private write lease
