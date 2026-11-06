@@ -66,6 +66,7 @@ jobs:
       - name: Verify isolated Git Data objects and staging ref
         env:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITDATA_PROBE_REPO: ${{ github.workspace }}/vault
         run: python3 get-runtime/get-runtime/scripts/get_gitdata_probe.py
       - name: Release private write lease
