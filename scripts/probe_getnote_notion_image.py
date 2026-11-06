@@ -97,7 +97,8 @@ def verify_proof(root: Path, commit: str) -> tuple[str, dict, object]:
     if (not isinstance(row, dict) or not isinstance(embed, dict)
             or embed.get('source_field') != 'content'
             or embed.get('source_content_sha256') != proof.get('source_content_sha256')
-            or embed.get('asset_path') != row.get('path')
+            or not isinstance(embed.get('asset_path'), str)
+            or 'Raw/03 Get/' + embed['asset_path'] != row.get('path')
             or embed.get('asset_sha256') != row.get('sha256')
             or embed.get('url_sha256') != row.get('source_url_sha256')
             or type(row.get('bytes')) is not int or not 0 < row['bytes'] <= assets.SINGLE_PART_BYTES
@@ -112,7 +113,7 @@ def verify_proof(root: Path, commit: str) -> tuple[str, dict, object]:
     if not re.search(rb'^!\[[^\]]*\]\(' + re.escape(encoded_asset.encode()) + rb'\)\s*$', note, re.M):
         fail('note_asset_reference_mismatch')
     if (not isinstance(manifest.get('assets'), list) or len(manifest['assets']) != 1
-            or manifest['assets'][0].get('path') != row['path']
+            or manifest['assets'][0].get('path') != embed['asset_path']
             or manifest['assets'][0].get('sha256') != row['sha256']
             or manifest['assets'][0].get('bytes') != row['bytes']):
         fail('manifest_asset_mismatch')
