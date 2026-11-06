@@ -24,7 +24,10 @@ RECEIPT_CONTRACT = 'get-canonical-sync-receipt-1'
 RECEIPT = '03 State/canonical-sync-receipt.json'
 FULL_RECEIPT = r.GET + '/' + RECEIPT
 MAX_RECEIPT = 512 * 1024
-MAX_INTERVENING = 1024
+# Non-Get commits accumulate between publications. Every first-parent step
+# inside this finite window still goes through the original subtree checks.
+# shortcut: over 8192 commits without a Get publication require a renewed verified anchor.
+MAX_INTERVENING = 8192
 PILOT_MIGRATION = _private_bindings.value('get_recurring_entry', 'PILOT_MIGRATION')
 BOOTSTRAP = _private_bindings.value('get_recurring_entry', 'BOOTSTRAP')
 STATE_PATHS = {r.GET + '/' + a.STATE, r.GET + '/' + n.STATE}

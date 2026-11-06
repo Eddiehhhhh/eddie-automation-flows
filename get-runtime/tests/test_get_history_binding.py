@@ -29,6 +29,29 @@ class Reader:
 
 
 class MainlineHistory(unittest.TestCase):
+    def long_history(self, edges):
+        ids = [format(i+1, '040x') for i in range(edges+1)]
+        parents = {commit: [ids[i-1]] if i else [] for i, commit in enumerate(ids)}
+        return ids, Reader(parents, dict.fromkeys(ids, self.tree))
+
+    def test_long_first_parent_interval_checks_every_tree(self):
+        ids, reader = self.long_history(3749)
+        with patch.object(reader, 'source_get_tree', wraps=reader.source_get_tree) as reads:
+            entry.unchanged_get_history(reader, ids[0], ids[-1])
+        self.assertEqual({call.args[0] for call in reads.call_args_list}, set(ids))
+
+    def test_restored_edit_beyond_old_window_is_rejected(self):
+        ids, reader = self.long_history(3749)
+        reader.trees[ids[100]] = self.changed
+        with patch.object(entry, 'PILOT_MIGRATION', None):
+            with self.assertRaisesRegex(entry.EntryFailure, 'entry_foreign_get_change'):
+                entry.unchanged_get_history(reader, ids[0], ids[-1])
+
+    def test_one_edge_past_history_window_is_rejected(self):
+        ids, reader = self.long_history(entry.MAX_INTERVENING + 1)
+        with self.assertRaisesRegex(entry.EntryFailure, 'entry_history_bound'):
+            entry.unchanged_get_history(reader, ids[0], ids[-1])
+
     def setUp(self):
         self.root, self.linear, self.side, self.merge = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
         self.tree, self.changed = ('1' * 40, '2' * 40)
