@@ -30,7 +30,10 @@ jobs:
           fetch-depth: 1
           sparse-checkout: |
             /.sync/get-notion-incremental/queue.json
+            /.sync/get-notion-asset-probes/**
             /Raw/03 Get/01 Notes/**
+            /Raw/03 Get/_assets/images/**
+            /Raw/03 Get/03 State/attachments/**
             /Raw/03 Get/03 State/canonical-registry.json
           sparse-checkout-cone-mode: false
           persist-credentials: true
@@ -60,7 +63,7 @@ jobs:
             *) FAILURE_STAGE=unknown ;;
           esac
           case "$FAILURE_CATEGORY" in
-            validation|auth_denied|not_found|rate_limited|server_error|http_error|api_rejected|transport_error|redirect_blocked|detail_error|detail_identity_mismatch|invalid_attachment_schema|no_image_descriptors|url_unbound) ;;
+            validation|auth_denied|not_found|rate_limited|server_error|http_error|api_rejected|transport_error|redirect_blocked|detail_error|detail_identity_mismatch|invalid_attachment_schema|no_image_descriptors|url_unbound|private_write_failed) ;;
             *) FAILURE_CATEGORY=validation ;;
           esac
           echo "Get image probe stopped at stage=$FAILURE_STAGE category=$FAILURE_CATEGORY; private output suppressed."

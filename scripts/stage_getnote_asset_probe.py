@@ -37,7 +37,8 @@ FAILURE_STAGES = {'verify_private_repo', 'load_credentials', 'prepare_private_re
 FAILURE_CATEGORIES = {'validation', 'auth_denied', 'not_found', 'rate_limited',
                       'server_error', 'http_error', 'api_rejected', 'transport_error',
                       'redirect_blocked', 'detail_error', 'detail_identity_mismatch',
-                      'invalid_attachment_schema', 'no_image_descriptors', 'url_unbound'}
+                      'invalid_attachment_schema', 'no_image_descriptors', 'url_unbound',
+                      'private_write_failed'}
 RETRYABLE_DETAIL_FAILURES = {'not_found', 'server_error', 'transport_error'}
 CURRENT_STAGE = 'unknown'
 CURRENT_FAILURE_CATEGORY = 'validation'
@@ -659,11 +660,13 @@ def main() -> int:
     if selected is None:
         fail()
     CURRENT_STAGE = 'download_bind_attachment'
+    CURRENT_FAILURE_CATEGORY = 'validation'
     staged = stage_note(root, selected, ref, private_ref_base, selected_source_note,
                         source_field=selected_source_field)
     # stage_note writes only in the isolated runner checkout; the single push
     # targets the run-scoped private branch and is read back above.
     CURRENT_STAGE = 'publish_private_ref'
+    CURRENT_FAILURE_CATEGORY = 'private_write_failed'
     commit = publish_private_stage(root, ref, staged['paths'])
     print(json.dumps({'status': 'verified', 'notes': 1,
                       'image_assets': len(staged['proof']['assets']),
