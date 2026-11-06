@@ -8,7 +8,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from test_notion_single_id_input import runtime, bindings
 
@@ -158,6 +158,86 @@ class ExactArchiveReplay(unittest.TestCase):
             git.run('merge','--no-ff','-qm','merge changed fork','bad-fork')
             bad=git.run('rev-parse','HEAD').decode().strip()
             with self.assertRaises(ValueError):replay.unchanged_journal(git,anchor,bad,path)
+
+    def test_shallow_journal_fork_rehydrates_but_keeps_change_and_span_gates(self):
+        import get_confirmed_source as source
+        def git(root, *args, data=None):
+            return subprocess.check_output(['git','-C',str(root),*args],input=data,stderr=subprocess.DEVNULL)
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder).resolve()
+            origin=root/'repo.git'
+            git(root,'init','--bare','-q',str(origin))
+            for key in ('uploadpack.allowFilter','uploadpack.allowAnySHA1InWant'):
+                git(origin,'config',key,'true')
+            commands=[]
+            def commit(ref,parent=None,*,merge=None,body=None):
+                mark=len(commands)+1
+                commands.append(f'commit refs/heads/{ref}\nmark :{mark}\ncommitter Test <test@example.invalid> {mark} +0000\ndata 1\nx\n'
+                    +(f'from :{parent}\n' if parent else '')+(f'merge :{merge}\n' if merge else '')
+                    +(f'M 100644 inline state.json\ndata {len(body)}\n{body}\n' if body else '')+'\n')
+                return mark
+            base=None
+            for _ in range(560):base=commit('early',base)
+            side=commit('side',base)
+            main=base
+            for _ in range(600):main=commit('old',main)
+            anchor_mark=commit('anchor',main,body='approved')
+            good=commit('good',commit('good',anchor_mark),merge=side)
+            dirty=commit('bad',good,body='foreign')
+            commit('bad',dirty,body='approved')
+            long=good
+            for _ in range(513):long=commit('long',long)
+            git(origin,'fast-import','--quiet',data=''.join(commands).encode())
+            anchor={'commit':git(origin,'rev-parse','anchor').decode().strip(),
+                    'state_blob':git(origin,'rev-parse','anchor:state.json').decode().strip()}
+            for ref,allowed in (('good',True),('bad',False),('long',False)):
+                with self.subTest(ref=ref):
+                    dest=root/ref
+                    git(root,'init','-q',str(dest))
+                    git(dest,'remote','add','origin',origin.as_uri())
+                    fetches=[]
+                    class Local:
+                        vault=dest
+                        def run(self,*args):
+                            if args[0]=='fetch':fetches.append(args)
+                            return git(dest,'-c','protocol.file.allow=always',*args)
+                    local=Local()
+                    tip=git(origin,'rev-parse',ref).decode().strip()
+                    for depth,oid in ((2,tip),(512,tip),(512,anchor['commit']),(512,tip)):
+                        local.run('fetch','--depth='+str(depth),'--filter=blob:none','--no-tags',
+                                  '--no-write-fetch-head','origin',oid)
+                    self.assertTrue(all(local.run('cat-file','-t',c)==b'commit\n' for c in (anchor['commit'],tip)))
+                    with self.assertRaisesRegex(ValueError,'approval_missing'):
+                        replay.unchanged_journal(local,anchor,tip,'state.json')
+                    if allowed:
+                        failed=Mock(side_effect=RuntimeError('fixture_fetch_failed'))
+                        with self.assertRaisesRegex(RuntimeError,'fixture_fetch_failed'):
+                            replay.unchanged_journal(local,anchor,tip,'state.json',hydrate_fixed_history=failed)
+                        failed.assert_called_once_with(tip)
+                        unchanged=Mock()
+                        with self.assertRaisesRegex(ValueError,'approval_missing'):
+                            replay.unchanged_journal(local,anchor,tip,'state.json',hydrate_fixed_history=unchanged)
+                        unchanged.assert_called_once_with(tip)
+                    fetches.clear()
+                    loader=object.__new__(source.Loader)
+                    loader.local=local;loader.fetches=0
+                    def prove():
+                        replay.unchanged_journal(local,anchor,tip,'state.json',hydrate_fixed_history=loader.fetch)
+                    if allowed:prove()
+                    else:
+                        with self.assertRaisesRegex(ValueError,'approval_missing'):prove()
+                    self.assertEqual(loader.fetches,1)
+                    self.assertEqual(len(fetches),1)
+                    self.assertEqual(fetches[0][-2:],('origin',tip))
+                    self.assertIn('--depth=8194',fetches[0])
+                    self.assertIn('--filter=blob:none',fetches[0])
+                    if ref=='long':
+                        self.assertFalse((dest/'.git/shallow').exists())
+                        unused=Mock()
+                        with self.assertRaisesRegex(ValueError,'approval_missing'):
+                            replay.unchanged_journal(local,anchor,tip,'state.json',hydrate_fixed_history=unused)
+                        unused.assert_not_called()
+                    self.assertNotIn(b'blob',local.run('cat-file','--batch-all-objects','--batch-check=%(objecttype)').splitlines())
 
     def test_registered_interval_reconnects_two_shallow_endpoint_slices(self):
         import get_confirmed_source as source
