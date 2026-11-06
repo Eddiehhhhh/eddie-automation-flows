@@ -445,6 +445,9 @@ def failure(exc=None, *, attempt_started=False):
     stage = getattr(exc, 'runtime_stage', None)
     if isinstance(stage, str) and stage in STAGES:
         result['stage'] = stage
+    category = getattr(exc, 'cas_error_category', None)
+    if isinstance(category, str) and category in m.CAS_ERROR_CATEGORIES:
+        result['cas_error_category'] = category
     result['failure_kind'] = ('missing_key' if isinstance(exc, KeyError) else
         'invalid_type' if isinstance(exc, TypeError) else
         'invalid_value' if isinstance(exc, ValueError) else

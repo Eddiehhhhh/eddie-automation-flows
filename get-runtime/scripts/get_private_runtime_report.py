@@ -36,6 +36,9 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
     if isinstance(stage,str) and stage in allowed_stages:out['stage']=stage
     kind=result.get('failure_kind')
     if isinstance(kind,str) and kind in FAILURE_KINDS:out['failure_kind']=kind
+    category=result.get('cas_error_category')
+    if out['status']=='recurring_failed' and category in ('missing_object','shallow_history','authentication_or_permission','network','size_or_remote_rejection','other'):
+        out['cas_error_category']=category
     for key in ('external_write_attempts','writes','asset_downloads','notion_writes','confirmed_content_ids','new_selected','notes_changed'):
         value=result.get(key)
         if type(value) is int and 0<=value<=1000000 or key in result and value is None:out[key]=value
