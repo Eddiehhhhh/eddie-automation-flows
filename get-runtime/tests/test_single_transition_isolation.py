@@ -145,9 +145,11 @@ class SingleTransitionIsolation(unittest.TestCase):
     def test_full_sync_preserves_only_unchanged_reported_local_conflict(self):
         candidate, after = self.prepare_candidate()
         held = deepcopy(after)
-        held[2]['conflictsById']['11111'] = 'local_note_edited'
-        self.assertEqual(entry.transition(self.reader, self.repo.evidence, self.parent, candidate,
-                                         self.before, held), [self.target])
+        for reason in ('local_note_edited', 'source_missing', 'identity_reserved'):
+            with self.subTest(reason=reason):
+                held[2]['conflictsById']['11111'] = reason
+                self.assertEqual(entry.transition(self.reader, self.repo.evidence, self.parent, candidate,
+                                                 self.before, held), [self.target])
         for change in ('row', 'bytes', 'missing_conflict'):
             bad = deepcopy(held)
             if change == 'row':

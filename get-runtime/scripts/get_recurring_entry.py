@@ -283,7 +283,7 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
         rel = previous['filePath']
         path = r.GET + '/' + rel
         data = current.get(rel)
-        held_unchanged = (registry['conflictsById'].get(ident) == 'local_note_edited'
+        held_unchanged = (ident in registry['conflictsById']
                           and row == previous and path not in changed_paths and data is not None
                           and before_states[0].get(rel) == data
                           and reader.tree(before).get(path) == ('100644', 'blob', r.oid(data)))
