@@ -1,0 +1,73 @@
+name: Dry-run one Get image for Notion
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: get-notion-image-probe-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      GIT_TERMINAL_PROMPT: '0'
+    steps:
+      - name: Check out isolated probe code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify private repository and read the isolated image proof
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          ref: codex/get-asset-proof-42289447756-1
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: vault
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: |
+            /.sync/get-notion-asset-probes/**
+          sparse-checkout-cone-mode: false
+          persist-credentials: true
+
+      - name: Check out the pinned Notion read-only runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: 4e280c2970285469f5eddf0cba31e1742a1fae10
+          path: get-runtime
+          persist-credentials: false
+
+      - name: Verify repository privacy and materialize pinned runtime bindings
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
+          python3 -m pip install --require-hashes --only-binary=:all: --no-deps -r get-runtime/get-runtime/requirements-notion-properties.txt
+          python3 get-runtime/get-runtime/scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+
+      - name: Validate private image and existing Notion page without writes
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
+        run: |
+          set -euo pipefail
+          python3 scripts/probe_getnote_notion_image.py \
+            --vault "$GITHUB_WORKSPACE/vault" \
+            --proof-commit a20458e7b35ab2580070262e414e800f8ec477c0 | tee "$RUNNER_TEMP/notion-image-dry-run.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          value=json.loads((Path(os.environ['RUNNER_TEMP'])/'notion-image-dry-run.json').read_text())
+          allowed=('status','notes','image_assets','image_bytes','notion_workspace_limit','existing_pages','writes','main_targeted')
+          print(json.dumps({key:value[key] for key in allowed}, sort_keys=True))
+          PY
