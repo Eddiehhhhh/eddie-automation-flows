@@ -30,10 +30,21 @@ class GitDataProbe(unittest.TestCase):
         self.fail_at = None
         self.wrong_at = None
         self.drift = False
-        self.ref = None
+        self.refs = {}
+        self.push_calls = []
+        self.push_fails = False
         self.commit_payload = None
         original = probe.git
         def capture(repo, *args, **kwargs):
+            if args[:3] == ('remote', 'get-url', 'origin'):
+                return 'https://github.com/' + probe.REPO + '.git'
+            if args[0] == 'push':
+                self.push_calls.append(args)
+                if self.push_fails:
+                    raise probe.ProbeFailure('git_push', 'exit_128')
+                ref = args[-1].split(':', 1)[1]
+                self.refs[ref]['object']['sha'] = self.values['commit-tree']
+                return ''
             result = original(repo, *args, **kwargs)
             if args[0] in ('hash-object', 'write-tree', 'commit-tree'):
                 self.values[args[0]] = result
@@ -54,7 +65,7 @@ class GitDataProbe(unittest.TestCase):
             sha = 'f' * 40 if self.drift and self.values.get('commit-tree') else self.parent
             return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': sha}}
         if path.startswith('/git/ref/heads/codex/'):
-            return self.ref
+            return self.refs.get('refs/' + path.removeprefix('/git/ref/'))
         if path == '/git/blobs':
             return {'sha': self.values['hash-object']}
         if path == '/git/trees':
@@ -63,8 +74,8 @@ class GitDataProbe(unittest.TestCase):
             self.commit_payload = payload
             return {'sha': self.values['commit-tree']}
         if path == '/git/refs':
-            self.ref = {'ref': payload['ref'], 'object': {'type': 'commit', 'sha': payload['sha']}}
-            return self.ref
+            self.refs[payload['ref']] = {'ref': payload['ref'], 'object': {'type': 'commit', 'sha': payload['sha']}}
+            return self.refs[payload['ref']]
         if path.startswith('/git/commits/'):
             return {'sha': self.values['commit-tree'], 'tree': {'sha': self.values['write-tree']},
                     'parents': [{'sha': self.parent}]}
@@ -76,11 +87,17 @@ class GitDataProbe(unittest.TestCase):
                     'content': base64.b64encode(probe.CONTENT).decode()}
         raise AssertionError(path)
 
-    def test_local_objects_match_and_only_staging_ref_is_created(self):
+    def test_local_objects_match_and_one_leased_push_updates_only_probe_ref(self):
         result = probe.run(self, self.repo, '123', '1')
         self.assertEqual(result['status'], 'verified')
         self.assertEqual([path for method, path in self.calls if method == 'POST'],
-                         ['/git/blobs', '/git/trees', '/git/commits', '/git/refs'])
+                         ['/git/blobs', '/git/trees', '/git/commits', '/git/refs', '/git/refs'])
+        self.assertEqual(result['git_push'], 'verified')
+        push_ref = 'refs/heads/codex/get-gitpush-probe-123-1'
+        self.assertEqual(self.push_calls, [('push', '--porcelain', '--no-verify',
+            '--force-with-lease=' + push_ref + ':' + self.parent, 'origin',
+            self.values['commit-tree'] + ':' + push_ref)])
+        self.assertEqual(self.refs[push_ref]['object']['sha'], self.values['commit-tree'])
         self.assertEqual(probe.git(self.repo, 'rev-parse', 'HEAD'), self.parent)
         raw = subprocess.check_output(['git', '-C', str(self.repo), 'cat-file', 'commit', self.values['commit-tree']])
         self.assertEqual(raw.partition(b'\n\n')[2], (probe.MESSAGE + '\n').encode())
@@ -98,6 +115,21 @@ class GitDataProbe(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'parent_changed'):
             probe.run(self, self.repo, '123', '1')
         self.assertNotIn(('POST', '/git/refs'), self.calls)
+
+    def test_uncertain_push_is_not_retried_or_sent_to_main(self):
+        self.push_fails = True
+        with self.assertRaises(probe.ProbeFailure):
+            probe.run(self, self.repo, '123', '1')
+        self.assertEqual(len(self.push_calls), 1)
+        self.assertNotIn('refs/heads/main', self.push_calls[0][-1])
+
+    def test_existing_push_probe_ref_stops_before_any_write(self):
+        ref = 'refs/heads/codex/get-gitpush-probe-123-1'
+        self.refs[ref] = {'ref': ref, 'object': {'type': 'commit', 'sha': self.parent}}
+        with self.assertRaisesRegex(ValueError, 'ref_exists'):
+            probe.run(self, self.repo, '123', '1')
+        self.assertFalse(any(method == 'POST' for method, _ in self.calls))
+        self.assertEqual(self.push_calls, [])
 
     def test_object_id_mismatch_stops_before_staging(self):
         for path in ('/git/blobs', '/git/trees', '/git/commits'):

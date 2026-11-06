@@ -19,9 +19,9 @@ OID = re.compile(r'^[a-f0-9]{40}$')
 REASONS = {'invalid_oid', 'missing_token', 'run_identity', 'not_private', 'main_ref',
            'parent_changed', 'ref_exists', 'path_exists', 'timestamp', 'blob_mismatch',
            'tree_mismatch', 'commit_mismatch', 'ref_mismatch', 'commit_readback',
-           'path_readback', 'blob_readback'}
+           'path_readback', 'blob_readback', 'remote_mismatch', 'push_ref_mismatch'}
 GIT_OPS = {'rev-parse', 'ls-tree', 'show', 'read-tree', 'hash-object',
-           'update-index', 'write-tree', 'commit-tree'}
+           'update-index', 'write-tree', 'commit-tree', 'remote', 'push'}
 STAGES = {'repository', 'main_ref', 'staging_ref_read', 'blob_create', 'tree_create',
           'commit_create', 'staging_ref_create', 'commit_read', 'blob_read', 'path_read',
           'api_unknown', 'git_unknown'} | {'git_' + op.replace('-', '_') for op in GIT_OPS}
@@ -140,9 +140,14 @@ def run(api, repo, run_id, attempt):
     parent = main_ref(api)
     if git(repo, 'rev-parse', 'HEAD') != parent:
         raise ValueError('parent_changed')
+    if git(repo, 'remote', 'get-url', 'origin') != 'https://github.com/' + REPO + '.git':
+        raise ValueError('remote_mismatch')
     path = '.sync/get-gitdata-probe/' + run_id + '-' + attempt + '.txt'
     ref = 'refs/heads/codex/get-gitdata-probe-' + run_id + '-' + attempt
+    push_ref = 'refs/heads/codex/get-gitpush-probe-' + run_id + '-' + attempt
     if api.call('GET', '/git/ref/' + ref.removeprefix('refs/'), missing=True) is not None:
+        raise ValueError('ref_exists')
+    if api.call('GET', '/git/ref/' + push_ref.removeprefix('refs/'), missing=True) is not None:
         raise ValueError('ref_exists')
     if git(repo, 'ls-tree', parent, '--', path):
         raise ValueError('path_exists')
@@ -193,7 +198,22 @@ def run(api, repo, run_id, attempt):
         raise ValueError('blob_readback')
     if main_ref(api) != parent:
         raise ValueError('parent_changed')
-    return {'status': 'verified', 'staging_ref': ref}
+    api.call('POST', '/git/refs', {'ref': push_ref, 'sha': parent})
+    target_ref = api.call('GET', '/git/ref/' + push_ref.removeprefix('refs/'))
+    if (target_ref.get('ref') != push_ref or target_ref.get('object', {}).get('type') != 'commit'
+            or target_ref.get('object', {}).get('sha') != parent):
+        raise ValueError('push_ref_mismatch')
+    if main_ref(api) != parent:
+        raise ValueError('parent_changed')
+    git(repo, 'push', '--porcelain', '--no-verify', '--force-with-lease=' + push_ref + ':' + parent,
+        'origin', commit + ':' + push_ref)
+    target_ref = api.call('GET', '/git/ref/' + push_ref.removeprefix('refs/'))
+    if (target_ref.get('ref') != push_ref or target_ref.get('object', {}).get('type') != 'commit'
+            or target_ref.get('object', {}).get('sha') != commit):
+        raise ValueError('push_ref_mismatch')
+    if main_ref(api) != parent:
+        raise ValueError('parent_changed')
+    return {'status': 'verified', 'git_push': 'verified'}
 
 
 if __name__ == '__main__':
