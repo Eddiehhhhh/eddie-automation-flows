@@ -218,12 +218,60 @@ def verify_note(api, ident, page, props, blocks):
     return target_sha(snapshot, props)
 
 
-def owned_receipt(ident, page, data, target, *, created=False):
+def owned_receipt(ident, page, data, target, *, created=False, adoption=None):
     receipt = {'note_id': ident, 'page_id': page,
                'source_sha256': hashlib.sha256(data).hexdigest(), 'target_sha256': target}
     if created:
         receipt['origin'] = 'created'
+    if adoption is not None:
+        receipt['origin'] = 'adopted'
+        receipt['adoption'] = adoption
     return receipt
+
+
+def checked_adoption(owned):
+    value = owned.get('adoption')
+    if (owned.get('origin') != 'adopted' or not isinstance(value, dict)
+            or set(value) != {'contract', 'source_commit', 'source_blob',
+                              'initial_target_sha256', 'target_snapshot_sha256'}
+            or value.get('contract') != 'get-notion-exact-adoption-1'
+            or any(not isinstance(value.get(key), str) or re.fullmatch('[a-f0-9]{40}', value[key]) is None
+                   for key in ('source_commit', 'source_blob'))
+            or any(not isinstance(value.get(key), str) or re.fullmatch('[a-f0-9]{64}', value[key]) is None
+                   for key in ('initial_target_sha256', 'target_snapshot_sha256'))):
+        stop('manual_edit_or_unknown_write')
+    return value
+
+
+def adopt(root, ident, commit, source_id, token, legacy_owned):
+    """Read-only candidate; caller must save the receipt with private-main CAS."""
+    path, data, row = source(root, ident, commit)
+    required = {'note_id', 'page_id', 'source_sha256', 'target_sha256'}
+    if (not isinstance(legacy_owned, dict) or set(legacy_owned) != required
+            or legacy_owned.get('note_id') != ident
+            or legacy_owned.get('source_sha256') != hashlib.sha256(data).hexdigest()):
+        stop('unowned_target')
+    api = transport.API(transport.Transport(token), source_id, [ident])
+    props, blocks = desired(data, ident, path, row, api.schema())
+    if api.matches(ident) != [legacy_owned.get('page_id')]:
+        stop('unowned_target')
+    page = legacy_owned['page_id']
+    target = verify_note(api, ident, page, props, blocks)
+    if target != legacy_owned.get('target_sha256'):
+        stop('manual_edit_or_unknown_write')
+    import get_notion_executor as executor
+    snapshot = api.read_note(ident)
+    if (api.matches(ident) != [page] or snapshot.get('page_id') != page
+            or target_sha(snapshot, props) != target):
+        stop('manual_edit_or_unknown_write')
+    full = executor.target_sha(snapshot, ident, source_id)
+    blob = git(root, 'rev-parse', 'HEAD:' + path).decode().strip()
+    if not re.fullmatch('[a-f0-9]{40}', blob):
+        stop('unowned_target')
+    adoption = {'contract': 'get-notion-exact-adoption-1', 'source_commit': commit,
+                'source_blob': blob, 'initial_target_sha256': target,
+                'target_snapshot_sha256': full}
+    return owned_receipt(ident, page, data, target, adoption=adoption)
 
 
 def attempt_from_main(root, ident):
@@ -250,16 +298,22 @@ def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=
         page = matches[0]
         if owned is not None:
             required = {'note_id', 'page_id', 'source_sha256', 'target_sha256'}
-            if (not isinstance(owned, dict) or set(owned) not in (required, required | {'origin'})
-                    or owned.get('origin', 'created') != 'created' or owned['note_id'] != ident
+            if not isinstance(owned, dict):
+                stop('manual_edit_or_unknown_write')
+            shape = (required if 'origin' not in owned else
+                     required | {'origin', 'adoption'} if owned.get('origin') == 'adopted' else
+                     required | {'origin'} if owned.get('origin') == 'created' else set())
+            if (set(owned) != shape or owned['note_id'] != ident
                     or owned['page_id'] != page or any(not isinstance(owned[key], str)
                     or re.fullmatch(r'[a-f0-9]{64}', owned[key]) is None
                     for key in ('source_sha256', 'target_sha256'))):
                 stop('manual_edit_or_unknown_write')
+            if owned.get('origin') == 'adopted':
+                checked_adoption(owned)
             source_sha = hashlib.sha256(data).hexdigest()
             if source_sha != owned['source_sha256'] or (isinstance(journal, dict)
                     and journal.get('phase') != 'complete'):
-                if owned.get('origin') != 'created':
+                if owned.get('origin') not in ('created', 'adopted'):
                     stop('unowned_target')
                 import get_notion_incremental_update as update
                 return update.update(root, ident, page, data, props, blocks,
@@ -271,8 +325,13 @@ def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=
             if str(exc) in ('existing_content_differs', 'existing_properties_differ'):
                 raise
             raise
+        if owned is not None and owned.get('origin') == 'adopted':
+            import get_notion_executor as executor
+            if executor.target_sha(api.read_note(ident), ident, source_id) != owned['adoption']['target_snapshot_sha256']:
+                stop('manual_edit_or_unknown_write')
         return {'status': 'already_present', 'page_id': page,
-                'owned': owned_receipt(ident, page, data, target,
+                'owned': owned if owned is not None and owned.get('origin') == 'adopted' else
+                         owned_receipt(ident, page, data, target,
                                        created=owned is not None and owned.get('origin') == 'created')}
     if not apply:
         return {'status': 'ready', 'source_blob': hashlib.sha256(data).hexdigest()}

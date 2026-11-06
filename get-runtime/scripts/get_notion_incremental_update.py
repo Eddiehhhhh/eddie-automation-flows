@@ -88,6 +88,9 @@ def update(root, ident, page, data, props, blocks, source_id, token, api, owned,
     if journal is None or journal.get('phase') == 'complete':
         if worker.target_sha(current, props) != owned['target_sha256']:
             stop('manual_edit_or_unknown_write')
+        if owned.get('origin') == 'adopted':
+            if executor.target_sha(current, ident, source_id) != owned['adoption']['target_snapshot_sha256']:
+                stop('manual_edit_or_unknown_write')
         old_roots = sink.snapshot_tree(current)[1]
         if not old_roots or len(old_roots) > 20:
             stop('source_content_held')
@@ -187,8 +190,18 @@ def update(root, ident, page, data, props, blocks, source_id, token, api, owned,
                 if not same_unmanaged(journal['before'], current, changed):
                     stop('manual_edit_or_unknown_write')
                 target = worker.verify_note(api, ident, page, props, blocks)
+                receipt = worker.owned_receipt(ident, page, data, target, created=True)
+                if owned.get('origin') == 'adopted':
+                    final = api.read_note(ident)
+                    if final.get('page_id') != page or api.matches(ident) != [page]:
+                        stop('manual_edit_or_unknown_write')
+                    if worker.target_sha(final, props) != target:
+                        stop('manual_edit_or_unknown_write')
+                    adoption = dict(owned['adoption'])
+                    adoption['target_snapshot_sha256'] = executor.target_sha(final, ident, source_id)
+                    receipt = worker.owned_receipt(ident, page, data, target, adoption=adoption)
                 return {'status': 'updated', 'page_id': page,
-                        'owned': worker.owned_receipt(ident, page, data, target, created=True),
+                        'owned': receipt,
                         'journal_complete': {'contract': CONTRACT, 'note_id': ident,
                             'page_id': page, 'source_sha256': source_sha, 'phase': 'complete'}}
             if actual != before or not same_unmanaged(journal['before'], current, set()):

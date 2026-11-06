@@ -70,6 +70,68 @@ class AttemptSafety(unittest.TestCase):
         return {'contract': controller.CONTRACT, 'receipt_commit': 'a' * 40,
                 'sequence': 4, 'pending': ['1926106578851738352']}
 
+    def test_exact_adoption_dry_run_does_not_write(self):
+        ident = self.plan()['pending'][0]
+        old = {'note_id': ident, 'page_id': '1' * 32,
+               'source_sha256': 'a' * 64, 'target_sha256': 'b' * 64}
+        candidate = {**old, 'origin': 'adopted', 'adoption': {'contract': 'test'}}
+        with (patch.object(controller, 'head', return_value='b' * 40),
+              patch.object(controller, 'git', return_value='b' * 40 + '\trefs/heads/main'),
+              patch.object(controller, 'config', return_value='c' * 32),
+              patch.object(controller, 'committed_json', side_effect=[old, None]),
+              patch.object(controller.worker, 'adopt', return_value=candidate, create=True),
+              patch.object(controller, 'save') as save):
+            result = controller.adopt_one(Path('/unused'), 'token', ident, False)
+        self.assertEqual(result['status'], 'adoption_ready')
+        save.assert_not_called()
+
+    def test_adoption_with_uncertain_update_journal_stops(self):
+        ident = self.plan()['pending'][0]
+        with (patch.object(controller, 'head', return_value='b' * 40),
+              patch.object(controller, 'git', return_value='b' * 40 + '\trefs/heads/main'),
+              patch.object(controller, 'config', return_value='c' * 32),
+              patch.object(controller, 'committed_json', side_effect=[{}, {'phase': 'append_in_flight'}]),
+              patch.object(controller.worker, 'adopt', create=True) as adopt,
+              patch.object(controller, 'save') as save):
+            with self.assertRaisesRegex(ValueError, 'unowned_target'):
+                controller.adopt_one(Path('/unused'), 'token', ident, True)
+        adopt.assert_not_called()
+        save.assert_not_called()
+
+    def test_exact_adoption_writes_only_one_owned_receipt_and_reads_back(self):
+        ident = self.plan()['pending'][0]
+        old = {'note_id': ident, 'page_id': '1' * 32,
+               'source_sha256': 'a' * 64, 'target_sha256': 'b' * 64}
+        candidate = {**old, 'origin': 'adopted', 'adoption': {'contract': 'test'}}
+        writes = []
+        with (patch.object(controller, 'head', return_value='b' * 40),
+              patch.object(controller, 'git', return_value='b' * 40 + '\trefs/heads/main'),
+              patch.object(controller, 'config', return_value='c' * 32),
+              patch.object(controller, 'committed_json', side_effect=[old, None]),
+              patch.object(controller.worker, 'adopt', return_value=candidate, create=True),
+              patch.object(controller.worker, 'run', return_value={'status': 'already_present', 'owned': candidate}),
+              patch.object(controller, 'save', side_effect=lambda _root, changes, _message: writes.append(changes))):
+            result = controller.adopt_one(Path('/unused'), 'token', ident, True)
+        self.assertEqual(result['status'], 'adopted')
+        self.assertEqual(writes, [{controller.OWNED + '/' + ident + '.json': candidate}])
+
+    def test_private_attempt_commit_selects_one_id_without_public_input(self):
+        ident = self.plan()['pending'][0]
+        path = controller.worker.ATTEMPTS + '/' + ident + '.json'
+        def git(_root, *args):
+            if args[0] == 'diff-tree':
+                return path
+            if args[0] == 'cat-file':
+                raise subprocess.CalledProcessError(1, args)
+            return ''
+        with patch.object(controller, 'git', side_effect=git), \
+                patch.object(controller, 'committed_json', return_value={'note_id': ident}):
+            self.assertEqual(controller.note_from_attempt_commit(Path('/unused'), 'a' * 40), ident)
+        with patch.object(controller, 'git', side_effect=lambda _root, *args:
+                          path + '\n' + path if args[0] == 'diff-tree' else ''):
+            with self.assertRaisesRegex(ValueError, 'unowned_target'):
+                controller.note_from_attempt_commit(Path('/unused'), 'a' * 40)
+
     def test_existing_page_receipt_uses_controller_owned_path(self):
         planned = self.plan()
         owned = {'note_id': planned['pending'][0], 'page_id': '1' * 32,

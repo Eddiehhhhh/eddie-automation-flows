@@ -112,6 +112,66 @@ class IncrementalWorker(unittest.TestCase):
                                 'b' * 32, 'token', owned=owned)
         self.assertEqual(result['owned']['origin'], 'created')
 
+    def test_exact_legacy_page_can_be_adopted_without_notion_write(self):
+        FakeAPI.created = True
+        old = {'note_id': self.ident, 'page_id': '1' * 32,
+               'source_sha256': hashlib.sha256(self.data).hexdigest(),
+               'target_sha256': 'c' * 64}
+        with patch.object(worker, 'verify_note', return_value='c' * 64), \
+                patch.object(worker, 'target_sha', return_value='c' * 64), \
+                patch.object(worker, 'git', return_value=('d' * 40 + '\n').encode()), \
+                patch('get_notion_executor.target_sha', return_value='e' * 64), \
+                patch.object(FakeAPI, 'create_page', side_effect=AssertionError('write')):
+            receipt = worker.adopt(Path('/unused'), self.ident, self.commit,
+                                   'b' * 32, 'token', old)
+        self.assertEqual(receipt['origin'], 'adopted')
+        self.assertEqual(receipt['adoption']['source_commit'], self.commit)
+        self.assertEqual(receipt['adoption']['source_blob'], 'd' * 40)
+        self.assertEqual(receipt['adoption']['target_snapshot_sha256'], 'e' * 64)
+
+    def test_adoption_rejects_legacy_source_mismatch(self):
+        old = {'note_id': self.ident, 'page_id': '1' * 32,
+               'source_sha256': '0' * 64, 'target_sha256': 'c' * 64}
+        with self.assertRaisesRegex(ValueError, 'unowned_target'):
+            worker.adopt(Path('/unused'), self.ident, self.commit, 'b' * 32, 'token', old)
+
+    def test_adoption_rejects_page_body_mismatch(self):
+        FakeAPI.created = True
+        old = {'note_id': self.ident, 'page_id': '1' * 32,
+               'source_sha256': hashlib.sha256(self.data).hexdigest(),
+               'target_sha256': 'c' * 64}
+        with patch.object(worker, 'verify_note', side_effect=ValueError('existing_content_differs')):
+            with self.assertRaisesRegex(ValueError, 'existing_content_differs'):
+                worker.adopt(Path('/unused'), self.ident, self.commit, 'b' * 32, 'token', old)
+
+    def test_adopted_receipt_requires_full_snapshot_unchanged_on_repeat(self):
+        FakeAPI.created = True
+        adoption = {'contract': 'get-notion-exact-adoption-1', 'source_commit': self.commit,
+                    'source_blob': 'd' * 40, 'initial_target_sha256': 'c' * 64,
+                    'target_snapshot_sha256': 'e' * 64}
+        owned = {'note_id': self.ident, 'page_id': '1' * 32,
+                 'source_sha256': hashlib.sha256(self.data).hexdigest(),
+                 'target_sha256': 'c' * 64, 'origin': 'adopted', 'adoption': adoption}
+        with patch.object(worker, 'verify_note', return_value='c' * 64), \
+                patch('get_notion_executor.target_sha', return_value='e' * 64):
+            result = worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32,
+                                'token', owned=owned)
+        self.assertEqual(result['owned'], owned)
+        with patch.object(worker, 'verify_note', return_value='c' * 64), \
+                patch('get_notion_executor.target_sha', return_value='f' * 64):
+            with self.assertRaisesRegex(ValueError, 'manual_edit_or_unknown_write'):
+                worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32,
+                           'token', owned=owned)
+
+    def test_created_origin_cannot_hide_adoption_metadata(self):
+        FakeAPI.created = True
+        owned = {'note_id': self.ident, 'page_id': '1' * 32,
+                 'source_sha256': hashlib.sha256(self.data).hexdigest(),
+                 'target_sha256': 'c' * 64, 'origin': 'created', 'adoption': {}}
+        with self.assertRaisesRegex(ValueError, 'manual_edit_or_unknown_write'):
+            worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32,
+                       'token', owned=owned)
+
     def test_changed_existing_page_holds_without_any_write(self):
         FakeAPI.created = True
         with patch.object(worker, 'verify_note', side_effect=ValueError('existing_content_differs')):

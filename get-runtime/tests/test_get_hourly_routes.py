@@ -12,8 +12,22 @@ class HourlyRoutes(unittest.TestCase):
             self.assertIn("inputs.notion_mode != 'canonical'", section)
         self.assertIn("NOTION_MODE\" = historical-capture", template)
         self.assertIn("NOTION_MODE\" = historical-apply", template)
-        self.assertNotIn('continue-on-error:', template)
+        self.assertNotIn('continue-on-error:', template.split('  notion-incremental:', 1)[0])
 
 
 if __name__ == '__main__':
     unittest.main()
+
+class FollowupNotion(unittest.TestCase):
+    def test_incremental_job_follows_successful_get_and_preserves_failure_evidence(self):
+        template = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
+        job = template.split('  notion-incremental:\n', 1)[1]
+        self.assertIn('needs: canonical-get', job)
+        self.assertIn("needs.canonical-get.result == 'success'", job)
+        self.assertIn("inputs.notion_mode == 'canonical'", job)
+        self.assertIn('continue-on-error: true', job)
+        self.assertIn('get_notion_incremental_controller as controller', job)
+        self.assertIn('RESULT: ${{ job.status }}', job)
+        self.assertIn('Notion incremental processing did not finish', job)
+        self.assertNotIn('get_notion_runtime.py', job)
+        self.assertIn("ref: '@@RUNTIME_SHA@@'", job)

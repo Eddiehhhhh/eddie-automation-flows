@@ -292,16 +292,69 @@ def run(root, token, limit, apply):
             'held': held, 'pending': len(planned['pending'])}
 
 
+def adopt_one(root, token, ident, apply):
+    """Adopt one exact legacy match without writing to Notion or touching the queue."""
+    if not isinstance(ident, str) or not re.fullmatch('[0-9]{19}', ident):
+        stop('invalid_source')
+    current = head(root)
+    if git(root, 'ls-remote', 'origin', 'refs/heads/main').split()[0] != current:
+        stop('private_head_changed')
+    source_id = config(root)
+    path = OWNED + '/' + ident + '.json'
+    legacy = committed_json(root, path, missing=True)
+    if committed_json(root, UPDATES + '/' + ident + '.json', missing=True) is not None:
+        stop('unowned_target')
+    candidate = worker.adopt(root, ident, current, source_id, token, legacy)
+    if not apply:
+        return {'status': 'adoption_ready'}
+    save(root, {path: candidate}, 'Adopt one exact Get page baseline for Notion updates')
+    observed = worker.run(root, ident, head(root), source_id, token, owned=candidate)
+    if observed['status'] != 'already_present' or observed['owned'] != candidate:
+        stop('target_unverified')
+    return {'status': 'adopted'}
+
+
+def note_from_attempt_commit(root, commit):
+    """Select one private note without putting its ID in a public workflow input."""
+    if not isinstance(commit, str) or not re.fullmatch('[a-f0-9]{40}', commit):
+        stop('unowned_target')
+    try:
+        git(root, 'merge-base', '--is-ancestor', commit, 'HEAD')
+        paths = git(root, 'diff-tree', '--no-commit-id', '--name-only', '-r', commit).splitlines()
+    except subprocess.CalledProcessError:
+        stop('unowned_target')
+    if len(paths) != 1 or not paths[0].startswith(worker.ATTEMPTS + '/'):
+        stop('unowned_target')
+    path = paths[0]
+    ident = Path(path).stem
+    if path != worker.ATTEMPTS + '/' + ident + '.json' or not re.fullmatch('[0-9]{19}', ident):
+        stop('unowned_target')
+    try:
+        git(root, 'cat-file', '-e', commit + '^:' + path)
+    except subprocess.CalledProcessError:
+        pass
+    else:
+        stop('unowned_target')
+    marker = committed_json(root, path, commit)
+    if not isinstance(marker, dict) or marker.get('note_id') != ident:
+        stop('unowned_target')
+    return ident
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--vault', type=Path, required=True)
     parser.add_argument('--max-notes', type=int, default=50)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--adopt-attempt-commit')
     args = parser.parse_args()
     if not 1 <= args.max_notes <= 50:
         stop('invalid_batch')
     try:
-        result = run(args.vault, os.environ['NOTION_API_KEY'], args.max_notes, args.apply)
+        result = (adopt_one(args.vault, os.environ['NOTION_API_KEY'],
+                            note_from_attempt_commit(args.vault, args.adopt_attempt_commit), args.apply)
+                  if args.adopt_attempt_commit else
+                  run(args.vault, os.environ['NOTION_API_KEY'], args.max_notes, args.apply))
     except ValueError as exc:
         raise SystemExit(public_reason(exc)) from None
     except Exception:

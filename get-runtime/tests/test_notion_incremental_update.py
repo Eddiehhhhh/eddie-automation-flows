@@ -135,6 +135,31 @@ class OwnedUpdate(unittest.TestCase):
                 self.call()
         self.assertEqual(self.api.writes, [])
 
+    def test_adopted_page_manual_change_stops_before_journal_or_write(self):
+        self.owned['origin'] = 'adopted'
+        self.owned['adoption'] = {'contract': 'get-notion-exact-adoption-1',
+            'source_commit': 'a' * 40, 'source_blob': 'b' * 40,
+            'initial_target_sha256': 'b' * 64,
+            'target_snapshot_sha256': 'c' * 64}
+        with patch.object(update.executor, 'target_sha', return_value='d' * 64):
+            with self.assertRaisesRegex(ValueError, 'manual_edit_or_unknown_write'):
+                self.call()
+        self.assertEqual(self.saved, [])
+        self.assertEqual(self.api.writes, [])
+
+    def test_adopted_origin_and_baseline_survive_successful_update(self):
+        self.owned['origin'] = 'adopted'
+        self.owned['adoption'] = {'contract': 'get-notion-exact-adoption-1',
+            'source_commit': 'a' * 40, 'source_blob': 'b' * 40,
+            'initial_target_sha256': 'b' * 64,
+            'target_snapshot_sha256': 'c' * 64}
+        with patch.object(update.executor, 'target_sha', side_effect=['c' * 64, 'd' * 64]):
+            result = self.call()
+        self.assertEqual(result['status'], 'updated')
+        self.assertEqual(result['owned']['origin'], 'adopted')
+        self.assertEqual(result['owned']['adoption']['initial_target_sha256'], 'b' * 64)
+        self.assertEqual(result['owned']['adoption']['target_snapshot_sha256'], 'd' * 64)
+
 
 class NativeRecordingReadback(unittest.TestCase):
     def test_two_foldable_roots_with_children_are_verified_and_archived(self):
