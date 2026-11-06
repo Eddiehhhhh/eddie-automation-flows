@@ -11,6 +11,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(TESTS))
 import test_get_canonical_inline_image_binding as image_fixture
 import probe_get_image_canonical_stage as probe
+import get_private_preflight_rules as preflight_rules
 import get_recurring_runtime as runtime
 
 
@@ -19,6 +20,26 @@ def git_blob(data):
 
 
 class ProbeStageTests(unittest.TestCase):
+    def test_current_private_route_fixture_requires_both_github_rule_paths(self):
+        docs={
+            preflight_rules.AGENT_RULES: (
+                '`Wiki/06 Systems/01 Routing/GitHub AI 接入入口.md` '
+                'and `Wiki/06 Systems/02 Operations/GitHub 自动化与发布经验.md`'),
+            preflight_rules.ROUTING_INDEX: (
+                '| GitHub、Actions、PR、push、secret、deploy | '
+                '`Wiki/06 Systems/02 Operations/GitHub 自动化与发布经验.md` |'),
+            preflight_rules.GITHUB_ENTRY: '`Raw/00 Meta/Cloud Inbox/README.md`',
+            preflight_rules.GITHUB_OPERATIONS: '# GitHub 自动化与发布经验',
+            preflight_rules.CLOUD_INBOX: '# Cloud Inbox',
+        }
+        self.assertTrue(preflight_rules.valid_github_route(docs))
+        docs[preflight_rules.ROUTING_INDEX]=docs[preflight_rules.ROUTING_INDEX].replace(
+            'GitHub、Actions、PR、push、secret、deploy',
+            'GitHub / Actions / PR / push / secret / deploy')
+        self.assertFalse(preflight_rules.valid_github_route(docs))
+        del docs[preflight_rules.AGENT_RULES]
+        self.assertFalse(preflight_rules.valid_github_route(docs))
+
     def test_private_proof_reader_returns_id_without_emitting_it(self):
         ident = '1234567890123456789'
         ref = 'codex/get-asset-proof-42297879789-1'
@@ -90,6 +111,7 @@ class ProbeStageTests(unittest.TestCase):
         self.assertIn('sparse-checkout-cone-mode: true',text)
         self.assertIn('            scripts\n',text)
         self.assertIn('Scripts/task_preflight.py',text)
+        self.assertIn('get_private_preflight_rules',text)
         self.assertIn('from task_guard import guard_directory, release_guard',text)
         self.assertIn("steps.private_preflight.outputs.lease_active == 'true'",text)
         self.assertNotIn('lease.unlink',text)
