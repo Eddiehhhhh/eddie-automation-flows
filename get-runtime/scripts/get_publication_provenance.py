@@ -40,6 +40,7 @@ RUN_PAGE_SIZE = 30
 MAX_CANDIDATES = 4
 MAX_SECONDS = 120
 REGISTERED_REPLAY_SEQUENCE = 3
+REGISTERED_FAILED_REPLAY_SEQUENCE = 4
 POLICY_KEYS = {'contract', 'repository', 'repository_id', 'workflow_id', 'workflow_path',
                'head_branch', 'code_sha', 'job_name', 'publication_step_name',
                'rules_sha256', 'get_policy_sha256', 'controller_template_sha256'}
@@ -686,6 +687,12 @@ def _registered_replay_selection(policy):
     return b
 
 
+def _registered_failed_replay_selection(policy):
+    if policy.get('get_policy_sha256') != recovery.current_get_policy():
+        fail('provenance_no_verified_publication')
+    return _private_bindings.value('get_publication_provenance', 'FAILED_NOTION_REPLAY_4')
+
+
 def _registered_replay_anchor(client, policy, b, *, excluded=None, checked=0):
     """Verify one fixed Get-success/Notion-failure record, never a successful job."""
     import get_notion_publication_replay as replay
@@ -727,6 +734,21 @@ def _prefer_registered_replay(client, policy, found, *, rotation_search, reserve
     if reserve_next_run:
         return None
     ordinary_max = max((row['receipt_sequence'] for row in found), default=0)
+    if ordinary_max <= REGISTERED_FAILED_REPLAY_SEQUENCE:
+        latest = _registered_failed_replay_selection(policy)
+        if latest['sequence'] != REGISTERED_FAILED_REPLAY_SEQUENCE:
+            fail('provenance_record')
+        anchor = {'commit': latest['selection']['receipt_commit'],
+                  'receipt_sha256': latest['selection']['receipt_sha256']}
+        if ordinary_max == REGISTERED_FAILED_REPLAY_SEQUENCE:
+            if any(row['anchor'] != anchor for row in found
+                   if row['receipt_sequence'] == REGISTERED_FAILED_REPLAY_SEQUENCE):
+                fail('provenance_receipt_fork')
+            return None
+        excluded = None if exclude_run_id is None else (exclude_run_id, exclude_run_attempt)
+        if (latest['selection']['run_id'], latest['selection']['run_attempt']) != excluded:
+            if rotation_search is not None: fail('rotation_source_unverified')
+            return _registered_replay_anchor(client, policy, latest, excluded=excluded, checked=checked)
     if ordinary_max > REGISTERED_REPLAY_SEQUENCE:
         return None
     if ordinary_max == REGISTERED_REPLAY_SEQUENCE:

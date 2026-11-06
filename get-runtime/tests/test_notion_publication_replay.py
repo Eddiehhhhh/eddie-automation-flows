@@ -204,19 +204,36 @@ class PublicationReplay(unittest.TestCase):
             'notion_outcome': 'failure'}
 
     def _prefer_replay(self, found=(), *, rotation_search=None, reserve=False, exclude=None,
-                       proof=None, verify=None, binding=None):
+                       proof=None, verify=None, binding=None, latest=None):
         provenance = p
         fixed = binding or self._registered_binding()
         fake_exact = types.SimpleNamespace(binding=lambda: deepcopy(fixed))
         fake_replay = types.SimpleNamespace(CONTRACT=replay.CONTRACT,
-            verify=verify or (lambda *args: deepcopy(proof or self._registered_proof(fixed))))
+            verify=verify or (lambda *args: deepcopy(proof or self._registered_proof(latest or fixed))))
         with patch.dict(sys.modules, {'get_notion_exact_replay': fake_exact,
                                       'get_notion_publication_replay': fake_replay}), \
-             patch.object(provenance.recovery, 'current_get_policy', return_value=self.policy['get_policy_sha256']):
+             patch.object(provenance.recovery, 'current_get_policy', return_value=self.policy['get_policy_sha256']), \
+             patch.object(provenance, 'REGISTERED_FAILED_REPLAY_SEQUENCE', 4 if latest else -1), \
+             patch.object(provenance, '_registered_failed_replay_selection', return_value=deepcopy(latest)):
             return provenance._prefer_registered_replay(self.client, self.policy, list(found),
                 rotation_search=rotation_search, reserve_next_run=reserve,
                 exclude_run_id=exclude[0] if exclude else None,
                 exclude_run_attempt=exclude[1] if exclude else None, checked=2)
+
+    def test_newer_failed_notion_receipt_supersedes_old_fixed_anchor(self):
+        latest=self._registered_binding()
+        latest['sequence']=4
+        latest['selection']={**latest['selection'],'run_id':904,'record_sha256':'6'*64,
+                             'receipt_commit':'7'*40,'receipt_sha256':'8'*64}
+        with patch.object(p, 'verified_candidate', side_effect=AssertionError('failed job is not ordinary success')):
+            result=self._prefer_replay([{'receipt_sequence':3,'anchor':{'commit':'2'*40,'receipt_sha256':'3'*64}}],latest=latest)
+        self.assertEqual(result['receipt_sequence'],4)
+        self.assertEqual(result['anchor'],{'commit':'7'*40,'receipt_sha256':'8'*64})
+        self.assertIsNone(self._prefer_replay([result],latest=latest))
+        with self.assertRaisesRegex(p.ProvenanceFailure,'provenance_receipt_fork'):
+            self._prefer_replay([{'receipt_sequence':4,'anchor':{'commit':'9'*40,'receipt_sha256':'8'*64}}],latest=latest)
+        with self.assertRaisesRegex(p.ProvenanceFailure,'provenance_no_verified_publication'):
+            self._prefer_replay([],latest=latest,exclude=(904,1))
 
     def test_registered_sequence_three_supersedes_older_success_only_after_exact_replay(self):
         older = {'receipt_sequence': 2, 'anchor': {'commit': '4'*40, 'receipt_sha256': '5'*64}}
@@ -270,7 +287,8 @@ class PublicationReplay(unittest.TestCase):
             fake_replay = types.SimpleNamespace(CONTRACT=replay.CONTRACT,
                 verify=lambda *args: self._registered_proof(self._registered_binding()))
             with patch.dict(sys.modules, {'get_notion_exact_replay': fake_exact,
-                                          'get_notion_publication_replay': fake_replay}):
+                                          'get_notion_publication_replay': fake_replay}), \
+                 patch.object(p, 'REGISTERED_FAILED_REPLAY_SEQUENCE', -1):
                 with self.assertRaisesRegex(p.ProvenanceFailure, 'provenance_no_verified_publication'):
                     p._prefer_registered_replay(self.client, wrong_policy, [], rotation_search=None,
                         reserve_next_run=False, exclude_run_id=None, exclude_run_attempt=None, checked=0)
