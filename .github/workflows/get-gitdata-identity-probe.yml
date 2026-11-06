@@ -1,0 +1,84 @@
+name: Isolated private Git Data identity probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      GIT_TERMINAL_PROMPT: '0'
+      CODEX_THREAD_ID: gitdata-probe-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out verified probe runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: 777bdf767c290a9a510524d58ef395ec8ad60362
+          path: get-runtime
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Check out private main without media
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
+          gh auth setup-git --hostname github.com
+          git init -q vault
+          git -C vault remote add origin https://github.com/Eddiehhhhh/eddie-llm-wiki.git
+          git -C vault config core.sparseCheckout true
+          cat > vault/.git/info/sparse-checkout <<'SPARSE'
+          /AGENTS.md
+          /Wiki/
+          /Schema/
+          /scripts/
+          /Scripts/
+          SPARSE
+          git -C vault fetch --filter=blob:none --no-tags origin refs/heads/main
+          git -C vault checkout -q -b main FETCH_HEAD
+          test "$(git -C vault rev-parse origin/main)" = "$(git -C vault rev-parse HEAD)"
+          test -z "$(git -C vault status --porcelain --untracked-files=all)"
+      - name: Read rules and acquire private write lease
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('AGENTS.md', 'Wiki/索引.md', 'Wiki/06 Systems/01 Routing/规则入口索引.md'):
+              assert Path(name).read_text(encoding='utf-8').strip()
+          print('Required private-vault rules read.')
+          PY
+          python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/gitdata-probe-preflight.txt"
+          grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/gitdata-probe-preflight.txt"
+      - name: Verify isolated Git Data objects and staging ref
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GITDATA_PROBE_REPO: ${{ github.workspace }}/vault
+        run: python3 get-runtime/get-runtime/scripts/get_gitdata_probe.py
+      - name: Release private write lease
+        if: always()
+        working-directory: vault
+        run: |
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('Scripts').resolve()))
+          from task_guard import guard_directory, release_guard
+          from vault_integration_guard import release
+          root = Path.cwd()
+          release(root)
+          release_guard(guard_directory(root))
+          PY
