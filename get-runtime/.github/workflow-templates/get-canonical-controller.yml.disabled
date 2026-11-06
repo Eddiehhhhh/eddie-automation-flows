@@ -310,6 +310,7 @@ jobs:
           APPLY: "true"
         run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
       - name: Check queued Get notes
+        id: notion_queue
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
@@ -320,12 +321,21 @@ jobs:
           set -euo pipefail
           args=(--vault vault)
           if test "$APPLY" = true; then args+=(--apply); fi
+          set +e
           python3 - "${args[@]}" <<'PY'
           import get_notion_incremental_controller as controller
           # A note needing content review must not block unrelated verified notes.
           controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required'}
           controller.main()
           PY
+          result=$?
+          set -e
+          case "$result" in
+            0) echo 'state=complete' >> "$GITHUB_OUTPUT" ;;
+            2) echo 'state=partial' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'state=failed' >> "$GITHUB_OUTPUT" ;;
+          esac
+          exit "$result"
       - name: Release private write lease
         if: always()
         working-directory: vault
@@ -344,9 +354,12 @@ jobs:
         if: always()
         env:
           RESULT: ${{ job.status }}
+          NOTION_STATE: ${{ steps.notion_queue.outputs.state }}
         run: |
-          if test "$RESULT" = success; then
-            echo 'Get publication succeeded; Notion incremental processing completed.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Get publication succeeded; Notion incremental processing did not finish. Check this job before retrying.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          case "$RESULT:$NOTION_STATE" in
+            success:complete) message='Get: success; Notion: complete.' ;;
+            failure:partial) message='Get: success; Notion: partial, queued notes remain.' ;;
+            *) message='Get: success; Notion: failed or incomplete; check this job.' ;;
+          esac
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
