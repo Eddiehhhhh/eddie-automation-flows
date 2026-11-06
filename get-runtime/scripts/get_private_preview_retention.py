@@ -181,8 +181,11 @@ class LocalGit:
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   env=env or self.env, timeout=getattr(self, 'timeout', 600), check=False,
                                   preexec_fn=getattr(self, 'child_limits', None))
-        except Exception:
-            fail('git_operation_failed')
+        except Exception as exc:
+            failure = RetentionFailure('git_operation_failed')
+            failure.git_exception_kind = ('timeout' if isinstance(exc, subprocess.TimeoutExpired) else
+                                          'spawn_error' if isinstance(exc, (OSError, subprocess.SubprocessError)) else 'other')
+            raise failure from None
 
     def run(self, *args, data=None, env=None, cwd=None):
         result = self.command(*args, data=data, env=env, cwd=cwd)
