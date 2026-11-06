@@ -67,18 +67,28 @@ def read_source(local, remote, token, root, tip, b):
     return loader.reader.tree(tip['commit'])[paths[0]][2]
 
 
-def unchanged_journal(local, anchor, source_commit, path):
+def unchanged_journal(local, anchor, source_commit, path, *, hydrate_fixed_history=None):
     """Check every mainline tree, and prove any older merged fork never contained the journal."""
     start = anchor['commit']
-    local.run('merge-base', '--is-ancestor', start, source_commit)
     span = start + '..' + source_commit
-    rows = local.run('rev-list', '--parents', '--max-count=513', span).decode().splitlines()
-    parents = {parts[0]: parts[1:] for parts in (row.split() for row in rows)}
-    if not parents or len(parents) > 512 or len(parents) != len(rows):
-        e.fail('approval_missing')
     shallow = Path(local.vault) / '.git/shallow'
-    if shallow.exists() and set(shallow.read_text().splitlines()).intersection(parents):
+    def bounded_span():
+        raw = local.run('rev-list', '--parents', '--max-count=513', span).decode().splitlines()
+        parents = {parts[0]: parts[1:] for parts in (row.split() for row in raw)}
+        if not parents or len(parents) != len(raw):
+            e.fail('approval_missing')
+        boundaries = e.git.bounded_file(shallow, 2 * 1024 * 1024).decode().splitlines() if shallow.exists() else ()
+        return parents, len(parents) > 512 or not parents.keys().isdisjoint(boundaries)
+    parents, incomplete = bounded_span()
+    if incomplete and shallow.exists() and hydrate_fixed_history is not None:
+        # Separate shallow slices can hide a merge base and inflate old..new.
+        # Fetch the registered descendant's trees/parents once, then enforce
+        # the same 512 limit and the same per-commit journal checks.
+        hydrate_fixed_history(source_commit)
+        parents, incomplete = bounded_span()
+    if incomplete:
         e.fail('approval_missing')
+    local.run('merge-base', '--is-ancestor', start, source_commit)
     expected = ('100644 blob ' + anchor['state_blob'] + '\t' + path + '\0').encode()
     main = set()
     forks = []
@@ -118,7 +128,9 @@ def bridge_state(local, loader, old, source_commit):
         e.fail('approval_missing')
     for commit in (old['commit'], source_commit):
         loader(commit)
-    unchanged_journal(local, old, source_commit, outbox.STATE_PATH)
+    from get_confirmed_source import Loader
+    source = Loader(local, None, None, None, b['source_policy']['get_policy_sha256'])
+    unchanged_journal(local, old, source_commit, outbox.STATE_PATH, hydrate_fixed_history=source.fetch)
     reader = outbox.git.OfflineGit(local.vault)
     for commit in (old['commit'], source_commit):
         row = reader.tree(commit).get(outbox.STATE_PATH)
