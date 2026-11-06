@@ -89,7 +89,7 @@ class ProbeStageTests(unittest.TestCase):
         self.assertIn('private-vault-preflight',text)
         self.assertIn('sparse-checkout-cone-mode: true',text)
         self.assertIn('            scripts\n',text)
-        self.assertIn('scripts/task_preflight.py',text)
+        self.assertIn('Scripts/task_preflight.py',text)
         self.assertIn('from task_guard import guard_directory, release_guard',text)
         self.assertIn("steps.private_preflight.outputs.lease_active == 'true'",text)
         self.assertNotIn('lease.unlink',text)

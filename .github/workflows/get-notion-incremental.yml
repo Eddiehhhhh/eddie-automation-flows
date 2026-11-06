@@ -66,9 +66,9 @@ jobs:
           try:
               stage = 'sparse_checkout'
               must_exist = [
-                  'AGENTS.md', 'scripts/task_preflight.py', 'scripts/task_guard.py',
-                  'scripts/task_context.py', 'scripts/vault_git_guard.py',
-                  'scripts/vault_integration_guard.py', 'Wiki/索引.md',
+                  'AGENTS.md', 'Scripts/task_preflight.py', 'Scripts/task_guard.py',
+                  'Scripts/task_context.py', 'Scripts/vault_git_guard.py',
+                  'Scripts/vault_integration_guard.py', 'Wiki/索引.md',
                   'Wiki/01 Self/工作方式与价值观.md',
                   'Wiki/06 Systems/01 Routing/规则入口索引.md',
                   'Schema/偏好学习与应用协议.md',
@@ -103,7 +103,7 @@ jobs:
 
               stage = 'task_preflight'
               result = subprocess.run(
-                  [sys.executable, 'scripts/task_preflight.py',
+                  [sys.executable, 'Scripts/task_preflight.py',
                    '--query', 'Get private image isolated staging'],
                   cwd=root, capture_output=True, text=True, check=False)
               if result.returncode:
@@ -160,7 +160,7 @@ jobs:
           python - <<'PY'
           import sys
           from pathlib import Path
-          sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+          sys.path.insert(0, str((Path.cwd() / 'Scripts').resolve()))
           from task_guard import guard_directory, release_guard
           root = Path.cwd()
           lease = release_guard(guard_directory(root))
