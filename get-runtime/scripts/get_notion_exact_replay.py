@@ -10,6 +10,9 @@ CONTRACT = 'get-notion-exact-archive-replay-1'
 SELECTION = '97b7d03eff1b05750bd8398af5ea6e3338147b7b1fc430102d33965a8391a88c'
 
 
+DELIVERED_ANCHOR_SHA256 = 'dbb03051930db0c365b87863a6550a449092d1d1f1e9ea77327298ea5dc234f9'
+
+
 def binding():
     original = bindings.value('get_notion_exact_replay', 'ORIGINAL')
     if e.digest(original) != SELECTION:
@@ -128,6 +131,25 @@ def bridge_state(local, loader, old, source_commit):
         e.fail('approval_missing')
     for commit in (old['commit'], source_commit):
         loader(commit)
+    # The recovered final checkpoint already includes this publication. Keep
+    # that later independently authenticated state, and never seek it backwards.
+    # RemoteJournal.read() checks private commit/tree/blob on the anchored chain.
+    if e.digest(old) == DELIVERED_ANCHOR_SHA256:
+        import get_recurring_entry as entry
+        reader = outbox.git.OfflineGit(local.vault)
+        entry.unchanged_get_history(reader, source_commit, old['commit'])
+        if reader.tree(old['commit']).get(outbox.STATE_PATH) != ('100644', 'blob', old['state_blob']):
+            e.fail('approval_missing')
+        raw = reader.read(old['commit'], outbox.STATE_PATH, outbox.MAX_STATE)
+        if outbox.digest(raw) != old['state_sha256']:
+            e.fail('approval_missing')
+        state = entry.r.strict_json(raw)
+        pub = {'commit':source_commit,'receipt_sha256':b['selection']['receipt_sha256'],'sequence':b['sequence']}
+        if (state['last_enqueued_publication'] != pub or state['observed_publication_tip'] != pub
+                or b['note_id'] in state['pending_by_id']
+                or state['engine_state']['receipts'].get(b['note_id'], {}).get('source_commit') != source_commit):
+            e.fail('approval_missing')
+        return old
     from get_confirmed_source import Loader
     source = Loader(local, None, None, None, b['source_policy']['get_policy_sha256'])
     unchanged_journal(local, old, source_commit, outbox.STATE_PATH, hydrate_fixed_history=source.fetch)
