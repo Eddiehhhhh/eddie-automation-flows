@@ -171,7 +171,8 @@ def wire_blocks(rows, previous_type=list_semantics.UNKNOWN,*,uploaded_pngs=None)
             if kind=='table_row':payload['cells']=[split_runs(cell) for cell in payload['cells']]
             if kind=='code':
                 if payload.pop('color','default')!='default':fail('unsupported_code_color')
-            if row['children'] and kind not in ('paragraph','bulleted_list_item','numbered_list_item','quote','to_do','callout','table'):fail('invalid_children')
+            if (row['children'] and kind not in ('paragraph','bulleted_list_item','numbered_list_item','quote','to_do','callout','table')
+                    and not (kind.startswith('heading_') and payload.get('is_toggleable') is True)):fail('invalid_children')
             if kind=='table':
                 if not row['children'] or any(not isinstance(c,dict) or c.get('type')!='table_row' or not isinstance(c.get('payload'),dict) or len(c['payload'].get('cells',[]))!=payload['table_width'] for c in row['children']):fail('invalid_table')
             children=walk(row['children'],depth+1) if row['children'] else []
