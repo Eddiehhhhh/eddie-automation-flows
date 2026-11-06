@@ -33,7 +33,10 @@ MAX_SCAN_BYTES = 8 * 1024 * 1024
 MAX_NOTE_BYTES = 2 * 1024 * 1024
 FAILURE_STAGES = {'verify_private_repo', 'load_credentials', 'prepare_private_ref',
                   'select_candidate', 'fetch_get_detail', 'download_bind_attachment',
-                  'validate_detail_identity', 'match_image_source', 'publish_private_ref', 'unknown'}
+                  'validate_detail_identity', 'match_image_source', 'publish_private_ref',
+                  'verify_stage_paths', 'git_stage_files', 'commit_stage_files',
+                  'push_private_ref', 'readback_private_ref', 'readback_private_files',
+                  'readback_private_proof', 'unknown'}
 FAILURE_CATEGORIES = {'validation', 'auth_denied', 'not_found', 'rate_limited',
                       'server_error', 'http_error', 'api_rejected', 'transport_error',
                       'redirect_blocked', 'detail_error', 'detail_identity_mismatch',
@@ -476,7 +479,9 @@ def prepare_private_stage(root: Path, ref: str) -> str:
 
 
 def publish_private_stage(root: Path, ref: str, paths: list[str]) -> str:
+    global CURRENT_STAGE
     ref = safe_ref(ref)
+    CURRENT_STAGE = 'verify_stage_paths'
     if git(root, 'branch', '--show-current').decode().strip() != ref:
         fail()
     allowed = set(paths)
@@ -485,17 +490,22 @@ def publish_private_stage(root: Path, ref: str, paths: list[str]) -> str:
     # Only this probe's note, manifest, assets and proof may be staged.
     if changed - allowed:
         fail()
+    CURRENT_STAGE = 'git_stage_files'
     git(root, 'add', '--', *paths)
     staged = git(root, 'diff', '--cached', '--name-only', '-z').decode().split('\0')
     if {item for item in staged if item} != allowed:
         fail()
+    CURRENT_STAGE = 'commit_stage_files'
     git(root, 'config', 'user.name', 'github-actions[bot]')
     git(root, 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
     git(root, 'commit', '-m', 'Stage one verified Get image attachment')
     commit = git(root, 'rev-parse', 'HEAD').decode().strip()
     # Empty expected value makes the remote update create-only.
+    CURRENT_STAGE = 'verify_private_repo'
     verify_private_repository()
+    CURRENT_STAGE = 'push_private_ref'
     git(root, 'push', f'--force-with-lease=refs/heads/{ref}:', 'origin', f'HEAD:refs/heads/{ref}')
+    CURRENT_STAGE = 'readback_private_ref'
     observed = git(root, 'ls-remote', 'origin', 'refs/heads/' + ref).decode().split()
     if len(observed) != 2 or observed != [commit, 'refs/heads/' + ref]:
         fail()
@@ -504,6 +514,7 @@ def publish_private_stage(root: Path, ref: str, paths: list[str]) -> str:
     proof_candidates = [path for path in paths if path.startswith(PROOF_ROOT + '/')]
     if len(proof_candidates) != 1:
         fail()
+    CURRENT_STAGE = 'readback_private_proof'
     proof = json.loads(git(root, 'show', f'{commit}:{proof_candidates[0]}'))
     if git(root, 'rev-parse', commit + '^').decode().strip() != proof.get('parent'):
         fail()
@@ -512,10 +523,12 @@ def publish_private_stage(root: Path, ref: str, paths: list[str]) -> str:
     for item in proof['assets']:
         expected[item['path']] = None
     for path, digest in expected.items():
+        CURRENT_STAGE = 'readback_private_files'
         data = git(root, 'show', f'{commit}:{path}')
         if digest is not None and hashlib.sha256(data).hexdigest() != digest:
             fail()
     for item in proof['assets']:
+        CURRENT_STAGE = 'readback_private_files'
         data = git(root, 'show', f"{commit}:{item['path']}")
         if hashlib.sha256(data).hexdigest() != item['sha256'] or len(data) != item['bytes']:
             fail()
