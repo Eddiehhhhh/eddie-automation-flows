@@ -21,7 +21,7 @@ from get_canonical_manual import a, m, n, r
 
 CONTRACT = 'get-recurring-local-entry-1'
 RECEIPT_CONTRACT = 'get-canonical-sync-receipt-1'
-RECEIPT = '03 State/canonical-sync-receipt.json'
+RECEIPT = engine.RECURRING_RECEIPT
 FULL_RECEIPT = r.GET + '/' + RECEIPT
 MAX_RECEIPT = 512 * 1024
 # Non-Get commits accumulate between publications. Every first-parent step
@@ -257,7 +257,7 @@ def read_receipt(reader, commit, expected_sha, policy):
     return value
 
 
-def transition(reader, evidence, before, after, before_states, after_states, expected_ids=None):
+def transition(reader, evidence, before, after, before_states, after_states, expected_ids=None, *, source_id=None):
     """Complete commit delta plus immutable ownership; never overwrite foreign files."""
     _, old_legacy, old_registry = before_states
     current, legacy, registry = after_states
@@ -270,18 +270,39 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
         fail('entry_ownership_changed')
     if len(set(new) - set(old)) > 50:
         fail('entry_batch_bound')
+    changed = delta(reader, before, after)
+    changed_paths = {change['path'] for change in changed}
+    if source_id is not None and set(new) - set(old) - {source_id}:
+        fail('entry_single_scope')
+    # A state-only receipt does not record the selected ID. Keep its original
+    # full checks so a later reader can reproduce the proof without guessing.
+    single_content = source_id in new and r.GET + '/' + new[source_id][0] in changed_paths
+    preserved = set()
     for ident, previous in old_registry['newById'].items():
         row = registry['newById'][ident]
+        if single_content and ident != source_id:
+            rel = previous['filePath']
+            path = r.GET + '/' + rel
+            data = current.get(rel)
+            if (row != previous or path in changed_paths or data is None
+                    or before_states[0].get(rel) != data
+                    or reader.tree(before).get(path) != ('100644', 'blob', r.oid(data))):
+                fail('entry_ownership_changed')
+            # The complete delta proves the same mode and blob at the new tip.
+            # Preserve these bytes; only the selected owner can be updated.
+            preserved.add(ident)
+            continue
         if any(row[k] != previous[k] for k in ('filePath', 'created_at', 'preview_anchor', 'unknown_sha256')) or not set(previous['text_fields']) <= set(row['text_fields']) or n.metadata_missing(previous['source_metadata'], row['source_metadata']):
             fail('entry_ownership_changed')
         if n.json_header(before_states[0][previous['filePath']]).get('note_type') != n.json_header(current[row['filePath']]).get('note_type'):
             fail('entry_ownership_changed')
-    for rel, digest, blob in new.values():
+    for ident, (rel, digest, blob) in new.items():
+        if ident in preserved:
+            continue
         data = current.get(rel)
         if data is None or a.sha(data) != digest or r.oid(data) != blob:
             fail('entry_ownership_changed')
     path_ids = {r.GET + '/' + row[0]: ident for ident, row in new.items()}
-    changed = delta(reader, before, after)
     content_ids = []
     for row in changed:
         path = row['path']; r.safe_path(path)
@@ -297,6 +318,8 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
             fail('entry_ownership_changed')
         content_ids.append(ident)
     ids = sorted(content_ids)
+    if source_id is not None and set(ids) - {source_id}:
+        fail('entry_single_scope')
     if len(ids) != len(set(ids)) or expected_ids is not None and ids != expected_ids:
         fail('entry_content_ids')
     return ids
@@ -334,7 +357,9 @@ def verify_trusted_publication(reader, evidence, anchor, policy, bootstrap, *, h
         fail('entry_receipt_only_commit')
     prior_states = load_states(reader, evidence, parent, receipt['previous_legacy_sha256'], receipt['previous_registry_sha256'], source_id=source_id)
     next_states = load_states(reader, evidence, commit, receipt['state_sha256'], receipt['registry_sha256'], source_id=source_id)
-    transition(reader, evidence, parent, commit, prior_states, next_states, receipt['changed_content_ids'])
+    ids = receipt['changed_content_ids']
+    receipt_source = ids[0] if receipt['source_scope'] == 'single_note' and len(ids) == 1 else None
+    transition(reader, evidence, parent, commit, prior_states, next_states, ids, source_id=receipt_source)
     if sum(receipt['counts'][k] for k in ('new_created', 'new_preview_imported', 'new_updated', 'legacy_source_updated')) != len(receipt['changed_content_ids']):
         fail('entry_counts')
     check_counts(receipt['counts'], next_states)
@@ -420,7 +445,7 @@ def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=N
         plan['proposed_content_ids'] = []
         return plan, files
     next_states = load_states(reader, evidence, plan['candidate_commit'], plan['state_sha256'], plan['registry_sha256'], source_id=source_id)
-    ids = transition(reader, evidence, parent, plan['candidate_commit'], states, next_states)
+    ids = transition(reader, evidence, parent, plan['candidate_commit'], states, next_states, source_id=source_id)
     receipt = {'contract': RECEIPT_CONTRACT, 'policy_sha256': policy,
                'sequence': previous['sequence'] + 1 if previous else 1, 'parent_commit': parent,
                'previous_receipt_commit': anchor['commit'] if anchor else bootstrap['commit'],
@@ -455,7 +480,7 @@ def prepare(reader, evidence, parent, source, *, approved_rules_sha256, anchor=N
 
 
 def verify_plan(reader, evidence, plan, files, approved_rules_sha256, *, bootstrap=BOOTSTRAP, history_witness=None, source_id=None):
-    engine.verify_plan(reader, plan, files)
+    engine.verify_plan(reader, plan, files, with_recurring_receipt=True)
     bootstrap_states(reader, evidence, bootstrap)
     if plan.get('entry_contract') != CONTRACT or plan.get('policy_sha256') != policy_sha256(approved_rules_sha256, bootstrap) or approved_rules_sha256 != rules_sha256():
         fail('entry_policy_changed')

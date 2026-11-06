@@ -566,6 +566,8 @@ def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,deta
         registry=validate_registry(raw.strict_capture_json(current[STATE],MAX_STATE),registry_sha,evidence,legacy_state,legacy_sha,current,only_id=only_id)
         if legacy.encoded(registry)!=current[STATE]:fail('canonical_state_schema')
         for ident,row in registry['newById'].items():
+            if only_id is not None and ident != only_id:
+                continue
             try:
                 baseline=repo.baseline(parent,row['filePath'],row['baseline_blob'],row['mirror_sha256'])
                 baseline_header(ident,row,baseline)

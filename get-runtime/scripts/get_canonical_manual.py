@@ -17,6 +17,7 @@ from get_legacy_manual import a,c,r,strict_capture_json,raw_source_version
 
 CONTRACT='get-canonical-manual-transaction-1'
 MAX_NEW=50
+RECURRING_RECEIPT='03 State/canonical-sync-receipt.json'
 
 def load_states(reader,evidence,parent,current,legacy_sha,registry_sha,*,source_id=None):
     if a.STATE not in current:m.fail('manual_state_anchor')
@@ -57,7 +58,7 @@ def canonical_payload(reader,plan,current):
       'single_source_id':plan['single_source_id'],'single_source_path':plan['single_source_path'],
       'source_scope':plan['source_scope'],'catalog_complete':plan['catalog_complete']}
 
-def verify_single_scope(plan):
+def verify_single_scope(plan, *, with_recurring_receipt=False):
     only_id=plan.get('single_source_id');only_path=plan.get('single_source_path')
     if (only_id is None)!=(only_path is None):m.fail('manual_single_scope')
     if only_id is None:
@@ -67,11 +68,13 @@ def verify_single_scope(plan):
     if plan.get('source_scope')!='single_note' or plan.get('catalog_complete') is not False:
         m.fail('manual_single_scope')
     n.identity(only_id);r.safe_path(only_path)
-    content={row['path'] for row in plan['changes']
-             if row['path'] not in {r.GET+'/'+a.STATE,r.GET+'/'+n.STATE}}
+    state_paths = {r.GET+'/'+a.STATE, r.GET+'/'+n.STATE}
+    if with_recurring_receipt:
+        state_paths.add(r.GET+'/'+RECURRING_RECEIPT)
+    content = {row['path'] for row in plan['changes'] if row['path'] not in state_paths}
     if content and content!={only_path}:m.fail('manual_single_scope')
 
-def verify_plan(reader,plan,files):
+def verify_plan(reader,plan,files,*,with_recurring_receipt=False):
     if plan.get('contract')!=CONTRACT or plan.get('local_proposal_only') is not True or plan.get('apply_ready') is not False:m.fail('manual_plan')
     parent=a.checked(plan['parent_commit'],40);commit=a.checked(plan['candidate_commit'],40)
     reader.local.run('merge-base','--is-ancestor',parent,commit)
@@ -79,7 +82,7 @@ def verify_plan(reader,plan,files):
     if reader.local.run('rev-parse',commit+'^{tree}').decode().strip()!=plan['candidate_tree']:m.fail('manual_plan')
     changed={p for p in set(before)|set(after) if before.get(p)!=after.get(p)}
     if changed!=set(files) or changed!={x['path'] for x in plan['changes']} or len(changed)!=len(plan['changes']):m.fail('manual_plan')
-    verify_single_scope(plan)
+    verify_single_scope(plan, with_recurring_receipt=with_recurring_receipt)
     for row in plan['changes']:
         p=row['path'];r.safe_path(p)
         if not p.startswith(r.GET+'/') or p not in after:m.fail('manual_scope')
