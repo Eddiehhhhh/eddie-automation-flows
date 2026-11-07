@@ -1,120 +1,176 @@
-name: Get notes from private GitHub to Notion
+name: Capture current Get image proof in a private ref (no main or Notion writes)
 
 on:
-  schedule:
-    # Backup for queued notes when Get could not run.
-    - cron: '20 */6 * * *'
   workflow_dispatch:
-    inputs:
-      apply:
-        description: Write verified pending Get notes to Notion
-        type: boolean
-        default: false
-        required: true
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: eddie-private-vault-writers
+  group: get-image-canonical-stage-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 
 jobs:
-  sync:
+  probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-      GIT_TERMINAL_PROMPT: '0'
-      CODEX_THREAD_ID: get-notion-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: get-runtime
     steps:
-      - name: Check out verified runtime
+      - name: Check out the isolated candidate branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: f30906ceaaaee733e64fe7f3b154d458455de3e6
-          path: get-runtime
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Check out the exact reviewed Get runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: f6dcd238afd3599f37d8b2a6420cb6cc9b47f143
+          path: runtime-reviewed
+          persist-credentials: false
+      - name: Verify exact reviewed runtime checkout
+        run: test "$(git -C ../runtime-reviewed rev-parse HEAD)" = f6dcd238afd3599f37d8b2a6420cb6cc9b47f143
+      - name: Check out private rules for the write preflight
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-llm-wiki
+          ref: main
+          token: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          path: private-vault-preflight
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            Scripts
+            .github/workflows
+            Wiki
+            Schema
+            Raw/00 Meta/Cloud Inbox
+          sparse-checkout-cone-mode: true
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Install verified metadata parser
-        working-directory: get-runtime/get-runtime
-        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
-      - name: Check out private vault without media blobs
+      - name: Verify private repo and run the original write preflight
+        id: private_preflight
+        working-directory: ${{ github.workspace }}/private-vault-preflight
         env:
-          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          CODEX_THREAD_ID: get-image-stage-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
-          gh auth setup-git --hostname github.com
-          git init -q vault
-          git -C vault remote add origin https://github.com/Eddiehhhhh/eddie-llm-wiki.git
-          git -C vault config core.sparseCheckout true
-          cat > vault/.git/info/sparse-checkout <<'SPARSE'
-          /AGENTS.md
-          /Wiki/
-          /Schema/
-          /scripts/
-          /Scripts/
-          /.github/
-          /.sync/get-notion/
-          /.sync/get-notion-incremental/
-          /Raw/03 Get/03 State/
-          SPARSE
-          git -C vault fetch --filter=blob:none --no-tags origin refs/heads/main
-          git -C vault checkout -q -b main FETCH_HEAD
-          test "$(git -C vault rev-parse --is-shallow-repository)" = false
-          test "$(git -C vault rev-parse origin/main)" = "$(git -C vault rev-parse HEAD)"
-          test -z "$(git -C vault status --porcelain --untracked-files=all)"
-      - name: Read rules and acquire private write lease
-        working-directory: vault
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
+          python - <<'PY'
+          import json
+          import os
           from pathlib import Path
-          for name in ('AGENTS.md', 'Wiki/索引.md', 'Wiki/06 Systems/01 Routing/规则入口索引.md'):
-              assert Path(name).read_text(encoding='utf-8').strip()
-          print('Required private-vault rules read.')
+          import subprocess
+          import sys
+          import urllib.request
+
+          root = Path.cwd()
+          sys.path.insert(0, str(Path(os.environ['GITHUB_WORKSPACE']) / 'get-runtime' / 'scripts'))
+          from get_private_preflight_rules import (
+              AGENT_RULES, CLOUD_INBOX, GITHUB_ENTRY, GITHUB_OPERATIONS,
+              ROUTING_INDEX, valid_github_route)
+          stage = 'private_repo'
+          try:
+              stage = 'sparse_checkout'
+              must_exist = [
+                  'AGENTS.md', 'Scripts/task_preflight.py', 'Scripts/task_guard.py',
+                  'Scripts/task_context.py', 'Scripts/vault_git_guard.py',
+                  'Scripts/vault_integration_guard.py', 'Wiki/索引.md',
+                  'Wiki/01 Self/工作方式与价值观.md',
+                  'Wiki/06 Systems/01 Routing/规则入口索引.md',
+                  'Schema/偏好学习与应用协议.md',
+              ]
+              if any(not (root / relative).is_file() for relative in must_exist):
+                  raise ValueError()
+
+              stage = 'private_repo'
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/Eddiehhhhh/eddie-llm-wiki',
+                  headers={'Authorization': 'Bearer ' + os.environ['PRIVATE_VAULT_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  repo = json.loads(response.read(1024 * 1024))
+              if repo.get('private') is not True or repo.get('default_branch') != 'main':
+                  raise ValueError()
+
+              stage = 'routing_rules'
+              rules = (AGENT_RULES, ROUTING_INDEX, GITHUB_ENTRY, GITHUB_OPERATIONS, CLOUD_INBOX)
+              documents = {relative: (root / relative).read_text(encoding='utf-8') for relative in rules}
+              if not valid_github_route(documents):
+                  raise ValueError()
+
+              stage = 'task_preflight'
+              result = subprocess.run(
+                  [sys.executable, 'Scripts/task_preflight.py',
+                   '--query', 'Get private image isolated staging'],
+                  cwd=root, capture_output=True, text=True, check=False)
+              if result.returncode:
+                  raise ValueError()
+              lines = result.stdout.splitlines()
+              lease_active = any(line.startswith('SYNC_GUARD_ACTIVE: ') for line in lines)
+              if lease_active:
+                  with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                      output.write('lease_active=true\n')
+              required = {
+                  'AGENTS.md', 'Wiki/索引.md',
+                  'Wiki/06 Systems/01 Routing/规则入口索引.md'}
+              reported = {line.removeprefix('READ_REQUIRED: ')
+                          for line in lines if line.startswith('READ_REQUIRED: ')}
+              manifest_line = next(line for line in lines if line.startswith('CONTEXT_MANIFEST: '))
+              manifest = json.loads(manifest_line.removeprefix('CONTEXT_MANIFEST: '))
+              if (not required <= reported or manifest.get('status') != 'ok'
+                      or manifest.get('missing') or any(row.get('truncated') for row in manifest.get('sources', []))
+                      or not lease_active):
+                  raise ValueError()
+              stage = 'source_snapshot'
+              source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+              if subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip():
+                  raise ValueError()
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                  output.write('source_sha=' + source_sha + '\n')
+              print('private_preflight=passed')
+          except Exception:
+              raise SystemExit('private_preflight_failed stage=' + stage) from None
           PY
-          python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
-          grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-notion-preflight.txt"
-      - name: Materialize verified private runtime binding
-        working-directory: get-runtime/get-runtime
+      - name: Materialize the verified private runtime binding
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-        run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
-      - name: Check queued Get notes
+          APPLY: 'false'
+        run: python ../runtime-reviewed/get-runtime/scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Capture and verify current Get image proof (isolated private ref only)
         env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
-          PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GET_PREFLIGHT_SOURCE_SHA: ${{ steps.private_preflight.outputs.source_sha }}
+          GET_FORMAL_RUNTIME_ROOT: ${{ github.workspace }}/runtime-reviewed/get-runtime
+        run: >-
+          python scripts/probe_get_image_canonical_stage.py
+          --proof-ref codex/get-asset-proof-42297879789-1
+      - name: Release this run's private preflight lease
+        if: ${{ always() && steps.private_preflight.outputs.lease_active == 'true' }}
+        working-directory: ${{ github.workspace }}/private-vault-preflight
+        env:
+          CODEX_THREAD_ID: get-image-stage-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          set -euo pipefail
-          args=(--vault vault)
-          if test "$APPLY" = true; then args+=(--apply); fi
-          python3 - "${args[@]}" <<'PY'
-          import get_notion_incremental_controller as controller
-          # A note needing content review must not block unrelated verified notes.
-          controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required'}
-          controller.main()
-          PY
-      - name: Release private write lease
-        if: always()
-        working-directory: vault
-        run: |
-          python3 - <<'PY'
+          python - <<'PY'
           import sys
           from pathlib import Path
-          sys.path.insert(0, str(Path('Scripts').resolve()))
+          sys.path.insert(0, str((Path.cwd() / 'Scripts').resolve()))
           from task_guard import guard_directory, release_guard
-          from vault_integration_guard import release
           root = Path.cwd()
-          release(root)
-          release_guard(guard_directory(root))
+          lease = release_guard(guard_directory(root))
+          if lease.exists():
+              raise SystemExit('private_preflight_lease_release_failed')
+          print('private_preflight_lease=released')
           PY
