@@ -513,12 +513,17 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
                 path=old['filePath'];before=current.get(path)
                 if before is None or legacy.sha(before)!=old['mirror_sha256']:fail('local_note_edited')
                 baseline_header(ident,old,before)
-                if token==old['source_version'] and raw._source_content_hash(summary)==old['summary_sha256']:
+                media_backfill=(only_id==ident and old['source_metadata'].get('inline_images') is None
+                    and (ident in media_by_id or ident in media_errors))
+                if (token==old['source_version'] and raw._source_content_hash(summary)==old['summary_sha256']
+                        and not media_backfill):
                     counts['unchanged']+=1;continue
             elif ident in present:fail('identity_reserved')
             if not old and not owner_budget(set(state['reserved'])|set(state['newById'])|{ident}):fail('canonical_budget')
             if ident not in details:counts['detail_required']+=1;fail('detail_required')
             note=source_note(summary,details[ident])
+            if old and media_backfill and raw._source_content_hash(note)!=old['source_sha256']:
+                fail('source_version_race')
             if ident in media_errors:fail('asset_materialization_required')
             if old:
                 if json_header(before)['note_type']!=note.get('note_type'):fail('source_note_type_changed')
