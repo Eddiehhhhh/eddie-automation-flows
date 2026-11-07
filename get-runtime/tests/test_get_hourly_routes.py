@@ -26,6 +26,7 @@ class FollowupNotion(unittest.TestCase):
         self.assertIn("needs.canonical-get.result == 'success'", job)
         self.assertIn("inputs.notion_mode == 'canonical'", job)
         self.assertIn("inputs.private_proof_key == ''", job)
+        self.assertNotIn("inputs.notion_mode == 'private-single-note-proof'", job)
         self.assertIn('!inputs.create_test_note', job)
         self.assertIn('continue-on-error: true', job)
         self.assertIn('get_notion_incremental_controller as controller', job)

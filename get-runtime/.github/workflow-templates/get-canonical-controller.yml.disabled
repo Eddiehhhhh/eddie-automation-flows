@@ -249,7 +249,7 @@ jobs:
 
   notion-incremental:
     needs: canonical-get
-    if: ${{ needs.canonical-get.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply && ((inputs.notion_mode == 'canonical' && inputs.private_proof_key == '') || (inputs.notion_mode == 'private-single-note-proof' && inputs.private_proof_key != '')) && !inputs.create_test_note)) }}
+    if: ${{ needs.canonical-get.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply && inputs.notion_mode == 'canonical' && inputs.private_proof_key == '' && !inputs.create_test_note)) }}
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 45
