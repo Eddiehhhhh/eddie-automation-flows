@@ -258,6 +258,18 @@ def normalize_payload(kind, payload):
             if set(value) != {'kind','block_id','sha256','byte_count','mime','caption'} or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= MAX_ASSET or value['mime'] != 'image/jpeg':
                 stop('missing_asset')
             value['block_id'] = notion_id(value['block_id'])
+        elif value.get('kind') == 'notion_incremental_uploaded_media':
+            if (set(value) != {'kind','upload_id','sha256','byte_count','mime','caption'}
+                    or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= 16 * 1024 * 1024
+                    or value['mime'] not in {'image/png','image/jpeg','image/webp','image/gif'}):
+                stop('missing_asset')
+            value['upload_id'] = notion_id(value['upload_id'])
+        elif value.get('kind') == 'notion_existing_media_block':
+            if (set(value) != {'kind','block_id','sha256','byte_count','mime','caption'}
+                    or type(value['byte_count']) is not int or not 0 < value['byte_count'] <= 16 * 1024 * 1024
+                    or value['mime'] not in {'image/png','image/jpeg','image/webp','image/gif'}):
+                stop('missing_asset')
+            value['block_id'] = notion_id(value['block_id'])
         else:
             if set(value) != {'file_identity', 'sha256', 'caption'}:
                 stop('missing_asset')
@@ -677,6 +689,8 @@ def snapshot_tree(snapshot):
         if len(children) != len(set(children)) or type(row.get('has_children')) is not bool or row['has_children'] != bool(children): stop('incomplete_target_read')
         nodes[ident] = {'id': ident, 'parent_id': parent, 'type': row.get('type'), 'payload': normalize_payload(row.get('type'), row.get('payload')), 'children_ids': children}
         if nodes[ident]['type']=='image' and nodes[ident]['payload'].get('kind')=='notion_existing_image_block':
+            if nodes[ident]['payload']['block_id']!=ident or children:stop('missing_asset')
+        if nodes[ident]['type']=='image' and nodes[ident]['payload'].get('kind')=='notion_existing_media_block':
             if nodes[ident]['payload']['block_id']!=ident or children:stop('missing_asset')
         order.append(ident)
     roots = [i for i in order if nodes[i]['parent_id'] == page]; visited = []

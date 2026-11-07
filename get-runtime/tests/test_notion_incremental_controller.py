@@ -12,6 +12,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 worker = types.ModuleType('get_notion_incremental_worker')
 worker.ATTEMPTS = '.sync/get-notion-incremental/attempts'
+worker.media = types.SimpleNamespace(STATE_DIR='.sync/get-notion-incremental/media')
+worker.prepare_media = lambda *args, **kwargs: {}
 worker.run = lambda *args, **kwargs: None
 native = types.ModuleType('get_notion_native')
 native.DATA_SOURCE_PIN = '0' * 64

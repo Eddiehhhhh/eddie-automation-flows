@@ -182,9 +182,31 @@ def delta(reader, before, after, *, exclude_receipt=True):
 def load_states(reader, evidence, commit, legacy_sha, registry_sha, *, source_id=None):
     current = n.git_inventory(reader, commit, only_id=source_id)
     legacy, registry = engine.load_states(reader, evidence, commit, current, legacy_sha, registry_sha, source_id=source_id)
+    n.verify_registered_asset_refs(reader,commit,registry,source_id=source_id)
     if a.encoded(legacy) != current[a.STATE]:
         fail('entry_state_encoding')
     return current, legacy, registry
+
+
+def verify_asset_delta(reader,before,after,changed_paths,registry):
+    """Bind changed image blobs to registry owners and verify exact bytes."""
+    owners={}
+    for ident,row in registry['newById'].items():
+        manifest=(row.get('source_metadata',{}).get('inline_images') or {}).get('images',[])
+        for image in manifest:
+            owners.setdefault(image['asset_path'],[]).append((ident,image))
+    found={}
+    for path in changed_paths & set(owners):
+        matches=owners[path];expected=matches[0][1]
+        if any(any(item[key]!=expected[key] for key in ('asset_path','asset_blob','asset_sha256','asset_bytes','asset_mime')) for _,item in matches):fail('entry_ownership_changed')
+        old_tree=reader.tree(before).get(path);new_tree=reader.tree(after).get(path)
+        if (new_tree!=('100644','blob',expected['asset_blob'])
+                or old_tree is not None and old_tree!=new_tree):fail('entry_ownership_changed')
+        data=reader.read(after,path,expected['asset_bytes'])
+        if (len(data)!=expected['asset_bytes'] or a.sha(data)!=expected['asset_sha256']
+                or r.oid(data)!=expected['asset_blob']):fail('entry_ownership_changed')
+        found[path]={ident for ident,_ in matches}
+    return found
 
 
 def owners(legacy, registry):
@@ -296,7 +318,8 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
             # Preserve these bytes; an externally edited owner cannot be overwritten.
             preserved.add(ident)
             continue
-        if any(row[k] != previous[k] for k in ('filePath', 'created_at', 'preview_anchor', 'unknown_sha256')) or not set(previous['text_fields']) <= set(row['text_fields']) or n.metadata_missing(previous['source_metadata'], row['source_metadata']):
+        old_metadata=deepcopy(previous['source_metadata']);old_metadata.pop('inline_images',None)
+        if any(row[k] != previous[k] for k in ('filePath', 'created_at', 'preview_anchor', 'unknown_sha256')) or not set(previous['text_fields']) <= set(row['text_fields']) or n.metadata_missing(old_metadata, row['source_metadata']):
             fail('entry_ownership_changed')
         if n.json_header(before_states[0][previous['filePath']]).get('note_type') != n.json_header(current[row['filePath']]).get('note_type'):
             fail('entry_ownership_changed')
@@ -307,12 +330,16 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
         if data is None or a.sha(data) != digest or r.oid(data) != blob:
             fail('entry_ownership_changed')
     path_ids = {r.GET + '/' + row[0]: ident for ident, row in new.items()}
-    content_ids = []
+    asset_ids=verify_asset_delta(reader,before,after,changed_paths,registry)
+    content_ids = set()
     for row in changed:
         path = row['path']; r.safe_path(path)
         if row['after'] is None or row['after'][:2] != ['100644', 'blob']:
             fail('entry_foreign_delta')
         if path in STATE_PATHS:
+            continue
+        if path in asset_ids:
+            content_ids.update(asset_ids[path])
             continue
         if path not in path_ids:
             fail('entry_foreign_delta')
@@ -320,7 +347,7 @@ def transition(reader, evidence, before, after, before_states, after_states, exp
         data = current.get(rel)
         if data is None or a.sha(data) != digest or r.oid(data) != blob or row['after'][2] != blob:
             fail('entry_ownership_changed')
-        content_ids.append(ident)
+        content_ids.add(ident)
     ids = sorted(content_ids)
     if source_id is not None and set(ids) - {source_id}:
         fail('entry_single_scope')

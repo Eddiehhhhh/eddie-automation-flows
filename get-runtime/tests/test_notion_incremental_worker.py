@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -40,6 +41,7 @@ class IncrementalWorker(unittest.TestCase):
         self.props = {'笔记 ID': {'type': 'rich_text', 'rich_text': []}}
         self.blocks = [{'type': 'paragraph', 'payload': {'rich_text': []}, 'children': []}]
         self.patches = [patch.object(worker, 'source', return_value=('Raw/03 Get/note.md', self.data, {})),
+                        patch.object(worker.media, 'source_assets', return_value=[]),
                         patch.object(worker, 'desired', return_value=(self.props, self.blocks)),
                         patch.object(worker.transport, 'Transport', return_value=object()),
                         patch.object(worker.transport, 'API', FakeAPI)]
@@ -52,7 +54,7 @@ class IncrementalWorker(unittest.TestCase):
         self.assertEqual(result['status'], 'ready')
 
     def test_new_page_dates_use_existing_notion_minute_wire_projection(self):
-        self.patches[1].stop()
+        self.patches[2].stop()
         data = b'---\ntitle: "Sample"\n---\nbody'
         fields = {'note_type': 'plain_text', 'created_at': '2026-11-05 05:08:58',
                   'updated_at': '2026-11-05 05:08:58'}
@@ -93,6 +95,95 @@ class IncrementalWorker(unittest.TestCase):
         self.assertEqual(result['owned']['target_sha256'], 'c' * 64)
         self.assertEqual(result['owned']['origin'], 'created')
         verified.assert_called_once()
+
+    def test_apply_reads_verified_media_receipts_before_render_and_create(self):
+        data = self.data
+        asset = SimpleNamespace(path='Raw/03 Get/_assets/images/a.png', blob='b' * 40,
+            sha256='c' * 64, data=b'image', content_type='image/png', block_type='image')
+        assets = [{'reference': '../_assets/images/a.png', 'asset': asset}]
+        receipts = {'b' * 40 + ':' + 'c' * 64: {'phase': 'verified', 'upload_id': 'file-id'}}
+        events = []
+        props = {'笔记 ID': {'type': 'rich_text', 'rich_text': []}}
+        blocks = [{'type': 'image', 'payload': {'kind': 'notion_incremental_uploaded_media'},
+                   'children': []}]
+        desired_calls = []
+        def desired(*args, **kwargs):
+            events.append('render')
+            desired_calls.append(kwargs)
+            return props, blocks
+        def create(*args, **kwargs):
+            events.append('create')
+            FakeAPI.created = True
+            return '1' * 32
+        with (patch.object(worker.media, 'source_assets', return_value=assets),
+              patch.object(worker.media, 'receipts_from_main', side_effect=lambda *a: events.append('receipts') or receipts),
+              patch.object(worker.media, 'upload_handles', return_value={'file-id': {
+                  'sha256': asset.sha256, 'byte_count': len(asset.data), 'mime': asset.content_type}}),
+              patch.object(worker.media, 'bind_uploaded_blocks', side_effect=lambda *a: events.append('bind')),
+              patch.object(worker.media, 'bind_uploaded_snapshot', side_effect=lambda snapshot, *a: snapshot),
+              patch.object(worker.media, 'publish_missing') as upload,
+              patch.object(worker, 'desired', side_effect=desired),
+              patch.object(worker, 'attempt_from_main', return_value={
+                  'note_id': self.ident, 'source_sha256': hashlib.sha256(data).hexdigest(),
+                  'run_id': '123', 'run_attempt': '1', 'status': 'attempt_reserved'}),
+              patch.object(worker, 'verify_note', side_effect=lambda *a, **k: events.append('verify') or 'd' * 64),
+              patch.object(worker.transport, 'wire_blocks', return_value=[]),
+              patch.object(worker.transport, 'fingerprint', return_value='e' * 64),
+              patch.object(FakeAPI, 'create_page', side_effect=create),
+              patch.dict(os.environ, {'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'})):
+            result = worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32,
+                                'token', apply=True)
+        self.assertEqual(result['status'], 'created')
+        self.assertEqual(events[:3], ['receipts', 'render', 'bind'])
+        self.assertEqual(desired_calls[0]['media_receipts'], receipts)
+        self.assertEqual(desired_calls[0]['media_preview'], False)
+        self.assertLess(events.index('receipts'), events.index('create'))
+        upload.assert_not_called()
+
+    def test_apply_media_state_failure_stops_before_render_or_page_write(self):
+        asset = SimpleNamespace(path='Raw/03 Get/_assets/images/a.png', blob='b' * 40,
+            sha256='c' * 64, data=b'image', content_type='image/png', block_type='image')
+        events = []
+        with (patch.object(worker.media, 'source_assets', return_value=[{'asset': asset}]),
+              patch.object(worker.media, 'receipts_from_main', side_effect=ValueError('source_content_held')),
+              patch.object(worker, 'desired', side_effect=lambda *a, **k: events.append('render')),
+              patch.object(FakeAPI, 'create_page', side_effect=lambda *a: events.append('create')),
+              patch.object(worker, 'attempt_from_main') as attempt):
+            with self.assertRaisesRegex(ValueError, 'source_content_held'):
+                worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32,
+                           'token', apply=True)
+        self.assertEqual(events, [])
+        attempt.assert_not_called()
+
+    def test_apply_unverified_receipt_stops_before_render_or_attempt(self):
+        asset = SimpleNamespace(path='Raw/03 Get/_assets/images/a.png', blob='b' * 40,
+            sha256='c' * 64, data=b'image', content_type='image/png', block_type='image')
+        with (patch.object(worker.media, 'source_assets', return_value=[{'asset': asset}]),
+              patch.object(worker.media, 'receipts_from_main', return_value={}),
+              patch.object(worker.media, 'upload_handles', side_effect=ValueError('missing_asset')),
+              patch.object(worker, 'desired') as render,
+              patch.object(worker, 'attempt_from_main') as attempt,
+              patch.object(FakeAPI, 'create_page') as create):
+            with self.assertRaisesRegex(ValueError, 'missing_asset'):
+                worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32,
+                           'token', apply=True)
+        render.assert_not_called()
+        attempt.assert_not_called()
+        create.assert_not_called()
+
+    def test_existing_media_page_without_owned_receipt_never_uploads_or_creates(self):
+        FakeAPI.created = True
+        asset = SimpleNamespace(path='Raw/03 Get/_assets/images/a.png', blob='b' * 40,
+            sha256='c' * 64, data=b'image', content_type='image/png', block_type='image')
+        with (patch.object(worker.media, 'source_assets', return_value=[{'asset': asset}]),
+              patch.object(worker.media, 'publish_missing') as upload,
+              patch.object(FakeAPI, 'create_page') as create,
+              patch.object(FakeAPI, 'read_note') as read):
+            with self.assertRaisesRegex(ValueError, 'unowned_target'):
+                worker.run(Path('/unused'), self.ident, self.commit, 'b' * 32, 'token')
+        upload.assert_not_called()
+        create.assert_not_called()
+        read.assert_not_called()
 
     def test_legacy_owned_receipt_cannot_authorize_page_update(self):
         FakeAPI.created = True

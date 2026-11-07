@@ -266,6 +266,10 @@ def run(root, token, limit, apply):
                     held += 1
                     defer(ident)
                     continue
+                media_path = worker.media.STATE_DIR + '/' + ident + '.json'
+                def persist_media(value):
+                    save(root, {media_path: value}, 'Checkpoint one Get Notion media upload')
+                worker.prepare_media(root, ident, head(root), token, persist_media)
                 marker = {'note_id': ident, 'source_sha256': result['source_blob'],
                           'run_id': os.environ['GITHUB_RUN_ID'],
                           'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
