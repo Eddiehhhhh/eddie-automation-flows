@@ -30,6 +30,13 @@ import get_notion_png_recovery as png_recovery
 import get_notion_idle_recovery as idle_recovery
 import get_notion_blocked_idle_recovery as blocked_idle
 
+def fixed_template_allowed(policy):
+    # Both templates are exact, code-pinned renderings; all original controller,
+    # run identity, checkpoint and receipt verification still follows.
+    digest = policy.get('controller_template_sha256') if isinstance(policy, dict) else None
+    return digest in (controller.template_sha256(), controller.PRE_MINUTE23_TEMPLATE_SHA256)
+
+
 MARKER = 'GET_NOTION_JOURNAL_V1 '
 CONTRACT = 'get-notion-journal-checkpoint-1'
 NOTION_STEP = 'Sync confirmed Get content to Notion'
@@ -511,7 +518,7 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
         fixed = get_step.get('conclusion') == 'skipped'
         # Only the newly reviewed exact controller supports this second source
         # identity. An old skipped Get step can never become archive authority.
-        if fixed and (policy['controller_template_sha256'] != controller.template_sha256()
+        if fixed and (not fixed_template_allowed(policy)
                 or run['event'] != 'workflow_dispatch'):
             fail('journal_provenance_steps')
         if (get_step.get('conclusion') not in ('success', 'skipped')

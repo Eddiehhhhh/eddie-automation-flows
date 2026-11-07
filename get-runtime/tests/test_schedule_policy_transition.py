@@ -18,6 +18,13 @@ class SchedulePolicyTransition(unittest.TestCase):
         self.assertIn(b"cron: '17 * * * *'", ctl.policy_template_bytes(old))
         self.assertIn(b"cron: '23 * * * *'", ctl.policy_template_bytes(new))
 
+    def test_fixed_archive_accepts_only_current_and_immediate_prior_template(self):
+        import get_notion_journal_runtime as journal
+        for digest in (ctl.template_sha256(), ctl.PRE_MINUTE23_TEMPLATE_SHA256):
+            self.assertTrue(journal.fixed_template_allowed({'controller_template_sha256': digest}))
+        for digest in (ctl.PRE_DECOUPLE_TEMPLATE_SHA256, '0'*64, None):
+            self.assertFalse(journal.fixed_template_allowed({'controller_template_sha256': digest}))
+
     def test_previous_template_bytes_are_hash_pinned(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-minute17.yml.disabled'
         self.assertEqual(ctl.a.sha(path.read_bytes()), ctl.PRE_MINUTE23_TEMPLATE_SHA256)
