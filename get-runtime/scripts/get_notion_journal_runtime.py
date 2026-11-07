@@ -33,8 +33,7 @@ import get_notion_blocked_idle_recovery as blocked_idle
 def fixed_template_allowed(policy):
     # Both templates are exact, code-pinned renderings; all original controller,
     # run identity, checkpoint and receipt verification still follows.
-    digest = policy.get('controller_template_sha256') if isinstance(policy, dict) else None
-    return digest in (controller.template_sha256(), controller.PRE_MINUTE23_TEMPLATE_SHA256)
+    return controller.current_or_prior_schedule_template(policy)
 
 
 MARKER = 'GET_NOTION_JOURNAL_V1 '

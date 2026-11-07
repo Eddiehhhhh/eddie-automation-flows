@@ -104,6 +104,11 @@ def policy_template_bytes(policy):
     p.fail('provenance_controller_policy')
 
 
+def current_or_prior_schedule_template(policy):
+    digest = policy.get('controller_template_sha256') if isinstance(policy, dict) else None
+    return digest in (template_sha256(), PRE_MINUTE23_TEMPLATE_SHA256)
+
+
 def scope_for(policy, policy_hash):
     return {'contract': SCOPE_CONTRACT, 'production_approved': True,
             'public_policy_sha256': policy_hash, 'rules_sha256': policy['rules_sha256'],

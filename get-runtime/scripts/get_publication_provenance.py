@@ -334,7 +334,7 @@ def verified_prepare_only(raw, policy, run, job, emission):
             {**private_report.PREPARE, 'source_scope': 'single_note', 'catalog_complete': False})
         scoped_valid = (value == private_report.PREPARE
                         or type(value.get('catalog_complete')) is bool and value in allowed_reports[1:])
-        if not scoped_valid or policy['controller_template_sha256'] != controller.template_sha256():
+        if not scoped_valid or not controller.current_or_prior_schedule_template(policy):
             fail('provenance_prepare_only')
         return True
     fixed = {'status': 'recurring_candidate_verified', 'main_updated': False,
