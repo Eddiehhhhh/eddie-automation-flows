@@ -214,6 +214,23 @@ def clean_content(title: str, content: str) -> str:
     return text
 
 
+def order_sheet_content(content: str, sheets: list[dict[str, Any]]) -> str:
+    names = [sheet.get("sheet_name") for sheet in sheets]
+    if (not names or any(not isinstance(name, str) or not name or "\n" in name or "\r" in name for name in names)
+            or len(set(names)) != len(names)):
+        raise SyncFailure("content_unavailable")
+    pattern = re.compile(r"(?:\A|(?<=\n\n))\|(" + "|".join(re.escape(name) for name in names) + r")(?=\n|\Z)")
+    matches = list(pattern.finditer(content))
+    if (not matches or matches[0].start() != 0 or len(matches) != len(names)
+            or {match.group(1) for match in matches} != set(names)):
+        raise SyncFailure("content_unavailable")
+    blocks = {}
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() - 2 if i + 1 < len(matches) else len(content)
+        blocks[match.group(1)] = content[match.start():end]
+    return "\n\n".join(blocks[name] for name in names)
+
+
 def sanitize_filename(title: str) -> str:
     cleaned = title.strip()
     cleaned = re.sub(r"[\\/:*?\"<>|]", "-", cleaned)
@@ -347,12 +364,16 @@ def sync_target(
         destination = RAW_ROOT / folder / f"{sanitize_filename(title)}.md"
 
     destination = ensure_unique_path(destination, file_id, existing_paths)
+    body = clean_content(title, content)
+    if doc_type == "sheet" and body:
+        sheet_info = mcp_call("sheet.get_sheet_info", {"file_id": file_id}, token)
+        body = order_sheet_content(body, sheet_info.get("sheets") or [])
     rendered = render_markdown(
         source_url=source_url,
         file_id=file_id,
         fetched_at=fetched_at,
         doc_type=doc_type,
-        body=clean_content(title, content),
+        body=body,
     )
     previous = destination.read_text(encoding="utf-8") if destination.exists() else None
     if previous is not None:
