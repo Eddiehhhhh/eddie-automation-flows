@@ -145,7 +145,7 @@ jobs:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           APPLY: 'false'
         run: python ../runtime-reviewed/get-runtime/scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
-      - name: Build, stage and read back one canonical image candidate
+      - name: Compare five proof fields for one canonical image candidate (read-only)
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
