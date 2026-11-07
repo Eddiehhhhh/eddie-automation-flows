@@ -159,6 +159,26 @@ class ProbeStageTests(unittest.TestCase):
         self.assertIn("if manual.guard(remote) != parent",body)
         self.assertIn("if manual.guard(remote) != parent",body.split('api.call(\'POST\', \'/git/refs\'',1)[1])
 
+    def test_compare_readback_rejects_pagination(self):
+        class Response:
+            status=200
+            def __init__(self,link=None):
+                self.headers={} if link is None else {'Link':link}
+            def __enter__(self):return self
+            def __exit__(self,*args):return False
+            def read(self,_limit):return b'{"status":"ahead"}'
+        class Opener:
+            def __init__(self,response):self.response=response
+            def open(self,_request,timeout):
+                self.timeout=timeout
+                return self.response
+        with patch.object(probe.urllib.request,'build_opener',return_value=Opener(Response())):
+            self.assertEqual(probe.compare_unpaginated('token','a'*40,'b'*40),{'status':'ahead'})
+        with patch.object(probe.urllib.request,'build_opener',return_value=Opener(Response('<https://api.github.com/?page=2>; rel="next"'))):
+            with self.assertRaises(probe.ProbeFailure) as caught:
+                probe.compare_unpaginated('token','a'*40,'b'*40)
+        self.assertEqual(caught.exception.category,'proof_compare_incomplete')
+
     def test_new_proof_writer_creates_only_one_run_ref_and_reads_it_back(self):
         parent='a'*40;tree_sha='b'*40;proof_ref='codex/get-asset-proof-42320-1'
         proof_path=probe.PROOF_ROOT+'/1234567890123456789.json'
@@ -166,19 +186,8 @@ class ProbeStageTests(unittest.TestCase):
             'source_id':'1234567890123456789','parent':parent,
             'proof_created_at_utc':'2026-11-07T08:09:12Z'}
         class FakeRemote:
-            include_sibling=False
             def __init__(self,*args):pass
             def commit(self,commit_sha):return {'tree':tree_sha,'parents':[parent]}
-            def tree_entries(self,tree,recursive=False):
-                if tree=='c'*40:return []
-                rows=[
-                    {'path':'.sync','mode':'040000','type':'tree','sha':'d'*40},
-                    {'path':'.sync/get-notion-asset-probes','mode':'040000','type':'tree','sha':'e'*40},
-                    {'path':proof_path,'mode':'100644','type':'blob','sha':api.oid,'size':len(api.proof_bytes)},
-                ]
-                if self.include_sibling:
-                    rows.append({'path':'.sync/unrelated','mode':'100644','type':'blob','sha':'f'*40,'size':1})
-                return rows
         class FakeAPI:
             def __init__(self):self.calls=[];self.created=None;self.proof_bytes=None;self.oid=None;self.commit_sha=None
             def call(self,method,path,payload=None,**kwargs):
@@ -216,7 +225,13 @@ class ProbeStageTests(unittest.TestCase):
                         'content':base64.b64encode(self.proof_bytes).decode()}
                 raise AssertionError((method,path))
         api=FakeAPI()
-        with patch.object(probe.manual,'Remote',FakeRemote), patch.object(probe.manual,'guard',return_value=parent):
+        def compare_for(api, files=None):
+            return {'status':'ahead','ahead_by':1,'behind_by':0,
+                'base_commit':{'sha':parent},'merge_base_commit':{'sha':parent},
+                'commits':[{'sha':api.commit_sha}],
+                'files':files or [{'filename':proof_path,'status':'added','deletions':0}]}
+        with patch.object(probe.manual,'Remote',FakeRemote), patch.object(probe.manual,'guard',return_value=parent), \
+                patch.object(probe,'compare_unpaginated',side_effect=lambda *args: compare_for(api)):
             observed_ref,commit=probe.publish_current_proof(api,'token',parent,'c'*40,proof)
         self.assertEqual(observed_ref,proof_ref)
         self.assertEqual(commit,api.commit_sha)
@@ -227,9 +242,11 @@ class ProbeStageTests(unittest.TestCase):
         self.assertEqual(ref_posts[0][2]['ref'],'refs/heads/'+proof_ref)
         self.assertNotIn(('POST','/git/refs/heads/main',None),api.calls)
 
-        FakeRemote.include_sibling=True
         api_with_sibling=FakeAPI()
-        with patch.object(probe.manual,'Remote',FakeRemote), patch.object(probe.manual,'guard',return_value=parent):
+        with patch.object(probe.manual,'Remote',FakeRemote), patch.object(probe.manual,'guard',return_value=parent), \
+                patch.object(probe,'compare_unpaginated',side_effect=lambda *args: compare_for(api_with_sibling,[
+                    {'filename':proof_path,'status':'added','deletions':0},
+                    {'filename':'.sync/unrelated','status':'added','deletions':0}])):
             with self.assertRaises(probe.ProbeFailure):
                 probe.publish_current_proof(api_with_sibling,'token',parent,'c'*40,proof)
         self.assertFalse(any(call[0:2]==('POST','/git/refs') for call in api_with_sibling.calls))
