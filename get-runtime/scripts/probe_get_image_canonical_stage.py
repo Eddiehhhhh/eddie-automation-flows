@@ -12,7 +12,6 @@ import re
 import sys
 import tempfile
 from urllib.parse import quote
-import urllib.request
 
 # The probe and the runtime under review intentionally live in separate
 # checkouts. Import every production module from the exact pinned runtime,
@@ -65,35 +64,67 @@ def fail(stage, category='verification_failed'):
     raise ProbeFailure(stage, category) from None
 
 
-def compare_unpaginated(token, parent, commit_sha):
-    """Read one exact GitHub compare response and reject pagination/redirects."""
-    path = ('/repos/' + staging.r.REPOSITORY + '/compare/' + parent + '...' + commit_sha
-            + '?per_page=100&page=1')
-    request = urllib.request.Request('https://api.github.com' + path, method='GET', headers={
-        'Authorization': 'Bearer ' + token,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'get-private-proof-check',
-    })
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), staging.NoRedirect())
-    try:
-        with opener.open(request, timeout=60) as response:
-            if response.status != 200 or response.headers.get('Link'):
-                fail('private_proof', 'proof_compare_incomplete')
-            raw = response.read(1048577)
-    except ProbeFailure:
-        raise
-    except Exception:
-        fail('private_proof', 'proof_compare_unavailable')
-    if len(raw) > 1048576:
-        fail('private_proof', 'proof_compare_incomplete')
-    try:
-        value = json.loads(raw)
-    except (ValueError, UnicodeError):
-        fail('private_proof', 'proof_compare_invalid')
-    if not isinstance(value, dict):
-        fail('private_proof', 'proof_compare_invalid')
-    return value
+def verify_proof_tree_scope(api, parent_tree, candidate_tree, proof_path, proof_oid, proof_size):
+    """Prove one leaf changed by comparing complete non-recursive tree levels."""
+    if (not re.fullmatch(r'[0-9a-f]{40}', parent_tree or '')
+            or not re.fullmatch(r'[0-9a-f]{40}', candidate_tree or '')
+            or not isinstance(proof_path, str)):
+        fail('private_proof', 'proof_tree_scope_mismatch')
+    parts = proof_path.split('/')
+    if (not parts or any(not part or part in {'.', '..'} for part in parts)
+            or type(proof_size) is not int or proof_size < 0
+            or re.fullmatch(r'[0-9a-f]{40}', proof_oid or '') is None):
+        fail('private_proof', 'proof_tree_scope_mismatch')
+
+    def entries(tree_oid):
+        value = api.call('GET', '/git/trees/' + tree_oid)
+        rows = value.get('tree') if isinstance(value, dict) else None
+        if (not isinstance(value, dict) or value.get('sha') != tree_oid
+                or value.get('truncated') is not False or not isinstance(rows, list)):
+            fail('private_proof', 'proof_tree_incomplete')
+        found = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                fail('private_proof', 'proof_tree_invalid')
+            name, mode, kind, oid = row.get('path'), row.get('mode'), row.get('type'), row.get('sha')
+            if (not isinstance(name, str) or not name or '/' in name or name in {'.', '..'}
+                    or name in found or not isinstance(mode, str)
+                    or kind not in {'blob', 'tree', 'commit'}
+                    or not isinstance(oid, str) or re.fullmatch(r'[0-9a-f]{40}', oid) is None
+                    or (kind == 'tree' and mode != '040000')
+                    or (kind == 'commit' and mode != '160000')
+                    or (kind == 'blob' and mode not in {'100644', '100755', '120000'})):
+                fail('private_proof', 'proof_tree_invalid')
+            size = row.get('size')
+            if kind == 'blob':
+                if type(size) is not int or size < 0:
+                    fail('private_proof', 'proof_tree_invalid')
+            elif size is not None:
+                fail('private_proof', 'proof_tree_invalid')
+            found[name] = (mode, kind, oid, size)
+        return found
+
+    before_oid, after_oid = parent_tree, candidate_tree
+    for index, name in enumerate(parts):
+        before = {} if before_oid is None else entries(before_oid)
+        after = entries(after_oid)
+        before_target = before.pop(name, None)
+        after_target = after.pop(name, None)
+        if before != after:
+            fail('private_proof', 'proof_tree_sibling_mismatch')
+        is_leaf = index == len(parts) - 1
+        if is_leaf:
+            if before_target is not None:
+                fail('private_proof', 'proof_path_exists')
+            if after_target != ('100644', 'blob', proof_oid, proof_size):
+                fail('private_proof', 'proof_tree_scope_mismatch')
+            return
+        if (after_target is None or after_target[0:2] != ('040000', 'tree')
+                or (before_target is not None and before_target[0:2] != ('040000', 'tree'))):
+            fail('private_proof', 'proof_tree_scope_mismatch')
+        before_oid = None if before_target is None else before_target[2]
+        after_oid = after_target[2]
+    fail('private_proof', 'proof_tree_scope_mismatch')
 
 
 def fetch_proof(api, proof_ref):
@@ -343,20 +374,7 @@ def publish_current_proof(api, token, parent, parent_tree, proof):
             'tree': tree, 'parents': [parent], 'author': actor, 'committer': actor})
         if commit.get('sha') != commit_sha:
             fail('private_proof', 'proof_commit_mismatch')
-        comparison = compare_unpaginated(token, parent, commit_sha)
-        commits = comparison.get('commits')
-        changed_files = comparison.get('files')
-        if (comparison.get('status') != 'ahead' or comparison.get('ahead_by') != 1
-                or comparison.get('behind_by') != 0
-                or comparison.get('base_commit', {}).get('sha') != parent
-                or comparison.get('merge_base_commit', {}).get('sha') != parent
-                or not isinstance(commits, list) or len(commits) != 1
-                or commits[0].get('sha') != commit_sha
-                or not isinstance(changed_files, list) or len(changed_files) != 1
-                or changed_files[0].get('filename') != proof_path
-                or changed_files[0].get('status') != 'added'
-                or changed_files[0].get('deletions') != 0):
-            fail('private_proof', 'proof_tree_scope_mismatch')
+        verify_proof_tree_scope(api, parent_tree, tree, proof_path, proof_oid, len(proof_bytes))
         if manual.guard(remote) != parent:
             fail('private_proof', 'main_moved')
         try:
