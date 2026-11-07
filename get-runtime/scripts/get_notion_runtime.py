@@ -1046,7 +1046,14 @@ def main(argv=None):
         single_id=os.environ.get('GET_SINGLE_NOTE_ID') or None
         if single_mode not in ('','false','true'):fail('notion_scope')
         if single_mode=='true':
-            if os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or not args.apply or os.environ.get('NOTION_MODE','canonical')!='canonical' or not single_id:fail('notion_scope')
+            mode=os.environ.get('NOTION_MODE','canonical')
+            if os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or not args.apply or not single_id:fail('notion_scope')
+            if mode=='private-single-note-proof':
+                from get_notion_route_selection import selection
+                from get_private_single_note_proof import resolve
+                selected_mode,key,_=selection()
+                if selected_mode!=mode or resolve(key)!=single_id:fail('notion_scope')
+            elif mode!='canonical':fail('notion_scope')
             e.p.note_id(single_id)
         elif single_id:fail('notion_scope')
         # Pending production activation is rejected before credential lookup.

@@ -18,15 +18,17 @@ on:
           - historical-capture
           - historical-apply
           - property-apply
+          - private-single-note-proof
       notion_input_sha256:
         description: Registered private input digest; empty for canonical
         type: string
         default: ''
         required: false
-      single_note_id:
-        description: Process only this exact Get note ID; requires canonical apply
-        type: string
-        default: ''
+      private_proof_key:
+        description: Select one reviewed private Get note; contains no note ID
+        type: choice
+        options:
+          - recording-card-20261108
         required: false
       create_test_note:
         description: Create one fixed Get note and sync only that note end to end
@@ -65,43 +67,49 @@ jobs:
           RUNTIME_SHA: '@@RUNTIME_SHA@@'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Validate single-note request
-        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.private_proof_key != '' || inputs.create_test_note) }}
         env:
-          SINGLE_NOTE_ID: ${{ inputs.single_note_id }}
+          PRIVATE_PROOF_KEY: ${{ inputs.private_proof_key }}
           CREATE_TEST_NOTE: ${{ inputs.create_test_note }}
           APPLY: ${{ inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode }}
         run: |
           test "$APPLY" = true
-          test "$NOTION_MODE" = canonical
-          if test "$CREATE_TEST_NOTE" = true; then
-            test -z "$SINGLE_NOTE_ID"
+          if test -n "$PRIVATE_PROOF_KEY"; then
+            test "$NOTION_MODE" = private-single-note-proof
+            test "$CREATE_TEST_NOTE" = false
+            test "$PRIVATE_PROOF_KEY" = recording-card-20261108
           else
-            [[ "$SINGLE_NOTE_ID" =~ ^[0-9]{1,64}$ ]]
-            echo "::add-mask::$SINGLE_NOTE_ID"
+            test "$NOTION_MODE" = canonical
           fi
       - name: Validate bounded Notion route before Get
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.notion_mode != 'canonical' }}
         env:
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
+          NOTION_INPUT_SHA256: ${{ inputs.private_proof_key || inputs.notion_input_sha256 }}
         run: python scripts/get_notion_route_selection.py
       - name: Materialize verified private runtime data
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
+          NOTION_INPUT_SHA256: ${{ inputs.private_proof_key || inputs.notion_input_sha256 }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
         run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+      - name: Resolve private Get note proof
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.private_proof_key != '' }}
+        env:
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          PRIVATE_PROOF_KEY: ${{ inputs.private_proof_key }}
+        run: python scripts/get_private_single_note_proof.py --key "$PRIVATE_PROOF_KEY" --github-env "$GITHUB_ENV"
       - name: Validate complete private Notion route before Get
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.notion_mode != 'canonical' }}
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
+          NOTION_INPUT_SHA256: ${{ inputs.private_proof_key || inputs.notion_input_sha256 }}
         run: python scripts/get_notion_controller_route.py --preflight
       - name: Prepare reviewed public policy
         env:
@@ -117,7 +125,7 @@ jobs:
           with path.open('xb') as stream:
               stream.write(value)
           PY
-      # Reruns must reuse the note ID through single_note_id, never create a duplicate.
+      # Private proof keys resolve to one note ID inside the hash-bound private runtime bundle.
       # Reuse the fixed test note on later runs instead of creating duplicates.
       - name: Create one real Get sync test note
         id: create_test_note
@@ -190,8 +198,8 @@ jobs:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
-          GET_SINGLE_NOTE_ID: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id || steps.create_test_note.outputs.note_id) || '' }}
-          GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
+          GET_SINGLE_NOTE_ID: ${{ env.GET_SINGLE_NOTE_ID || steps.create_test_note.outputs.note_id || '' }}
+          GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.private_proof_key != '' || inputs.create_test_note) }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           POLICY_SHA256: '@@POLICY_SHA256@@'
           SCOPE_SHA256: '@@SCOPE_SHA256@@'
@@ -213,11 +221,11 @@ jobs:
           POLICY_SHA256: '@@POLICY_SHA256@@'
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
-          NOTION_INPUT_SHA256: ${{ inputs.notion_input_sha256 }}
-          GET_SINGLE_NOTE_ID: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id || steps.create_test_note.outputs.note_id) || '' }}
-          GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.single_note_id != '' || inputs.create_test_note) }}
+          NOTION_INPUT_SHA256: ${{ inputs.private_proof_key || inputs.notion_input_sha256 }}
+          GET_SINGLE_NOTE_ID: ${{ env.GET_SINGLE_NOTE_ID || steps.create_test_note.outputs.note_id || '' }}
+          GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.private_proof_key != '' || inputs.create_test_note) }}
         run: |
-          if test "$NOTION_MODE" = canonical; then
+          if test "$NOTION_MODE" = canonical || test "$NOTION_MODE" = private-single-note-proof; then
             python scripts/get_notion_runtime.py \
               --policy "$RUNNER_TEMP/get-recurring-public-policy.json" \
               --approved-policy-sha256 "$POLICY_SHA256" \
@@ -241,7 +249,7 @@ jobs:
 
   notion-incremental:
     needs: canonical-get
-    if: ${{ needs.canonical-get.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply && inputs.notion_mode == 'canonical' && inputs.single_note_id == '' && !inputs.create_test_note)) }}
+    if: ${{ needs.canonical-get.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply && ((inputs.notion_mode == 'canonical' && inputs.private_proof_key == '') || (inputs.notion_mode == 'private-single-note-proof' && inputs.private_proof_key != '')) && !inputs.create_test_note)) }}
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 45

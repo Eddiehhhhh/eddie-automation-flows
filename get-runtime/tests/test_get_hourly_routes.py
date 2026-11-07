@@ -25,7 +25,7 @@ class FollowupNotion(unittest.TestCase):
         self.assertIn('needs: canonical-get', job)
         self.assertIn("needs.canonical-get.result == 'success'", job)
         self.assertIn("inputs.notion_mode == 'canonical'", job)
-        self.assertIn("inputs.single_note_id == ''", job)
+        self.assertIn("inputs.private_proof_key == ''", job)
         self.assertIn('!inputs.create_test_note', job)
         self.assertIn('continue-on-error: true', job)
         self.assertIn('get_notion_incremental_controller as controller', job)
@@ -36,3 +36,10 @@ class FollowupNotion(unittest.TestCase):
         self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', job)
         self.assertNotIn('get_notion_runtime.py', job)
         self.assertIn("ref: '@@RUNTIME_SHA@@'", job)
+
+    def test_private_proof_selector_never_accepts_or_exposes_a_note_id(self):
+        template = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
+        self.assertIn('private_proof_key:', template)
+        self.assertIn('inputs.private_proof_key', template)
+        self.assertNotIn('single_note_id:', template)
+        self.assertNotIn('inputs.single_note_id', template)

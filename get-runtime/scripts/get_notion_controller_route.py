@@ -13,8 +13,9 @@ import get_notion_executor as e
 import get_notion_historical as historical
 import get_notion_historical_input as private_input
 import get_notion_properties_runtime as properties
+import get_private_single_note_proof as single_note_proof
 
-MODES = ('canonical', 'historical-capture', 'historical-apply', 'property-apply')
+MODES = ('canonical', 'historical-capture', 'historical-apply', 'property-apply', 'private-single-note-proof')
 
 
 def preflight(event, apply, mode, expected):
@@ -42,6 +43,11 @@ def preflight(event, apply, mode, expected):
             private_input.anchor_for(member)
             private_input.creation_property_for(member)
         return historical.CONTRACT
+    if mode == 'private-single-note-proof':
+        if expected not in single_note_proof.KEYS:
+            e.fail('approval_missing')
+        single_note_proof.resolve(expected)
+        return single_note_proof.CONTRACT
     registrations = {
         'historical-apply': historical.APPROVED_MANIFESTS,
         'property-apply': properties.APPROVED_MANIFESTS,
