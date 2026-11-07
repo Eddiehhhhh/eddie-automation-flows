@@ -34,7 +34,7 @@ on:
         default: false
         required: false
   schedule:
-    - cron: '17 * * * *'
+    - cron: '23 * * * *'
 permissions:
   contents: read
 concurrency:

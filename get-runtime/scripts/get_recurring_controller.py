@@ -20,7 +20,8 @@ MAX_CONTROLLER = 32768
 JOB_NAME = 'canonical-get'
 STEP_NAME = 'Emit verified canonical publication anchor'
 SCOPE_CONTRACT = 'get-recurring-production-scope-1'
-SCHEDULE_BLOCK = "  schedule:\n    - cron: '17 * * * *'\n"
+SCHEDULE_BLOCK = "  schedule:\n    - cron: '23 * * * *'\n"
+HISTORICAL_SCHEDULE_BLOCK = "  schedule:\n    - cron: '17 * * * *'\n"
 # Only fully verified immutable file bytes are retained, and only for the
 # lifetime of the built-in bounded public transport that obtained them.
 # Never cache run/attempt/job metadata, logs, or a policy/event trust decision.
@@ -34,6 +35,8 @@ def template_bytes():
 def template_sha256():
     return a.sha(template_bytes())
 
+
+PRE_MINUTE23_TEMPLATE_SHA256 = 'a02cd63f4ef057369d99f64da9c22d54ea3a659b9ee05b6d672836cd72e5a253'
 
 PRE_DECOUPLE_TEMPLATE_SHA256 = '6ecdf9a68b1a1c3b251b033d6bea1f2a1df80a6b0a318f5b1043c11d05bc6501'
 
@@ -58,7 +61,7 @@ def fixed_idle_template_transition(old, new):
 
 
 def historical_template_digests():
-    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256, PRE_FIXED_TEMPLATE_SHA256, FIXED_TEMPLATE_SHA256, PRE_DECOUPLE_TEMPLATE_SHA256)
+    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256, PRE_FIXED_TEMPLATE_SHA256, FIXED_TEMPLATE_SHA256, PRE_DECOUPLE_TEMPLATE_SHA256, PRE_MINUTE23_TEMPLATE_SHA256)
 
 
 def policy_template_bytes(policy):
@@ -68,6 +71,11 @@ def policy_template_bytes(policy):
     current = template_bytes()
     if digest == a.sha(current):
         return current
+    if digest == PRE_MINUTE23_TEMPLATE_SHA256:
+        raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-minute17.yml.disabled').read_bytes()
+        if len(raw) > MAX_CONTROLLER or a.sha(raw) != PRE_MINUTE23_TEMPLATE_SHA256:
+            p.fail('provenance_controller_template')
+        return raw
     if digest == PRE_DECOUPLE_TEMPLATE_SHA256:
         raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-before-decouple.yml.disabled').read_bytes()
         if len(raw) > MAX_CONTROLLER or a.sha(raw) != PRE_DECOUPLE_TEMPLATE_SHA256:
@@ -100,7 +108,8 @@ def scope_for(policy, policy_hash):
     return {'contract': SCOPE_CONTRACT, 'production_approved': True,
             'public_policy_sha256': policy_hash, 'rules_sha256': policy['rules_sha256'],
             'get_policy_sha256': policy['get_policy_sha256'], 'private_repository': r.REPOSITORY,
-            'main_ref': r.MAIN_REF, 'max_new': 50, 'schedule_minute': 17,
+            'main_ref': r.MAIN_REF, 'max_new': 50,
+            'schedule_minute': 23 if policy.get('controller_template_sha256') == template_sha256() else 17,
             'receipt_path': entry.FULL_RECEIPT, 'sink': 'same-controller-confirmed-content-only',
             'permissions': 'existing-only',
             'notion_scope_contract': 'get-notion-standing-runtime-1', 'notion_batch_max': 50,
@@ -123,10 +132,11 @@ def render(policy, approved_policy_sha256, approved_scope_sha256, *, scheduled=T
                     '@@POLICY_SHA256@@': a.checked(approved_policy_sha256, 64),
                     '@@SCOPE_SHA256@@': approved_scope_sha256}
     text = template.decode('utf-8')
-    if type(scheduled) is not bool or text.count(SCHEDULE_BLOCK) != 1:
+    schedule_block = SCHEDULE_BLOCK if policy['controller_template_sha256'] == template_sha256() else HISTORICAL_SCHEDULE_BLOCK
+    if type(scheduled) is not bool or text.count(schedule_block) != 1:
         p.fail('provenance_controller_template')
     if not scheduled:
-        text = text.replace(SCHEDULE_BLOCK, '', 1)
+        text = text.replace(schedule_block, '', 1)
     for key, value in replacements.items():
         if key not in text:
             p.fail('provenance_controller_template')
@@ -202,7 +212,7 @@ def main(argv=None):
     parser.add_argument('--approved-policy-sha256', required=True)
     parser.add_argument('--approved-scope-sha256', required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--enable-schedule', action='store_true', help='Render the fixed minute-17 schedule only after manual acceptance')
+    parser.add_argument('--enable-schedule', action='store_true', help='Render the fixed minute-23 schedule only after manual acceptance')
     args = parser.parse_args(argv)
     try:
         policy = m.strict_capture_json(a.bounded_file(args.policy, 16384), 16384)

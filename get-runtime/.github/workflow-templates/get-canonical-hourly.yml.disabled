@@ -1,6 +1,6 @@
 # PREPARATION ONLY. Outside .github/workflows and non-workflow extension.
 # No live Get/GitHub/Notion steps or credentials are present.
-# Intended cadence after separate consolidated approval: 17 * * * * (UTC).
+# Intended cadence after separate consolidated approval: 23 * * * * (UTC).
 # Activation also requires authenticated last-publication anchor retrieval.
 name: Canonical Get single writer (disabled preparation)
 on:
