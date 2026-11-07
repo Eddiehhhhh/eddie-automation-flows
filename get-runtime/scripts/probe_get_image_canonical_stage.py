@@ -180,10 +180,18 @@ def verify_proof_parent(api, proof, parent):
     if not isinstance(proof, dict) or not re.fullmatch(r'[0-9a-f]{40}', parent or ''):
         fail('proof', 'proof_parent_not_ancestor')
     value = api.call('GET', '/compare/' + proof['parent'] + '...' + parent + '?per_page=1&page=1')
-    if (value.get('status') not in {'ahead', 'identical'}
+    status = value.get('status')
+    ahead = value.get('ahead_by')
+    behind = value.get('behind_by')
+    counts_match = (type(ahead) is int and type(behind) is int and
+                    ((status == 'ahead' and ahead > 0 and behind == 0)
+                     or (status == 'identical' and ahead == 0 and behind == 0)))
+    # GitHub's compare response has no `head_commit` field. The requested URL
+    # binds the exact target SHA; status and the returned base/merge base prove
+    # that the proof parent is its ancestor without inferring a substitute head.
+    if (not counts_match
             or value.get('base_commit', {}).get('sha') != proof['parent']
-            or value.get('merge_base_commit', {}).get('sha') != proof['parent']
-            or value.get('head_commit', {}).get('sha') != parent):
+            or value.get('merge_base_commit', {}).get('sha') != proof['parent']):
         fail('proof', 'proof_parent_not_ancestor')
 
 

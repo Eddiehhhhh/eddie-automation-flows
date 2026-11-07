@@ -100,10 +100,15 @@ class ProbeStageTests(unittest.TestCase):
             def call(self,method,path):
                 self.asserted=(method,path)
                 if not self.success:
-                    return {'status':'diverged','base_commit':{'sha':'a'*40},
-                        'merge_base_commit':{'sha':'c'*40},'head_commit':{'sha':'b'*40}}
-                return {'status':'ahead','base_commit':{'sha':'a'*40},
-                    'merge_base_commit':{'sha':'a'*40},'head_commit':{'sha':'b'*40}}
+                    return {'status':'ahead','ahead_by':1,'behind_by':0,
+                        'base_commit':{'sha':'a'*40},'merge_base_commit':{'sha':'c'*40},
+                        'commits':[{'sha':'b'*40}]}
+                # Shape taken from the live GitHub Compare API response: it
+                # carries base_commit/merge_base_commit and commits, but no
+                # top-level head_commit field.
+                return {'status':'ahead','ahead_by':1,'behind_by':0,
+                    'base_commit':{'sha':'a'*40},'merge_base_commit':{'sha':'a'*40},
+                    'commits':[{'sha':'b'*40}]}
         proof={'parent':'a'*40}
         api=API(True)
         probe.verify_proof_parent(api,proof,'b'*40)
