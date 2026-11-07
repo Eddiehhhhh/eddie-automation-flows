@@ -154,13 +154,6 @@ def extract_candidate(plan, files, source_id, proof, source_json_sha256, source_
     markdown = get_root + row['filePath']
     image = images[0]
     proof_asset = proof['assets'][0]
-    if (proof.get('source_field') != 'content_embed'
-            or source_content_sha256 != proof['source_content_sha256']
-            or source_json_sha256 != proof['source_json_sha256']
-            or image.get('asset_sha256') != proof_asset['sha256']
-            or image.get('asset_bytes') != proof_asset['bytes']
-            or image.get('asset_mime') != proof_asset['mime']):
-        fail('canonical_prepare', 'proof_binding_mismatch')
     asset_path = image.get('asset_path')
     if (markdown not in files or asset_path not in files
             or not asset_path.startswith(get_root + '_assets/images/')):
@@ -173,7 +166,14 @@ def extract_candidate(plan, files, source_id, proof, source_json_sha256, source_
     # The Markdown uses a relative reference; never log or persist the source URL.
     if Path(asset_path).name.encode() not in files[markdown]:
         fail('canonical_prepare')
-    return image
+    matches = {
+        'source_json_match': source_json_sha256 == proof['source_json_sha256'],
+        'source_content_match': source_content_sha256 == proof['source_content_sha256'],
+        'image_sha256_match': image.get('asset_sha256') == proof_asset['sha256'],
+        'image_bytes_match': image.get('asset_bytes') == proof_asset['bytes'],
+        'image_mime_match': image.get('asset_mime') == proof_asset['mime'],
+    }
+    return image, matches
 
 
 def verify_proof_parent(api, proof, parent):
@@ -348,16 +348,14 @@ def main(argv=None):
                 'source_content_sha256': source_content_sha256}
             if manual.guard(parent) != parent_sha:
                 fail('private_stage', 'main_moved')
-        image = extract_candidate(candidate['plan'], candidate['files'], source_id, proof,
-                                  candidate['source_json_sha256'], candidate['source_content_sha256'])
-        ref, commit, readback = publish_private_stage(api, token, candidate, proof)
-        if (set(readback) != set(candidate['files'])
-                or readback[image['asset_path']] != candidate['files'][image['asset_path']]
-                or readback[runtime.entry.FULL_RECEIPT] != candidate['files'][runtime.entry.FULL_RECEIPT]):
-            fail('readback')
-        print(json.dumps({'status':'verified','private_ref':ref,'commit':commit,
-            'main_updated':False,'changed_files':len(readback),'image_assets':1,
-            'registry_receipt_readback':'verified','source_id_emitted':False},sort_keys=True))
+        _, proof_matches = extract_candidate(
+            candidate['plan'], candidate['files'], source_id, proof,
+            candidate['source_json_sha256'], candidate['source_content_sha256'])
+        # This run is deliberately diagnostic-only: never create a stage ref,
+        # even when every proof field matches. A later publication requires a
+        # separate, reviewed execution path.
+        print(json.dumps({'status':'proof_comparison_complete', **proof_matches,
+            'stage_written':False,'main_updated':False},sort_keys=True))
         return 0
     except ProbeFailure:
         raise

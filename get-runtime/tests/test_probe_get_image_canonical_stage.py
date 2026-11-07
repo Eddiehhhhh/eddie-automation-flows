@@ -84,15 +84,32 @@ class ProbeStageTests(unittest.TestCase):
         proof={'source_field':'content_embed','source_json_sha256':'d'*64,
             'source_content_sha256':'e'*64,
             'assets':[{'sha256':sha,'bytes':len(data),'mime':'image/png'}]}
-        self.assertEqual(probe.extract_candidate(plan,files,ident,proof,'d'*64,'e'*64),image)
+        actual, matches = probe.extract_candidate(plan,files,ident,proof,'d'*64,'e'*64)
+        self.assertEqual(actual,image)
+        self.assertEqual(matches,{
+            'source_json_match':True,'source_content_match':True,
+            'image_sha256_match':True,'image_bytes_match':True,'image_mime_match':True})
         bad=dict(files);bad[asset_path]=b'changed'
         with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,bad,ident,proof,'d'*64,'e'*64)
-        wrong_asset={'source_field':'content_embed','source_json_sha256':'d'*64,
-            'source_content_sha256':'e'*64,
-            'assets':[{'sha256':'f'*64,'bytes':len(data),'mime':'image/png'}]}
-        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,wrong_asset,'d'*64,'e'*64)
-        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,proof,'f'*64,'e'*64)
-        with self.assertRaises(probe.ProbeFailure):probe.extract_candidate(plan,files,ident,proof,'d'*64,'f'*64)
+        checks = [
+            ({**proof,'source_json_sha256':'f'*64},'d'*64,'e'*64,'source_json_match'),
+            ({**proof,'source_content_sha256':'f'*64},'d'*64,'e'*64,'source_content_match'),
+            ({**proof,'assets':[{'sha256':'f'*64,'bytes':len(data),'mime':'image/png'}]},
+                'd'*64,'e'*64,'image_sha256_match'),
+            ({**proof,'assets':[{'sha256':sha,'bytes':len(data)+1,'mime':'image/png'}]},
+                'd'*64,'e'*64,'image_bytes_match'),
+            ({**proof,'assets':[{'sha256':sha,'bytes':len(data),'mime':'image/jpeg'}]},
+                'd'*64,'e'*64,'image_mime_match'),
+        ]
+        for altered_proof, source_json, source_content, expected_false in checks:
+            with self.subTest(expected_false=expected_false):
+                _, observed = probe.extract_candidate(
+                    plan,files,ident,altered_proof,source_json,source_content)
+                self.assertEqual([key for key,value in observed.items() if not value],[expected_false])
+        probe_text=(Path(__file__).resolve().parents[1]/'scripts/probe_get_image_canonical_stage.py').read_text()
+        main_body=probe_text.split('def main(argv=None):',1)[1].split("if __name__ == '__main__':",1)[0]
+        self.assertNotIn('publish_private_stage(',main_body)
+        self.assertIn("'stage_written':False,'main_updated':False",main_body)
 
     def test_proof_parent_must_be_candidate_ancestor(self):
         class API:
