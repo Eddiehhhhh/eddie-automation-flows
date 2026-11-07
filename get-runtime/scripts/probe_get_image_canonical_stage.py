@@ -10,7 +10,33 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 from urllib.parse import quote
+
+# The probe and the runtime under review intentionally live in separate
+# checkouts. Import every production module from the exact pinned runtime,
+# never from this probe branch.
+FORMAL_RUNTIME_SHA = '651a6d59d3501f082f65ebb79ddc63d3d2039524'
+FORMAL_RUNTIME_ROOT = Path(os.environ.get(
+    'GET_FORMAL_RUNTIME_ROOT', str(Path(__file__).resolve().parents[1])))
+FORMAL_SCRIPTS = FORMAL_RUNTIME_ROOT / 'scripts'
+import subprocess
+if not FORMAL_SCRIPTS.is_dir():
+    raise SystemExit('formal_runtime_checkout_invalid')
+sys.path.insert(0, str(FORMAL_SCRIPTS))
+
+
+def verify_formal_runtime_checkout():
+    if not re.fullmatch(r'[0-9a-f]{40}', FORMAL_RUNTIME_SHA):
+        fail('bindings', 'formal_runtime_sha_mismatch')
+    try:
+        formal_head = subprocess.check_output(
+            ['git', '-C', str(FORMAL_RUNTIME_ROOT.parent), 'rev-parse', 'HEAD'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        fail('bindings', 'formal_runtime_checkout_invalid')
+    if formal_head != FORMAL_RUNTIME_SHA:
+        fail('bindings', 'formal_runtime_sha_mismatch')
 
 import get_private_runtime_bindings as bindings
 import get_gitdata_staging as staging
@@ -21,7 +47,7 @@ import get_recurring_runtime as runtime
 import sync_getnote_to_raw as sync
 from source_sync_rate import RequestPolicy
 
-PROOF_CONTRACT = 'getnote-private-asset-probe-1'
+PROOF_CONTRACT = 'getnote-private-content-image-probe-1'
 PROOF_COMMIT = '328fe058d8ad3190eeb3cce69a66ff49009c19fd'
 PROOF_ROOT = '.sync/get-notion-asset-probes'
 STAGES = {'proof', 'bindings', 'policy', 'source', 'canonical_prepare', 'private_stage', 'readback'}
@@ -67,6 +93,8 @@ def fetch_proof(api, proof_ref):
     if (proof.get('contract') != PROOF_CONTRACT or proof.get('ref') != proof_ref
             or type(ident) is not str or re.fullmatch(r'[0-9]{19}', ident) is None
             or path != PROOF_ROOT + '/' + ident + '.json'
+            or proof.get('source_field') != 'content_embed'
+            or re.fullmatch(r'[0-9a-f]{64}', proof.get('source_content_sha256', '')) is None
             or not re.fullmatch(r'[0-9a-f]{64}', proof.get('source_json_sha256', ''))
             or not isinstance(proof.get('assets'), list) or len(proof['assets']) != 1
             or not isinstance(proof.get('parent'), str) or re.fullmatch(r'[0-9a-f]{40}', proof['parent']) is None):
@@ -93,10 +121,19 @@ def load_policy():
         value = json.loads(base64.b64decode(encoded.group(1), validate=True))
     except (ValueError, UnicodeError, TypeError):
         fail('policy')
-    return runtime.validate_policy(value, digest.group(1), runtime.entry.BOOTSTRAP), digest.group(1)
+    # This is an isolated candidate policy, not a production policy update.
+    # Keep repository/workflow/job identity fields from the reviewed policy,
+    # and bind the exact runtime and template that this probe imports.
+    value['code_sha'] = FORMAL_RUNTIME_SHA
+    value['rules_sha256'] = runtime.entry.rules_sha256()
+    value['get_policy_sha256'] = runtime.entry.policy_sha256(
+        value['rules_sha256'], runtime.entry.BOOTSTRAP)
+    value['controller_template_sha256'] = runtime.controller.template_sha256()
+    candidate_sha = runtime.entry.a.sha(runtime.entry.a.encoded(value))
+    return runtime.validate_policy(value, candidate_sha, runtime.entry.BOOTSTRAP), candidate_sha
 
 
-def extract_candidate(plan, files, source_id, proof, source_json_sha256):
+def extract_candidate(plan, files, source_id, proof, source_json_sha256, source_content_sha256):
     get_root = runtime.r.GET + '/'
     state_path = get_root + runtime.engine.n.STATE
     receipt_path = runtime.entry.FULL_RECEIPT
@@ -117,7 +154,9 @@ def extract_candidate(plan, files, source_id, proof, source_json_sha256):
     markdown = get_root + row['filePath']
     image = images[0]
     proof_asset = proof['assets'][0]
-    if (source_json_sha256 != proof['source_json_sha256']
+    if (proof.get('source_field') != 'content_embed'
+            or source_content_sha256 != proof['source_content_sha256']
+            or source_json_sha256 != proof['source_json_sha256']
             or image.get('asset_sha256') != proof_asset['sha256']
             or image.get('asset_bytes') != proof_asset['bytes']
             or image.get('asset_mime') != proof_asset['mime']):
@@ -225,6 +264,7 @@ def main(argv=None):
     token = os.environ.get('PRIVATE_VAULT_TOKEN')
     if not token:
         fail('bindings', 'credential_missing')
+    verify_formal_runtime_checkout()
     api = staging.API(token)
     proof = fetch_proof(api, args.proof_ref)
     source_id = proof['source_id']
@@ -240,50 +280,72 @@ def main(argv=None):
         source_key, client_id = sync.load_credentials()
         source = manual.c.Source(source_key, client_id, RequestPolicy(seconds=35 * 60))
         public = provenance.PublicGithub(os.environ.get('GITHUB_TOKEN'))
-        captured = {}
-        original_prepare = runtime.entry.prepare
-        original_publish = runtime.m.publish
-        def capture_prepare(reader, evidence, parent, source, **kwargs):
-            plan, files = original_prepare(reader, evidence, parent, source, **kwargs)
-            preflight_sha = os.environ.get('GET_PREFLIGHT_SOURCE_SHA', '')
-            if not re.fullmatch(r'[0-9a-f]{40}', preflight_sha) or parent != preflight_sha:
-                fail('canonical_prepare', 'preflight_parent_mismatch')
-            snapshot = source.snapshot
-            if snapshot is None or snapshot[0] != source_id or source_id not in source.details:
-                fail('canonical_prepare', 'source_replay_missing')
-            summaries, terminal = snapshot[1]
+        if runtime.validate_policy(policy, policy_sha, runtime.entry.BOOTSTRAP) != policy:
+            fail('policy')
+        parent = manual.Remote(None, token)
+        parent_sha = manual.guard(parent)
+        preflight_sha = os.environ.get('GET_PREFLIGHT_SOURCE_SHA', '')
+        if not re.fullmatch(r'[0-9a-f]{40}', preflight_sha) or parent_sha != preflight_sha:
+            fail('canonical_prepare', 'preflight_parent_mismatch')
+        verify_proof_parent(api, proof, parent_sha)
+        public.private_proof_source = runtime.private_proof.PrivateRecords(parent)
+        public.private_proof_source.expected_head = parent_sha
+        candidate = {}
+        with tempfile.TemporaryDirectory(prefix='get-image-prepare-only-') as folder:
+            root = Path(folder)
+            local = manual.r.readback_checkout(
+                root / 'objects', runtime.entry.BOOTSTRAP['capture_anchor']['capture_commit'], token)
+            parent.local = local
+            reader, evidence, _ = manual.load_evidence(
+                local, parent, token, root, parent_sha,
+                anchor=runtime.entry.BOOTSTRAP['capture_anchor'])
+            trusted_root = root / 'trusted'
+            trusted_root.mkdir(mode=0o700)
+            replay = runtime.ReplaySource(source)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                anchor, preview, history_witness = runtime.load_trusted_inputs(
+                    local, reader, evidence, parent, token, trusted_root, parent_sha,
+                    public, policy, bootstrap=runtime.entry.BOOTSTRAP,
+                    exclude_run_id=None, exclude_run_attempt=None, source_id=source_id)
+                plan, files = runtime.entry.prepare(
+                    reader, evidence, parent_sha, replay,
+                    approved_rules_sha256=policy['rules_sha256'], anchor=anchor,
+                    preview=preview, bootstrap=runtime.entry.BOOTSTRAP,
+                    trigger='manual', history_witness=history_witness,
+                    source_id=source_id)
+            replay.seal()
+            if (plan.get('source_scope') != 'single_note'
+                    or plan.get('single_source_id') != source_id
+                    or plan.get('proposed_content_ids') != [source_id]
+                    or replay.snapshot is None or replay.snapshot[0] != source_id
+                    or source_id not in replay.details):
+                fail('canonical_prepare', 'single_note_contract_mismatch')
+            summaries, terminal = replay.snapshot[1]
             items = runtime.entry.engine.a.source_snapshot(summaries, terminal, only_id=source_id)
-            detail = manual.detail_note(source.details[source_id])
+            detail = manual.detail_note(replay.details[source_id])
             runtime.entry.engine.n.source_note(items.get(source_id), detail)
             source_json_sha256 = hashlib.sha256(sync.json_text(detail).encode('utf-8')).hexdigest()
+            source_content = detail.get('content') if isinstance(detail, dict) else None
+            if not isinstance(source_content, str):
+                fail('canonical_prepare', 'source_content_missing')
+            source_content_sha256 = hashlib.sha256(source_content.encode('utf-8')).hexdigest()
+            runtime.entry.verify_plan(
+                reader, evidence, plan, files, policy['rules_sha256'],
+                bootstrap=runtime.entry.BOOTSTRAP,
+                history_witness=history_witness, source_id=source_id)
             candidate = {'plan': plan, 'files': files,
-                'parent_tree': reader.local.run('rev-parse', parent + '^{tree}').decode().strip(),
-                'parent_timestamp': reader.local.run('show', '-s', '--format=%ct', parent).decode().strip(),
-                'source_json_sha256': source_json_sha256}
-            captured.update(candidate)
-            return plan, files
-        def forbid_main_publish(*args, **kwargs):
-            fail('private_stage', 'main_publish_forbidden')
-        original_scope = runtime.validate_single_note_scope
-        runtime.entry.prepare = capture_prepare
-        runtime.m.publish = forbid_main_publish
-        runtime.validate_single_note_scope = lambda ident, trigger, apply: runtime.engine.n.identity(ident) if ident is not None and trigger == 'manual' and not apply else original_scope(ident, trigger, apply)
-        try:
-            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                result = runtime.run(token, source, policy=policy, approved_policy_sha256=policy_sha,
-                    apply=False, trigger='manual', public_client=public, source_id=source_id)
-        finally:
-            runtime.entry.prepare = original_prepare
-            runtime.m.publish = original_publish
-            runtime.validate_single_note_scope = original_scope
-        if result.get('status') != 'recurring_candidate_verified' or not captured:
-            fail('canonical_prepare')
-        image = extract_candidate(captured['plan'], captured['files'], source_id, proof,
-                                  captured['source_json_sha256'])
-        ref, commit, readback = publish_private_stage(api, token, captured, proof)
-        if (set(readback) != set(captured['files'])
-                or readback[image['asset_path']] != captured['files'][image['asset_path']]
-                or readback[runtime.entry.FULL_RECEIPT] != captured['files'][runtime.entry.FULL_RECEIPT]):
+                'parent_tree': reader.local.run('rev-parse', parent_sha + '^{tree}').decode().strip(),
+                'parent_timestamp': reader.local.run('show', '-s', '--format=%ct', parent_sha).decode().strip(),
+                'source_json_sha256': source_json_sha256,
+                'source_content_sha256': source_content_sha256}
+            if manual.guard(parent) != parent_sha:
+                fail('private_stage', 'main_moved')
+        image = extract_candidate(candidate['plan'], candidate['files'], source_id, proof,
+                                  candidate['source_json_sha256'], candidate['source_content_sha256'])
+        ref, commit, readback = publish_private_stage(api, token, candidate, proof)
+        if (set(readback) != set(candidate['files'])
+                or readback[image['asset_path']] != candidate['files'][image['asset_path']]
+                or readback[runtime.entry.FULL_RECEIPT] != candidate['files'][runtime.entry.FULL_RECEIPT]):
             fail('readback')
         print(json.dumps({'status':'verified','private_ref':ref,'commit':commit,
             'main_updated':False,'changed_files':len(readback),'image_assets':1,

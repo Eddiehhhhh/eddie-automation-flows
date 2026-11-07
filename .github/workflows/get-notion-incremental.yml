@@ -25,6 +25,15 @@ jobs:
           repository: Eddiehhhhh/eddie-automation-flows
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Check out the exact reviewed Get runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Eddiehhhhh/eddie-automation-flows
+          ref: 651a6d59d3501f082f65ebb79ddc63d3d2039524
+          path: runtime-651
+          persist-credentials: false
+      - name: Verify exact reviewed runtime checkout
+        run: test "$(git -C ../runtime-651 rev-parse HEAD)" = 651a6d59d3501f082f65ebb79ddc63d3d2039524
       - name: Check out private rules for the write preflight
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -135,7 +144,7 @@ jobs:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           APPLY: 'false'
-        run: python scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
+        run: python ../runtime-651/get-runtime/scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
       - name: Build, stage and read back one canonical image candidate
         env:
           GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
@@ -144,6 +153,7 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
           GITHUB_TOKEN: ${{ github.token }}
           GET_PREFLIGHT_SOURCE_SHA: ${{ steps.private_preflight.outputs.source_sha }}
+          GET_FORMAL_RUNTIME_ROOT: ${{ github.workspace }}/runtime-651/get-runtime
         run: >-
           python scripts/probe_get_image_canonical_stage.py
           --proof-ref codex/get-asset-proof-42297879789-1
