@@ -126,6 +126,16 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     selected,remaining=select_new(items,registry,preview,source_id=source_id,legacy_ids=legacy['legacyById'])
     legacy_needed={i for i,row in legacy['legacyById'].items() if (source_id is None or i==source_id) and i in items and (raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or a.sha(a.encoded(items[i]))!=row['summary_sha256'])}
     new_needed={i for i,row in registry['newById'].items() if (source_id is None or i==source_id) and i in items and (raw_source_version(items[i].get('updated_at'))!=row['source_version'] or n.raw._source_content_hash(items[i])!=row['summary_sha256'])}
+    # An explicit single-note request may fill an older canonical note's missing
+    # inline-image assets even when Get has not changed its update timestamp.
+    # Keep the hourly full-catalog path unchanged so historical media cannot
+    # delay newly changed notes.
+    if source_id in registry['newById'] and source_id in items:
+        row=registry['newById'][source_id]
+        old=current.get(row['filePath'])
+        if (row['source_metadata'].get('inline_images') is None
+                and isinstance(old,bytes) and b'![' in old):
+            new_needed.add(source_id)
     needed=sorted((legacy_needed|new_needed|set(selected))&set(items));details={};receipts={};unavailable=0
     for ident in needed:
         try:

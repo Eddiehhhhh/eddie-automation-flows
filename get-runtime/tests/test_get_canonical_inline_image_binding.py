@@ -159,6 +159,80 @@ class CanonicalInlineBindingTests(unittest.TestCase):
         with self.assertRaises(ValueError):verify(Reader({}),'parent',registry)
         with self.assertRaises(ValueError):verify(Reader({self.path:('100755','blob',image['asset_blob'])}),'parent',registry)
 
+    def test_single_note_backfills_unchanged_old_image_without_hourly_scan(self):
+        repo=fixture.HourlyDuplicateIsolation();repo.setUp()
+        self.addCleanup(repo.doCleanups)
+        ident='55555'
+        old=fixture.note(ident,self.body)
+        path=CANON.new_path(old,ident)
+        rendered,_=CANON.render(old,[],Path(path),faithful=True)
+        original=rendered.encode()
+        repo.current[path]=original
+        repo.owner_rows[ident]=CANON.record(old,old,path,original)
+        parent,legacy_sha,registry_sha=repo.save_parent()
+        reader=CANON.legacy.OfflineGit(repo.root)
+        current=ENTRY.load_states(reader,repo.evidence,parent,legacy_sha,registry_sha,source_id=ident)[0]
+        class Source:
+            def enumerate(self,only_id=None):
+                return [old],{'contract':'get-single-note-source-scope-1',
+                    'note_id':ident,'complete_catalog':False} if only_id else True
+            def detail_raw(self,requested):
+                self_call.append(requested)
+                return CANON.legacy.encoded({'data':old})
+        class AssetStore:
+            def __init__(self,root,**kwargs):self.root=Path(root)
+            def materialize(self,note):
+                target=self.root/('_assets/images/'+self_sha+'.png')
+                target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes(self_data)
+                return [{'status':'downloaded','path':'_assets/images/'+self_sha+'.png',
+                    'sha256':self_sha,'bytes':len(self_data),'mime':'image/png'}]
+        self_data=self.data;self_sha=self.sha;self_call=[]
+        with patch.object(ENTRY.engine.source_assets,'AssetStore',AssetStore):
+            proposal,files=ENTRY.engine.prepare(reader,repo.evidence,parent,current,Source(),
+                legacy_sha=legacy_sha,registry_sha=registry_sha,source_id=ident)
+        states=ENTRY.load_states(reader,repo.evidence,proposal['candidate_commit'],
+            proposal['state_sha256'],proposal['registry_sha256'],source_id=ident)
+        self.assertEqual(self_call,[ident])
+        self.assertEqual(proposal['counts']['new_updated'],1)
+        self.assertIn('inline_images',states[2]['newById'][ident]['source_metadata'])
+        self.assertEqual(reader.read(proposal['candidate_commit'],
+            'Raw/03 Get/'+path,CANON.legacy.owned.MAX_NOTE).count(b'../_assets/images/'),1)
+        self.assertEqual(reader.read(proposal['candidate_commit'],self.path,len(self_data)),self_data)
+        self.assertEqual(reader.read(parent,'Raw/03 Get/'+path,CANON.legacy.owned.MAX_NOTE),original)
+
+        self_call.clear()
+        with patch.object(ENTRY.engine.source_assets,'AssetStore',AssetStore):
+            hourly,_=ENTRY.engine.prepare(reader,repo.evidence,parent,current,Source(),
+                legacy_sha=legacy_sha,registry_sha=registry_sha)
+        self.assertEqual(self_call,[])
+        self.assertEqual(hourly['counts']['new_unchanged'],1)
+
+        class UnavailableStore(AssetStore):
+            def materialize(self,note):
+                raise SOURCE_ASSETS.AssetError('synthetic unavailable image')
+        with patch.object(ENTRY.engine.source_assets,'AssetStore',UnavailableStore):
+            held,_=ENTRY.engine.prepare(reader,repo.evidence,parent,current,Source(),
+                legacy_sha=legacy_sha,registry_sha=registry_sha,source_id=ident)
+        held_states=ENTRY.load_states(reader,repo.evidence,held['candidate_commit'],
+            held['state_sha256'],held['registry_sha256'],source_id=ident)
+        self.assertEqual(held_states[2]['conflictsById'][ident],'asset_materialization_required')
+        self.assertEqual(reader.read(held['candidate_commit'],
+            'Raw/03 Get/'+path,CANON.legacy.owned.MAX_NOTE),original)
+
+        changed=fixture.note(ident,self.body.replace('before','changed body'))
+        class DivergedSource(Source):
+            def detail_raw(self,requested):
+                return CANON.legacy.encoded({'data':changed})
+        with patch.object(ENTRY.engine.source_assets,'AssetStore',AssetStore):
+            raced,_=ENTRY.engine.prepare(reader,repo.evidence,parent,current,DivergedSource(),
+                legacy_sha=legacy_sha,registry_sha=registry_sha,source_id=ident)
+        raced_states=ENTRY.load_states(reader,repo.evidence,raced['candidate_commit'],
+            raced['state_sha256'],raced['registry_sha256'],source_id=ident)
+        self.assertEqual(raced_states[2]['conflictsById'][ident],'source_version_race')
+        self.assertEqual(reader.read(raced['candidate_commit'],
+            'Raw/03 Get/'+path,CANON.legacy.owned.MAX_NOTE),original)
+
     def test_real_canonical_receipt_holds_bad_and_overbudget_images_per_note(self):
         repo=fixture.HourlyDuplicateIsolation();repo.setUp()
         self.addCleanup(repo.doCleanups)
