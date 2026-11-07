@@ -157,9 +157,11 @@ def wire_blocks(rows, previous_type=list_semantics.UNKNOWN,*,uploaded_pngs=None)
             if kind=='image':
                 try:payload=ro.planner.normalize_payload('image',payload)
                 except Exception:fail('asset_write_contract_missing')
-                if payload.get('kind')!='notion_uploaded_png' or row['children'] or not isinstance(uploaded_pngs,dict):fail('asset_write_contract_missing')
+                if row['children'] or not isinstance(uploaded_pngs,dict):fail('asset_write_contract_missing')
                 wanted={k:payload[k] for k in ('sha256','byte_count','mime')}
-                if uploaded_pngs.get(payload['upload_id'])!=wanted:fail('asset_write_contract_missing')
+                if payload.get('kind') in ('notion_uploaded_png','notion_incremental_uploaded_media'):
+                    if uploaded_pngs.get(payload['upload_id'])!=wanted:fail('asset_write_contract_missing')
+                else:fail('asset_write_contract_missing')
                 result.append({'object':'block','type':'image','image':{'type':'file_upload','file_upload':{'id':payload['upload_id']},'caption':split_runs(payload['caption'])}})
                 continue
             if kind not in ro.planner.KINDS or not isinstance(payload,dict) or count[0]>1000:fail('invalid_blocks')

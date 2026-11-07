@@ -16,6 +16,7 @@ import subprocess
 import get_notion_live_transport as transport
 import get_notion_properties as properties
 import get_notion_sink_plan as sink
+import get_notion_incremental_media as media
 
 REPO = 'Eddiehhhhh/eddie-llm-wiki'
 REGISTRY = 'Raw/03 Get/03 State/canonical-registry.json'
@@ -92,7 +93,8 @@ def source(root, ident, expected_commit):
     return path, data, row
 
 
-def desired(data, ident, path, row, schema):
+def desired(data, ident, path, row, schema, *, media_assets=None, media_receipts=None,
+            media_preview=False):
     recording = properties.source_fields(data, ident).get('note_type') in ('recorder_audio', 'recorder_flash_audio')
     title_lines = [line[7:] for line in data.decode().split('\n---\n', 1)[0].splitlines()
                    if line.startswith('title: ')]
@@ -132,9 +134,22 @@ def desired(data, ident, path, row, schema):
         stop('source_properties_held')
     for name, precise in exact_dates.items():
         projected[name] = {'type': 'date', 'date': {'start': precise}}
-    blocks, assets, warnings = sink.render_markdown(data, ident, {}, path, {})
-    if assets or warnings or not blocks or len(blocks) > 100:
-        # shortcut: media and longer notes wait for the existing upload/paging path.
+    media_assets = [] if media_assets is None else media_assets
+    if media_assets:
+        asset_map, content_tree = media.render_assets(media_assets, media_receipts,
+                                                       preview=media_preview)
+    else:
+        asset_map, content_tree = {}, {}
+    blocks, used_assets, warnings = sink.render_markdown(data, ident, asset_map, path, content_tree)
+    if warnings or not blocks or len(blocks) > 100:
+        stop('source_content_held')
+    if media_assets:
+        if (len(used_assets) != len(asset_map) or set(used_assets) != set(asset_map)
+                or media.image_count(blocks) != len(media_assets)):
+            stop('source_content_held')
+        if media_receipts is not None:
+            media.bind_uploaded_blocks(blocks, media_assets, media_receipts)
+    elif used_assets:
         stop('source_content_held')
     props = {'笔记 ID': {'type': 'rich_text', 'rich_text': [sink.text_run(ident)]},
              names[0]: {'type': 'title', 'title': [sink.text_run(title)]}, **projected}
@@ -202,8 +217,8 @@ def target_sha(snapshot, names):
     return hashlib.sha256(sink.encoded({'blocks': semantic, 'properties': values})).hexdigest()
 
 
-def verify_note(api, ident, page, props, blocks):
-    snapshot = api.read_note(ident)
+def verify_note(api, ident, page, props, blocks, *, snapshot=None):
+    snapshot = api.read_note(ident) if snapshot is None else snapshot
     if snapshot.get('page_id') != page or sink.snapshot_tree(snapshot)[3] != sink.comparison_semantics(blocks):
         stop('existing_content_differs')
     actual = snapshot['properties_raw']
@@ -241,6 +256,23 @@ def checked_adoption(owned):
                    for key in ('initial_target_sha256', 'target_snapshot_sha256'))):
         stop('manual_edit_or_unknown_write')
     return value
+
+
+def validate_owned_page(owned, ident, page):
+    required = {'note_id', 'page_id', 'source_sha256', 'target_sha256'}
+    if not isinstance(owned, dict):
+        stop('manual_edit_or_unknown_write')
+    shape = (required if 'origin' not in owned else
+             required | {'origin', 'adoption'} if owned.get('origin') == 'adopted' else
+             required | {'origin'} if owned.get('origin') == 'created' else set())
+    if (set(owned) != shape or owned['note_id'] != ident or owned['page_id'] != page
+            or any(not isinstance(owned[key], str)
+                   or re.fullmatch(r'[a-f0-9]{64}', owned[key]) is None
+                   for key in ('source_sha256', 'target_sha256'))):
+        stop('manual_edit_or_unknown_write')
+    if owned.get('origin') == 'adopted':
+        checked_adoption(owned)
+    return owned
 
 
 def adopt(root, ident, commit, source_id, token, legacy_owned):
@@ -287,29 +319,46 @@ def attempt_from_main(root, ident):
 def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=None,
         persist_update=None):
     path, data, row = source(root, ident, commit)
+    media_assets = media.source_assets(root, commit, ident, data, path, row)
     request = transport.Transport(token)
     api = transport.API(request, source_id, [ident])
+    api.uploaded_pngs = {}
     schema = api.schema()
-    props, blocks = desired(data, ident, path, row, schema)
     matches = api.matches(ident)
     if len(matches) > 1:
         stop('duplicate_id')
     if matches:
         page = matches[0]
-        if owned is not None:
-            required = {'note_id', 'page_id', 'source_sha256', 'target_sha256'}
-            if not isinstance(owned, dict):
-                stop('manual_edit_or_unknown_write')
-            shape = (required if 'origin' not in owned else
-                     required | {'origin', 'adoption'} if owned.get('origin') == 'adopted' else
-                     required | {'origin'} if owned.get('origin') == 'created' else set())
-            if (set(owned) != shape or owned['note_id'] != ident
-                    or owned['page_id'] != page or any(not isinstance(owned[key], str)
-                    or re.fullmatch(r'[a-f0-9]{64}', owned[key]) is None
-                    for key in ('source_sha256', 'target_sha256'))):
-                stop('manual_edit_or_unknown_write')
+        if media_assets:
+            if owned is None:
+                stop('unowned_target')
+            validate_owned_page(owned, ident, page)
+            if hashlib.sha256(data).hexdigest() != owned['source_sha256']:
+                stop('existing_content_differs')
+            snapshot = api.read_note(ident)
+            existing_media = media.match_existing_images(snapshot, media_assets)
+            if existing_media is None:
+                stop('existing_content_differs')
+            props, blocks = desired(data, ident, path, row, schema,
+                                    media_assets=media_assets, media_preview=True)
+            snapshot = media.bind_existing_snapshot(snapshot, existing_media)
+            blocks = media.bind_existing_blocks(blocks, existing_media)
+            target = verify_note(api, ident, page, props, blocks, snapshot=snapshot)
             if owned.get('origin') == 'adopted':
-                checked_adoption(owned)
+                import get_notion_executor as executor
+                if executor.target_sha(snapshot, ident, source_id) != owned['adoption']['target_snapshot_sha256']:
+                    stop('manual_edit_or_unknown_write')
+                result_owned = owned
+            elif owned.get('origin') == 'created':
+                result_owned = owned_receipt(ident, page, data, target, created=True)
+            else:
+                if owned.get('target_sha256') != target:
+                    stop('manual_edit_or_unknown_write')
+                result_owned = owned
+            return {'status': 'already_present', 'page_id': page, 'owned': result_owned}
+        props, blocks = desired(data, ident, path, row, schema)
+        if owned is not None:
+            validate_owned_page(owned, ident, page)
             source_sha = hashlib.sha256(data).hexdigest()
             if source_sha != owned['source_sha256'] or (isinstance(journal, dict)
                     and journal.get('phase') != 'complete'):
@@ -333,20 +382,53 @@ def run(root, ident, commit, source_id, token, apply=False, owned=None, journal=
                 'owned': owned if owned is not None and owned.get('origin') == 'adopted' else
                          owned_receipt(ident, page, data, target,
                                        created=owned is not None and owned.get('origin') == 'created')}
+    if media_assets:
+        if apply:
+            # The controller must first publish upload checkpoints. Read and
+            # validate those durable receipts before rendering any write payload.
+            receipts = media.receipts_from_main(root, ident, data)
+            api.uploaded_pngs = media.upload_handles(media_assets, receipts)
+        else:
+            receipts = None
+        props, blocks = desired(data, ident, path, row, schema,
+                                media_assets=media_assets, media_receipts=receipts,
+                                media_preview=not apply)
+        if not apply:
+            return {'status': 'ready', 'source_blob': hashlib.sha256(data).hexdigest()}
+        media.bind_uploaded_blocks(blocks, media_assets, receipts)
+    else:
+        props, blocks = desired(data, ident, path, row, schema)
     if not apply:
         return {'status': 'ready', 'source_blob': hashlib.sha256(data).hexdigest()}
     check_attempt(attempt_from_main(root, ident), ident, data)
     payload = {'parent': {'type': 'data_source_id', 'data_source_id': api.source},
-               'properties': props, 'children': transport.wire_blocks(blocks)}
+               'properties': props, 'children': transport.wire_blocks(
+                   blocks, uploaded_pngs=api.uploaded_pngs)}
     key = transport.fingerprint('POST', '/pages', payload)
     writer = transport.Transport(token, approved_writes=(key,))
-    page = transport.API(writer, source_id, [ident], approved_writes=(key,)).create_page(source_id, ident, props, blocks)
+    page = transport.API(writer, source_id, [ident], approved_writes=(key,),
+                         uploaded_pngs=api.uploaded_pngs).create_page(source_id, ident, props, blocks)
     check = transport.API(transport.Transport(token), source_id, [ident])
     if check.matches(ident) != [page]:
         stop('write_uncertain')
-    target = verify_note(check, ident, page, props, blocks)
+    target = verify_note(check, ident, page, props, blocks,
+                         snapshot=media.bind_uploaded_snapshot(check.read_note(ident),
+                             media_assets, receipts) if media_assets else None)
     return {'status': 'created', 'page_id': page,
             'owned': owned_receipt(ident, page, data, target, created=True)}
+
+
+def prepare_media(root, ident, commit, token, persist):
+    """Checkpoint verified private Git media before reserving a Notion page create."""
+    path, data, row = source(root, ident, commit)
+    assets = media.source_assets(root, commit, ident, data, path, row)
+    if not assets:
+        return {}
+    previous = media.receipts_from_main(root, ident, data)
+    def checkpoint(receipts):
+        persist({'contract': media.CONTRACT, 'note_id': ident,
+                 'source_sha256': hashlib.sha256(data).hexdigest(), 'assets': receipts})
+    return media.publish_missing(assets, token, previous, checkpoint)
 
 
 def check_attempt(attempt, ident, data):
