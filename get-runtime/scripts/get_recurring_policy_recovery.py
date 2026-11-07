@@ -80,7 +80,7 @@ def current_get_policy():
 def accepts_receipt(commit, receipt_sha256, value, requested_policy):
     """No arbitrary old receipt, policy choice, reverse migration or relabeling."""
     from get_recurring_entry import a
-    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING'):
+    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING'):
         binding = _private_bindings.value('get_recurring_policy_recovery', binding_name)
         if isinstance(binding, dict) and 'record' in binding:
             record = binding['record']
@@ -125,13 +125,14 @@ def candidate_policy(policy, run):
     old = old_public_policy()
     run_id, attempt, controller = ORIGINAL_RUN_ID, ORIGINAL_RUN_ATTEMPT, ORIGINAL_CONTROLLER_SHA
     event = 'workflow_dispatch'
-    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING'):
+    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING'):
         binding = _private_bindings.value('get_recurring_policy_recovery', binding_name)
         if isinstance(binding, dict) and 'record' in binding and run.get('id') == binding['record']['run_id']:
             old = deepcopy(binding['public_policy'])
             if entry.a.sha(entry.a.encoded(old)) != binding['public_sha256']:
                 raise ValueError('recovery_policy_changed')
             run_id, attempt, controller = (binding['record'][k] for k in ('run_id', 'run_attempt', 'controller_sha'))
+            event = binding.get('event', 'workflow_dispatch')
     if run.get('id') == NOOP_RUN_ID:
         old = noop_public_policy()
         run_id, attempt, controller = NOOP_RUN_ID, NOOP_RUN_ATTEMPT, NOOP_CONTROLLER_SHA
@@ -169,7 +170,7 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id, *, job=None, raw=None, run=None):
     from get_publication_provenance import fail
-    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING'):
+    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING'):
         binding = _private_bindings.value('get_recurring_policy_recovery', binding_name)
         if isinstance(binding, dict) and 'record' in binding and record['run_id'] == binding['record']['run_id']:
             if job_id != binding['job_id'] or record != binding['record']:
