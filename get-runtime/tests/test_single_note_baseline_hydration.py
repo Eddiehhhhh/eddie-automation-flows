@@ -130,19 +130,20 @@ class BaselineHydration(unittest.TestCase):
                 anchor['commit']: before_tree, self.parent: after_tree,
                 migration: after_tree}[commit])
         pin = ('e' * 40, migration, before_tree, after_tree)
+        writable_local = object()
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime, 'fetch_commit') as fetch, \
              patch.object(runtime, 'load_receipt') as load:
-            runtime.hydrate_pilot_migration_receipt(reader, self.remote, 'token',
+            runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
                 Path('/unused'), anchor, self.parent)
-        fetch.assert_called_once_with(self.reader.local, migration)
+        fetch.assert_called_once_with(writable_local, migration)
         load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration)
 
         reader.source_get_tree = lambda _: 'f' * 40
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime, 'fetch_commit') as fetch, \
              patch.object(runtime, 'load_receipt') as load:
-            runtime.hydrate_pilot_migration_receipt(reader, self.remote, 'token',
+            runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
                 Path('/unused'), anchor, self.parent)
         fetch.assert_not_called()
         load.assert_not_called()
