@@ -43,11 +43,35 @@ class ProofSelectionTest(unittest.TestCase):
         mapping = {key: self.row()}
         with tempfile.TemporaryDirectory() as directory:
             envfile = Path(directory) / 'env'; envfile.write_text('')
-            with patch.object(proof.bindings, 'value', return_value=mapping), patch('builtins.print') as output:
+            with patch.dict('os.environ', {'RUNNER_TEMP':directory,'GITHUB_RUN_ID':'100',
+                    'GITHUB_RUN_ATTEMPT':'1'}), \
+                 patch.object(proof.bindings, 'value', return_value=mapping), patch('builtins.print') as output:
                 result = proof.export_to_github_env(key, envfile)
             self.assertEqual(result, {'status': 'private_single_note_proof_resolved'})
             self.assertEqual(envfile.read_text(), f'GET_SINGLE_NOTE_ID={note_id}\n')
             output.assert_called_once_with(f'::add-mask::{note_id}', flush=True)
+
+    def test_runtime_reads_private_id_from_stable_file_across_step_env_files(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        note_id = self.row()['note_id']
+        with tempfile.TemporaryDirectory() as directory:
+            source_env = Path(directory) / 'resolve-env'; source_env.write_text('')
+            runtime_env = Path(directory) / 'runtime-env'; runtime_env.write_text('')
+            key = next(iter(proof.KEYS)); mapping = {key: self.row()}
+            context = {'GET_SINGLE_NOTE_ID':'', 'GET_SINGLE_NOTE_MODE':'true',
+                       'RUNNER_TEMP':directory, 'GITHUB_RUN_ID':'101', 'GITHUB_RUN_ATTEMPT':'2'}
+            with patch.dict(os.environ, {**context,'GITHUB_ENV':str(source_env)}), \
+                 patch.object(proof.bindings, 'value', return_value=mapping), \
+                 patch('builtins.print'):
+                proof.export_to_github_env(key, source_env)
+            with patch.dict(os.environ, {**context,'GITHUB_ENV':str(runtime_env)}):
+                self.assertEqual(proof.runtime_note_id(), note_id)
+            proof_file = Path(directory) / 'get-single-note-proof-101-2.txt'
+            proof_file.write_text(f'{note_id}\n456\n')
+            with patch.dict(os.environ, {**context,'GITHUB_ENV':str(runtime_env)}):
+                self.assertIsNone(proof.runtime_note_id())
 
 
 if __name__ == '__main__':

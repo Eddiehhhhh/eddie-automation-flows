@@ -725,7 +725,8 @@ def main(argv=None):
         if args.publication_file and not args.apply:
             fail('runtime_scope')
         policy = validate_policy(m.strict_capture_json(a.bounded_file(args.policy, 16384), 16384), args.approved_policy_sha256, entry.BOOTSTRAP)
-        source_id = os.environ.get('GET_SINGLE_NOTE_ID') or None
+        from get_private_single_note_proof import runtime_note_id
+        source_id = runtime_note_id()
         single_mode = os.environ.get('GET_SINGLE_NOTE_MODE', 'false') == 'true'
         if single_mode != (source_id is not None) or (source_id is not None and (not args.apply or args.trigger != 'manual' or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch')):
             fail('runtime_scope')
