@@ -435,11 +435,34 @@ def trust_current(reader, evidence, parent, approved_rules_sha256, anchor=None, 
         fail('entry_rules_changed')
     policy = policy_sha256(approved_rules_sha256, bootstrap)
     initial = bootstrap_states(reader, evidence, bootstrap)
+    external_anchor = anchor
     if anchor is None:
         trusted = bootstrap['commit']; receipt = None; states = initial
     else:
         receipt, states = verify_trusted_publication(reader, evidence, anchor, policy, bootstrap, history_witness=history_witness, source_id=source_id)
         trusted = anchor['commit']
+    if receipt is not None and external_anchor is not None and type(PILOT_MIGRATION) is tuple and len(PILOT_MIGRATION) == 4:
+        before, migration, before_tree, after_tree = PILOT_MIGRATION
+        if (reader.source_get_tree(trusted) == before_tree
+                and reader.source_get_tree(parent) == after_tree):
+            # A state-only migration is accepted only after its complete receipt
+            # proves continuity, state hashes, registry contents, and zero note changes.
+            raw_receipt = reader.read(migration, FULL_RECEIPT, MAX_RECEIPT)
+            migration_anchor = {'commit': migration, 'receipt_sha256': a.sha(raw_receipt)}
+            migrated_receipt, migrated_states = verify_trusted_publication(
+                reader, evidence, migration_anchor, policy, bootstrap,
+                history_witness=history_witness, source_id=source_id)
+            content_writes = sum(migrated_receipt['counts'][key] for key in (
+                'new_created', 'new_preview_imported', 'new_updated', 'legacy_source_updated'))
+            if (single_parent(reader, migration) != before
+                    or migrated_receipt['parent_commit'] != before
+                    or migrated_receipt['previous_receipt_commit'] != trusted
+                    or migrated_receipt['previous_receipt_sha256'] != external_anchor['receipt_sha256']
+                    or migrated_receipt['sequence'] != receipt['sequence'] + 1
+                    or migrated_receipt['changed_content_ids'] or content_writes):
+                fail('entry_receipt_anchor')
+            trusted, receipt, states = migration, migrated_receipt, migrated_states
+            history_witness = None
     unchanged_get_history(reader, trusted, parent, history_witness=history_witness, source_id=source_id,
                           diagnostic_interval='trusted_anchor_to_parent')
     # Equal full Get trees guarantee these exact state/inventory bytes at parent.

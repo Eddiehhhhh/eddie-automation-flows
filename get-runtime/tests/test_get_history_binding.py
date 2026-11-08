@@ -352,6 +352,86 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
             for key, value in (('id', 124), ('run_attempt', 2), ('head_sha', '0' * 40), ('event', 'schedule')):
                 self.assertFalse(entry.recovery.candidate_policy(new, {**run, key: value})[1])
 
+    def test_exact_state_only_transition_verifies_receipt_and_advances_state_anchor(self):
+        anchor, before, migration, parent = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        before_tree, after_tree = '1' * 40, '2' * 40
+        migration_data = (before, migration, before_tree, after_tree)
+        parents = {anchor: [], before: [anchor], migration: [before], parent: [migration]}
+        trees = {anchor: before_tree, before: before_tree, migration: after_tree, parent: after_tree}
+        reader = Reader(parents, trees)
+        raw_receipt = b'bound seq8 receipt'
+        reader.read = lambda commit, path, limit: raw_receipt if commit == migration and path == entry.FULL_RECEIPT else None
+        previous = {'sequence': 7, 'state_sha256': '3' * 64, 'registry_sha256': '4' * 64}
+        next_receipt = {'sequence': 8, 'parent_commit': before,
+                        'previous_receipt_commit': anchor,
+                        'previous_receipt_sha256': 'f' * 64,
+                        'state_sha256': '5' * 64, 'registry_sha256': '6' * 64,
+                        'changed_content_ids': [],
+                        'counts': dict.fromkeys(('new_created', 'new_preview_imported',
+                                                 'new_updated', 'legacy_source_updated'), 0)}
+        old_states, new_states = ({'old': 1}, {'old': 2}, {'old': 3}), ({'new': 1}, {'new': 2}, {'new': 3})
+        bootstrap = {'commit': 'e' * 40}
+        anchor_value = {'commit': anchor, 'receipt_sha256': 'f' * 64}
+        with patch.object(entry, 'PILOT_MIGRATION', migration_data), \
+                patch.object(entry, 'rules_sha256', return_value='7' * 64), \
+                patch.object(entry, 'policy_sha256', return_value='8' * 64), \
+                patch.object(entry, 'bootstrap_states', return_value=old_states), \
+                patch.object(entry, 'verify_trusted_publication', side_effect=[(previous, old_states), (next_receipt, new_states)]) as verify, \
+                patch.object(entry, 'load_states', return_value=new_states) as load:
+            result = entry.trust_current(reader, object(), parent, '7' * 64, anchor_value,
+                                         bootstrap=bootstrap)
+        self.assertEqual(result, ('8' * 64, next_receipt, new_states))
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(verify.call_args_list[1].args[2], {
+            'commit': migration, 'receipt_sha256': entry.a.sha(raw_receipt)})
+        self.assertEqual(load.call_args.args[2:5],
+                         (parent, next_receipt['state_sha256'], next_receipt['registry_sha256']))
+
+    def test_state_only_transition_rejects_content_write_receipt(self):
+        anchor, before, migration, parent = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        before_tree, after_tree = '1' * 40, '2' * 40
+        migration_data = (before, migration, before_tree, after_tree)
+        reader = Reader({anchor: [], before: [anchor], migration: [before], parent: [migration]},
+                        {anchor: before_tree, before: before_tree, migration: after_tree, parent: after_tree})
+        reader.read = lambda *args: b'bound migration receipt'
+        previous = {'sequence': 7, 'state_sha256': '3' * 64, 'registry_sha256': '4' * 64}
+        content_receipt = {'sequence': 8, 'parent_commit': before,
+                           'previous_receipt_commit': anchor,
+                           'previous_receipt_sha256': 'f' * 64,
+                           'changed_content_ids': ['1234567890'],
+                           'counts': {'new_created': 1, 'new_preview_imported': 0,
+                                      'new_updated': 0, 'legacy_source_updated': 0}}
+        with patch.object(entry, 'PILOT_MIGRATION', migration_data), \
+                patch.object(entry, 'rules_sha256', return_value='7' * 64), \
+                patch.object(entry, 'policy_sha256', return_value='8' * 64), \
+                patch.object(entry, 'bootstrap_states', return_value=({}, {}, {})), \
+                patch.object(entry, 'verify_trusted_publication', side_effect=[(previous, ({}, {}, {})), (content_receipt, ({}, {}, {}))]), \
+                patch.object(entry, 'load_states') as load:
+            with self.assertRaisesRegex(entry.EntryFailure, 'entry_receipt_anchor'):
+                entry.trust_current(reader, object(), parent, '7' * 64,
+                                    {'commit': anchor, 'receipt_sha256': 'f' * 64},
+                                    bootstrap={'commit': 'e' * 40})
+        load.assert_not_called()
+
+    def test_invalid_state_only_receipt_stops_before_loading_current_state(self):
+        anchor, before, migration, parent = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        before_tree, after_tree = '1' * 40, '2' * 40
+        reader = Reader({anchor: [], before: [anchor], migration: [before], parent: [migration]},
+                        {anchor: before_tree, before: before_tree, migration: after_tree, parent: after_tree})
+        reader.read = lambda *args: b'bad transition receipt'
+        previous = {'sequence': 7, 'state_sha256': '3' * 64, 'registry_sha256': '4' * 64}
+        with patch.object(entry, 'PILOT_MIGRATION', (before, migration, before_tree, after_tree)), \
+                patch.object(entry, 'rules_sha256', return_value='7' * 64), \
+                patch.object(entry, 'policy_sha256', return_value='8' * 64), \
+                patch.object(entry, 'bootstrap_states', return_value=({}, {}, {})), \
+                patch.object(entry, 'verify_trusted_publication', side_effect=[(previous, ({}, {}, {})), entry.EntryFailure('entry_foreign_delta')]), \
+                patch.object(entry, 'load_states') as load:
+            with self.assertRaisesRegex(entry.EntryFailure, 'entry_foreign_delta'):
+                entry.trust_current(reader, object(), parent, '7' * 64,
+                                    {'commit': anchor, 'receipt_sha256': 'f' * 64},
+                                    bootstrap={'commit': 'e' * 40})
+        load.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
