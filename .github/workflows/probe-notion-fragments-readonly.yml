@@ -1,0 +1,58 @@
+name: Probe Notion Fragments read only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check credential and approved database without reading page content
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          token = os.environ.get('NOTION_API_KEY')
+          if not token:
+              raise SystemExit('credential_missing')
+          base = 'https://api.notion.com/v1'
+          database = '11233b33-7f23-8024-9555-cb8de8c58e02'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+          def status(label, method, path, payload=None, version='2022-06-28'):
+              headers = {'Authorization': 'Bearer ' + token, 'Notion-Version': version}
+              if payload is not None:
+                  headers['Content-Type'] = 'application/json'
+              request = urllib.request.Request(base + path, data=payload, headers=headers, method=method)
+              try:
+                  with opener.open(request, timeout=20) as response:
+                      code = response.status
+                      # No response body is read or logged.
+              except urllib.error.HTTPError as error:
+                  code = error.code
+                  error.close()
+              except (urllib.error.URLError, TimeoutError):
+                  print(label + ': transport_error')
+                  return None
+              print(label + ': HTTP ' + str(code))
+              return code
+
+          identity = status('identity', 'GET', '/users/me')
+          target = status('fragments_database', 'GET', '/databases/' + database)
+          query = status('fragments_query', 'POST', '/databases/' + database + '/query', b'{"page_size":1}')
+          if identity != 200 or target != 200 or query != 200:
+              raise SystemExit('fragments_read_unavailable')
+          PY
