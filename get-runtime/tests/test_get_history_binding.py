@@ -219,6 +219,25 @@ class MainlineHistory(unittest.TestCase):
 
 
 class FailedNotionReceiptPolicy(unittest.TestCase):
+    def test_only_pinned_pilot_migration_receipt_crosses_policy(self):
+        migration = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        seq4 = {'selection': {'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64},
+                'sequence': 4, 'source_policy': {'get_policy_sha256': 'f' * 64}}
+        def value(module, key):
+            if module == 'get_recurring_entry' and key == 'PILOT_MIGRATION': return migration
+            if module == 'get_publication_provenance': return seq4
+            return {}
+        receipt = {'sequence': 8, 'policy_sha256': 'c' * 64}
+        with patch.object(entry.recovery._private_bindings, 'value', side_effect=value), \
+                patch.object(entry.recovery, 'current_get_policy', return_value='d' * 64), \
+                patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {
+                    'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64}), \
+                patch.object(entry.recovery, 'ORIGINAL_RECEIPT_COMMIT', 'f' * 40), \
+                patch.object(entry.recovery.idle_recovery, 'accepts_receipt', return_value=False):
+            self.assertTrue(entry.recovery.accepts_receipt('b' * 40, 'e' * 64, receipt, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('e' * 40, 'e' * 64, receipt, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('b' * 40, 'e' * 64, receipt, 'f' * 64))
+
     def test_only_registered_sequence_four_receipt_crosses_policy(self):
         binding = {'selection': {'receipt_commit': 'a' * 40, 'receipt_sha256': 'b' * 64},
                    'sequence': 4, 'source_policy': {'get_policy_sha256': 'c' * 64}}
