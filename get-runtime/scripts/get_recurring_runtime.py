@@ -306,7 +306,7 @@ def hydrate_pilot_migration_receipt(local, reader, remote, token, root, anchor, 
     if (reader.source_get_tree(anchor['commit']) != before_tree
             or reader.source_get_tree(parent) != after_tree):
         return
-    fetch_commit(local, migration)
+    fetch_commit(local, migration, entry.MAX_INTERVENING + 2)
     load_receipt(reader, remote, token, root, migration)
 
 
