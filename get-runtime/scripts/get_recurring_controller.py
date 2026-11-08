@@ -44,6 +44,8 @@ PRE_PRIVATE_TEMPLATE_SHA256 = '9555eb4a70a35381505a46d767aa17663489e4e4548c3803d
 
 PRE_FIXED_TEMPLATE_SHA256 = '17520052435895138a6529f3a84958dddb8cc50b9c23b07e63c12e52c8f8f178'
 
+SEQ7_TEMPLATE_SHA256 = '3f7b35a0348f5f0197998bf84c6d1473f5e364a8f4611a2823b6642c9263aadb'
+
 # Exact forward-only template migration. The existing private idle capsule must
 # separately authenticate the actual terminal original attempt and idle state.
 FIXED_TEMPLATE_SHA256 = '1d568531b4672b89ec80eaa08532e152d9c13a400602cfaf5438a3cd24f73dc5'
@@ -61,7 +63,7 @@ def fixed_idle_template_transition(old, new):
 
 
 def historical_template_digests():
-    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256, PRE_FIXED_TEMPLATE_SHA256, FIXED_TEMPLATE_SHA256, PRE_DECOUPLE_TEMPLATE_SHA256, PRE_MINUTE23_TEMPLATE_SHA256)
+    return (legacy.TEMPLATE_SHA256, PRE_PRIVATE_TEMPLATE_SHA256, PRE_FIXED_TEMPLATE_SHA256, FIXED_TEMPLATE_SHA256, PRE_DECOUPLE_TEMPLATE_SHA256, PRE_MINUTE23_TEMPLATE_SHA256, SEQ7_TEMPLATE_SHA256)
 
 
 def policy_template_bytes(policy):
@@ -74,6 +76,11 @@ def policy_template_bytes(policy):
     if digest == PRE_MINUTE23_TEMPLATE_SHA256:
         raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-minute17.yml.disabled').read_bytes()
         if len(raw) > MAX_CONTROLLER or a.sha(raw) != PRE_MINUTE23_TEMPLATE_SHA256:
+            p.fail('provenance_controller_template')
+        return raw
+    if digest == SEQ7_TEMPLATE_SHA256:
+        raw = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller-seq7.yml.disabled').read_bytes()
+        if len(raw) > MAX_CONTROLLER or a.sha(raw) != SEQ7_TEMPLATE_SHA256:
             p.fail('provenance_controller_template')
         return raw
     if digest == PRE_DECOUPLE_TEMPLATE_SHA256:
@@ -114,7 +121,7 @@ def scope_for(policy, policy_hash):
             'public_policy_sha256': policy_hash, 'rules_sha256': policy['rules_sha256'],
             'get_policy_sha256': policy['get_policy_sha256'], 'private_repository': r.REPOSITORY,
             'main_ref': r.MAIN_REF, 'max_new': 50,
-            'schedule_minute': 23 if policy.get('controller_template_sha256') == template_sha256() else 17,
+            'schedule_minute': 23 if policy.get('controller_template_sha256') in (template_sha256(), SEQ7_TEMPLATE_SHA256) else 17,
             'receipt_path': entry.FULL_RECEIPT, 'sink': 'same-controller-confirmed-content-only',
             'permissions': 'existing-only',
             'notion_scope_contract': 'get-notion-standing-runtime-1', 'notion_batch_max': 50,
@@ -137,7 +144,7 @@ def render(policy, approved_policy_sha256, approved_scope_sha256, *, scheduled=T
                     '@@POLICY_SHA256@@': a.checked(approved_policy_sha256, 64),
                     '@@SCOPE_SHA256@@': approved_scope_sha256}
     text = template.decode('utf-8')
-    schedule_block = SCHEDULE_BLOCK if policy['controller_template_sha256'] == template_sha256() else HISTORICAL_SCHEDULE_BLOCK
+    schedule_block = SCHEDULE_BLOCK if policy['controller_template_sha256'] in (template_sha256(), SEQ7_TEMPLATE_SHA256) else HISTORICAL_SCHEDULE_BLOCK
     if type(scheduled) is not bool or text.count(schedule_block) != 1:
         p.fail('provenance_controller_template')
     if not scheduled:

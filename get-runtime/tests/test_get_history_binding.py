@@ -310,11 +310,12 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
     def test_sequence_seven_policy_transition_requires_exact_run_identity(self):
         import get_recurring_controller as controller_module
         old = {'code_sha': 'a' * 40, 'rules_sha256': 'b' * 64, 'get_policy_sha256': 'c' * 64,
-               'controller_template_sha256': 'd' * 64, 'stable': 'unchanged'}
+               'controller_template_sha256': '3f7b35a0348f5f0197998bf84c6d1473f5e364a8f4611a2823b6642c9263aadb', 'stable': 'unchanged'}
         record = {'run_id': 124, 'run_attempt': 3, 'controller_sha': 'e' * 40}
         seq7 = {'record': record, 'event': 'schedule', 'public_policy': old,
                 'public_sha256': entry.a.sha(entry.a.encoded(old))}
-        new = {**old, 'code_sha': 'f' * 40, 'rules_sha256': '1' * 64, 'get_policy_sha256': '2' * 64}
+        new = {**old, 'code_sha': 'f' * 40, 'rules_sha256': '1' * 64,
+               'get_policy_sha256': '2' * 64, 'controller_template_sha256': 'd' * 64}
         run = {'id': 124, 'run_attempt': 3, 'head_sha': 'e' * 40, 'event': 'schedule'}
         def value(_module, key): return seq7 if key == 'SEQ7_BINDING' else {}
         with patch.object(entry.recovery._private_bindings, 'value', side_effect=value), \
@@ -324,8 +325,7 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
                 patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {'run_id': 999}), \
                 patch.object(entry.recovery, 'current_get_policy', return_value='2' * 64), \
                 patch.object(entry, 'rules_sha256', return_value='1' * 64), \
-                patch.object(controller_module, 'template_sha256', return_value='d' * 64), \
-                patch.object(controller_module, 'historical_template_digests', return_value=()):
+                patch.object(controller_module, 'template_sha256', return_value='d' * 64):
             self.assertEqual(entry.recovery.candidate_policy(new, run), (old, True))
             for key, value in (('id', 125), ('run_attempt', 4), ('head_sha', '0' * 40),
                                ('event', 'workflow_dispatch')):
