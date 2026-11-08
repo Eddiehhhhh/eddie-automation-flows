@@ -605,6 +605,10 @@ def failure(exc=None, *, attempt_started=False):
     stage = getattr(exc, 'runtime_stage', None)
     if isinstance(stage, str) and stage in STAGES:
         result['stage'] = stage
+    history_check = getattr(exc, 'history_check', None)
+    if (result.get('error') == 'entry_foreign_get_change' and stage == 'trusted_states'
+            and history_check in entry.HISTORY_CHECKS):
+        result['history_check'] = history_check
     category = getattr(exc, 'cas_error_category', None)
     if isinstance(category, str) and category in m.CAS_ERROR_CATEGORIES:
         result['cas_error_category'] = category

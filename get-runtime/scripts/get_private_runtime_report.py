@@ -17,6 +17,9 @@ PREPARE={'contract':CONTRACT,'status':'recurring_candidate_verified','main_updat
          'local_proposal_only':True,'readback_verified':True,'business_health_asserted':False}
 
 FAILURE_KINDS=frozenset(('missing_key','invalid_type','invalid_value','io_error','guard_or_runtime'))
+HISTORY_CHECKS=frozenset(('merge_first_parent_tree_mismatch','pilot_start_disallowed',
+    'pilot_migration_unconfigured','pilot_migration_malformed','pilot_tree_pair_unmatched',
+    'pilot_tree_diverged','pilot_parent_mismatch','pilot_migration_unclosed'))
 
 def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons=()):
     if not isinstance(result,dict):result={}
@@ -49,6 +52,9 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
     if isinstance(stage,str) and stage in allowed_stages:out['stage']=stage
     kind=result.get('failure_kind')
     if isinstance(kind,str) and kind in FAILURE_KINDS:out['failure_kind']=kind
+    history_check=result.get('history_check')
+    if (out.get('error')=='entry_foreign_get_change' and out.get('stage')=='trusted_states'
+            and history_check in HISTORY_CHECKS):out['history_check']=history_check
     category=result.get('cas_error_category')
     cas_categories=('missing_object','shallow_history','authentication_or_permission','network','size_or_remote_rejection','ref_changed','resource_limit','other')
     if out['status']=='recurring_failed' and category in cas_categories:

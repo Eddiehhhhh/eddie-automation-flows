@@ -52,6 +52,60 @@ class MainlineHistory(unittest.TestCase):
         with self.assertRaisesRegex(entry.EntryFailure, 'entry_history_bound'):
             entry.unchanged_get_history(reader, ids[0], ids[-1])
 
+    def test_unbound_historical_tree_transition_has_fixed_diagnostic(self):
+        later = 'f' * 40
+        reader = Reader({self.root: [], self.linear: [self.root], later: [self.linear]},
+                        {self.root: self.tree, self.linear: self.tree, later: self.changed})
+        migration = ('8' * 40, '9' * 40, '3' * 40, '4' * 40)
+        with patch.object(entry, 'PILOT_MIGRATION', migration):
+            with self.assertRaisesRegex(entry.EntryFailure, 'entry_foreign_get_change') as caught:
+                entry.unchanged_get_history(reader, self.root, later)
+        self.assertEqual(caught.exception.history_check, 'pilot_tree_pair_unmatched')
+
+    def assert_history_check(self, expected, reader, ancestor, descendant, migration):
+        with patch.object(entry, 'PILOT_MIGRATION', migration):
+            with self.assertRaisesRegex(entry.EntryFailure, 'entry_foreign_get_change') as caught:
+                entry.unchanged_get_history(reader, ancestor, descendant)
+        self.assertEqual(caught.exception.history_check, expected)
+
+    def test_missing_or_malformed_pilot_binding_has_fixed_diagnostic(self):
+        later = 'f' * 40
+        reader = Reader({self.root: [], later: [self.root]},
+                        {self.root: self.tree, later: self.changed})
+        self.assert_history_check('pilot_migration_unconfigured', reader, self.root, later, None)
+        self.assert_history_check('pilot_migration_malformed', reader, self.root, later, ())
+
+    def test_pilot_tree_divergence_has_fixed_diagnostic(self):
+        middle, later, migration = '5' * 40, '6' * 40, '7' * 40
+        reader = Reader({self.root: [], middle: [self.root], later: [middle]},
+                        {self.root: self.tree, middle: '3' * 40, later: self.changed})
+        self.assert_history_check('pilot_tree_diverged', reader, self.root, later,
+                                  (self.root, migration, self.tree, self.changed))
+
+    def test_pilot_parent_mismatch_has_fixed_diagnostic(self):
+        other, migration = '5' * 40, '6' * 40
+        reader = Reader({self.root: [], self.linear: [self.root], other: [self.root],
+                         migration: [other]},
+                        {self.root: self.tree, self.linear: self.tree, other: self.tree,
+                         migration: self.changed})
+        self.assert_history_check('pilot_parent_mismatch', reader, self.root, migration,
+                                  (self.root, migration, self.tree, self.changed))
+
+    def test_second_pilot_start_is_rejected_with_fixed_diagnostic(self):
+        older_change, middle, later = '5' * 40, '6' * 40, '7' * 40
+        reader = Reader({self.root: [], older_change: [self.root], middle: [older_change],
+                         later: [middle]},
+                        {self.root: self.tree, older_change: self.changed,
+                         middle: self.tree, later: self.changed})
+        self.assert_history_check('pilot_start_disallowed', reader, self.root, later,
+                                  (middle, later, self.tree, self.changed))
+
+    def test_merge_first_parent_get_change_has_fixed_diagnostic(self):
+        parents = {self.root: [], self.side: [self.root], self.merge: [self.side, self.root]}
+        trees = {self.root: self.tree, self.side: self.changed, self.merge: self.tree}
+        self.assert_history_check('merge_first_parent_tree_mismatch', Reader(parents, trees),
+                                  self.root, self.merge, None)
+
     def setUp(self):
         self.root, self.linear, self.side, self.merge = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
         self.tree, self.changed = ('1' * 40, '2' * 40)

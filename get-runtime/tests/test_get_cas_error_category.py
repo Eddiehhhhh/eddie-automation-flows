@@ -14,6 +14,21 @@ import get_private_preview_retention as retention
 
 
 class CasErrorCategory(unittest.TestCase):
+    def test_trusted_history_diagnostic_is_allowlisted_and_scoped(self):
+        error = runtime.entry.EntryFailure('entry_foreign_get_change')
+        error.runtime_stage = 'trusted_states'
+        for check in runtime.entry.HISTORY_CHECKS:
+            error.history_check = check
+            result = runtime.failure(error)
+            self.assertEqual(result['history_check'], check)
+            self.assertEqual(runtime.public_result(result)['history_check'], check)
+
+        error.history_check = 'private-commit-id-must-not-leak'
+        self.assertNotIn('history_check', runtime.public_result(runtime.failure(error)))
+        error.history_check = 'pilot_tree_pair_unmatched'
+        error.runtime_stage = 'receipt_provenance'
+        self.assertNotIn('history_check', runtime.public_result(runtime.failure(error)))
+
     def test_pending_gate_stops_before_source_and_publication(self):
         parent = 'a' * 40
         remote = types.SimpleNamespace(cas_main=Mock())

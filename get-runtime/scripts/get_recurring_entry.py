@@ -47,8 +47,24 @@ class EntryFailure(a.ParityFailure):
     pass
 
 
+HISTORY_CHECKS = frozenset((
+    'merge_first_parent_tree_mismatch', 'pilot_start_disallowed',
+    'pilot_migration_unconfigured', 'pilot_migration_malformed',
+    'pilot_tree_pair_unmatched', 'pilot_tree_diverged',
+    'pilot_parent_mismatch', 'pilot_migration_unclosed',
+))
+
+
 def fail(code):
     raise EntryFailure(code)
+
+
+def fail_history(check):
+    if check not in HISTORY_CHECKS:
+        fail('entry_history_witness')
+    error = EntryFailure('entry_foreign_get_change')
+    error.history_check = check
+    raise error
 
 
 def rules_sha256():
@@ -82,7 +98,7 @@ def mainline_parent(reader, commit, expected_get_tree):
     parent = rows[1]
     a.checked(parent, 40)
     if len(rows) == 3 and reader.source_get_tree(parent) != expected_get_tree:
-        fail('entry_foreign_get_change')
+        fail_history('merge_first_parent_tree_mismatch')
     return parent
 
 
@@ -143,20 +159,23 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None,
             if pilot_migration is None:
                 # This is a fixed historical Get-tree transition in the trusted
                 # lineage, not a transition caused by the current source item.
-                if (not pilot_start_allowed or type(PILOT_MIGRATION) is not tuple
-                        or len(PILOT_MIGRATION) != 4):
-                    fail('entry_foreign_get_change')
+                if not pilot_start_allowed:
+                    fail_history('pilot_start_disallowed')
+                if PILOT_MIGRATION is None:
+                    fail_history('pilot_migration_unconfigured')
+                if type(PILOT_MIGRATION) is not tuple or len(PILOT_MIGRATION) != 4:
+                    fail_history('pilot_migration_malformed')
                 before, migration, before_tree, after_tree = PILOT_MIGRATION
                 if expected != before_tree or current != after_tree:
-                    fail('entry_foreign_get_change')
+                    fail_history('pilot_tree_pair_unmatched')
                 pilot_migration = (before, migration, before_tree, after_tree)
                 pilot_start_allowed = False
             before, migration, before_tree, after_tree = pilot_migration
             if current != after_tree:
-                fail('entry_foreign_get_change')
+                fail_history('pilot_tree_diverged')
             if cursor == migration:
                 if single_parent(reader, cursor) != before:
-                    fail('entry_foreign_get_change')
+                    fail_history('pilot_parent_mismatch')
                 expected = before_tree
                 cursor = before
                 pilot_migration = None
@@ -164,7 +183,7 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None,
                 cursor = mainline_parent(reader, cursor, after_tree)
             continue
         if pilot_migration is not None:
-            fail('entry_foreign_get_change')
+            fail_history('pilot_migration_unclosed')
         if cursor == ancestor:
             return
         cursor = mainline_parent(reader, cursor, expected)
