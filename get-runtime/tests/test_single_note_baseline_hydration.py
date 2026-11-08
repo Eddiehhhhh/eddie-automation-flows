@@ -121,6 +121,32 @@ class BaselineHydration(unittest.TestCase):
                                                {'Wiki/unexpected.md': b'updated'})
             fetch.assert_not_called()
 
+    def test_pinned_migration_receipt_is_hydrated_only_for_exact_tree_pair(self):
+        anchor, migration = {'commit': 'e' * 40}, 'b' * 40
+        before_tree, after_tree = 'c' * 40, 'd' * 40
+        reader = types.SimpleNamespace(
+            local=self.reader.local,
+            source_get_tree=lambda commit: {
+                anchor['commit']: before_tree, self.parent: after_tree,
+                migration: after_tree}[commit])
+        pin = ('e' * 40, migration, before_tree, after_tree)
+        with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
+             patch.object(runtime, 'fetch_commit') as fetch, \
+             patch.object(runtime, 'load_receipt') as load:
+            runtime.hydrate_pilot_migration_receipt(reader, self.remote, 'token',
+                Path('/unused'), anchor, self.parent)
+        fetch.assert_called_once_with(self.reader.local, migration)
+        load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration)
+
+        reader.source_get_tree = lambda _: 'f' * 40
+        with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
+             patch.object(runtime, 'fetch_commit') as fetch, \
+             patch.object(runtime, 'load_receipt') as load:
+            runtime.hydrate_pilot_migration_receipt(reader, self.remote, 'token',
+                Path('/unused'), anchor, self.parent)
+        fetch.assert_not_called()
+        load.assert_not_called()
+
     def test_selected_baseline_readback_failure_still_stops(self):
         with patch.object(self.remote, 'request', return_value={'sha': 'wrong'}):
             with self.assertRaises(runtime.a.ParityFailure):

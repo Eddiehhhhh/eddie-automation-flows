@@ -298,6 +298,18 @@ def load_receipt(reader, remote, token, root, commit):
         m.import_blob(reader.local, values[entry.FULL_RECEIPT], row[2])
 
 
+def hydrate_pilot_migration_receipt(reader, remote, token, root, anchor, parent):
+    pin = entry.PILOT_MIGRATION
+    if anchor is None or type(pin) is not tuple or len(pin) != 4:
+        return
+    _, migration, before_tree, after_tree = pin
+    if (reader.source_get_tree(anchor['commit']) != before_tree
+            or reader.source_get_tree(parent) != after_tree):
+        return
+    fetch_commit(reader.local, migration)
+    load_receipt(reader, remote, token, root, migration)
+
+
 def hydrate_replaced_blobs(reader, remote, token, directory, parent, files):
     """Supply the exact parent blobs needed to push modified paths from a shallow clone."""
     if any(not isinstance(path, str) or not path.startswith(r.GET + '/') for path in files):
@@ -367,6 +379,7 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
             load_receipt(reader, remote, token, root, previous)
         for target in sorted({before, commit}):
             at_stage('current_inventory', load_inventory, reader, remote, token, root / target, target, source_id=source_id)
+    at_stage('trusted_states', hydrate_pilot_migration_receipt, reader, remote, token, root, anchor, parent)
     _, _, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
     _, legacy, registry = states
     hydrate_baselines(reader, legacy, registry, parent, remote, source_id=source_id)
