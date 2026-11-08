@@ -136,7 +136,7 @@ class BaselineHydration(unittest.TestCase):
              patch.object(runtime, 'load_receipt') as load:
             runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
                 Path('/unused'), anchor, self.parent)
-        fetch.assert_called_once_with(writable_local, migration)
+        fetch.assert_called_once_with(writable_local, migration, runtime.entry.MAX_INTERVENING + 2)
         load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration)
 
         reader.source_get_tree = lambda _: 'f' * 40
