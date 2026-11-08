@@ -148,6 +148,41 @@ class BaselineHydration(unittest.TestCase):
         fetch.assert_not_called()
         load.assert_not_called()
 
+    def test_verified_pilot_migration_becomes_effective_anchor(self):
+        anchor = {'commit': 'e' * 40, 'receipt_sha256': 'a' * 64}
+        migration = 'b' * 40
+        before_tree, after_tree = 'c' * 40, 'd' * 40
+        prior = {'sequence': 7}
+        migrated = {'sequence': 8, 'parent_commit': 'f' * 40,
+                    'previous_receipt_commit': anchor['commit'],
+                    'previous_receipt_sha256': anchor['receipt_sha256'],
+                    'changed_content_ids': [],
+                    'counts': {'new_created': 0, 'new_preview_imported': 0,
+                               'new_updated': 0, 'legacy_source_updated': 0}}
+        reader = types.SimpleNamespace(
+            source_get_tree=lambda commit: {
+                anchor['commit']: before_tree, migration: after_tree,
+                self.parent: after_tree}[commit],
+            read=lambda *args: b'verified migration receipt')
+        pin = ('f' * 40, migration, before_tree, after_tree)
+        policy = {'get_policy_sha256': '8' * 64}
+        with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
+             patch.object(runtime.entry, 'single_parent', return_value='f' * 40), \
+             patch.object(runtime.entry, 'read_receipt', return_value=migrated):
+            effective, witness = runtime.effective_anchor_after_pilot_migration(
+                reader, anchor, prior, migrated, self.parent, policy, {'old': 'witness'})
+        self.assertEqual(effective, {
+            'commit': migration, 'receipt_sha256': runtime.a.sha(b'verified migration receipt')})
+        self.assertIsNone(witness)
+
+        changed = {**migrated, 'changed_content_ids': ['123']}
+        with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
+             patch.object(runtime.entry, 'single_parent', return_value='f' * 40), \
+             patch.object(runtime.entry, 'read_receipt', return_value=changed):
+            with self.assertRaisesRegex(runtime.a.ParityFailure, 'runtime_receipt'):
+                runtime.effective_anchor_after_pilot_migration(
+                    reader, anchor, prior, changed, self.parent, policy, {'old': 'witness'})
+
     def test_selected_baseline_readback_failure_still_stops(self):
         with patch.object(self.remote, 'request', return_value={'sha': 'wrong'}):
             with self.assertRaises(runtime.a.ParityFailure):
