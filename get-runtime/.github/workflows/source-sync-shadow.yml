@@ -1,0 +1,402 @@
+name: Validate Get sync in ephemeral shadow
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Bounded sample, private pair, list inventory, or full-library acceptance
+        type: choice
+        options: [saved_upload_inspection, sample, existing_sample, inventory, migration_check, pack_seed, full_replay, mirror_replay, pending_diagnostic, private_preview, verify_retained, legacy_capture, legacy_verify, legacy_manual, canonical_prepare, canonical_manual, canonical_probe, notion_readonly, notion_prepare, saved_create_inspection, full]
+        default: sample
+        required: true
+      preview_source_commit:
+        description: Exact approved private source commit (private_preview / verify_retained)
+        type: string
+        default: '4fbc69f2d41bc3c7da81eae8f0c91584f0923190'
+        required: false
+      retained_preview_commit:
+        description: Exact existing private preview commit (verify_retained only)
+        type: string
+        default: 'dab0abf680075e3f073b225872be010c3ae99561'
+        required: false
+      legacy_expected_parent:
+        description: Exact current private main commit (manual and canonical modes)
+        type: string
+        default: ''
+        required: false
+      legacy_state_sha256:
+        description: Externally verified previous legacy state SHA-256; empty for bootstrap
+        type: string
+        default: ''
+        required: false
+      canonical_registry_sha256:
+        description: Externally verified canonical registry SHA-256; empty before first import
+        type: string
+        default: ''
+        required: false
+      legacy_approved_payload_sha256:
+        description: Exact reviewed logical payload SHA-256; required only for apply
+        type: string
+        default: ''
+        required: false
+      legacy_apply:
+        description: Apply the bounded manual transaction after explicit production authorization
+        type: boolean
+        default: false
+        required: false
+      sample_pages:
+        description: List pages to inspect for one ordinary note and one recording
+        type: choice
+        options: ['1', '2', '3']
+        default: '2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ (inputs.mode == 'legacy_manual' || inputs.mode == 'canonical_prepare' || inputs.mode == 'canonical_manual') && 'eddie-private-vault-writers' || 'getnote-shadow' }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: inputs.mode != 'saved_create_inspection' && inputs.mode != 'saved_upload_inspection'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ (inputs.mode == 'full_replay' || inputs.mode == 'mirror_replay' || inputs.mode == 'pending_diagnostic' || inputs.mode == 'private_preview' || inputs.mode == 'legacy_capture') && 120 || 60 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # Preserve the existing legacy manual implementation; migrate it separately.
+          ref: 40b120de009b9e7cc68f7811614c77fe4e17d385
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+      - name: Install verified metadata parser
+        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
+      - name: Offline regression suite
+        run: python -m unittest discover -s tests -v
+      - name: Read bounded Get sample twice
+        if: inputs.mode == 'sample'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          SAMPLE_PAGES: ${{ inputs.sample_pages }}
+        run: timeout 12m python scripts/run_private_command.py --label 'Get sample shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --sample-pages "$SAMPLE_PAGES"
+      - name: Read full Get library twice (explicit only)
+        if: inputs.mode == 'full'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+        run: timeout 55m python scripts/run_private_command.py --label 'Get full shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --full
+      - name: Verify two existing private notes twice without Get list discovery
+        if: inputs.mode == 'existing_sample'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout 12m python scripts/run_private_command.py --label 'Get existing sample shadow' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/verify_shadow_repeat.py --sample-existing
+      - name: Compare bounded complete Get list to private index without detail reads
+        if: inputs.mode == 'inventory'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout 10m python scripts/run_private_command.py --label 'Get migration inventory' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_inventory.py
+      - name: Audit pinned old paths and roundtrip one real binary note
+        if: inputs.mode == 'migration_check'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout 12m python scripts/run_private_command.py --label 'Get mapping and binary check' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_migration_check.py
+      - name: Seed exact real Get subtree from bounded blob-only Git packs
+        if: inputs.mode == 'pack_seed'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout 15m python scripts/run_private_command.py --label 'Get real pinned blob seed' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_pack_seed.py
+      - name: Replay complete bounded Get source twice on real private baseline
+        if: inputs.mode == 'full_replay'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get real full replay' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_full_replay.py
+      - name: Replay bounded incremental mirror twice on private temporary seed
+        if: inputs.mode == 'mirror_replay'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get incremental mirror replay' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_mirror_replay.py
+      - name: Diagnose at most nine pending candidates without writes
+        if: inputs.mode == 'pending_diagnostic'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get bounded pending diagnostic' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_mirror_replay.py --pending-diagnostic
+      - name: Checkout pinned private Get subtree with suppressed diagnostics
+        if: inputs.mode == 'private_preview'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+        run: timeout 3m python scripts/run_private_command.py --label 'Get private source checkout' --stdout-file '${{ runner.temp }}/checkout-result.json' -- python scripts/get_private_preview_retention.py checkout --vault "$GITHUB_WORKSPACE/private-vault" --source-commit "$PREVIEW_SOURCE"
+      - name: Verify approved private recovery point before source reads
+        if: inputs.mode == 'private_preview'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+        run: timeout 3m python scripts/run_private_command.py --label 'Get private recovery point' --stdout-file '${{ runner.temp }}/backup-result.json' -- python scripts/get_private_preview_retention.py prepare --vault "$GITHUB_WORKSPACE/private-vault" --source-commit "$PREVIEW_SOURCE"
+      - name: Prepare and retain approved private Get preview
+        if: inputs.mode == 'private_preview'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+        run: |
+          umask 077
+          set +e
+          timeout --kill-after=60s 105m python scripts/run_private_command.py --label 'Get retained private preview' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/source_sync_mirror_replay.py --private-preview-vault "$GITHUB_WORKSPACE/private-vault" --private-preview-output '${{ runner.temp }}/get-private-preview' --expected-source-commit "$PREVIEW_SOURCE"
+          preview_rc=$?
+          set -e
+          if [ "$preview_rc" != 0 ] && [ "$preview_rc" != 2 ]; then exit "$preview_rc"; fi
+          timeout --kill-after=30s 10m python scripts/run_private_command.py --label 'Get private preview retention' --stdout-file '${{ runner.temp }}/retention-result.json' -- python scripts/get_private_preview_retention.py retain --vault "$GITHUB_WORKSPACE/private-vault" --preview-output '${{ runner.temp }}/get-private-preview' --source-commit "$PREVIEW_SOURCE"
+          exit "$preview_rc"
+      - name: Verify existing retained private preview without Get reads or writes
+        if: inputs.mode == 'verify_retained'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source_commit }}
+          RETAINED_PREVIEW: ${{ inputs.retained_preview_commit }}
+        run: timeout --kill-after=30s 10m python scripts/run_private_command.py --label 'Get retained preview readback only' --stdout-file '${{ runner.temp }}/retention-result.json' -- python scripts/get_private_preview_retention.py verify-retained --vault "$GITHUB_WORKSPACE/private-vault" --source-commit "$PREVIEW_SOURCE" --preview-commit "$RETAINED_PREVIEW"
+      - name: Capture approved legacy source observations on private reconciliation branch
+        if: inputs.mode == 'legacy_capture'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=60s 115m python scripts/run_private_command.py --label 'Get bounded private legacy capture' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_capture.py
+      - name: Verify retained legacy observations without source reads or writes
+        if: inputs.mode == 'legacy_verify'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+        run: timeout --kill-after=30s 15m python scripts/run_private_command.py --label 'Get retained legacy verification only' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_capture.py --verify-only
+      - name: Remove ephemeral private checkout and preview
+        if: always() && (inputs.mode == 'private_preview' || inputs.mode == 'verify_retained')
+        run: rm -rf -- "$GITHUB_WORKSPACE/private-vault" '${{ runner.temp }}/get-private-preview'
+      - name: Prepare or explicitly apply one bounded legacy transaction
+        if: inputs.mode == 'legacy_manual'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          STATE_SHA256: ${{ inputs.legacy_state_sha256 }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+          APPLY: ${{ inputs.legacy_apply }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--expected-parent "$EXPECTED_PARENT")
+          if [[ -n "$STATE_SHA256" ]]; then args+=(--state-sha256 "$STATE_SHA256"); fi
+          if [[ "$APPLY" == true ]]; then args+=(--apply --approved-payload-sha256 "$APPROVED_PAYLOAD_SHA256"); fi
+          timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get bounded manual legacy transaction' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' "${args[@]}"
+
+      - name: Prepare or explicitly apply one canonical Get transaction
+        if: inputs.mode == 'canonical_manual' || inputs.mode == 'canonical_probe'
+        env:
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          LEGACY_SHA256: ${{ inputs.legacy_state_sha256 }}
+          REGISTRY_SHA256: ${{ inputs.canonical_registry_sha256 }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+          APPLY: ${{ inputs.legacy_apply }}
+        run: |
+          if [ '${{ inputs.mode }}' = canonical_probe ]; then
+            test "$APPLY" != true
+            test -z "$APPROVED_PAYLOAD_SHA256"
+            timeout --kill-after=30s 15m python scripts/run_private_command.py --label 'Get fixed ten-detail source diagnosis' --stdout-file '${{ runner.temp }}/canonical-result.json' -- python scripts/get_canonical_manual.py --probe-fixed-source --expected-parent "$EXPECTED_PARENT"
+            exit 0
+          fi
+          args=(--expected-parent "$EXPECTED_PARENT" --legacy-sha256 "$LEGACY_SHA256" --checkpoint '${{ runner.temp }}/canonical-checkpoint.json')
+          if [ -n "$REGISTRY_SHA256" ]; then args+=(--registry-sha256 "$REGISTRY_SHA256"); fi
+          if [ "$APPLY" = true ]; then args+=(--apply --approved-payload-sha256 "$APPROVED_PAYLOAD_SHA256"); fi
+          timeout --kill-after=60s 55m python scripts/run_private_command.py --label 'Get canonical transaction' --stdout-file '${{ runner.temp }}/canonical-result.json' -- python scripts/get_canonical_manual.py "${args[@]}"
+      - name: Publish safe canonical transaction counts
+        if: always() && (inputs.mode == 'canonical_manual' || inputs.mode == 'canonical_probe')
+        run: |
+          set -o pipefail
+          python scripts/get_canonical_manual.py --publish-report '${{ runner.temp }}/canonical-result.json' --checkpoint '${{ runner.temp }}/canonical-checkpoint.json' | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Prepare ten fixed preview notes without writes
+        if: inputs.mode == 'canonical_prepare'
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GETNOTE_API_KEY: ${{ secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          STATE_SHA256: ${{ inputs.legacy_state_sha256 }}
+          APPLY: ${{ inputs.legacy_apply }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$APPLY" != true
+          test -z "$APPROVED_PAYLOAD_SHA256"
+          timeout --kill-after=30s 45m python scripts/run_private_command.py --label 'Get ten-note read-only preparation' --stdout-file '${{ runner.temp }}/shadow-result.json' -- python scripts/get_legacy_manual.py --canonical-preview --expected-parent "$EXPECTED_PARENT" --state-sha256 "$STATE_SHA256"
+
+      - name: Read two pinned Notion pages and plan without writes
+        if: inputs.mode == 'notion_readonly'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          APPLY: ${{ inputs.legacy_apply }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$APPLY" != true
+          test -z "$APPROVED_PAYLOAD_SHA256"
+          PYTHONPATH=scripts python - <<'PYGUARD'
+          import json, os
+          from get_notion_writer_guard import WriterGuard, Blocked
+          try:
+              guard = WriterGuard(os.environ.get('GITHUB_TOKEN'))
+              guard()
+              print(json.dumps({'old_writer_guard': 'verified', 'requests': guard.diagnostics['requests'], 'writes': 0}))
+          except Blocked as exc:
+              print(json.dumps({'old_writer_guard': 'blocked', 'reason': str(exc), 'writes': 0}))
+              raise SystemExit(1)
+          PYGUARD
+          timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion two-page read-only observation' --stdout-file '${{ runner.temp }}/notion-readonly-result.json' -- python scripts/get_notion_readonly.py --expected-parent "$EXPECTED_PARENT"
+
+      - name: Prepare the bounded Notion transaction without writes
+        if: inputs.mode == 'notion_prepare'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          EXPECTED_PARENT: ${{ inputs.legacy_expected_parent }}
+          APPLY: ${{ inputs.legacy_apply }}
+          APPROVED_PAYLOAD_SHA256: ${{ inputs.legacy_approved_payload_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$APPLY" != true
+          test -z "$APPROVED_PAYLOAD_SHA256"
+          PYTHONPATH=scripts python - <<'PYPUBLIC'
+          import hashlib, json, os
+          from get_publication_provenance import PublicGithub
+          class CheckedPublic(PublicGithub):
+              def once(self, url, maximum):
+                  status, headers, raw = super().once(url, maximum)
+                  self.statuses.append(status if type(status) is int and 100 <= status <= 599 else 0)
+                  return status, headers, raw
+          client = CheckedPublic(os.environ.get('GITHUB_TOKEN'))
+          client.statuses = []
+          try:
+              raw = client.logs(117176342381)
+              print(json.dumps({'public_actions_logs': 'verified', 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(), 'requests': client.requests, 'http_statuses': client.statuses, 'writes': 0}))
+          except Exception:
+              print(json.dumps({'public_actions_logs': 'blocked', 'requests': client.requests, 'http_statuses': client.statuses, 'writes': 0}))
+              raise SystemExit(1)
+          PYPUBLIC
+          prepare_status=0
+          timeout --kill-after=30s 25m python scripts/run_private_command.py --label 'Get Notion transaction read-only preparation' --stdout-file '${{ runner.temp }}/notion-prepare-result.json' -- python scripts/get_notion_runtime.py --expected-parent "$EXPECTED_PARENT" || prepare_status=$?
+          cat '${{ runner.temp }}/notion-prepare-result.json' | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$prepare_status"
+
+      - name: Publish aggregate evidence only
+        if: always()
+        env:
+          RESULT: ${{ runner.temp }}/shadow-result.json
+          MODE: ${{ inputs.mode }}
+          BACKUP_RESULT: ${{ runner.temp }}/backup-result.json
+          RETENTION_RESULT: ${{ runner.temp }}/retention-result.json
+        run: |
+          set -o pipefail
+          if [ "$MODE" = canonical_manual ] || [ "$MODE" = canonical_probe ] || [ "$MODE" = notion_prepare ]; then exit 0; fi
+          if [ "$MODE" = notion_readonly ]; then
+            python scripts/get_notion_readonly.py --publish-report '${{ runner.temp }}/notion-readonly-result.json' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$MODE" = legacy_manual ] || [ "$MODE" = canonical_prepare ]; then
+            python scripts/get_legacy_manual.py --publish-report "$RESULT" --checkpoint '${{ runner.temp }}/get-legacy-write-checkpoint.json' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$MODE" = legacy_capture ] || [ "$MODE" = legacy_verify ]; then
+            python scripts/get_legacy_capture.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$MODE" = verify_retained ]; then
+            python scripts/get_private_preview_retention.py --publish-report "$RETENTION_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$MODE" = private_preview ]; then
+            python scripts/get_private_preview_retention.py --publish-report "$BACKUP_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+            python scripts/get_private_preview_retention.py --publish-report "$RETENTION_RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$MODE" = mirror_replay ] || [ "$MODE" = pending_diagnostic ] || [ "$MODE" = private_preview ]; then
+            python scripts/source_sync_mirror_replay.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$MODE" = full_replay ]; then
+            python scripts/source_sync_full_replay.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$MODE" = pack_seed ]; then
+            python scripts/source_sync_pack_seed.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$MODE" = migration_check ]; then
+            python scripts/source_sync_migration_check.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$MODE" = inventory ]; then
+            python scripts/source_sync_inventory.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python scripts/verify_shadow_repeat.py --publish-report "$RESULT" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  saved-create-inspection:
+    if: inputs.mode == 'saved_create_inspection'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: 40b120de009b9e7cc68f7811614c77fe4e17d385
+          path: diagnostic-code
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: 086fc1425a95f7bce6df55b3e36aa449f679a316
+          path: inspected-runtime
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Inspect one saved create without writes
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python diagnostic-code/diagnostics/run_saved_create_diagnostic.py --runtime inspected-runtime
+
+  saved-upload-inspection:
+    if: inputs.mode == 'saved_upload_inspection'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: 40b120de009b9e7cc68f7811614c77fe4e17d385
+          path: diagnostic-code
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: 086fc1425a95f7bce6df55b3e36aa449f679a316
+          path: inspected-runtime
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Inspect one saved upload status without writes
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        run: python diagnostic-code/diagnostics/run_saved_upload_status.py --runtime inspected-runtime
