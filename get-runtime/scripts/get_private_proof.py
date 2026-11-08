@@ -225,6 +225,16 @@ class PrivateRecords:
         if any(v['commit']==commit for v in self.nodes):self._reject('ancestry','ancestry')
         node=self.read_node(commit);self.nodes.append(node)
         return node
+    def _commit_metadata(self,commit):
+        checked(commit,40)
+        paired=getattr(self.remote,'commit_with_locator',None)
+        if callable(paired):metadata,locator=self._read('commit',paired,commit)
+        else:metadata=self._read('commit',self.remote.commit,commit);locator=None
+        tree=checked(metadata.get('tree'),40);parents=metadata.get('parents')
+        if not isinstance(parents,list) or len(parents)>2:self._reject('ancestry','ancestry')
+        parents=[checked(value,40) for value in parents]
+        if len(set(parents))!=len(parents):self._reject('ancestry','ancestry')
+        return tree,parents,locator
     def read_node(self,commit):
         checked(commit,40)
         # Per-resolver immutable-object cache only. Mutable repository/head
@@ -234,13 +244,13 @@ class PrivateRecords:
         key=(REPOSITORY,commit)
         if key in self._node_cache:
             return deepcopy(self._node_cache[key])
-        paired=getattr(self.remote,'commit_with_locator',None)
-        if callable(paired): metadata,locator=self._read('commit',paired,commit)
-        else: metadata=self._read('commit',self.remote.commit,commit);locator=None
-        tree=checked(metadata.get('tree'),40);parents=metadata.get('parents')
-        if not isinstance(parents,list) or len(parents)>1:self._reject('ancestry','ancestry')
-        parent=checked(parents[0],40) if parents else None
+        tree,parents,locator=self._commit_metadata(commit)
+        parent=parents[0] if parents else None
         selected=self._fixed_path_entries(tree)
+        if len(parents)==2:
+            # Follow first-parent history only; the merge cannot alter proof objects.
+            parent_tree,_,_=self._commit_metadata(parent)
+            if selected!=self._fixed_path_entries(parent_tree):self._reject('ancestry','ancestry')
         node={'commit':commit,'tree':tree,'parent':parent,'objects':selected}
         if locator is not None: node['locator']=deepcopy(locator)
         # Cache only after every original metadata validation succeeds. The
