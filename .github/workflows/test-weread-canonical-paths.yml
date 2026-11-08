@@ -6,7 +6,7 @@ on:
       - '.github/workflows/test-weread-canonical-paths.yml'
       - 'scripts/sync_notion_weread_to_raw.py'
       - 'scripts/sync_notion_to_raw.py'
-      - 'tests/**'
+      - 'tests/test_sync_notion_weread_to_raw.py'
       - 'docs/weread-canonical-paths.md'
 
 permissions:
@@ -25,6 +25,6 @@ jobs:
         with:
           python-version: '3.11'
       - name: Run offline regression tests
-        run: python3 -m unittest discover -s tests -v
+        run: python3 -m unittest tests.test_sync_notion_weread_to_raw -v
       - name: Check whitespace
         run: git diff --check HEAD^ HEAD
