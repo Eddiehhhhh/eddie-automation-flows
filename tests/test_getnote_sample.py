@@ -1,5 +1,8 @@
 import ast
+import hashlib
 import contextlib
+import base64
+import re
 import email.message
 import io
 import json
@@ -29,6 +32,20 @@ def note(ident, kind='plain_text'):
 
 
 class GetSampleTests(unittest.TestCase):
+    def test_canonical_policy_matches_reviewed_runtime_pin(self):
+        workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
+        encoded = re.search(r"POLICY_B64: '([^']+)'", workflow).group(1)
+        policy_bytes = base64.b64decode(encoded, validate=True)
+        policy = json.loads(policy_bytes)
+        runtime_sha = re.search(r"RUNTIME_SHA: '([0-9a-f]{40})'", workflow).group(1)
+        self.assertEqual(runtime_sha, 'b774ccfbca1d2c7c540effbbdefe1c52897655e5')
+        self.assertEqual(policy['code_sha'], runtime_sha)
+        self.assertEqual(policy['rules_sha256'], '40d3b321e7a9f0b8c80e608e66cb1e2e1cdc9c1bfe1b0db717e0d5db189ec6c5')
+        self.assertEqual(policy['get_policy_sha256'], 'ba0effd55b9a43c2c20622d00414741775a7025a4a87731d8c4a8e0c4f958dd9')
+        self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), '1117646fe52241b40fbbd777ca3b21502ff930e2442167eb35f859d33ce2aacf')
+        self.assertEqual(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1),
+                         '4418bf50578a2f126feedad4bfa28fde140fb815d30ef8d81963acfab024a06d')
+
     def test_cloud_test_note_reuses_complete_paginated_lookup(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
         step = workflow.split('      - name: Create one real Get sync test note', 1)[1].split('      - name:', 1)[0]
