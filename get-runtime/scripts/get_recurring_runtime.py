@@ -376,7 +376,7 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
         # The independently authenticated receipt binds these exact hashes.
         fetch_commit(local, before, entry.MAX_INTERVENING + 2)
         fetch_commit(local, previous)
-        if receipt['sequence'] > 1:
+        if prior_receipt['sequence'] > 1:
             load_receipt(reader, remote, token, root, previous)
         for target in sorted({before, commit}):
             at_stage('current_inventory', load_inventory, reader, remote, token, root / target, target, source_id=source_id)

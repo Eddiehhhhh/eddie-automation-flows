@@ -218,5 +218,40 @@ class BaselineHydration(unittest.TestCase):
                 self.assert_downloads(['111', '222', '333', '444'] if ident is None
                     else ([] if ident == '999' else [ident]))
 
+    def test_loader_uses_verified_prior_receipt_when_loading_history(self):
+        anchor = {'commit': 'b' * 40, 'receipt_sha256': 'c' * 64}
+        bootstrap = {'commit': 'd' * 40}
+        prior = {'sequence': 7, 'parent_commit': 'e' * 40,
+                 'previous_receipt_commit': 'f' * 40}
+        trusted = {'sequence': 8}
+        current = {runtime.n.STATE: b'full registry'}
+        policy = {'rules_sha256': 'a' * 64, 'get_policy_sha256': 'b' * 64}
+        self.reader.tree = lambda commit: {runtime.entry.FULL_RECEIPT: 'present'}
+        with patch.object(runtime, 'fetch_commit') as fetch, \
+             patch.object(runtime, 'load_inventory', return_value=current), \
+             patch.object(runtime, 'load_receipt') as load_receipt, \
+             patch.object(runtime.provenance, 'discover', return_value={
+                 'anchor': anchor, 'receipt_sequence': 7}), \
+             patch.object(runtime.provenance, 'history_witness_required', return_value=False), \
+             patch.object(runtime.entry, 'read_receipt', return_value=prior), \
+             patch.object(runtime, 'hydrate_pilot_migration_receipt'), \
+             patch.object(runtime.entry, 'trust_current', return_value=(
+                 'policy', trusted, (current, {}, {}))), \
+             patch.object(runtime, 'effective_anchor_after_pilot_migration',
+                          return_value=(anchor, None)) as promote, \
+             patch.object(runtime, 'hydrate_baselines'):
+            result = runtime.load_trusted_inputs(self.reader.local, self.reader,
+                'evidence', self.remote, 'token', Path('/not-used'), self.parent,
+                'client', policy, bootstrap=bootstrap,
+                exclude_run_id=123, exclude_run_attempt=1, source_id='333')
+
+        self.assertEqual(result, (anchor, None, None))
+        fetch.assert_any_call(self.reader.local, 'f' * 40)
+        self.assertEqual(load_receipt.call_count, 2)
+        load_receipt.assert_any_call(self.reader, self.remote, 'token',
+                                     Path('/not-used'), 'f' * 40)
+        promote.assert_called_once_with(self.reader, anchor, prior, trusted,
+                                        self.parent, policy, None)
+
 
 if __name__ == '__main__': unittest.main()
