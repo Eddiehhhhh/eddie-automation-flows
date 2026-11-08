@@ -107,8 +107,8 @@ jobs:
           if test -n "$ADOPT_ATTEMPT_COMMIT"; then args+=(--adopt-attempt-commit "$ADOPT_ATTEMPT_COMMIT"); fi
           python3 - "${args[@]}" <<'PY'
           import get_notion_incremental_controller as controller
-          # A note needing content review must not block unrelated verified notes.
-          controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required'}
+          # A held note must not block unrelated verified notes.
+          controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required', 'source_conflict'}
           controller.main()
           PY
       - name: Release private write lease
