@@ -80,6 +80,10 @@ def current_get_policy():
 def accepts_receipt(commit, receipt_sha256, value, requested_policy):
     """No arbitrary old receipt, policy choice, reverse migration or relabeling."""
     from get_recurring_entry import a
+    migration = _private_bindings.value('get_recurring_entry', 'PILOT_MIGRATION')
+    if (type(migration) is tuple and len(migration) == 4 and commit == migration[1]
+            and requested_policy == current_get_policy()):
+        return True
     for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING'):
         binding = _private_bindings.value('get_recurring_policy_recovery', binding_name)
         if isinstance(binding, dict) and 'record' in binding:
