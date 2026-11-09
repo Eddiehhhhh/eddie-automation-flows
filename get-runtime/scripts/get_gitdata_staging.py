@@ -13,6 +13,7 @@ import get_pending_gate as pending
 
 MAX_BYTES = m.MAX_CHANGED_BYTES
 MAX_REQUEST = 4 * ((MAX_BYTES + 2) // 3) + 1048576
+MAX_COMPARE_RESPONSE = 2 * 1024 * 1024
 NAME = 'Get local proposal'
 EMAIL = 'get-proposal@example.invalid'
 MESSAGE = 'Prepare canonical Get transaction with receipt\n'
@@ -66,6 +67,9 @@ class API:
         data = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
         if data is not None and len(data) > MAX_REQUEST:
             fail()
+        response_limit = (MAX_COMPARE_RESPONSE if method == 'GET' and
+                          re.fullmatch(r'/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}', path)
+                          else 1048576)
         request = urllib.request.Request('https://api.github.com/repos/' + r.REPOSITORY + path,
             data=data, method=method, headers={'Authorization': 'Bearer ' + self.token,
             'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
@@ -76,7 +80,7 @@ class API:
                     api_fail(method, path, 'unexpected_status', response.status)
                 if list_result and response.headers.get('Link'):
                     api_fail(method, path, 'paginated', response.status)
-                raw = response.read(1048577)
+                raw = response.read(response_limit + 1)
         except urllib.error.HTTPError as exc:
             if missing and method == 'GET' and exc.code == 404:
                 return None
@@ -87,7 +91,7 @@ class API:
             api_fail(method, path, 'timeout')
         except Exception:
             api_fail(method, path, 'transport_error')
-        if len(raw) > 1048576:
+        if len(raw) > response_limit:
             api_fail(method, path, 'response_too_large', response.status)
         try:
             value = json.loads(raw)
