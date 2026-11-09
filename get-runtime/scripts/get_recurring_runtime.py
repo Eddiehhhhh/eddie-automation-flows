@@ -31,6 +31,9 @@ SCOPE_KEYS = {'contract', 'production_approved', 'public_policy_sha256', 'rules_
               'notion_initial_proof_sha256'}
 ERRORS = {'runtime_activation_pending', 'runtime_scope', 'runtime_context',
           'runtime_receipt', 'runtime_failed', 'gitdata_staging_failed', 'pending_unresolved'}
+SCOPE_CHECKS = frozenset(('single_note_trigger', 'policy_bindings', 'scope_keys_or_hash',
+    'scope_policy_mismatch', 'trigger', 'publication_requires_apply',
+    'publication_file_requires_apply', 'single_note_mode', 'scope_arguments'))
 
 # Fixed diagnostics only; private exception text/arguments are never emitted.
 STAGES = frozenset(('policy', 'execution_provenance', 'remote_guard', 'checkout',
@@ -242,18 +245,25 @@ def at_stage(stage, operation, *args, **kwargs):
 def fail(code):
     raise entry.EntryFailure(code)
 
+def fail_scope(check):
+    if check not in SCOPE_CHECKS:
+        fail('runtime_failed')
+    error = entry.EntryFailure('runtime_scope')
+    error.scope_check = check
+    raise error
+
 
 def validate_single_note_scope(source_id, trigger, apply):
     if source_id is not None:
         if trigger != 'manual' or not apply:
-            fail('runtime_scope')
+            fail_scope('single_note_trigger')
         engine.n.identity(source_id)
 
 
 def validate_policy(policy, expected, bootstrap):
     value = provenance.validate_policy(policy, expected)
     if value['rules_sha256'] != entry.rules_sha256() or value['get_policy_sha256'] != entry.policy_sha256(value['rules_sha256'], bootstrap):
-        fail('runtime_scope')
+        fail_scope('policy_bindings')
     return value
 
 
@@ -261,10 +271,10 @@ def validate_scope(scope, expected, policy, policy_hash):
     if not PRODUCTION_ACTIVATED:
         fail('runtime_activation_pending')
     if not isinstance(scope, dict) or set(scope) != SCOPE_KEYS or a.sha(a.encoded(scope)) != a.checked(expected, 64):
-        fail('runtime_scope')
+        fail_scope('scope_keys_or_hash')
     wanted = controller.scope_for(policy, policy_hash)
     if scope != wanted or scope['production_approved'] is not True or type(scope['max_new']) is not int or type(scope['schedule_minute']) is not int:
-        fail('runtime_scope')
+        fail_scope('scope_policy_mismatch')
 
 
 def context(policy, value):
@@ -538,7 +548,7 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
     """
     policy = at_stage('policy', validate_policy, policy, approved_policy_sha256, bootstrap)
     if trigger not in ('manual', 'schedule'):
-        fail('runtime_scope')
+        fail_scope('trigger')
     validate_single_note_scope(source_id, trigger, apply)
     if expected_parent is not None:
         a.checked(expected_parent, 40)
@@ -548,7 +558,7 @@ def run(token, source, *, policy, approved_policy_sha256, remote=None, public_cl
         if checkpoint is None:
             m.fail('manual_checkpoint')
     elif sink is not None or on_publication is not None:
-        fail('runtime_scope')
+        fail_scope('publication_requires_apply')
     remote = remote if remote is not None else m.Remote(None, token)
     client = public_client if public_client is not None else provenance.AnonymousGithub()
     if isinstance(client, provenance._PublicGithub):
@@ -671,6 +681,9 @@ def failure(exc=None, *, attempt_started=False):
         return result
     code = str(exc)
     result['error'] = code if code in ERRORS | m.ERRORS | ENTRY_ERRORS | m.c.ERRORS | CORE_ERRORS else SOURCE_ERRORS.get(code, 'runtime_failed')
+    scope_check = getattr(exc, 'scope_check', None)
+    if result['error'] == 'runtime_scope' and scope_check in SCOPE_CHECKS:
+        result['scope_check'] = scope_check
     stage = getattr(exc, 'runtime_stage', None)
     if isinstance(stage, str) and stage in STAGES:
         result['stage'] = stage
@@ -751,17 +764,17 @@ def main(argv=None):
         if args.apply and not PRODUCTION_ACTIVATED:
             fail('runtime_activation_pending')
         if args.publication_file and not args.apply:
-            fail('runtime_scope')
+            fail_scope('publication_file_requires_apply')
         policy = validate_policy(m.strict_capture_json(a.bounded_file(args.policy, 16384), 16384), args.approved_policy_sha256, entry.BOOTSTRAP)
         from get_private_single_note_proof import runtime_note_id
         source_id = runtime_note_id()
         single_mode = os.environ.get('GET_SINGLE_NOTE_MODE', 'false') == 'true'
         if single_mode != (source_id is not None) or (source_id is not None and (not args.apply or args.trigger != 'manual' or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch')):
-            fail('runtime_scope')
+            fail_scope('single_note_mode')
         scope = None; run_context = None
         if args.apply:
             if bool(args.scope) == args.scope_from_policy:
-                fail('runtime_scope')
+                fail_scope('scope_arguments')
             scope = controller.scope_for(policy, args.approved_policy_sha256) if args.scope_from_policy else m.strict_capture_json(a.bounded_file(args.scope, 16384), 16384)
             validate_scope(scope, args.approved_scope_sha256, policy, args.approved_policy_sha256)
             if not args.checkpoint:
