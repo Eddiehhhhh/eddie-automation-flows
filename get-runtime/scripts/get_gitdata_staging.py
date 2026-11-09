@@ -19,11 +19,35 @@ MESSAGE = 'Prepare canonical Get transaction with receipt\n'
 
 
 class StageFailure(Exception):
-    pass
+    def __init__(self, message='gitdata_staging_failed', diagnostic=None):
+        super().__init__(message)
+        if diagnostic is not None:
+            self.api_diagnostic = diagnostic
 
 
 def fail():
     raise StageFailure('gitdata_staging_failed') from None
+
+
+def api_diagnostic(method, path, kind, status=None):
+    if method != 'GET':
+        return None
+    if path == '/git/ref/heads/codex/get-pending':
+        operation = 'pending_ref'
+    elif path == '/git/matching-refs/heads/codex/get-stage-':
+        operation = 'stage_refs'
+    elif re.fullmatch(r'/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}', path):
+        operation = 'ancestry_compare'
+    else:
+        return None
+    result = {'operation': operation, 'failure': kind}
+    if type(status) is int and 100 <= status <= 599:
+        result['http_status'] = status
+    return result
+
+
+def api_fail(method, path, kind, status=None):
+    raise StageFailure('gitdata_staging_failed', api_diagnostic(method, path, kind, status)) from None
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -49,24 +73,28 @@ class API:
         try:
             with self.opener.open(request, timeout=60) as response:
                 if response.status not in (200, 201):
-                    fail()
+                    api_fail(method, path, 'unexpected_status', response.status)
                 if list_result and response.headers.get('Link'):
-                    fail()
+                    api_fail(method, path, 'paginated', response.status)
                 raw = response.read(1048577)
         except urllib.error.HTTPError as exc:
             if missing and method == 'GET' and exc.code == 404:
                 return None
-            fail()
+            api_fail(method, path, 'http_error', exc.code)
+        except StageFailure:
+            raise
+        except TimeoutError:
+            api_fail(method, path, 'timeout')
         except Exception:
-            fail()
+            api_fail(method, path, 'transport_error')
         if len(raw) > 1048576:
-            fail()
+            api_fail(method, path, 'response_too_large', response.status)
         try:
             value = json.loads(raw)
         except (ValueError, UnicodeError):
-            fail()
+            api_fail(method, path, 'invalid_json', response.status)
         if not isinstance(value, list if list_result else dict):
-            fail()
+            api_fail(method, path, 'invalid_shape', response.status)
         return value
 
     def list_stage_refs(self):

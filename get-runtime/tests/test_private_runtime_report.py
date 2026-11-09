@@ -36,6 +36,23 @@ class PrivateRuntimeReport(unittest.TestCase):
                                    'source_phase': 'single_detail'})
         self.assertEqual(projected['source_phase'], 'single_detail')
 
+    def test_gitdata_api_diagnostic_projects_only_allowlisted_fields(self):
+        value = {'status': 'recurring_failed', 'error': 'gitdata_staging_failed',
+                 'stage': 'pending_gate', 'gitdata_api_diagnostic': {
+                     'operation': 'stage_refs', 'failure': 'http_error', 'http_status': 403}}
+        self.assertEqual(report.public(value, allowed_codes=('gitdata_staging_failed',),
+                                       allowed_stages=('pending_gate',)), {
+            'contract': report.CONTRACT, 'status': 'recurring_failed',
+            'business_health_asserted': False, 'complete_library_claimed': False,
+            'error': 'gitdata_staging_failed', 'stage': 'pending_gate',
+            'gitdata_api_diagnostic': {'operation': 'stage_refs', 'failure': 'http_error',
+                                       'http_status': 403}})
+        value['gitdata_api_diagnostic'].update(url='private', body='private')
+        self.assertNotIn('gitdata_api_diagnostic', report.public(value))
+        del value['gitdata_api_diagnostic']['url']; del value['gitdata_api_diagnostic']['body']
+        value['gitdata_api_diagnostic']['operation'] = 'private/path'
+        self.assertNotIn('gitdata_api_diagnostic', report.public(value))
+
 
 if __name__ == '__main__':
     unittest.main()
