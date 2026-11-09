@@ -62,6 +62,40 @@ class MainlineHistory(unittest.TestCase):
                 entry.unchanged_get_history(reader, self.root, later)
         self.assertEqual(caught.exception.history_check, 'pilot_tree_pair_unmatched')
 
+    def test_consecutive_registered_state_transitions_are_accepted(self):
+        root, before1, migration1, between, before2, migration2, later = (
+            format(i, '040x') for i in range(1, 8))
+        first_before, first_after, second_after = '1' * 40, '2' * 40, '3' * 40
+        reader = Reader(
+            {root: [], before1: [root], migration1: [before1], between: [migration1],
+             before2: [between], migration2: [before2], later: [migration2]},
+            {root: first_before, before1: first_before, migration1: first_after,
+             between: first_after, before2: first_after, migration2: second_after,
+             later: second_after})
+        migrations = (
+            (before1, migration1, first_before, first_after, 'a' * 64, 8),
+            (before2, migration2, first_after, second_after, 'b' * 64, 9),
+        )
+        with patch.object(entry, 'PILOT_MIGRATION', migrations):
+            entry.unchanged_get_history(reader, root, later)
+
+    def test_unregistered_change_between_registered_state_transitions_is_rejected(self):
+        root, before1, migration1, rogue, before2, migration2 = (
+            format(i, '040x') for i in range(11, 17))
+        first_before, first_after, second_after = '1' * 40, '2' * 40, '3' * 40
+        reader = Reader(
+            {root: [], before1: [root], migration1: [before1], rogue: [migration1],
+             before2: [rogue], migration2: [before2]},
+            {root: first_before, before1: first_before, migration1: first_after,
+             rogue: '4' * 40, before2: first_after, migration2: second_after})
+        migrations = (
+            (before1, migration1, first_before, first_after, 'a' * 64, 8),
+            (before2, migration2, first_after, second_after, 'b' * 64, 9),
+        )
+        with patch.object(entry, 'PILOT_MIGRATION', migrations):
+            with self.assertRaisesRegex(entry.EntryFailure, 'entry_foreign_get_change'):
+                entry.unchanged_get_history(reader, root, migration2)
+
     def assert_history_check(self, expected, reader, ancestor, descendant, migration):
         with patch.object(entry, 'PILOT_MIGRATION', migration):
             with self.assertRaisesRegex(entry.EntryFailure, 'entry_foreign_get_change') as caught:
@@ -220,7 +254,7 @@ class MainlineHistory(unittest.TestCase):
 
 class FailedNotionReceiptPolicy(unittest.TestCase):
     def test_only_pinned_pilot_migration_receipt_crosses_policy(self):
-        migration = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        migration = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40, 'e' * 64, 8)
         seq4 = {'selection': {'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64},
                 'sequence': 4, 'source_policy': {'get_policy_sha256': 'f' * 64}}
         def value(module, key):
@@ -235,8 +269,22 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
                 patch.object(entry.recovery, 'ORIGINAL_RECEIPT_COMMIT', 'f' * 40), \
                 patch.object(entry.recovery.idle_recovery, 'accepts_receipt', return_value=False):
             self.assertTrue(entry.recovery.accepts_receipt('b' * 40, 'e' * 64, receipt, 'd' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt('b' * 40, 'f' * 64, receipt, 'd' * 64))
             self.assertFalse(entry.recovery.accepts_receipt('e' * 40, 'e' * 64, receipt, 'd' * 64))
             self.assertFalse(entry.recovery.accepts_receipt('b' * 40, 'e' * 64, receipt, 'f' * 64))
+
+    def test_legacy_migration_without_receipt_hash_cannot_cross_policy(self):
+        migration = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        with patch.object(entry.recovery._private_bindings, 'value',
+                          side_effect=lambda module, key: migration if module == 'get_recurring_entry' else {
+                              'selection': {'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64}}), \
+             patch.object(entry.recovery, 'current_get_policy', return_value='e' * 64), \
+             patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {
+                 'receipt_commit': 'f' * 40, 'receipt_sha256': 'f' * 64}), \
+             patch.object(entry.recovery, 'ORIGINAL_RECEIPT_COMMIT', 'f' * 40), \
+             patch.object(entry.recovery.idle_recovery, 'accepts_receipt', return_value=False):
+            self.assertFalse(entry.recovery.accepts_receipt(
+                'b' * 40, '9' * 64, {'sequence': 8}, 'e' * 64))
 
     def test_only_registered_sequence_four_receipt_crosses_policy(self):
         binding = {'selection': {'receipt_commit': 'a' * 40, 'receipt_sha256': 'b' * 64},
@@ -432,11 +480,11 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
     def test_exact_state_only_transition_verifies_receipt_and_advances_state_anchor(self):
         anchor, before, migration, parent = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
         before_tree, after_tree = '1' * 40, '2' * 40
-        migration_data = (before, migration, before_tree, after_tree)
+        raw_receipt = b'bound seq8 receipt'
+        migration_data = (before, migration, before_tree, after_tree, entry.a.sha(raw_receipt), 8)
         parents = {anchor: [], before: [anchor], migration: [before], parent: [migration]}
         trees = {anchor: before_tree, before: before_tree, migration: after_tree, parent: after_tree}
         reader = Reader(parents, trees)
-        raw_receipt = b'bound seq8 receipt'
         reader.read = lambda commit, path, limit: raw_receipt if commit == migration and path == entry.FULL_RECEIPT else None
         previous = {'sequence': 7, 'state_sha256': '3' * 64, 'registry_sha256': '4' * 64}
         next_receipt = {'sequence': 8, 'parent_commit': before,
@@ -464,13 +512,60 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
         self.assertEqual(load.call_args.args[2:5],
                          (parent, next_receipt['state_sha256'], next_receipt['registry_sha256']))
 
+    def test_consecutive_pinned_state_only_receipts_advance_trusted_state(self):
+        anchor, before1, migration1, between, before2, migration2, parent = (
+            format(i, '040x') for i in range(101, 108))
+        tree1, tree2, tree3 = '1' * 40, '2' * 40, '3' * 40
+        raw1, raw2 = b'bound state-only receipt 8', b'bound state-only receipt 9'
+        reader = Reader(
+            {anchor: [], before1: [anchor], migration1: [before1], between: [migration1],
+             before2: [between], migration2: [before2], parent: [migration2]},
+            {anchor: tree1, before1: tree1, migration1: tree2, between: tree2,
+             before2: tree2, migration2: tree3, parent: tree3})
+        raw = {migration1: raw1, migration2: raw2}
+        reader.read = lambda commit, path, limit: raw[commit]
+        migrations = (
+            (before1, migration1, tree1, tree2, entry.a.sha(raw1), 8),
+            (before2, migration2, tree2, tree3, entry.a.sha(raw2), 9),
+        )
+        previous = {'sequence': 7, 'state_sha256': '4' * 64, 'registry_sha256': '5' * 64}
+        receipt8 = {'sequence': 8, 'parent_commit': before1,
+                    'previous_receipt_commit': anchor,
+                    'previous_receipt_sha256': 'f' * 64,
+                    'state_sha256': '6' * 64, 'registry_sha256': '7' * 64,
+                    'changed_content_ids': [],
+                    'counts': dict.fromkeys(('new_created', 'new_preview_imported',
+                                             'new_updated', 'legacy_source_updated'), 0)}
+        receipt9 = {'sequence': 9, 'parent_commit': before2,
+                    'previous_receipt_commit': migration1,
+                    'previous_receipt_sha256': entry.a.sha(raw1),
+                    'state_sha256': '8' * 64, 'registry_sha256': '9' * 64,
+                    'changed_content_ids': [],
+                    'counts': dict.fromkeys(('new_created', 'new_preview_imported',
+                                             'new_updated', 'legacy_source_updated'), 0)}
+        old_states, states8, states9 = ({}, {}, {}), ({'s': 8}, {}, {}), ({'s': 9}, {}, {})
+        with patch.object(entry, 'PILOT_MIGRATION', migrations), \
+                patch.object(entry, 'rules_sha256', return_value='a' * 64), \
+                patch.object(entry, 'policy_sha256', return_value='b' * 64), \
+                patch.object(entry, 'bootstrap_states', return_value=old_states), \
+                patch.object(entry, 'verify_trusted_publication', side_effect=[
+                    (previous, old_states), (receipt8, states8), (receipt9, states9)]) as verify, \
+                patch.object(entry, 'load_states', return_value=states9) as load:
+            result = entry.trust_current(reader, object(), parent, 'a' * 64,
+                {'commit': anchor, 'receipt_sha256': 'f' * 64}, bootstrap={'commit': 'e' * 40})
+        self.assertEqual(result, ('b' * 64, receipt9, states9))
+        self.assertEqual(verify.call_count, 3)
+        self.assertEqual(load.call_args.args[2:5],
+                         (parent, receipt9['state_sha256'], receipt9['registry_sha256']))
+
     def test_state_only_transition_rejects_content_write_receipt(self):
         anchor, before, migration, parent = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
         before_tree, after_tree = '1' * 40, '2' * 40
-        migration_data = (before, migration, before_tree, after_tree)
+        raw_receipt = b'bound migration receipt'
+        migration_data = (before, migration, before_tree, after_tree, entry.a.sha(raw_receipt), 8)
         reader = Reader({anchor: [], before: [anchor], migration: [before], parent: [migration]},
                         {anchor: before_tree, before: before_tree, migration: after_tree, parent: after_tree})
-        reader.read = lambda *args: b'bound migration receipt'
+        reader.read = lambda *args: raw_receipt
         previous = {'sequence': 7, 'state_sha256': '3' * 64, 'registry_sha256': '4' * 64}
         content_receipt = {'sequence': 8, 'parent_commit': before,
                            'previous_receipt_commit': anchor,
@@ -495,9 +590,11 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
         before_tree, after_tree = '1' * 40, '2' * 40
         reader = Reader({anchor: [], before: [anchor], migration: [before], parent: [migration]},
                         {anchor: before_tree, before: before_tree, migration: after_tree, parent: after_tree})
-        reader.read = lambda *args: b'bad transition receipt'
+        raw_receipt = b'bad transition receipt'
+        reader.read = lambda *args: raw_receipt
         previous = {'sequence': 7, 'state_sha256': '3' * 64, 'registry_sha256': '4' * 64}
-        with patch.object(entry, 'PILOT_MIGRATION', (before, migration, before_tree, after_tree)), \
+        with patch.object(entry, 'PILOT_MIGRATION', (before, migration, before_tree, after_tree,
+                                                      entry.a.sha(raw_receipt), 8)), \
                 patch.object(entry, 'rules_sha256', return_value='7' * 64), \
                 patch.object(entry, 'policy_sha256', return_value='8' * 64), \
                 patch.object(entry, 'bootstrap_states', return_value=({}, {}, {})), \

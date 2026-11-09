@@ -298,16 +298,21 @@ def load_receipt(reader, remote, token, root, commit):
         m.import_blob(reader.local, values[entry.FULL_RECEIPT], row[2])
 
 
-def hydrate_pilot_migration_receipt(local, reader, remote, token, root, anchor, parent):
-    pin = entry.PILOT_MIGRATION
-    if anchor is None or type(pin) is not tuple or len(pin) != 4:
+def hydrate_pilot_migration_receipt(local, reader, remote, token, root, anchor, parent, *, after_sequence=None):
+    if anchor is None:
         return
-    _, migration, before_tree, after_tree = pin
-    if (reader.source_get_tree(anchor['commit']) != before_tree
-            or reader.source_get_tree(parent) != after_tree):
+    parent_tree = reader.source_get_tree(parent)
+    if reader.source_get_tree(anchor['commit']) == parent_tree:
         return
-    fetch_commit(local, migration, entry.MAX_INTERVENING + 2)
-    load_receipt(reader, remote, token, root, migration)
+    migrations = entry.pilot_migrations(require_receipts=True)
+    target = next((index for index, row in enumerate(migrations) if row[3] == parent_tree), None)
+    if target is None:
+        return
+    for _, migration, _, _, _, sequence in migrations[:target + 1]:
+        if after_sequence is not None and sequence <= after_sequence:
+            continue
+        fetch_commit(local, migration, entry.MAX_INTERVENING + 2)
+        load_receipt(reader, remote, token, root, migration)
 
 
 def hydrate_replaced_blobs(reader, remote, token, directory, parent, files):
@@ -380,7 +385,8 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
             load_receipt(reader, remote, token, root, previous)
         for target in sorted({before, commit}):
             at_stage('current_inventory', load_inventory, reader, remote, token, root / target, target, source_id=source_id)
-    at_stage('trusted_states', hydrate_pilot_migration_receipt, local, reader, remote, token, root, anchor, parent)
+    at_stage('trusted_states', hydrate_pilot_migration_receipt, local, reader, remote, token, root,
+             anchor, parent, after_sequence=prior_receipt['sequence'] if prior_receipt else None)
     _, trusted_receipt, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
     anchor, history_witness = effective_anchor_after_pilot_migration(
         reader, anchor, prior_receipt, trusted_receipt, parent, policy, history_witness)
@@ -393,31 +399,45 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
 
 
 def effective_anchor_after_pilot_migration(reader, anchor, prior_receipt, trusted_receipt, parent, policy, history_witness):
-    """Promote only the already verified, exact pinned zero-content migration."""
+    """Promote through exact pinned zero-content receipts already trusted by entry."""
     if prior_receipt is None or trusted_receipt is None or trusted_receipt['sequence'] == prior_receipt['sequence']:
         return anchor, history_witness
-    pin = entry.PILOT_MIGRATION
-    if anchor is None or type(pin) is not tuple or len(pin) != 4:
+    migrations = entry.pilot_migrations(require_receipts=True)
+    if anchor is None or not migrations:
         fail('runtime_receipt')
-    before, migration, before_tree, after_tree = pin
-    counts = trusted_receipt.get('counts', {})
-    if (reader.source_get_tree(anchor['commit']) != before_tree
-            or reader.source_get_tree(parent) != after_tree
-            or reader.source_get_tree(migration) != after_tree
-            or entry.single_parent(reader, migration) != before
-            or trusted_receipt['sequence'] != prior_receipt['sequence'] + 1
-            or trusted_receipt['parent_commit'] != before
-            or trusted_receipt['previous_receipt_commit'] != anchor['commit']
-            or trusted_receipt['previous_receipt_sha256'] != anchor['receipt_sha256']
-            or trusted_receipt['changed_content_ids']
-            or sum(counts.get(key, 0) for key in (
-                'new_created', 'new_preview_imported', 'new_updated', 'legacy_source_updated'))):
+    effective = anchor
+    sequence = prior_receipt['sequence']
+    latest_receipt = prior_receipt
+    for before, migration, before_tree, after_tree, receipt_sha256, pinned_sequence in migrations:
+        if pinned_sequence <= sequence:
+            continue
+        if pinned_sequence > trusted_receipt['sequence']:
+            break
+        if pinned_sequence != sequence + 1:
+            fail('runtime_receipt')
+        raw = reader.read(migration, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
+        if (a.sha(raw) != receipt_sha256
+                or reader.source_get_tree(effective['commit']) != before_tree
+                or reader.source_get_tree(before) != before_tree
+                or reader.source_get_tree(migration) != after_tree
+                or entry.single_parent(reader, migration) != before):
+            fail('runtime_receipt')
+        receipt = entry.read_receipt(reader, migration, receipt_sha256, policy['get_policy_sha256'])
+        counts = receipt.get('counts', {})
+        content_writes = sum(counts.get(key, 0) for key in (
+            'new_created', 'new_preview_imported', 'new_updated', 'legacy_source_updated'))
+        if (receipt['sequence'] != pinned_sequence
+                or receipt['parent_commit'] != before
+                or receipt['previous_receipt_commit'] != effective['commit']
+                or receipt['previous_receipt_sha256'] != effective['receipt_sha256']
+                or receipt['changed_content_ids'] or content_writes):
+            fail('runtime_receipt')
+        effective = {'commit': migration, 'receipt_sha256': receipt_sha256}
+        sequence = pinned_sequence
+        latest_receipt = receipt
+    if sequence != trusted_receipt['sequence'] or latest_receipt != trusted_receipt:
         fail('runtime_receipt')
-    raw = reader.read(migration, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
-    receipt_sha256 = a.sha(raw)
-    if entry.read_receipt(reader, migration, receipt_sha256, policy['get_policy_sha256']) != trusted_receipt:
-        fail('runtime_receipt')
-    return {'commit': migration, 'receipt_sha256': receipt_sha256}, None
+    return effective, None
 
 
 class ReplaySource:

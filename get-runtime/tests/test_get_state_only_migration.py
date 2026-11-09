@@ -106,7 +106,8 @@ class StateOnlyMigration(unittest.TestCase):
         self.assertEqual(receipt['delta_sha256'], entry.a.sha(entry.a.encoded(
             entry.delta(reader, first['candidate_commit'], migration))))
         migration_pin = (first['candidate_commit'], migration,
-            reader.source_get_tree(first['candidate_commit']), reader.source_get_tree(migration))
+            reader.source_get_tree(first['candidate_commit']), reader.source_get_tree(migration),
+            entry.a.sha(migration_receipt_bytes), receipt['sequence'])
 
         with patch.object(entry, 'PILOT_MIGRATION', migration_pin):
             policy, trusted_receipt, trusted_states = entry.trust_current(reader,

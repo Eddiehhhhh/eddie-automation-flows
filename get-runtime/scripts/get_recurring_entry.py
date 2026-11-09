@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 import get_canonical_manual as engine
@@ -69,6 +70,44 @@ def fail_history(check, interval=None):
         error.history_interval = interval
     raise error
 
+def pilot_migrations(*, require_receipts=False):
+    pin = PILOT_MIGRATION
+    if pin is None:
+        return ()
+    if type(pin) is tuple and len(pin) in (4, 6) and isinstance(pin[0], str):
+        rows = (pin,)
+    elif type(pin) is tuple and pin and all(type(row) is tuple for row in pin):
+        rows = pin
+    else:
+        fail_history('pilot_migration_malformed')
+    parsed = []
+    for row in rows:
+        if len(row) == 4:
+            before, migration, before_tree, after_tree = row
+            receipt_sha256 = sequence = None
+        elif len(row) == 6:
+            before, migration, before_tree, after_tree, receipt_sha256, sequence = row
+        else:
+            fail_history('pilot_migration_malformed')
+        if (any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{40}', value)
+                for value in (before, migration, before_tree, after_tree))
+                or (receipt_sha256 is None) != (sequence is None)
+                or (receipt_sha256 is not None and (not isinstance(receipt_sha256, str)
+                    or not re.fullmatch('[0-9a-f]{64}', receipt_sha256)
+                    or type(sequence) is not int or sequence < 1))):
+            fail_history('pilot_migration_malformed')
+        if require_receipts and receipt_sha256 is None:
+            fail_history('pilot_migration_malformed')
+        parsed.append((before, migration, before_tree, after_tree, receipt_sha256, sequence))
+    if len(parsed) > 1:
+        if (any(row[4] is None for row in parsed)
+                or len({row[1] for row in parsed}) != len(parsed)
+                or len({row[3] for row in parsed}) != len(parsed)
+                or any(right[5] != left[5] + 1 or right[2] != left[3]
+                       for left, right in zip(parsed, parsed[1:]))):
+            fail_history('pilot_migration_malformed')
+    return tuple(parsed)
+
 
 def rules_sha256():
     """Bind the shared engine, this entry, and the disabled template bytes."""
@@ -93,15 +132,16 @@ def single_parent(reader, commit):
     return rows[1]
 
 
-def mainline_parent(reader, commit, expected_get_tree):
+def mainline_parent(reader, commit, expected_get_tree, *, mismatch_check=None):
     a.checked(commit, 40); a.checked(expected_get_tree, 40)
     rows = reader.local.run('rev-list', '--parents', '-n', '1', commit).decode().split()
     if not rows or rows[0] != commit or len(rows) not in (2, 3):
         fail('entry_non_linear_history')
     parent = rows[1]
     a.checked(parent, 40)
-    if len(rows) == 3 and reader.source_get_tree(parent) != expected_get_tree:
-        fail_history('merge_first_parent_tree_mismatch')
+    if reader.source_get_tree(parent) != expected_get_tree:
+        fail_history('merge_first_parent_tree_mismatch' if len(rows) == 3
+                     else mismatch_check or 'pilot_tree_diverged')
     return parent
 
 
@@ -154,43 +194,50 @@ def unchanged_get_history(reader, ancestor, descendant, *, history_witness=None,
                 fail('entry_history_witness')
             ancestor = history_witness.observed_commit
     cursor = descendant
-    pilot_migration = None
-    pilot_start_allowed = True
+    migrations = None
+    by_commit = {}
+    consumed = set()
+    active_migration = None
+    saw_migration = False
     for _ in range(MAX_INTERVENING + 1):
         current = reader.source_get_tree(cursor)
-        if current != expected:
-            if pilot_migration is None:
-                # This is a fixed historical Get-tree transition in the trusted
-                # lineage, not a transition caused by the current source item.
-                if not pilot_start_allowed:
-                    fail_history('pilot_start_disallowed', diagnostic_interval)
-                if PILOT_MIGRATION is None:
-                    fail_history('pilot_migration_unconfigured', diagnostic_interval)
-                if type(PILOT_MIGRATION) is not tuple or len(PILOT_MIGRATION) != 4:
-                    fail_history('pilot_migration_malformed', diagnostic_interval)
-                before, migration, before_tree, after_tree = PILOT_MIGRATION
-                if expected != before_tree or current != after_tree:
-                    fail_history('pilot_tree_pair_unmatched', diagnostic_interval)
-                pilot_migration = (before, migration, before_tree, after_tree)
-                pilot_start_allowed = False
-            before, migration, before_tree, after_tree = pilot_migration
+        if active_migration is not None:
+            before, migration, before_tree, after_tree, _, _ = active_migration
             if current != after_tree:
                 fail_history('pilot_tree_diverged', diagnostic_interval)
             if cursor == migration:
-                if single_parent(reader, cursor) != before:
+                if (single_parent(reader, cursor) != before
+                        or reader.source_get_tree(before) != before_tree):
                     fail_history('pilot_parent_mismatch', diagnostic_interval)
                 expected = before_tree
                 cursor = before
-                pilot_migration = None
+                consumed.add(migration)
+                active_migration = None
+                saw_migration = True
             else:
                 cursor = mainline_parent(reader, cursor, after_tree)
             continue
-        if pilot_migration is not None:
-            fail_history('pilot_migration_unclosed', diagnostic_interval)
         if cursor == ancestor:
             return
-        cursor = mainline_parent(reader, cursor, expected)
-        pilot_start_allowed = False
+        pin = by_commit.get(cursor) if migrations is not None else None
+        if pin is not None and pin[1] not in consumed and current == pin[3]:
+            active_migration = pin
+            continue
+        if current != expected:
+            if migrations is None:
+                migrations = pilot_migrations()
+                by_commit = {row[1]: row for row in migrations}
+            candidates = [row for row in migrations
+                          if row[1] not in consumed and row[3] == current]
+            if len(candidates) != 1:
+                if not migrations:
+                    fail_history('pilot_migration_unconfigured', diagnostic_interval)
+                fail_history('pilot_start_disallowed' if saw_migration
+                             else 'pilot_tree_pair_unmatched', diagnostic_interval)
+            active_migration = candidates[0]
+            continue
+        cursor = mainline_parent(reader, cursor, expected,
+            mismatch_check='pilot_start_disallowed' if saw_migration else 'pilot_tree_diverged')
     fail('entry_history_bound')
 
 
@@ -441,28 +488,44 @@ def trust_current(reader, evidence, parent, approved_rules_sha256, anchor=None, 
     else:
         receipt, states = verify_trusted_publication(reader, evidence, anchor, policy, bootstrap, history_witness=history_witness, source_id=source_id)
         trusted = anchor['commit']
-    if receipt is not None and external_anchor is not None and type(PILOT_MIGRATION) is tuple and len(PILOT_MIGRATION) == 4:
-        before, migration, before_tree, after_tree = PILOT_MIGRATION
-        if (reader.source_get_tree(trusted) == before_tree
-                and reader.source_get_tree(parent) == after_tree):
-            # A state-only migration is accepted only after its complete receipt
-            # proves continuity, state hashes, registry contents, and zero note changes.
-            raw_receipt = reader.read(migration, FULL_RECEIPT, MAX_RECEIPT)
-            migration_anchor = {'commit': migration, 'receipt_sha256': a.sha(raw_receipt)}
-            migrated_receipt, migrated_states = verify_trusted_publication(
-                reader, evidence, migration_anchor, policy, bootstrap,
-                history_witness=history_witness, source_id=source_id)
-            content_writes = sum(migrated_receipt['counts'][key] for key in (
-                'new_created', 'new_preview_imported', 'new_updated', 'legacy_source_updated'))
-            if (single_parent(reader, migration) != before
-                    or migrated_receipt['parent_commit'] != before
-                    or migrated_receipt['previous_receipt_commit'] != trusted
-                    or migrated_receipt['previous_receipt_sha256'] != external_anchor['receipt_sha256']
-                    or migrated_receipt['sequence'] != receipt['sequence'] + 1
-                    or migrated_receipt['changed_content_ids'] or content_writes):
-                fail('entry_receipt_anchor')
-            trusted, receipt, states = migration, migrated_receipt, migrated_states
-            history_witness = None
+    if receipt is not None and external_anchor is not None:
+        parent_tree = reader.source_get_tree(parent)
+        migrations = (pilot_migrations(require_receipts=True)
+                      if parent_tree != reader.source_get_tree(trusted) else ())
+        target = next((index for index, row in enumerate(migrations) if row[3] == parent_tree), None)
+        if target is not None:
+            for before, migration, before_tree, after_tree, receipt_sha256, sequence in migrations[:target + 1]:
+                if sequence <= receipt['sequence']:
+                    continue
+                if sequence != receipt['sequence'] + 1:
+                    fail_history('pilot_migration_unclosed', 'trusted_anchor_to_parent')
+                unchanged_get_history(reader, trusted, before,
+                    history_witness=history_witness, source_id=source_id,
+                    diagnostic_interval='trusted_anchor_to_parent')
+                if (reader.source_get_tree(before) != before_tree
+                        or reader.source_get_tree(migration) != after_tree
+                        or single_parent(reader, migration) != before):
+                    fail_history('pilot_tree_pair_unmatched', 'trusted_anchor_to_parent')
+                raw_receipt = reader.read(migration, FULL_RECEIPT, MAX_RECEIPT)
+                if a.sha(raw_receipt) != receipt_sha256:
+                    fail('entry_receipt_anchor')
+                migration_anchor = {'commit': migration, 'receipt_sha256': receipt_sha256}
+                migrated_receipt, migrated_states = verify_trusted_publication(
+                    reader, evidence, migration_anchor, policy, bootstrap,
+                    history_witness=history_witness, source_id=source_id)
+                counts = migrated_receipt.get('counts', {})
+                content_writes = sum(counts.get(key, 0) for key in (
+                    'new_created', 'new_preview_imported', 'new_updated', 'legacy_source_updated'))
+                if (migrated_receipt['parent_commit'] != before
+                        or migrated_receipt['previous_receipt_commit'] != trusted
+                        or migrated_receipt['previous_receipt_sha256'] != external_anchor['receipt_sha256']
+                        or migrated_receipt['sequence'] != sequence
+                        or migrated_receipt['sequence'] != receipt['sequence'] + 1
+                        or migrated_receipt['changed_content_ids'] or content_writes):
+                    fail('entry_receipt_anchor')
+                trusted, receipt, states = migration, migrated_receipt, migrated_states
+                external_anchor = migration_anchor
+                history_witness = None
     unchanged_get_history(reader, trusted, parent, history_witness=history_witness, source_id=source_id,
                           diagnostic_interval='trusted_anchor_to_parent')
     # Equal full Get trees guarantee these exact state/inventory bytes at parent.

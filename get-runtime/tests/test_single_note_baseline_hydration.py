@@ -121,30 +121,60 @@ class BaselineHydration(unittest.TestCase):
                                                {'Wiki/unexpected.md': b'updated'})
             fetch.assert_not_called()
 
-    def test_pinned_migration_receipt_is_hydrated_only_for_exact_tree_pair(self):
-        anchor, migration = {'commit': 'e' * 40}, 'b' * 40
-        before_tree, after_tree = 'c' * 40, 'd' * 40
+    def test_pinned_migration_receipt_hydrates_only_when_not_already_anchored(self):
+        anchor = {'commit': 'e' * 40}
+        migration1, migration2 = 'b' * 40, 'c' * 40
+        before_tree, after_tree, final_tree = '1' * 40, '2' * 40, '3' * 40
         reader = types.SimpleNamespace(
             local=self.reader.local,
             source_get_tree=lambda commit: {
-                anchor['commit']: before_tree, self.parent: after_tree,
-                migration: after_tree}[commit])
-        pin = ('e' * 40, migration, before_tree, after_tree)
+                anchor['commit']: before_tree, self.parent: final_tree,
+                migration1: after_tree, migration2: final_tree}[commit])
+        pin = (
+            (anchor['commit'], migration1, before_tree, after_tree,
+             runtime.a.sha(b'receipt eight'), 8),
+            (migration1, migration2, after_tree, final_tree,
+             runtime.a.sha(b'receipt nine'), 9),
+        )
         writable_local = object()
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime, 'fetch_commit') as fetch, \
              patch.object(runtime, 'load_receipt') as load:
             runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
-                Path('/unused'), anchor, self.parent)
-        fetch.assert_called_once_with(writable_local, migration, runtime.entry.MAX_INTERVENING + 2)
-        load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration)
+                Path('/unused'), anchor, self.parent, after_sequence=7)
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], [migration1, migration2])
+        self.assertEqual([call.args[-1] for call in load.call_args_list], [migration1, migration2])
 
-        reader.source_get_tree = lambda _: 'f' * 40
+        reader.source_get_tree = lambda commit: {
+            anchor['commit']: before_tree, self.parent: after_tree,
+            migration1: after_tree, migration2: final_tree}[commit]
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime, 'fetch_commit') as fetch, \
              patch.object(runtime, 'load_receipt') as load:
             runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
-                Path('/unused'), anchor, self.parent)
+                Path('/unused'), anchor, self.parent, after_sequence=7)
+        fetch.assert_called_once_with(writable_local, migration1, runtime.entry.MAX_INTERVENING + 2)
+        load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration1)
+
+        with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
+             patch.object(runtime, 'fetch_commit') as fetch, \
+             patch.object(runtime, 'load_receipt') as load:
+            reader.source_get_tree = lambda commit: {
+                anchor['commit']: before_tree, self.parent: final_tree,
+                migration1: after_tree, migration2: final_tree}[commit]
+            runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
+                Path('/unused'), anchor, self.parent, after_sequence=8)
+        fetch.assert_called_once_with(writable_local, migration2, runtime.entry.MAX_INTERVENING + 2)
+        load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration2)
+
+    def test_migration_receipt_hydration_skips_unchanged_get_tree(self):
+        anchor = {'commit': 'e' * 40}
+        reader = types.SimpleNamespace(source_get_tree=lambda commit: '1' * 40)
+        with patch.object(runtime.entry, 'PILOT_MIGRATION', ()), \
+             patch.object(runtime, 'fetch_commit') as fetch, \
+             patch.object(runtime, 'load_receipt') as load:
+            runtime.hydrate_pilot_migration_receipt(object(), reader, self.remote, 'token',
+                Path('/unused'), anchor, self.parent, after_sequence=7)
         fetch.assert_not_called()
         load.assert_not_called()
 
@@ -159,12 +189,14 @@ class BaselineHydration(unittest.TestCase):
                     'changed_content_ids': [],
                     'counts': {'new_created': 0, 'new_preview_imported': 0,
                                'new_updated': 0, 'legacy_source_updated': 0}}
+        raw_receipt = b'verified migration receipt'
+        before = 'f' * 40
         reader = types.SimpleNamespace(
             source_get_tree=lambda commit: {
-                anchor['commit']: before_tree, migration: after_tree,
-                self.parent: after_tree}[commit],
-            read=lambda *args: b'verified migration receipt')
-        pin = ('f' * 40, migration, before_tree, after_tree)
+                anchor['commit']: before_tree, before: before_tree,
+                migration: after_tree, self.parent: after_tree}[commit],
+            read=lambda *args: raw_receipt)
+        pin = (before, migration, before_tree, after_tree, runtime.a.sha(raw_receipt), 8)
         policy = {'get_policy_sha256': '8' * 64}
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime.entry, 'single_parent', return_value='f' * 40), \
@@ -182,6 +214,44 @@ class BaselineHydration(unittest.TestCase):
             with self.assertRaisesRegex(runtime.a.ParityFailure, 'runtime_receipt'):
                 runtime.effective_anchor_after_pilot_migration(
                     reader, anchor, prior, changed, self.parent, policy, {'old': 'witness'})
+
+    def test_consecutive_verified_migrations_advance_to_last_receipt_only(self):
+        anchor = {'commit': 'a' * 40, 'receipt_sha256': 'f' * 64}
+        before1, migration1, before2, migration2 = ('b' * 40, 'c' * 40, 'd' * 40, 'e' * 40)
+        parent = '0' * 40
+        tree1, tree2, tree3 = '1' * 40, '2' * 40, '3' * 40
+        raw1, raw2 = b'receipt eight', b'receipt nine'
+        receipt8 = {'sequence': 8, 'parent_commit': before1,
+                    'previous_receipt_commit': anchor['commit'],
+                    'previous_receipt_sha256': anchor['receipt_sha256'],
+                    'changed_content_ids': [],
+                    'counts': dict.fromkeys(('new_created', 'new_preview_imported',
+                                             'new_updated', 'legacy_source_updated'), 0)}
+        receipt9 = {'sequence': 9, 'parent_commit': before2,
+                    'previous_receipt_commit': migration1,
+                    'previous_receipt_sha256': runtime.a.sha(raw1),
+                    'changed_content_ids': [],
+                    'counts': dict.fromkeys(('new_created', 'new_preview_imported',
+                                             'new_updated', 'legacy_source_updated'), 0)}
+        reader = types.SimpleNamespace(
+            source_get_tree=lambda commit: {
+                anchor['commit']: tree1, before1: tree1, migration1: tree2,
+                before2: tree2, migration2: tree3, parent: tree3}[commit],
+            read=lambda commit, *_: {migration1: raw1, migration2: raw2}[commit])
+        pins = (
+            (before1, migration1, tree1, tree2, runtime.a.sha(raw1), 8),
+            (before2, migration2, tree2, tree3, runtime.a.sha(raw2), 9),
+        )
+        with patch.object(runtime.entry, 'PILOT_MIGRATION', pins), \
+             patch.object(runtime.entry, 'single_parent', side_effect=lambda _, commit:
+                          {migration1: before1, migration2: before2}[commit]), \
+             patch.object(runtime.entry, 'read_receipt', side_effect=[receipt8, receipt9]) as read:
+            effective, witness = runtime.effective_anchor_after_pilot_migration(
+                reader, anchor, {'sequence': 7}, receipt9, parent,
+                {'get_policy_sha256': '8' * 64}, {'old': 'witness'})
+        self.assertEqual(effective, {'commit': migration2, 'receipt_sha256': runtime.a.sha(raw2)})
+        self.assertIsNone(witness)
+        self.assertEqual(read.call_count, 2)
 
     def test_selected_baseline_readback_failure_still_stops(self):
         with patch.object(self.remote, 'request', return_value={'sha': 'wrong'}):
