@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: '2d84554e79e13ab07b9fd6ff83bba9dc4a2a9991'
+          ref: '3d2a9bc5897996e879e44b517f50aef5101d5490'
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -64,7 +64,7 @@ jobs:
         run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
       - name: Verify pinned reviewed runtime
         env:
-          RUNTIME_SHA: '2d84554e79e13ab07b9fd6ff83bba9dc4a2a9991'
+          RUNTIME_SHA: '3d2a9bc5897996e879e44b517f50aef5101d5490'
         run: test "$(git rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Validate single-note request
         if: ${{ github.event_name == 'workflow_dispatch' && (inputs.private_proof_key != '' || inputs.create_test_note) }}
@@ -262,7 +262,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Eddiehhhhh/eddie-automation-flows
-          ref: '2d84554e79e13ab07b9fd6ff83bba9dc4a2a9991'
+          ref: '3d2a9bc5897996e879e44b517f50aef5101d5490'
           path: get-runtime
           persist-credentials: false
       - name: Set up Python
