@@ -71,7 +71,7 @@ from get_recurring_entry import a,m,r
 PRODUCTION_ACTIVATED=True
 CONTRACT='get-notion-standing-runtime-1'
 MAX_RUN_RECORDS=10
-STAGES={'input','policy','writers','clone','journal','source','initial','queue','execute','final'}
+STAGES={'input','policy','writers','clone','journal','journal_baseline','journal_discovery','journal_readback','source','initial','queue','execute','final'}
 ERRORS=set(png_runtime.REASONS)|{'notion_activation_pending','notion_context','notion_scope','notion_state_anchor','notion_source_changed','notion_initial_source','notion_schema','notion_marker','notion_failed','png_anchor_pending','notion_journal_busy','writer_guard_permission','writer_guard_quota','writer_gate_unknown','journal_provenance_missing','asset_permission_denied','permission_denied'}
 
 ERRORS.update(e.properties.REASONS | {'journal_busy'})
@@ -666,11 +666,15 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                 replay_blob = replay.read_source(local, remote, token, root, tip, replay_scope)
             if present:
                 if public_policy is None:fail('notion_state_anchor')
+                stage='journal_baseline'
                 found=idle_recovery.reviewed_baseline_anchor(reader.read(parent,outbox.STATE_PATH,outbox.MAX_STATE),public_policy,modes)
+                stage='journal'
                 if found is None:
+                    stage='journal_discovery'
                     found=checkpoints.discover_anchor(client,public_policy=public_policy,approved_public_policy_sha256=public_hash,
                         notion_policy_sha256=e.digest(scope_for(public_policy)),exclude_run_id=execution['run_id'] if execution else None,
                         exclude_run_attempt=execution['run_attempt'] if execution else None)
+                    stage='journal'
                 reviewed_replay = (replay_scope is not None and
                     found.get('recovery_anchor') == idle_recovery.REVIEWED_BASELINE_TAG)
                 if not single_note_anchor_allowed(single_note_id, found.get('recovery_anchor')):fail('notion_scope')
@@ -711,7 +715,9 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             durable=journal.RemoteJournal(local.vault,remote,anchor=anchor,load_commit=loader,guard=source_guard,confirm=journal_confirm,
                 post_cas_paths=post_cas_paths,post_cas_mirror=True,
                 require_locator=bool(apply and idle_rotation.enabled(public_policy)))
+            stage='journal_readback'
             current,sha=durable.read()
+            stage='journal'
             if present and found.get('recovery_anchor')=='exact_uncertain_transaction_v1' and not plan_recovery.validate_initial_state(current,sha):
                 fail('notion_state_anchor')
             if all(mode is None for mode in modes):

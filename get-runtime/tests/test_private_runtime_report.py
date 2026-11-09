@@ -72,6 +72,15 @@ class PrivateRuntimeReport(unittest.TestCase):
         value['gitdata_api_diagnostic']['operation'] = 'private/path'
         self.assertNotIn('gitdata_api_diagnostic', report.public(value))
 
+    def test_notion_journal_failure_stage_is_fixed_and_allowlisted(self):
+        for stage in ('journal_baseline', 'journal_discovery', 'journal_readback'):
+            projected = report.public({'status': 'failed', 'stage': stage, 'reason': 'approval_missing'},
+                                      allowed_stages=('journal_baseline', 'journal_discovery', 'journal_readback'))
+            self.assertEqual(projected['stage'], stage)
+        private = report.public({'status': 'failed', 'stage': 'journal / private path', 'reason': 'approval_missing'},
+                                allowed_stages=('journal_baseline', 'journal_discovery', 'journal_readback'))
+        self.assertNotIn('stage', private)
+
 
 if __name__ == '__main__':
     unittest.main()
