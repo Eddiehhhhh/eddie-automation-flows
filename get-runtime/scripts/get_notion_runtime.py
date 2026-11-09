@@ -94,6 +94,11 @@ def failure_diagnostic(exc):
 def fail(code):raise ValueError(code) from None
 
 
+def single_note_anchor_allowed(single_note_id, recovery_anchor):
+    return (single_note_id is None or recovery_anchor is None
+            or recovery_anchor == idle_recovery.REVIEWED_BASELINE_TAG)
+
+
 class ReadOnlyStore:
     def __init__(self,value):outbox.check_state(value);self.value=deepcopy(value)
     def read(self):return deepcopy(self.value),outbox.digest(self.value)
@@ -668,7 +673,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
                         exclude_run_attempt=execution['run_attempt'] if execution else None)
                 reviewed_replay = (replay_scope is not None and
                     found.get('recovery_anchor') == idle_recovery.REVIEWED_BASELINE_TAG)
-                if single_note_id is not None and found.get('recovery_anchor') is not None and not reviewed_replay:fail('notion_scope')
+                if not single_note_anchor_allowed(single_note_id, found.get('recovery_anchor')):fail('notion_scope')
                 anchor=found['anchor']
                 if reviewed_replay:
                     anchor = replay.bridge_state(local, loader, anchor, tip['commit'])

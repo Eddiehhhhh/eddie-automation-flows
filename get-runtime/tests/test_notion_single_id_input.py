@@ -24,6 +24,13 @@ with patch.dict(sys.modules):
 
 
 class SingleNoteNotionInput(unittest.TestCase):
+    def test_single_note_uses_only_the_reviewed_idle_baseline_anchor(self):
+        tag = runtime.idle_recovery.REVIEWED_BASELINE_TAG
+        self.assertTrue(runtime.single_note_anchor_allowed('123', tag))
+        self.assertTrue(runtime.single_note_anchor_allowed('123', None))
+        self.assertFalse(runtime.single_note_anchor_allowed('123', 'another_recovery_anchor'))
+        self.assertTrue(runtime.single_note_anchor_allowed(None, 'another_recovery_anchor'))
+
     def test_valid_cli_id_reaches_runtime_and_bad_id_does_not(self):
         policy = {'workflow_path': '.github/workflows/check.yml', 'head_branch': 'main'}
         env = {'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GET_SINGLE_NOTE_MODE': 'true',
