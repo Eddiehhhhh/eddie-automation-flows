@@ -246,7 +246,7 @@ def fail(code):
     raise entry.EntryFailure(code)
 
 def fail_scope(check):
-    if check not in SCOPE_CHECKS:
+    if not isinstance(check, str) or check not in SCOPE_CHECKS:
         fail('runtime_failed')
     error = entry.EntryFailure('runtime_scope')
     error.scope_check = check
