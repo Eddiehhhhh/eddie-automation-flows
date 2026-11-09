@@ -115,8 +115,10 @@ class _PublicGithub:
         self.clock = clock; self.sleep = sleep; self.elapsed = 0; self.requests = 0; self.bytes = 0
 
     def once(self, url, maximum):
-        if self.requests >= MAX_REQUESTS or self.elapsed >= MAX_SECONDS:
-            fail('provenance_budget')
+        if self.requests >= MAX_REQUESTS:
+            fail('provenance_budget_requests')
+        if self.elapsed >= MAX_SECONDS:
+            fail('provenance_budget_elapsed')
         self.requests += 1
         headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'canonical-get-public-provenance',
                    'X-GitHub-Api-Version': '2022-11-28', 'Accept-Encoding': 'identity'}
@@ -146,10 +148,12 @@ class _PublicGithub:
         finally:
             self.elapsed += max(0, self.clock() - started)
         if self.elapsed >= MAX_SECONDS:
-            fail('provenance_budget')
+            fail('provenance_budget_elapsed')
         self.bytes += len(raw)
-        if len(raw) > maximum or self.bytes > MAX_TOTAL:
-            fail('provenance_budget')
+        if len(raw) > maximum:
+            fail('provenance_budget_response_bytes')
+        if self.bytes > MAX_TOTAL:
+            fail('provenance_budget_total_bytes')
         return status, {k.lower(): v for k, v in headers.items()}, raw
 
     def request(self, path, maximum, *, log=False):
