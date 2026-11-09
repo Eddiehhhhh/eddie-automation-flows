@@ -226,6 +226,33 @@ class Staging(unittest.TestCase):
         self.assertEqual(caught.exception.api_diagnostic,
                          {'operation': 'stage_refs', 'failure': 'paginated', 'http_status': 200})
 
+    def test_ancestry_compare_accepts_bounded_large_history_and_rejects_unbounded_response(self):
+        ancestry = b'{"status":"ahead","merge_base_commit":{"sha":"' + b'a' * 40 + b'"}}'
+
+        class Response:
+            status = 200
+            headers = {}
+            def __init__(self, raw): self.raw, self.read_limit = raw, None
+            def __enter__(self): return self
+            def __exit__(self, *_): return None
+            def read(self, limit):
+                self.read_limit = limit
+                return self.raw[:limit]
+
+        compare = '/compare/' + 'a' * 40 + '...' + 'b' * 40
+        api = staging.API('token')
+        large = Response(ancestry + b' ' * (1024 * 1024))
+        api.opener.open = Mock(return_value=large)
+        self.assertEqual(api.call('GET', compare)['status'], 'ahead')
+        self.assertEqual(large.read_limit, 2 * 1024 * 1024 + 1)
+
+        too_large = Response(ancestry + b' ' * (2 * 1024 * 1024))
+        api.opener.open = Mock(return_value=too_large)
+        with self.assertRaises(staging.StageFailure) as caught:
+            api.call('GET', compare)
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'ancestry_compare', 'failure': 'response_too_large', 'http_status': 200})
+
     def test_blob_request_accepts_valid_object_larger_than_one_mebibyte(self):
         data = b'x' * (1024 * 1024 + 1)
         api = staging.API('token')
