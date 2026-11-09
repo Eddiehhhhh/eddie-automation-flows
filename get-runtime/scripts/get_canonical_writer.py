@@ -491,7 +491,9 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
     for ident in selected:identity(ident)
     if only_id is not None:
         identity(only_id)
-        if (only_id not in items or only_id in state['conflictsById']
+        retry_race=(state['conflictsById'].get(only_id)=='source_version_race'
+                    and only_id in state['newById'])
+        if (only_id not in items or (only_id in state['conflictsById'] and not retry_race)
                 or (only_id in state['reserved'] and only_id not in legacy_state['legacyById'])
                 or set(details)-{only_id} or set(selected_new)-{only_id}):fail('identity_reserved')
     present=inventory(current,only_id=only_id,known_owners=state['newById'],isolate_duplicates=only_id is None);occupied=set(current);changes={};conflicts=deepcopy(state['conflictsById']);counts=dict.fromkeys(('created','preview_imported','updated','state_only','unchanged','conflicted','detail_required'),0)
@@ -501,6 +503,9 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
     media_errors=media_errors or {}
     if not isinstance(media_by_id,dict) or set(media_by_id)-set(targets) or not isinstance(media_errors,dict) or set(media_errors)-set(targets):fail('canonical_details')
     for ident in targets:
+        retrying_source_race=(ident==only_id
+            and state['conflictsById'].get(ident)=='source_version_race'
+            and ident in state['newById'])
         conflicts.pop(ident,None)
         old=state['newById'].get(ident)
         try:
@@ -516,7 +521,7 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
                 media_backfill=(only_id==ident and old['source_metadata'].get('inline_images') is None
                     and (ident in media_by_id or ident in media_errors))
                 if (token==old['source_version'] and raw._source_content_hash(summary)==old['summary_sha256']
-                        and not media_backfill):
+                        and not media_backfill and not (ident==only_id and state['conflictsById'].get(ident)=='source_version_race')):
                     counts['unchanged']+=1;continue
             elif ident in present:fail('identity_reserved')
             if not old and not owner_budget(set(state['reserved'])|set(state['newById'])|{ident}):fail('canonical_budget')
@@ -573,7 +578,10 @@ def propose_new(evidence,legacy_state,legacy_sha,registry,registry_sha,current,s
                     changes[rel]=asset_data
         except (raw.ParityFailure,ValueError,TypeError) as exc:
             reason=str(exc)
-            conflicts[ident]=reason if re.fullmatch('[a-z_]{1,64}',reason or '') else 'source_shape_unsupported'
+            if retrying_source_race:
+                conflicts[ident]='source_version_race'
+            else:
+                conflicts[ident]=reason if re.fullmatch('[a-z_]{1,64}',reason or '') else 'source_shape_unsupported'
             counts['conflicted']+=1
     state['legacy_state_sha256']=legacy_sha;state['conflictsById']=conflicts
     if len(legacy.encoded(state))>MAX_STATE:fail('canonical_budget')
@@ -697,7 +705,13 @@ def prepare(repo,parent,evidence,legacy_sha,registry_sha,summaries,terminal,deta
     items=legacy.source_snapshot(summaries,terminal,only_id=only_id)
     if only_id is not None:
         identity(only_id)
-        if only_id not in items or only_id in registry['conflictsById'] or (only_id in registry['reserved'] and only_id not in legacy_state['legacyById']):fail('identity_reserved')
+        retry_race=(registry['conflictsById'].get(only_id)=='source_version_race'
+                    and only_id in registry['newById']
+                    and only_id not in legacy_state['legacyById']
+                    and only_id not in legacy_state['conflictsById']
+                    and only_id not in legacy_state['pending_ids'])
+        if (only_id not in items or (only_id in registry['conflictsById'] and not retry_race)
+                or (only_id in registry['reserved'] and only_id not in legacy_state['legacyById'])):fail('identity_reserved')
     legacy_needed={i for i,row in legacy_state['legacyById'].items() if (only_id is None or i==only_id) and i in items and (raw.raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or legacy.sha(legacy.encoded(items[i]))!=row['summary_sha256'])}
     unknown=set(details)-(legacy_needed|set(registry['newById'])|set(selected_new))
     if unknown:fail('canonical_details')
