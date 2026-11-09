@@ -42,7 +42,7 @@ class GetSampleTests(unittest.TestCase):
         self.assertEqual(re.findall(r"(?m)^\s+ref: '([0-9a-f]{40})'$", workflow),
                          [runtime_sha, runtime_sha])
         self.assertEqual(policy['code_sha'], runtime_sha)
-        self.assertEqual(policy['rules_sha256'], 'a452b5bfd68b3f12fdf61ab8995d8651fe4322ed34d961eb0e3ad3ed0282150')
+        self.assertEqual(policy['rules_sha256'], 'a452b5bfd68b3f12fdf61ab8995d8651fe4322ed34d961e0b0e3ad3ed0282150')
         self.assertEqual(policy['get_policy_sha256'], 'a1fcf336d8b179a82c215864a25afedc568b04f54bccb127846af09d4bf600ed')
         expected_policy_sha256 = '7ec1a6f4d3ec4025c4038ee58d4001dbe7faa477a4224bcf87ead60cd295d0dc'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
