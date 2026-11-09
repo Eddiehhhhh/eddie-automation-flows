@@ -38,18 +38,18 @@ class GetSampleTests(unittest.TestCase):
         policy_bytes = base64.b64decode(encoded, validate=True)
         policy = json.loads(policy_bytes)
         runtime_sha = re.search(r"RUNTIME_SHA: '([0-9a-f]{40})'", workflow).group(1)
-        self.assertEqual(runtime_sha, 'a35baa59312907882b48b6a3fa96a35aaeb9dfec')
+        self.assertEqual(runtime_sha, '57063cf0605fadb9b5aeaef603526ad9b7460654')
         self.assertEqual(re.findall(r"(?m)^\s+ref: '([0-9a-f]{40})'$", workflow),
                          [runtime_sha, runtime_sha])
         self.assertEqual(policy['code_sha'], runtime_sha)
-        self.assertEqual(policy['rules_sha256'], '54174b7d2eac2173f1edea54e2c438b9dea13e4aba183e68b3696911409ff6bd')
-        self.assertEqual(policy['get_policy_sha256'], '4b2a1f69eb9134818201b03d52a02c1badabb41e3349c37fd6409dcf1d91cb44')
-        expected_policy_sha256 = 'bf7e57d3ab8120cf28cc32744b5a9d31251f17b73b2587422ca797bee399e591'
+        self.assertEqual(policy['rules_sha256'], '48e165d9aadc951193a3efcf387f4674d2da96a0e44da73bb641fe237028fbae')
+        self.assertEqual(policy['get_policy_sha256'], '3231c58d2c2b0749c95724b9a703a9447b0e454b16d1d426d6a460816fe85aaa')
+        expected_policy_sha256 = '560e94d6ea2fedb5f116ecaff02f6adb510b824060b2a2be2941d9ea4ceb023a'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         self.assertEqual(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1),
-                         'f9fe139cdad23727f42cde68eaf286fa7c66ba9f3115cf9e95fc387479b4044e')
+                         'ec5810e4f7a4415b62262ff3b7226bda846f2f2b87bb5e790edd89ef1fe05abd')
 
     def test_cloud_test_note_reuses_complete_paginated_lookup(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
