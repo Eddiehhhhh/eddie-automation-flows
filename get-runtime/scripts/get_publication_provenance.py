@@ -38,6 +38,7 @@ MAX_REQUESTS = 40
 MAX_RUN_PAGES = 3
 RUN_PAGE_SIZE = 30
 MAX_CANDIDATES = 4
+MAX_FAILED_RUN_PROBES = 8
 MAX_SECONDS = 120
 REGISTERED_REPLAY_SEQUENCE = 3
 REGISTERED_FAILED_REPLAY_SEQUENCE = 4
@@ -438,6 +439,38 @@ def effective_candidate_policy(policy, run):
     return candidate_policy, original_recovery, registered_recovery
 
 
+def _notion_failed_after_publication(run, job, policy):
+    """Accept a Get anchor only when its own verified step succeeded and the sole later failure was Notion."""
+    if (run.get('status') != 'completed' or run.get('conclusion') != 'failure'
+            or run.get('event') not in ('workflow_dispatch', 'schedule')
+            or job.get('status') != 'completed' or job.get('conclusion') != 'failure'):
+        return False
+    steps = job.get('steps')
+    if not isinstance(steps, list) or len(steps) > 100:
+        return False
+    emissions = [s for s in steps if isinstance(s, dict)
+                 and s.get('name') == policy['publication_step_name']]
+    notions = [s for s in steps if isinstance(s, dict)
+               and s.get('name') == 'Sync confirmed Get content to Notion']
+    if (len(emissions) != 1 or len(notions) != 1
+            or emissions[0].get('status') != 'completed'
+            or emissions[0].get('conclusion') != 'success'
+            or notions[0].get('status') != 'completed'
+            or notions[0].get('conclusion') != 'failure'
+            or type(emissions[0].get('number')) is not int
+            or type(notions[0].get('number')) is not int
+            or emissions[0]['number'] >= notions[0]['number']):
+        return False
+    numbers = [s.get('number') for s in steps if isinstance(s, dict)]
+    if any(type(number) is not int or number <= 0 for number in numbers) or len(numbers) != len(set(numbers)):
+        return False
+    between = [s for s in steps if emissions[0]['number'] < s['number'] < notions[0]['number']]
+    if any(s.get('status') != 'completed' or s.get('conclusion') != 'success' for s in between):
+        return False
+    failures = [s for s in steps if isinstance(s, dict) and s.get('conclusion') == 'failure']
+    return failures == notions
+
+
 def verified_candidate(client, listed, policy, *, run_attempt=None, verified_controllers=None, rejected_controllers=None, include_verified_details=False, include_idle_checkpoint=False):
     """Prove one original successful attempt, never a later attempt's result."""
     if type(include_verified_details) is not bool or type(include_idle_checkpoint) is not bool:
@@ -456,9 +489,10 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
                 and clock_witness is None)
             or attempt == listed['run_attempt'] and run_semantic_binding(run) != run_semantic_binding(listed)):
         fail('provenance_run_changed')
-    if run.get('status') != 'completed' or run.get('conclusion') != 'success':
+    if run.get('status') != 'completed' or run.get('conclusion') not in ('success', 'failure'):
         if include_idle_checkpoint: fail('provenance_run_changed')
         return None
+    partial_get_publication = run.get('conclusion') == 'failure'
     candidate_policy, original_recovery, registered_recovery = effective_candidate_policy(policy, run)
     try:
         # One discovery may encounter the same immutable controller repeatedly.
@@ -488,12 +522,18 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     if len(matches) != 1:
         fail('provenance_job')
     job = matches[0]; positive(job.get('id'))
-    if job.get('run_id') != run_id or job.get('head_sha') != run['head_sha'] or job.get('status') != 'completed' or job.get('conclusion') != 'success':
+    if (job.get('run_id') != run_id or job.get('head_sha') != run['head_sha']
+            or job.get('status') != 'completed'):
         fail('provenance_job')
     if job.get('run_attempt', attempt) != attempt:
         fail('provenance_job')
     steps = job.get('steps')
     if not isinstance(steps, list) or len(steps) > 100:
+        fail('provenance_job')
+    partial_get_publication = partial_get_publication and _notion_failed_after_publication(run, job, policy)
+    if job.get('conclusion') != 'success' and not partial_get_publication:
+        return None
+    if include_idle_checkpoint and partial_get_publication:
         fail('provenance_job')
     emission = [s for s in steps if isinstance(s, dict) and s.get('name') == policy['publication_step_name']]
     if not emission or len(emission) == 1 and emission[0].get('conclusion') == 'skipped':
@@ -842,7 +882,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
         listed.insert(0, located)
     locator_positions = {0: locator[1]} if locator is not None else {}
     observations = {}
-    found = []; checked = 0; verified_controllers = set(); rejected_controllers = set()
+    found = []; checked = 0; failed_run_probes = 0; verified_controllers = set(); rejected_controllers = set()
     checked_attempts = set()
     for position, run in enumerate(listed):
         located_attempt = locator_positions.get(position)
@@ -850,8 +890,16 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
         # publication. This is negative selection only, never anchor evidence.
         # Reruns remain eligible: an earlier successful attempt must not vanish.
         if (located_attempt is None and run['run_attempt'] == 1 and run.get('status') == 'completed'
-                and run.get('conclusion') in ('failure', 'cancelled', 'timed_out', 'skipped', 'action_required', 'neutral', 'stale')):
+                and run.get('conclusion') in ('cancelled', 'timed_out', 'skipped', 'action_required', 'neutral', 'stale')):
             continue
+        failed_run_candidate = (run.get('status') == 'completed' and run.get('conclusion') == 'failure'
+                                and run.get('event') in ('workflow_dispatch', 'schedule'))
+        if failed_run_candidate:
+            if failed_run_probes >= MAX_FAILED_RUN_PROBES:
+                break
+            failed_run_probes += 1
+        elif checked >= candidate_limit:
+            break
         # Read attempts in descending order, never fabricate an older success
         # from latest metadata. Failed/nonpublication attempts consume the same
         # four-candidate bound. A verified publication ends this run's search.
@@ -877,9 +925,10 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
                 negative_key = (run['head_sha'], run['event'], a.sha(a.encoded(selected_policy)))
                 if negative_key in rejected_controllers:
                     continue
-            if checked >= candidate_limit:
-                break
-            checked += 1
+            if not failed_run_candidate:
+                if checked >= candidate_limit:
+                    break
+                checked += 1
             checked_attempts.add((run['id'], attempt))
             value = verified_candidate(client, run, verification_policy, run_attempt=attempt,
                                        verified_controllers=verified_controllers,
@@ -888,6 +937,8 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
                                        include_idle_checkpoint=bool(rotation_search is not None
                                            and rotation_search['joint'] and located_attempt is not None))
             if value is not None:
+                if failed_run_candidate:
+                    checked += 1
                 value = rotation.observe_source(client, policy, run, value,
                     search=rotation_search if located_attempt is not None else None)
                 observations[(value['run_id'], value['run_attempt'])] = rotation.observation_for(client, policy, value)
