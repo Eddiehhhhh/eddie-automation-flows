@@ -47,6 +47,12 @@ class PrivateRuntimeReport(unittest.TestCase):
             'error': 'gitdata_staging_failed', 'stage': 'pending_gate',
             'gitdata_api_diagnostic': {'operation': 'stage_refs', 'failure': 'http_error',
                                        'http_status': 403}})
+        value['gitdata_api_diagnostic'] = {'operation': 'blob_create', 'failure': 'http_error', 'http_status': 403}
+        self.assertEqual(report.public(value)['gitdata_api_diagnostic'],
+                         {'operation': 'blob_create', 'failure': 'http_error', 'http_status': 403})
+        value['gitdata_api_diagnostic'] = {'operation': 'blob_create', 'failure': 'guard_rejected'}
+        self.assertEqual(report.public(value)['gitdata_api_diagnostic'],
+                         {'operation': 'blob_create', 'failure': 'guard_rejected'})
         value['gitdata_api_diagnostic'].update(url='private', body='private')
         self.assertNotIn('gitdata_api_diagnostic', report.public(value))
         del value['gitdata_api_diagnostic']['url']; del value['gitdata_api_diagnostic']['body']
