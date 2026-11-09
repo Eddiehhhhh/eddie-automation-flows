@@ -26,19 +26,28 @@ class StageFailure(Exception):
             self.api_diagnostic = diagnostic
 
 
-def fail():
-    raise StageFailure('gitdata_staging_failed') from None
+def fail(operation='stage_validation'):
+    raise StageFailure('gitdata_staging_failed', {
+        'operation': operation, 'failure': 'guard_rejected'}) from None
 
 
 def api_diagnostic(method, path, kind, status=None):
-    if method != 'GET':
-        return None
-    if path == '/git/ref/heads/codex/get-pending':
+    if method == 'GET' and path == '/git/ref/heads/codex/get-pending':
         operation = 'pending_ref'
-    elif path == '/git/matching-refs/heads/codex/get-stage-':
+    elif method == 'GET' and re.fullmatch(r'/git/ref/heads/codex/get-stage-[0-9]{1,21}', path):
+        operation = 'stage_ref_readback'
+    elif method == 'GET' and path == '/git/matching-refs/heads/codex/get-stage-':
         operation = 'stage_refs'
-    elif re.fullmatch(r'/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}', path):
+    elif method == 'GET' and re.fullmatch(r'/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}', path):
         operation = 'ancestry_compare'
+    elif method == 'POST' and path == '/git/blobs':
+        operation = 'blob_create'
+    elif method == 'POST' and path == '/git/trees':
+        operation = 'tree_create'
+    elif method == 'POST' and path == '/git/commits':
+        operation = 'commit_create'
+    elif method == 'POST' and path == '/git/refs':
+        operation = 'stage_ref_create'
     else:
         return None
     result = {'operation': operation, 'failure': kind}
@@ -125,11 +134,11 @@ def stage(api, reader, remote, plan, files, run_context, readback, expected_anch
     ref_path = '/git/ref/' + ref.removeprefix('refs/')
     m.guard(remote, parent)
     if api.call('GET', ref_path, missing=True) is not None:
-        fail()
+        fail('stage_ref_precondition')
     parent_tree = m.a.checked(reader.local.run('rev-parse', parent + '^{tree}').decode().strip(), 40)
     timestamp = reader.local.run('show', '-s', '--format=%ct', parent).decode().strip()
     if not timestamp.isdigit():
-        fail()
+        fail('candidate_commit_validation')
     actor_line = (NAME + ' <' + EMAIL + '> ' + timestamp + ' +0000').encode()
     expected = (b'tree ' + tree.encode() + b'\nparent ' + parent.encode() + b'\nauthor ' + actor_line
                 + b'\ncommitter ' + actor_line + b'\n\n' + MESSAGE.encode())
@@ -141,39 +150,42 @@ def stage(api, reader, remote, plan, files, run_context, readback, expected_anch
         oid = r.oid(data)
         result = api.call('POST', '/git/blobs', {'content': base64.b64encode(data).decode(), 'encoding': 'base64'})
         if result.get('sha') != oid:
-            fail()
+            fail('blob_readback')
         entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': oid})
     result = api.call('POST', '/git/trees', {'base_tree': parent_tree, 'tree': entries})
     if result.get('sha') != tree:
-        fail()
+        fail('tree_readback')
     date = datetime.fromtimestamp(int(timestamp), timezone.utc).isoformat().replace('+00:00', 'Z')
     actor = {'name': NAME, 'email': EMAIL, 'date': date}
     result = api.call('POST', '/git/commits', {'message': MESSAGE, 'tree': tree,
         'parents': [parent], 'author': actor, 'committer': actor})
     if result.get('sha') != commit:
-        fail()
+        fail('commit_readback')
     m.guard(remote, parent)
     try:
         api.call('POST', '/git/refs', {'ref': ref, 'sha': commit})
-    except Exception:
+    except Exception as create_error:
         observed = api.call('GET', ref_path, missing=True)
     else:
+        create_error = None
         observed = api.call('GET', ref_path)
     if not isinstance(observed, dict):
-        fail()
+        if isinstance(create_error, StageFailure) and hasattr(create_error, 'api_diagnostic'):
+            raise create_error
+        fail('stage_ref_readback')
     if observed.get('ref') != ref or observed.get('object', {}).get('sha') != commit or observed.get('object', {}).get('type') != 'commit':
-        fail()
+        fail('stage_ref_readback')
     if remote.commit(commit) != {'tree': tree, 'parents': [parent]}:
-        fail()
+        fail('commit_object_readback')
     metadata = remote.check_source_budget(commit)
     selected = {}
     for path, data in files.items():
         row = metadata.get(path)
         if row != ('100644', 'blob', r.oid(data), len(data)):
-            fail()
+            fail('source_tree_readback')
         selected[path] = row
     if readback(commit, selected) != files:
-        fail()
+        fail('content_readback')
     m.guard(remote, parent)
     if pending.exact_ref(api) != expected_anchor:
         pending.fail()

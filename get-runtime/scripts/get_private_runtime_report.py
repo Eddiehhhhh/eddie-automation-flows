@@ -58,9 +58,12 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
             and isinstance(gitdata_diagnostic,dict)):
         operation=gitdata_diagnostic.get('operation')
         failure=gitdata_diagnostic.get('failure')
-        operations=('pending_ref','stage_refs','ancestry_compare')
+        operations=('pending_ref','stage_refs','ancestry_compare','blob_create','tree_create',
+                    'commit_create','stage_ref_create','stage_validation','stage_ref_precondition',
+                    'candidate_commit_validation','blob_readback','tree_readback','commit_readback',
+                    'stage_ref_readback','commit_object_readback','source_tree_readback','content_readback')
         failures=('unexpected_status','paginated','http_error','timeout','transport_error',
-                  'response_too_large','invalid_json','invalid_shape')
+                  'response_too_large','invalid_json','invalid_shape','guard_rejected')
         if (operation in operations and failure in failures
                 and set(gitdata_diagnostic) <= {'operation','failure','http_status'}):
             diagnostic={'operation':operation,'failure':failure}

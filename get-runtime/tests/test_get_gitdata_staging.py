@@ -100,10 +100,16 @@ class Staging(unittest.TestCase):
     def test_object_mismatch_and_existing_ref_stop_without_ref_write(self):
         for wrong in ('/git/blobs', '/git/trees', '/git/commits'):
             self.calls.clear(); self.wrong = wrong
-            with self.subTest(wrong=wrong), self.assertRaises(staging.StageFailure): self.run_stage()
+            with self.subTest(wrong=wrong), self.assertRaises(staging.StageFailure) as caught: self.run_stage()
+            expected = {'/git/blobs': 'blob_readback', '/git/trees': 'tree_readback',
+                        '/git/commits': 'commit_readback'}[wrong]
+            self.assertEqual(caught.exception.api_diagnostic,
+                             {'operation': expected, 'failure': 'guard_rejected'})
             self.assertNotIn(('POST', '/git/refs'), self.calls)
         self.wrong = None; self.ref = {'ref': 'existing'}; self.calls.clear()
-        with self.assertRaises(staging.StageFailure): self.run_stage()
+        with self.assertRaises(staging.StageFailure) as caught: self.run_stage()
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'stage_ref_precondition', 'failure': 'guard_rejected'})
         self.assertFalse(any(method == 'POST' for method, _ in self.calls))
         self.ref = {'ref': 'refs/heads/codex/get-stage-123',
                     'object': {'type': 'commit', 'sha': self.plan['candidate_commit']}}
@@ -207,6 +213,22 @@ class Staging(unittest.TestCase):
         self.assertEqual(caught.exception.api_diagnostic,
                          {'operation': 'ancestry_compare', 'failure': 'timeout'})
         self.assertNotIn('private body', str(caught.exception.api_diagnostic))
+
+        api.opener.open = Mock(side_effect=urllib.error.HTTPError(
+            'https://api.github.com/private?token=secret', 403, 'private body', {}, None))
+        with self.assertRaises(staging.StageFailure) as caught:
+            api.call('GET', '/git/ref/heads/codex/get-stage-123')
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'stage_ref_readback', 'failure': 'http_error', 'http_status': 403})
+        self.assertNotIn('123', str(caught.exception.api_diagnostic))
+
+        api.opener.open = Mock(side_effect=urllib.error.HTTPError(
+            'https://api.github.com/private?token=secret', 403, 'private body', {}, None))
+        with self.assertRaises(staging.StageFailure) as caught:
+            api.call('POST', '/git/blobs', {'content': 'private body'})
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'blob_create', 'failure': 'http_error', 'http_status': 403})
+        self.assertNotIn('private', str(caught.exception.api_diagnostic))
 
         class Response:
             def __init__(self, status, headers, raw=b'[]'):
