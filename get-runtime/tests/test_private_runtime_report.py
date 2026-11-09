@@ -43,6 +43,11 @@ class PrivateRuntimeReport(unittest.TestCase):
         private = report.public({'status': 'recurring_failed', 'error': 'runtime_scope',
                                  'scope_check': 'private note identifier'}, allowed_codes=('runtime_scope',))
         self.assertNotIn('scope_check', private)
+        malformed = report.public({'status': 'recurring_failed', 'error': 'runtime_scope',
+                                   'scope_check': []}, allowed_codes=('runtime_scope',))
+        self.assertNotIn('scope_check', malformed)
+        runtime = Path(__file__).resolve().parents[1] / 'scripts/get_recurring_runtime.py'
+        self.assertNotRegex(runtime.read_text(), r"\bfail\(['\"]runtime_scope['\"]\)")
 
     def test_gitdata_api_diagnostic_projects_only_allowlisted_fields(self):
         value = {'status': 'recurring_failed', 'error': 'gitdata_staging_failed',
