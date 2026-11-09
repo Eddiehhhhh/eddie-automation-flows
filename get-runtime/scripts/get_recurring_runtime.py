@@ -659,6 +659,9 @@ def failure(exc=None, *, attempt_started=False):
     category = getattr(exc, 'cas_error_category', None)
     if isinstance(category, str) and category in m.CAS_ERROR_CATEGORIES:
         result['cas_error_category'] = category
+    api_diagnostic = getattr(exc, 'api_diagnostic', None)
+    if isinstance(api_diagnostic, dict):
+        result['gitdata_api_diagnostic'] = api_diagnostic
     diagnostic = getattr(exc, 'cas_diagnostic', None)
     if isinstance(diagnostic, dict):
         result['cas_diagnostic'] = diagnostic

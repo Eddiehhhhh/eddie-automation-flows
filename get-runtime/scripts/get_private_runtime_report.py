@@ -53,6 +53,20 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
     if isinstance(stage,str) and stage in allowed_stages:out['stage']=stage
     kind=result.get('failure_kind')
     if isinstance(kind,str) and kind in FAILURE_KINDS:out['failure_kind']=kind
+    gitdata_diagnostic=result.get('gitdata_api_diagnostic')
+    if (out['status']=='recurring_failed' and result.get('error')=='gitdata_staging_failed'
+            and isinstance(gitdata_diagnostic,dict)):
+        operation=gitdata_diagnostic.get('operation')
+        failure=gitdata_diagnostic.get('failure')
+        operations=('pending_ref','stage_refs','ancestry_compare')
+        failures=('unexpected_status','paginated','http_error','timeout','transport_error',
+                  'response_too_large','invalid_json','invalid_shape')
+        if (operation in operations and failure in failures
+                and set(gitdata_diagnostic) <= {'operation','failure','http_status'}):
+            diagnostic={'operation':operation,'failure':failure}
+            status=gitdata_diagnostic.get('http_status')
+            if type(status) is int and 100<=status<=599:diagnostic['http_status']=status
+            out['gitdata_api_diagnostic']=diagnostic
     history_check=result.get('history_check')
     if (out.get('error')=='entry_foreign_get_change' and out.get('stage')=='trusted_states'
             and history_check in HISTORY_CHECKS):

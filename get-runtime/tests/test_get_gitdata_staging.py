@@ -189,6 +189,43 @@ class Staging(unittest.TestCase):
         with patch.object(staging.json, 'dumps', side_effect=MemoryError('secret')):
             with self.assertRaises(MemoryError): api.call('POST', '/git/blobs', {'content': 'fixed'})
 
+    def test_pending_gate_api_failure_is_classified_without_request_or_body_details(self):
+        api = staging.API('token')
+        api.opener.open = Mock(side_effect=urllib.error.HTTPError(
+            'https://api.github.com/private?token=secret', 403, 'private body', {}, None))
+        with self.assertRaises(staging.StageFailure) as caught:
+            api.call('GET', '/git/matching-refs/heads/codex/get-stage-', list_result=True)
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'stage_refs', 'failure': 'http_error', 'http_status': 403})
+        self.assertNotIn('secret', str(caught.exception))
+        self.assertNotIn('private body', str(caught.exception))
+        self.assertNotIn('private', str(caught.exception.api_diagnostic))
+
+        api.opener.open = Mock(side_effect=TimeoutError('private body'))
+        with self.assertRaises(staging.StageFailure) as caught:
+            api.call('GET', '/compare/' + 'a' * 40 + '...' + 'b' * 40)
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'ancestry_compare', 'failure': 'timeout'})
+        self.assertNotIn('private body', str(caught.exception.api_diagnostic))
+
+        class Response:
+            def __init__(self, status, headers, raw=b'[]'):
+                self.status, self.headers, self.raw = status, headers, raw
+            def __enter__(self): return self
+            def __exit__(self, *_): return None
+            def read(self, _): return self.raw
+
+        api.opener.open = Mock(return_value=Response(202, {}))
+        with self.assertRaises(staging.StageFailure) as caught:
+            api.call('GET', '/git/matching-refs/heads/codex/get-stage-', list_result=True)
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'stage_refs', 'failure': 'unexpected_status', 'http_status': 202})
+        api.opener.open = Mock(return_value=Response(200, {'Link': '<next>; rel="next"'}))
+        with self.assertRaises(staging.StageFailure) as caught:
+            api.call('GET', '/git/matching-refs/heads/codex/get-stage-', list_result=True)
+        self.assertEqual(caught.exception.api_diagnostic,
+                         {'operation': 'stage_refs', 'failure': 'paginated', 'http_status': 200})
+
     def test_blob_request_accepts_valid_object_larger_than_one_mebibyte(self):
         data = b'x' * (1024 * 1024 + 1)
         api = staging.API('token')
