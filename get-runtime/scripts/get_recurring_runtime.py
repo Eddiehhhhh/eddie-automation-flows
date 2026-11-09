@@ -298,7 +298,7 @@ def load_receipt(reader, remote, token, root, commit):
         m.import_blob(reader.local, values[entry.FULL_RECEIPT], row[2])
 
 
-def hydrate_pilot_migration_receipt(local, reader, remote, token, root, anchor, parent, *, after_sequence=None):
+def hydrate_pilot_migration_receipt(local, reader, remote, token, root, anchor, parent, *, after_sequence=None, source_id=None):
     if anchor is None:
         return
     parent_tree = reader.source_get_tree(parent)
@@ -313,6 +313,8 @@ def hydrate_pilot_migration_receipt(local, reader, remote, token, root, anchor, 
             continue
         fetch_commit(local, migration, entry.MAX_INTERVENING + 2)
         load_receipt(reader, remote, token, root, migration)
+        load_inventory(reader, remote, token, root / ('migration-inventory-' + migration),
+                       migration, source_id=source_id)
 
 
 def hydrate_replaced_blobs(reader, remote, token, directory, parent, files):
@@ -386,7 +388,8 @@ def load_trusted_inputs(local, reader, evidence, remote, token, root, parent, cl
         for target in sorted({before, commit}):
             at_stage('current_inventory', load_inventory, reader, remote, token, root / target, target, source_id=source_id)
     at_stage('trusted_states', hydrate_pilot_migration_receipt, local, reader, remote, token, root,
-             anchor, parent, after_sequence=prior_receipt['sequence'] if prior_receipt else None)
+             anchor, parent, after_sequence=prior_receipt['sequence'] if prior_receipt else None,
+             source_id=source_id)
     _, trusted_receipt, states = at_stage('trusted_states', entry.trust_current, reader, evidence, parent, policy['rules_sha256'], anchor, bootstrap=bootstrap, history_witness=history_witness, source_id=source_id)
     anchor, history_witness = effective_anchor_after_pilot_migration(
         reader, anchor, prior_receipt, trusted_receipt, parent, policy, history_witness)

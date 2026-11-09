@@ -139,26 +139,32 @@ class BaselineHydration(unittest.TestCase):
         writable_local = object()
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime, 'fetch_commit') as fetch, \
-             patch.object(runtime, 'load_receipt') as load:
+             patch.object(runtime, 'load_receipt') as load, \
+             patch.object(runtime, 'load_inventory') as inventory:
             runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
                 Path('/unused'), anchor, self.parent, after_sequence=7)
         self.assertEqual([call.args[1] for call in fetch.call_args_list], [migration1, migration2])
         self.assertEqual([call.args[-1] for call in load.call_args_list], [migration1, migration2])
+        self.assertEqual([call.args[-1] for call in inventory.call_args_list], [migration1, migration2])
 
         reader.source_get_tree = lambda commit: {
             anchor['commit']: before_tree, self.parent: after_tree,
             migration1: after_tree, migration2: final_tree}[commit]
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime, 'fetch_commit') as fetch, \
-             patch.object(runtime, 'load_receipt') as load:
+             patch.object(runtime, 'load_receipt') as load, \
+             patch.object(runtime, 'load_inventory') as inventory:
             runtime.hydrate_pilot_migration_receipt(writable_local, reader, self.remote, 'token',
                 Path('/unused'), anchor, self.parent, after_sequence=7)
         fetch.assert_called_once_with(writable_local, migration1, runtime.entry.MAX_INTERVENING + 2)
         load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration1)
+        inventory.assert_called_once_with(reader, self.remote, 'token',
+            Path('/unused') / ('migration-inventory-' + migration1), migration1, source_id=None)
 
         with patch.object(runtime.entry, 'PILOT_MIGRATION', pin), \
              patch.object(runtime, 'fetch_commit') as fetch, \
-             patch.object(runtime, 'load_receipt') as load:
+             patch.object(runtime, 'load_receipt') as load, \
+             patch.object(runtime, 'load_inventory') as inventory:
             reader.source_get_tree = lambda commit: {
                 anchor['commit']: before_tree, self.parent: final_tree,
                 migration1: after_tree, migration2: final_tree}[commit]
@@ -166,17 +172,21 @@ class BaselineHydration(unittest.TestCase):
                 Path('/unused'), anchor, self.parent, after_sequence=8)
         fetch.assert_called_once_with(writable_local, migration2, runtime.entry.MAX_INTERVENING + 2)
         load.assert_called_once_with(reader, self.remote, 'token', Path('/unused'), migration2)
+        inventory.assert_called_once_with(reader, self.remote, 'token',
+            Path('/unused') / ('migration-inventory-' + migration2), migration2, source_id=None)
 
     def test_migration_receipt_hydration_skips_unchanged_get_tree(self):
         anchor = {'commit': 'e' * 40}
         reader = types.SimpleNamespace(source_get_tree=lambda commit: '1' * 40)
         with patch.object(runtime.entry, 'PILOT_MIGRATION', ()), \
              patch.object(runtime, 'fetch_commit') as fetch, \
-             patch.object(runtime, 'load_receipt') as load:
+             patch.object(runtime, 'load_receipt') as load, \
+             patch.object(runtime, 'load_inventory') as inventory:
             runtime.hydrate_pilot_migration_receipt(object(), reader, self.remote, 'token',
                 Path('/unused'), anchor, self.parent, after_sequence=7)
         fetch.assert_not_called()
         load.assert_not_called()
+        inventory.assert_not_called()
 
     def test_verified_pilot_migration_becomes_effective_anchor(self):
         anchor = {'commit': 'e' * 40, 'receipt_sha256': 'a' * 64}
@@ -304,7 +314,7 @@ class BaselineHydration(unittest.TestCase):
                  'anchor': anchor, 'receipt_sequence': 7}), \
              patch.object(runtime.provenance, 'history_witness_required', return_value=False), \
              patch.object(runtime.entry, 'read_receipt', return_value=prior), \
-             patch.object(runtime, 'hydrate_pilot_migration_receipt'), \
+             patch.object(runtime, 'hydrate_pilot_migration_receipt') as hydrate_migrations, \
              patch.object(runtime.entry, 'trust_current', return_value=(
                  'policy', trusted, (current, {}, {}))), \
              patch.object(runtime, 'effective_anchor_after_pilot_migration',
@@ -320,6 +330,9 @@ class BaselineHydration(unittest.TestCase):
         self.assertEqual(load_receipt.call_count, 2)
         load_receipt.assert_any_call(self.reader, self.remote, 'token',
                                      Path('/not-used'), 'f' * 40)
+        hydrate_migrations.assert_called_once_with(self.reader.local, self.reader,
+            self.remote, 'token', Path('/not-used'), anchor, self.parent,
+            after_sequence=prior['sequence'], source_id='333')
         promote.assert_called_once_with(self.reader, anchor, prior, trusted,
                                         self.parent, policy, None)
 
