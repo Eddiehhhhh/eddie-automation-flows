@@ -13,6 +13,9 @@ def git_word_hits(raw):
 CONTRACT='get-private-runtime-report-2'
 STATUSES=frozenset(('failed','prepared','queue_empty','queue_partial','executed','captured','applied','blocked',
                    'recurring_candidate_verified','recurring_transaction_verified','recurring_failed','notion_probe'))
+SCOPE_CHECKS=frozenset(('single_note_trigger','policy_bindings','scope_keys_or_hash',
+    'scope_policy_mismatch','trigger','publication_requires_apply',
+    'publication_file_requires_apply','single_note_mode','scope_arguments'))
 PREPARE={'contract':CONTRACT,'status':'recurring_candidate_verified','main_updated':False,'cas_attempts':0,
          'local_proposal_only':True,'readback_verified':True,'business_health_asserted':False}
 
@@ -49,6 +52,9 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
         if result.get(key) in ('not_attempted','confirmed','unknown','uncertain'):out[key]=result[key]
     for key in ('reason','error'):
         if isinstance(result.get(key),str) and result[key] in allowed_codes:out[key]=result[key]
+    scope_check = result.get('scope_check')
+    if out.get('error') == 'runtime_scope' and isinstance(scope_check, str) and scope_check in SCOPE_CHECKS:
+        out['scope_check'] = scope_check
     stage=result.get('stage')
     if isinstance(stage,str) and stage in allowed_stages:out['stage']=stage
     kind=result.get('failure_kind')

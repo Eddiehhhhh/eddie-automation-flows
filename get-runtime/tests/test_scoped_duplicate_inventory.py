@@ -43,10 +43,13 @@ def scope_validator():
     node = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == 'validate_single_note_scope')
     def fail(code):
         raise ValueError(code)
+    def fail_scope(check):
+        fail('runtime_scope')
     def identity(value):
         if not isinstance(value, str) or re.fullmatch(r'[0-9]{1,64}', value) is None:
             raise ValueError('canonical_identity')
-    namespace = {'fail': fail, 'engine': types.SimpleNamespace(n=types.SimpleNamespace(identity=identity))}
+    namespace = {'fail': fail, 'fail_scope': fail_scope,
+                 'engine': types.SimpleNamespace(n=types.SimpleNamespace(identity=identity))}
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), namespace)
     return namespace['validate_single_note_scope']
 
