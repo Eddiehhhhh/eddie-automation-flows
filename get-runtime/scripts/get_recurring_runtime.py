@@ -682,7 +682,7 @@ def failure(exc=None, *, attempt_started=False):
     code = str(exc)
     result['error'] = code if code in ERRORS | m.ERRORS | ENTRY_ERRORS | m.c.ERRORS | CORE_ERRORS else SOURCE_ERRORS.get(code, 'runtime_failed')
     scope_check = getattr(exc, 'scope_check', None)
-    if result['error'] == 'runtime_scope' and scope_check in SCOPE_CHECKS:
+    if result['error'] == 'runtime_scope' and isinstance(scope_check, str) and scope_check in SCOPE_CHECKS:
         result['scope_check'] = scope_check
     stage = getattr(exc, 'runtime_stage', None)
     if isinstance(stage, str) and stage in STAGES:
