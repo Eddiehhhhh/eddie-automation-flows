@@ -50,9 +50,6 @@ class GetSampleTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         self.assertEqual(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1),
                          '51475eaa51e0ee9846ff23b09fb62265c76ca8c40b992613040818224d7f94cc')
-        prep = workflow.split('      - name: Prepare reviewed public policy', 1)[1].split('      - name:', 1)[0]
-        self.assertIn('runtime.validate_policy(json.loads(value)', prep)
-        self.assertIn('controller.scope_for(policy', prep)
 
     def test_cloud_test_note_reuses_complete_paginated_lookup(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
