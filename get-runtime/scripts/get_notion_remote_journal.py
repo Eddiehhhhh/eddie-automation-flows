@@ -12,6 +12,7 @@ from datetime import datetime
 import hashlib
 from pathlib import Path
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -662,6 +663,13 @@ class RemoteJournal:
         except Exception as exc:
             # Callback/readback failures may follow a committed journal. Preserve
             # only verified candidate metadata; block all subsequent API eligibility.
+            category = getattr(exc, 'cas_error_category', None)
+            diagnostic = getattr(exc, 'cas_diagnostic', None)
+            if attempted and isinstance(category, str) and isinstance(diagnostic, dict):
+                import get_private_runtime_report as report
+                safe = report.public({'status': 'recurring_failed', 'cas_error_category': category,
+                                      'cas_diagnostic': diagnostic})
+                print('GET_JOURNAL_CAS_DIAGNOSTIC ' + repr(safe), file=sys.stderr, flush=True)
             expired_reason = None
             if png_expired is not None and isinstance(exc, ValueError):
                 code = str(exc)
