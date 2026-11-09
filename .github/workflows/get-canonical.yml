@@ -113,14 +113,24 @@ jobs:
         run: python scripts/get_notion_controller_route.py --preflight
       - name: Prepare reviewed public policy
         env:
-          POLICY_B64: 'eyJjb2RlX3NoYSI6IjJmMThjNGM3YmUxNzUxYTI0MzljZTgxMTVhNjM5ZjU0NjYzZGNhYmIiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI1NmExMGI5ZGVhNTg3NTdkNWI5NzA5NzFlMDdjNTIzNDIxMjdiNGEzMWRkYWFjMzFjMGJmNmU5NjliNGYwNGJiIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiI3NjFjY2ZlZTNjMzBiNjcyZWM0NGFiYWRmNDFjOTI4MDlmMmQ0NTQ4Y2JjNDlmNmE5NTQ3YzgyNjBjNzQzNWUxIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjdlNjg2ZjBjZDdiMTQ0OGY3MzU3MGVjZTZhZGZhNTA3YjI4ZDk4ODg0ZDc2OGIwZjY4MWYwMWZjYTRlNDljZTkiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
-          POLICY_SHA256: 'b968c690eafd8caddff423be5d65627b083b34411298c2076191fe1da1547e29'
+          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
+          POLICY_B64: 'eyJjb2RlX3NoYSI6IjJmMThjNGM3YmUxNzUxYTI0MzljZTgxMTVhNjM5ZjU0NjYzZGNhYmIiLCJjb250cmFjdCI6ImdldC1wdWJsaWMtYWN0aW9ucy1wcm92ZW5hbmNlLXBvbGljeS0xIiwiY29udHJvbGxlcl90ZW1wbGF0ZV9zaGEyNTYiOiI1NmExMGI5ZGVhNTg3NTdkNWI5NzA5NzFlMDdjNTIzNDIxMjdiNGEzMWRkYWFjMzFjMGJmNmU5NjliNGYwNGJiIiwiZ2V0X3BvbGljeV9zaGEyNTYiOiIyM2E1NjQwYjgwOWIwODRjZjQ4MzAxNTVhODUzMTUzNDU1ZGM5NGFiMDgyN2E5ZmQzZWUzMzc5NTIwNTI2ZWIzIiwiaGVhZF9icmFuY2giOiJtYWluIiwiam9iX25hbWUiOiJjYW5vbmljYWwtZ2V0IiwicHVibGljYXRpb25fc3RlcF9uYW1lIjoiRW1pdCB2ZXJpZmllZCBjYW5vbmljYWwgcHVibGljYXRpb24gYW5jaG9yIiwicmVwb3NpdG9yeSI6IkVkZGllaGhoaGgvZWRkaWUtYXV0b21hdGlvbi1mbG93cyIsInJlcG9zaXRvcnlfaWQiOjEyNzA4MDczNTUsInJ1bGVzX3NoYTI1NiI6IjM5NDMwZDhmODI2Y2ZjZTA4NDllNDU2YzhkODE4NTA2MzZlYzNkYzk3MmJkY2ZkMzY1ZTRmMjI3ZGQ4N2Q4N2MiLCJ3b3JrZmxvd19pZCI6Mzg3MjQyODk2LCJ3b3JrZmxvd19wYXRoIjoiLmdpdGh1Yi93b3JrZmxvd3MvZ2V0LWNhbm9uaWNhbC55bWwifQo='
+          POLICY_SHA256: 'c40d88ea794602636926622eb9dfe398592564772c8f95d849e7a5cc9323cf3f'
+          SCOPE_SHA256: '51475eaa51e0ee9846ff23b09fb62265c76ca8c40b992613040818224d7f94cc'
         run: |
           python - <<'PY'
           import base64, hashlib, os
           from pathlib import Path
           value = base64.b64decode(os.environ['POLICY_B64'], validate=True)
           assert hashlib.sha256(value).hexdigest() == os.environ['POLICY_SHA256']
+          import json, sys
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          import get_recurring_runtime as runtime
+          import get_recurring_entry as entry
+          import get_recurring_controller as controller
+          policy = runtime.validate_policy(json.loads(value), os.environ['POLICY_SHA256'], entry.BOOTSTRAP)
+          scope = controller.scope_for(policy, os.environ['POLICY_SHA256'])
+          assert entry.a.sha(entry.a.encoded(scope)) == os.environ['SCOPE_SHA256']
           path = Path(os.environ['RUNNER_TEMP']) / 'get-recurring-public-policy.json'
           with path.open('xb') as stream:
               stream.write(value)
@@ -201,8 +211,8 @@ jobs:
           GET_SINGLE_NOTE_ID: ${{ env.GET_SINGLE_NOTE_ID || steps.create_test_note.outputs.note_id || '' }}
           GET_SINGLE_NOTE_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.private_proof_key != '' || inputs.create_test_note) }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          POLICY_SHA256: 'b968c690eafd8caddff423be5d65627b083b34411298c2076191fe1da1547e29'
-          SCOPE_SHA256: '49f89ed6479c493f6dee3ccd3ce393d86dbc638bbee3a9d4d4e0bef988b3b402'
+          POLICY_SHA256: 'c40d88ea794602636926622eb9dfe398592564772c8f95d849e7a5cc9323cf3f'
+          SCOPE_SHA256: '51475eaa51e0ee9846ff23b09fb62265c76ca8c40b992613040818224d7f94cc'
         run: |
           args=(--policy "$RUNNER_TEMP/get-recurring-public-policy.json" --approved-policy-sha256 "$POLICY_SHA256")
           if test "$GITHUB_EVENT_NAME" = schedule; then args+=(--trigger schedule); fi
@@ -218,7 +228,7 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          POLICY_SHA256: 'b968c690eafd8caddff423be5d65627b083b34411298c2076191fe1da1547e29'
+          POLICY_SHA256: 'c40d88ea794602636926622eb9dfe398592564772c8f95d849e7a5cc9323cf3f'
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           NOTION_MODE: ${{ inputs.notion_mode || 'canonical' }}
           NOTION_INPUT_SHA256: ${{ inputs.private_proof_key || inputs.notion_input_sha256 }}
