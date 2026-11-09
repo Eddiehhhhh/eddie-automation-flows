@@ -77,6 +77,18 @@ class SourceVersionRaceRecovery(unittest.TestCase):
         self.assertEqual(states[2]['conflictsById'][self.ident],'source_version_race')
         self.assertNotIn(self.path,{row['path'] for row in plan['changes']})
 
+    def test_wrong_detail_identity_keeps_conflict_and_note_body(self):
+        raced=self._make_race()
+        wrong_id=deepcopy(self.summary);wrong_id['note_id']='99999'
+        original=self.reader.read(raced['candidate_commit'],'Raw/03 Get/'+self.path,
+            C.legacy.owned.MAX_NOTE)
+        plan,states,_,calls=self._retry(raced['candidate_commit'],wrong_id)
+        self.assertEqual(calls,[self.ident])
+        self.assertEqual(states[2]['conflictsById'][self.ident],'source_version_race')
+        self.assertNotIn(self.path,{row['path'] for row in plan['changes']})
+        self.assertEqual(self.reader.read(plan['candidate_commit'],'Raw/03 Get/'+self.path,
+            C.legacy.owned.MAX_NOTE),original)
+
     def test_local_edit_is_preserved_and_blocks_recovery(self):
         raced=self._make_race()
         parent=raced['candidate_commit']
