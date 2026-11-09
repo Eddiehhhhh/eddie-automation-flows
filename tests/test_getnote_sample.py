@@ -49,7 +49,7 @@ class GetSampleTests(unittest.TestCase):
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         self.assertEqual(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1),
-                         '917251101e50df13bc1bb47bc3c1db7ec73dad8bcb2b9cd88cbd57334bf868a3')
+                         '3a13696ae486fbd73be5694bfc619d98667aadfcce02a93caec7780a4aa0b452')
 
     def test_cloud_test_note_reuses_complete_paginated_lookup(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
