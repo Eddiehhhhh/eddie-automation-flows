@@ -39,7 +39,9 @@ def select_new(items,registry,preview,*,source_id=None,legacy_ids=()):
     candidates=sorted(set(items)-set(registry['reserved'])-set(registry['newById']))
     if source_id is not None:
         n.identity(source_id)
-        if source_id not in items or source_id in registry['conflictsById']:
+        conflict=registry['conflictsById'].get(source_id)
+        retry_race=(conflict=='source_version_race' and source_id in registry['newById'])
+        if source_id not in items or (conflict is not None and not retry_race):
             m.fail('manual_scope')
         if source_id in registry['reserved'] and source_id not in legacy_ids:
             m.fail('manual_scope')
@@ -126,6 +128,12 @@ def prepare(reader,evidence,parent,current,source,*,legacy_sha,registry_sha=None
     selected,remaining=select_new(items,registry,preview,source_id=source_id,legacy_ids=legacy['legacyById'])
     legacy_needed={i for i,row in legacy['legacyById'].items() if (source_id is None or i==source_id) and i in items and (raw_source_version(items[i].get('updated_at'))!=row['ownership']['source_version'] or a.sha(a.encoded(items[i]))!=row['summary_sha256'])}
     new_needed={i for i,row in registry['newById'].items() if (source_id is None or i==source_id) and i in items and (raw_source_version(items[i].get('updated_at'))!=row['source_version'] or n.raw._source_content_hash(items[i])!=row['summary_sha256'])}
+    # A previously observed summary/detail race must be re-read by exact ID,
+    # even when the next summary still matches the mirror. Recovery remains
+    # limited to a registered new note with this one conflict reason.
+    if (source_id in registry['newById']
+            and registry['conflictsById'].get(source_id)=='source_version_race'):
+        new_needed.add(source_id)
     # An explicit single-note request may fill an older canonical note's missing
     # inline-image assets even when Get has not changed its update timestamp.
     # Keep the hourly full-catalog path unchanged so historical media cannot
