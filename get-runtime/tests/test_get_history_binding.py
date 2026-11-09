@@ -326,6 +326,64 @@ class FailedNotionReceiptPolicy(unittest.TestCase):
             with self.assertRaises(ProvenanceFailure):
                 entry.recovery.verify_original_record({**record, 'record_sha256': 'b' * 64}, 790)
 
+    def test_sequence_nine_binding_requires_exact_run_job_record_and_receipt(self):
+        from get_publication_provenance import ProvenanceFailure
+        import get_recurring_controller as controller_module
+        record = {'run_id': 459, 'run_attempt': 1, 'controller_sha': 'e' * 40,
+                  'receipt_commit': 'a' * 40, 'receipt_sha256': 'b' * 64,
+                  'receipt_sequence': 9, 'policy_sha256': 'c' * 64,
+                  'record_sha256': 'f' * 64}
+        old = {'code_sha': '1' * 40, 'rules_sha256': '2' * 64,
+               'get_policy_sha256': '3' * 64,
+               'controller_template_sha256': '4' * 64, 'stable': 'unchanged'}
+        seq9 = {'record': record, 'job_id': 791, 'public_policy': old,
+                'public_sha256': entry.a.sha(entry.a.encoded(old)), 'event': 'schedule'}
+        new = {**old, 'code_sha': '5' * 40, 'rules_sha256': '6' * 64,
+               'get_policy_sha256': '7' * 64}
+        run = {'id': 459, 'run_attempt': 1, 'head_sha': 'e' * 40, 'event': 'schedule'}
+
+        def value(_module, key):
+            if key == 'SEQ9_BINDING': return seq9
+            if key == 'FAILED_NOTION_REPLAY_4':
+                return {'selection': {'receipt_commit': '8' * 40,
+                                      'receipt_sha256': '8' * 64},
+                        'sequence': 4, 'source_policy': {'get_policy_sha256': '8' * 64}}
+            return {}
+
+        with patch.object(entry.recovery._private_bindings, 'value', side_effect=value), \
+             patch.object(entry.recovery.historical_active, 'candidate_policy', return_value=(new, False)), \
+             patch.object(entry.recovery.idle_recovery, 'candidate_policy', return_value=(new, False)), \
+             patch.object(entry.recovery, 'old_public_policy', return_value=old), \
+             patch.object(entry.recovery, 'SEQUENCE_TWO_RECORD', {
+                 'run_id': 999, 'receipt_commit': 'x' * 40,
+                 'receipt_sha256': 'x' * 64, 'get_policy_sha256': 'x' * 64}), \
+             patch.object(entry.recovery, 'current_get_policy', return_value='7' * 64), \
+             patch.object(entry, 'rules_sha256', return_value='6' * 64), \
+             patch.object(controller_module, 'template_sha256', return_value='4' * 64), \
+             patch.object(entry.recovery.idle_recovery, 'accepts_receipt', return_value=False):
+            self.assertEqual(entry.recovery.candidate_policy(new, run), (old, True))
+            entry.recovery.verify_original_record(record, 791)
+            self.assertTrue(entry.recovery.accepts_receipt(
+                'a' * 40, 'b' * 64, {'sequence': 9, 'policy_sha256': 'c' * 64}, '7' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt(
+                'd' * 40, 'b' * 64, {'sequence': 9, 'policy_sha256': 'c' * 64}, '7' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt(
+                'a' * 40, '9' * 64, {'sequence': 9, 'policy_sha256': 'c' * 64}, '7' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt(
+                'a' * 40, 'b' * 64, {'sequence': 8, 'policy_sha256': 'c' * 64}, '7' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt(
+                'a' * 40, 'b' * 64, {'sequence': 9, 'policy_sha256': '9' * 64}, '7' * 64))
+            self.assertFalse(entry.recovery.accepts_receipt(
+                'a' * 40, 'b' * 64, {'sequence': 9, 'policy_sha256': 'c' * 64}, '9' * 64))
+            with self.assertRaises(ProvenanceFailure):
+                entry.recovery.verify_original_record(record, 792)
+            with self.assertRaises(ProvenanceFailure):
+                entry.recovery.verify_original_record({**record, 'record_sha256': '0' * 64}, 791)
+            for key, wrong in (('id', 460), ('run_attempt', 2),
+                               ('head_sha', '0' * 40), ('event', 'workflow_dispatch')):
+                self.assertFalse(entry.recovery.candidate_policy(
+                    new, {**run, key: wrong})[1])
+
     def test_sequence_seven_policy_transition_requires_exact_run_identity(self):
         import get_recurring_controller as controller_module
         old = {'code_sha': 'a' * 40, 'rules_sha256': 'b' * 64, 'get_policy_sha256': 'c' * 64,

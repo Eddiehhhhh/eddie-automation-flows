@@ -84,7 +84,7 @@ def accepts_receipt(commit, receipt_sha256, value, requested_policy):
     if (type(migration) is tuple and len(migration) == 4 and commit == migration[1]
             and requested_policy == current_get_policy()):
         return True
-    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING'):
+    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING', 'SEQ9_BINDING'):
         binding = _private_bindings.value('get_recurring_policy_recovery', binding_name)
         if isinstance(binding, dict) and 'record' in binding:
             record = binding['record']
@@ -129,7 +129,7 @@ def candidate_policy(policy, run):
     old = old_public_policy()
     run_id, attempt, controller = ORIGINAL_RUN_ID, ORIGINAL_RUN_ATTEMPT, ORIGINAL_CONTROLLER_SHA
     event = 'workflow_dispatch'
-    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING'):
+    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING', 'SEQ9_BINDING'):
         binding = _private_bindings.value('get_recurring_policy_recovery', binding_name)
         if isinstance(binding, dict) and 'record' in binding and run.get('id') == binding['record']['run_id']:
             old = deepcopy(binding['public_policy'])
@@ -174,7 +174,7 @@ def candidate_policy(policy, run):
 
 def verify_original_record(record, job_id, *, job=None, raw=None, run=None):
     from get_publication_provenance import fail
-    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING'):
+    for binding_name in ('SEQ5_BINDING', 'SEQ6_BINDING', 'SEQ7_BINDING', 'SEQ9_BINDING'):
         binding = _private_bindings.value('get_recurring_policy_recovery', binding_name)
         if isinstance(binding, dict) and 'record' in binding and record['run_id'] == binding['record']['run_id']:
             if job_id != binding['job_id'] or record != binding['record']:
