@@ -928,6 +928,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 # The shared 40 physical-read / byte budgets still bound cost.
                 if locator is None and str(exc) in ('journal_provenance_other_controller', 'journal_provenance_no_checkpoint'):
                     checked -= 1
+                    probe_attempts -= 1
                 if str(exc) not in ('journal_provenance_missing', 'journal_provenance_no_checkpoint',
                                    'journal_provenance_other_controller'):
                     raise
