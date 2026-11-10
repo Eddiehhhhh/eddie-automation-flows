@@ -84,7 +84,7 @@ jobs:
           PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
           FLOMO_MAX_PAGES: ${{ inputs.flomo_max_pages || '50' }}
         run: |
-          python scripts/run_private_command.py --label "Notion Flomo staging" -- \
+          python scripts/run_private_command.py --label "Notion Flomo staging" --stdout-file "$RUNNER_TEMP/flomo-sync-result.json" -- \
             python scripts/sync_notion_flomo_to_raw.py --apply \
             --config "$VAULT_ROOT/.github/state/notion-flomo-config.json" \
             --max-pages "$FLOMO_MAX_PAGES"
@@ -114,5 +114,40 @@ jobs:
       - name: Report incomplete Flomo sync
         if: ${{ always() && !cancelled() && (steps.flomo_config.outcome == 'failure' || steps.flomo_sync.outcome == 'failure' || steps.flomo_commit.outcome == 'failure' || steps.flomo_readback.outcome == 'failure') }}
         run: |
-          echo "Flomo sync is incomplete; inspect private coverage and persistence/readback steps."
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'flomo-sync-result.json'
+          try:
+              records = [json.loads(line) for line in path.read_text().splitlines() if line.startswith('{')]
+              diagnostic = next((row['diagnostic'] for row in reversed(records) if isinstance(row, dict) and isinstance(row.get('diagnostic'), dict)), {})
+          except (OSError, ValueError):
+              diagnostic = {}
+          categories = {'notion_http_error', 'network_error', 'staging_error', 'partial_capture'}
+          lines = ['### Flomo sync diagnostic']
+          category = diagnostic.get('category')
+          lines.append('- Category: ' + (category if isinstance(category, str) and category in categories else 'details_unavailable'))
+          if type(diagnostic.get('http_status')) is int and 100 <= diagnostic['http_status'] <= 599:
+              lines.append('- HTTP status: ' + str(diagnostic['http_status']))
+          errors = {'unauthorized', 'restricted_resource', 'object_not_found', 'rate_limited', 'invalid_json', 'invalid_request_url', 'invalid_request', 'validation_error', 'conflict_error', 'internal_server_error', 'service_unavailable', 'request_timeout'}
+          if isinstance(diagnostic.get('notion_error_code'), str) and diagnostic['notion_error_code'] in errors:
+              lines.append('- Notion error: ' + diagnostic['notion_error_code'])
+          for key in ('notion_pages', 'flomo_ids', 'written', 'pending'):
+              value = diagnostic.get(key)
+              if type(value) is int and 0 <= value <= 1000000:
+                  lines.append('- ' + key.replace('_', ' ') + ': ' + str(value))
+          held = diagnostic.get('held')
+          if isinstance(held, dict):
+              safe = []
+              for key, value in held.items():
+                  code = key if key in {'source_identity_not_observed', 'stage_edited', 'source_identity_changed', 'incomplete_asset', 'incomplete_relation', 'unsupported_block', 'block_cycle', 'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source', 'incomplete_property_proof', 'unsupported_property_renderer_revision', 'state_changed', 'source_changed_during_read', 'source_or_stage_failed', 'other'} else 'other'
+                  if type(value) is int and 0 <= value <= 1000000:
+                      safe.append(code + '=' + str(value))
+              if safe:
+                  lines.append('- Held reasons: ' + ', '.join(sorted(safe)))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as handle:
+              handle.write('\n'.join(lines) + '\n')
+          print('Flomo sync is incomplete; safe diagnostic summary was written.')
+          PY
           exit 2

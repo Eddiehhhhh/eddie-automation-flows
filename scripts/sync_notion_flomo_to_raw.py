@@ -69,17 +69,6 @@ def safe_failure_diagnostic(exc):
     return {'category': 'staging_error'}
 
 
-def write_safe_failure_summary(exc):
-    path = os.environ.get('GITHUB_STEP_SUMMARY')
-    if not path: return
-    value = safe_failure_diagnostic(exc)
-    lines = ['### Flomo sync diagnostic', '- Category: ' + value['category']]
-    if 'http_status' in value: lines.append('- HTTP status: ' + str(value['http_status']))
-    if 'notion_error_code' in value: lines.append('- Notion error: ' + value['notion_error_code'])
-    with open(path, 'a', encoding='utf-8') as handle:
-        handle.write('\n'.join(lines) + '\n')
-
-
 def safe_partial_diagnostic(result):
     held = result.get('held') if isinstance(result, dict) else None
     counts = {}
@@ -93,20 +82,6 @@ def safe_partial_diagnostic(result):
         'written': result.get('written') if type(result.get('written')) is int else None,
         'pending': result.get('pending') if type(result.get('pending')) is int else None,
         'held': dict(sorted(counts.items()))}
-
-
-def write_safe_partial_summary(result):
-    path = os.environ.get('GITHUB_STEP_SUMMARY')
-    if not path: return
-    value = safe_partial_diagnostic(result)
-    lines = ['### Flomo sync diagnostic', '- Category: ' + value['category']]
-    for key in ('notion_pages', 'flomo_ids', 'written', 'pending'):
-        if value[key] is not None: lines.append('- ' + key.replace('_', ' ') + ': ' + str(value[key]))
-    if value['held']:
-        lines.append('- Held reasons: ' + ', '.join(code + '=' + str(count) for code, count in value['held'].items()))
-    with open(path, 'a', encoding='utf-8') as handle:
-        handle.write('\n'.join(lines) + '\n')
-
 
 def reject_credentials(raw):
     if CREDENTIAL_SHAPE.search(raw.decode('utf-8')):
@@ -852,17 +827,14 @@ def main():
     summary = {key: result[key] for key in ('notion_pages', 'flomo_ids', 'flomo_source_pages', 'written', 'unchanged', 'pending',
         'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete', 'renderer_rewritten', 'property_hydrated')}
     summary['incremental_complete'] = incremental_complete(result)
-    print(json.dumps(summary))
     exit_code = sync_exit_code(result, args.apply)
-    if exit_code:
-        try: write_safe_partial_summary(result)
-        except OSError: pass
+    if exit_code: summary['diagnostic'] = safe_partial_diagnostic(result)
+    print(json.dumps(summary), flush=True)
     return exit_code
 
 
 if __name__ == '__main__':
     try: raise SystemExit(main())
     except Exception as exc:
-        try: write_safe_failure_summary(exc)
-        except OSError: pass
+        print(json.dumps({'diagnostic': safe_failure_diagnostic(exc)}), flush=True)
         raise
