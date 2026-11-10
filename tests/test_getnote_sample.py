@@ -38,18 +38,20 @@ class GetSampleTests(unittest.TestCase):
         policy_bytes = base64.b64decode(encoded, validate=True)
         policy = json.loads(policy_bytes)
         runtime_sha = re.search(r"RUNTIME_SHA: '([0-9a-f]{40})'", workflow).group(1)
-        self.assertEqual(runtime_sha, '46c6fe644072c4dc2b4e2f7561ca92454e34daf0')
+        self.assertEqual(runtime_sha, 'e5f0cf08c076ea466f1f51ced81dfecb5afd12dd')
         self.assertEqual(re.findall(r"(?m)^\s+ref: '([0-9a-f]{40})'$", workflow),
                          [runtime_sha, runtime_sha])
+        self.assertEqual(workflow.count('- name: Verify pinned reviewed runtime'), 2)
+        self.assertIn('run: test "$(git -C get-runtime rev-parse HEAD)" = "$RUNTIME_SHA"', workflow)
         self.assertEqual(policy['code_sha'], runtime_sha)
-        self.assertEqual(policy['rules_sha256'], '2c17c3cfab6faf525e2536e3c229e347a783f1fdb7312262e4d300eee07d1d9b')
-        self.assertEqual(policy['get_policy_sha256'], '75cc39b34f5d8824406831362d27f6b3d2a00b10a7455c8214db5d61986b9a12')
-        expected_policy_sha256 = 'd2cf4a7be710c182bd3ff6774a118cf8ad73e14430205e7c7453bb80702df083'
+        self.assertEqual(policy['rules_sha256'], '8ebe7d2d5c64499129098e9dab68cec976aad00054be2226e10f8163fd47b328')
+        self.assertEqual(policy['get_policy_sha256'], 'e007a84ecb47e504c6ef68f3b26ebc0955fdb56d5fa2a06c2e6bf17ee19cadbd')
+        expected_policy_sha256 = '7900623f635ee09acf5e6f80ea8b521d408f4d89beb73829d171d7958d86d654'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         self.assertEqual(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1),
-                         '654f523f54ca14be9b19705f29157c72471184b072d27eab36198de2d942d150')
+                         '48a908ffa6e229e5ad21fbd78cbf2a8c299b942492ce549f8ec3d3d85b8e58ef')
 
     def test_cloud_test_note_reuses_complete_paginated_lookup(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
