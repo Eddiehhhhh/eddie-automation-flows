@@ -419,7 +419,7 @@ def reviewed_baseline():
     for key in ('old_policy_sha256','body_receipts_sha256','property_receipts_sha256','unresolved_sha256','target_material_sha256'):o.e.p.hex_hash(b[key],64)
     for key,limit in [('state_bytes',o.MAX_STATE),('body_receipts',2500),('property_receipts',2500),('unresolved',16)]:
         if type(b[key])is not int or not 0<b[key]<=limit:o.fail('approval_missing')
-    if reviewed_material_sha256(json.loads(checkpoint._capsule_bytes()))!=b['target_material_sha256']:o.fail('approval_missing')
+    if reviewed_material_sha256(json.loads(checkpoint._capsule_bytes()))!=b['target_material_sha256']:return None
     return deepcopy(b)
 
 

@@ -24,6 +24,25 @@ with patch.dict(sys.modules):
 
 
 class SingleNoteNotionInput(unittest.TestCase):
+    def test_stale_idle_baseline_is_not_accepted(self):
+        binding = {
+            'contract': runtime.idle_recovery.REVIEWED_BASELINE_TAG,
+            'anchor': {'commit': 'c' * 40, 'state_blob': 'b' * 40, 'state_sha256': 'a' * 64},
+            'state_bytes': 1, 'old_policy_sha256': 'd' * 64,
+            'body_receipts': 1, 'property_receipts': 1, 'unresolved': 1,
+            'body_receipts_sha256': 'e' * 64, 'property_receipts_sha256': 'f' * 64,
+            'unresolved_sha256': '1' * 64, 'target_material_sha256': '2' * 64,
+        }
+        modules = {'get_notion_checkpoint_resume': runtime.checkpoint_resume,
+                   'get_notion_outbox': runtime.outbox,
+                   'get_private_runtime_bindings': runtime.idle_recovery._private_bindings}
+        with patch.dict(sys.modules, modules), \
+             patch.object(runtime.idle_recovery._private_bindings, 'value', return_value=binding), \
+             patch.object(runtime.checkpoint_resume, '_capsule_bytes', return_value=b'{}'), \
+             patch.object(runtime.idle_recovery, 'reviewed_material_sha256', return_value='3' * 64):
+            self.assertIsNone(runtime.idle_recovery.reviewed_baseline())
+            self.assertIsNone(runtime.idle_recovery.reviewed_baseline_anchor(b'old', {}, (None, None)))
+
     def test_single_note_uses_only_the_reviewed_idle_baseline_anchor(self):
         tag = runtime.idle_recovery.REVIEWED_BASELINE_TAG
         self.assertTrue(runtime.single_note_anchor_allowed('123', tag))
