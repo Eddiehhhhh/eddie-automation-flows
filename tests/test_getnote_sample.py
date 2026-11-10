@@ -43,13 +43,13 @@ class GetSampleTests(unittest.TestCase):
                          [runtime_sha, runtime_sha])
         self.assertEqual(policy['code_sha'], runtime_sha)
         self.assertEqual(policy['rules_sha256'], 'eddbe501f1a737db32b6cb4e442ce57bdaf9720bde2b21bab5eebaa566c2c9a3')
-        self.assertEqual(policy['get_policy_sha256'], '77e53ac650c279a2ca3507b1ddc7444b934b994e2c7ea8406b1d8f68005a1ca7')
-        expected_policy_sha256 = 'd436abbb66bb03f5cfe6e198caff2a99ca85cdbebbbb2d9049f731b88940348f'
+        self.assertEqual(policy['get_policy_sha256'], '285c7d9884712d443db6bebfced24696de1dae5ec90b259bfa97e26f39968df3')
+        expected_policy_sha256 = '222f5620653c0ffa282c72a07aeb1af2be808bd7024a8fffa94149abb2cb16d3'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         self.assertEqual(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1),
-                         '4a95bc618f4b16fb79616e5994ab52966fa1803c8167e772a513d49e7a25d282')
+                         '5407e7015f1cc8781f9d53c83b25da87f5e431d308869876926d07fc7778203f')
 
     def test_cloud_test_note_reuses_complete_paginated_lookup(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
