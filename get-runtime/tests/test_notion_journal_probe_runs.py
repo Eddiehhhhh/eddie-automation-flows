@@ -53,6 +53,15 @@ for error, expected in ((rotation.RotationFailure('rotation_policy_changed'), 'r
     else: raise AssertionError('provenance failures must remain fail closed')
 assert report.public({'status':'failed','reason':'rotation_policy_changed'},
                      runtime.DIAGNOSTIC_ERRORS)['reason'] == 'rotation_policy_changed'
+budget_reasons = {
+    'journal_provenance_log_budget', 'journal_provenance_record_budget',
+    'journal_provenance_checkpoint_budget', 'journal_provenance_request_budget',
+    'journal_provenance_response_budget', 'journal_provenance_total_budget',
+    'journal_provenance_previous_budget', 'journal_provenance_probe_budget'}
+assert budget_reasons <= runtime.DIAGNOSTIC_ERRORS
+for reason in budget_reasons:
+    assert report.public({'status':'failed','reason':reason},
+                         runtime.DIAGNOSTIC_ERRORS)['reason'] == reason
 
 import get_publication_provenance as provenance
 assert provenance.MAX_REQUESTS == 1350
@@ -105,7 +114,7 @@ with patch('get_publication_provenance.validate_policy',return_value=policy), \
     try:
         m.discover_anchor(Client(),public_policy=policy,approved_public_policy_sha256='0'*64,
                           notion_policy_sha256='0'*64)
-    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_budget'
+    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_probe_budget'
     else: raise AssertionError('failed run discovery must stop at its explicit cap')
 
 runs = [{'id':i+1,'run_attempt':2,'event':'workflow_dispatch','status':'completed',
@@ -126,7 +135,7 @@ with patch('get_publication_provenance.validate_policy',return_value=policy), \
     try:
         m.discover_anchor(client,public_policy=policy,approved_public_policy_sha256='0'*64,
                           notion_policy_sha256='0'*64)
-    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_budget'
+    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_probe_budget'
     else: raise AssertionError('rerun ancestry probes must stop at the explicit cap')
 prior_reads=sum('/attempts/1' in call for call in client.calls)
 assert 0 < prior_reads <= provenance.MAX_JOURNAL_PREVIOUS_ATTEMPTS
