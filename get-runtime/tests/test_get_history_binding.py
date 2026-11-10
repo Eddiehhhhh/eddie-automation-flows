@@ -238,11 +238,15 @@ class MainlineHistory(unittest.TestCase):
         witness = SimpleNamespace(receipt_commit=receipt, observed_commit=observed)
         with tempfile.TemporaryDirectory() as vault:
             reader.local.vault = vault
+            shallow = Path(vault) / '.git/shallow'
+            shallow.parent.mkdir()
+            shallow.write_text(descendant + '\n')
             loader = confirmed_source.Loader.__new__(confirmed_source.Loader)
             loader.local = reader.local
             loader.reader = reader
             loader.history_witness = object()
             with patch.object(loader, 'commit') as commit, \
+                 patch.object(loader, 'fetch') as fetch, \
                  patch.object(loader, 'blob') as blob, \
                  patch.object(entry, 'select_history_witness', return_value=witness), \
                  patch.object(entry, 'unchanged_get_history') as verify:
@@ -250,6 +254,7 @@ class MainlineHistory(unittest.TestCase):
         self.assertEqual([call.args[0] for call in commit.call_args_list],
                          [receipt, descendant, descendant, middle, observed])
         blob.assert_called_once_with(receipt, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
+        fetch.assert_not_called()
         self.assertEqual(verify.call_args.args[1:], (receipt, descendant))
 
     def test_changed_merge_result_fails(self):
