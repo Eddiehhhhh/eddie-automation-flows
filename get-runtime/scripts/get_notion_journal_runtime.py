@@ -80,7 +80,11 @@ SAFE_PROVENANCE_DIAGNOSTICS = frozenset({
     'provenance_receipt_sequence', 'provenance_record', 'provenance_record_count',
     'provenance_repository', 'provenance_run', 'provenance_run_bound', 'provenance_run_changed',
     'provenance_schema', 'provenance_target', 'provenance_timestamp', 'provenance_transport',
-    'provenance_unavailable', 'provenance_unconfirmed', 'provenance_workflow'})
+    'provenance_unavailable', 'provenance_unconfirmed', 'provenance_workflow',
+    'journal_provenance_log_budget', 'journal_provenance_record_budget',
+    'journal_provenance_checkpoint_budget', 'journal_provenance_request_budget',
+    'journal_provenance_response_budget', 'journal_provenance_total_budget',
+    'journal_provenance_previous_budget', 'journal_provenance_probe_budget'})
 
 
 def fail(code):
@@ -446,7 +450,7 @@ def _interval(step, job):
 
 
 def _records(raw, expected, notion_interval, get_interval, policy, run):
-    if not isinstance(raw, bytes) or len(raw) > provenance.MAX_LOG: fail('journal_provenance_budget')
+    if not isinstance(raw, bytes) or len(raw) > provenance.MAX_LOG: fail('journal_provenance_log_budget')
     records = []; get_lines = []; fixed_records = []; previous = None; previous_stamp = None
     try: lines = raw.decode('utf-8', 'strict').splitlines()
     except Exception: fail('journal_provenance_log')
@@ -470,7 +474,8 @@ def _records(raw, expected, notion_interval, get_interval, policy, run):
         if not notion_interval[0] <= stamp <= notion_interval[1]: fail('journal_provenance_time')
         if previous_stamp is not None and stamp < previous_stamp: fail('journal_provenance_time')
         previous_stamp = stamp
-        if len(content) > 8192 or len(records) >= MAX_CHECKPOINTS: fail('journal_provenance_budget')
+        if len(content) > 8192: fail('journal_provenance_record_budget')
+        if len(records) >= MAX_CHECKPOINTS: fail('journal_provenance_checkpoint_budget')
         value = journal.retention.strict_json(content[len(MARKER):].encode())
         if not isinstance(value, dict) or set(value) != RECORD_KEYS: fail('journal_provenance_record')
         if (value['contract'] != CONTRACT or value['status'] != 'journal_readback_verified'
@@ -642,15 +647,15 @@ class _ReadBudget:
         self.client = client; self.requests = 0; self.bytes = 0; self.controllers = {}; self.repository = None
 
     def call(self, kind, value):
-        if self.requests >= provenance.MAX_REQUESTS: fail('journal_provenance_budget')
+        if self.requests >= provenance.MAX_REQUESTS: fail('journal_provenance_request_budget')
         self.requests += 1
         answer = getattr(self.client, kind)(value)
         raw = answer if kind == 'logs' else provenance.a.encoded(answer)
         limit = provenance.MAX_LOG if kind == 'logs' else provenance.MAX_JSON
         if not isinstance(raw, bytes) or len(raw) > limit:
-            fail('journal_provenance_budget')
+            fail('journal_provenance_response_budget')
         self.bytes += len(raw)
-        if self.bytes > provenance.MAX_TOTAL: fail('journal_provenance_budget')
+        if self.bytes > provenance.MAX_TOTAL: fail('journal_provenance_total_budget')
         return answer
 
     def json(self, value):
@@ -741,7 +746,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
             nonlocal previous_attempts
             if row['run_attempt'] <= 1: return
             if previous_attempts >= provenance.MAX_JOURNAL_PREVIOUS_ATTEMPTS:
-                fail('journal_provenance_budget')
+                fail('journal_provenance_previous_budget')
             previous_attempts += 1
             number = row['run_attempt'] - 1
             prior = _terminal_run(bounded.json('/actions/runs/' + str(row['id'])
@@ -805,7 +810,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 if locator_envelope is not None and (row['id'], row['run_attempt']) == locator:
                     locator_used = True
             if probe_attempts >= provenance.MAX_JOURNAL_PROBE_ATTEMPTS:
-                fail('journal_provenance_budget')
+                fail('journal_provenance_probe_budget')
             probe_attempts += 1
             checked += 1
             # Exact target-scoped evidence is selected BEFORE an otherwise
