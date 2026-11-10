@@ -160,25 +160,29 @@ def run():
                 or [item.get('sha') for item in api_commit_result.get('parents', [])] != [parent]):
             fail('probe_api_commit_mismatch')
         try:
-            ref_result = api_write(token, 'POST', '/git/refs', {'ref': target_ref, 'sha': api_commit})
+            ref_result = api_write(token, 'POST', '/git/refs', {'ref': target_ref, 'sha': parent})
+            if ref_result.get('ref') != target_ref or ref_result.get('object', {}).get('sha') != parent:
+                fail('probe_seed_ref_mismatch')
+            patch_result = api_write(token, 'PATCH', '/git/refs/' + target_ref.removeprefix('refs/'),
+                {'sha': api_commit, 'force': False})
         except ApiWriteFailure as error:
             try:
                 observed = remote.request('/git/ref/' + target_ref.removeprefix('refs/'), missing=True)
             except Exception:
                 observed = None
             if not isinstance(observed, dict) or observed.get('object', {}).get('sha') != api_commit:
-                return api_failure('create_ref', error)
-            ref_result = observed
+                return api_failure('update_ref', error)
+            patch_result = observed
         after = remote.request('/git/ref/' + target_ref.removeprefix('refs/'))
         commit_response = remote.request('/git/commits/' + api_commit)
-        if (ref_result.get('ref') != target_ref or ref_result.get('object', {}).get('sha') != api_commit
+        if (patch_result.get('ref') != target_ref or patch_result.get('object', {}).get('sha') != api_commit
                 or after.get('object', {}).get('sha') != api_commit or commit_response.get('sha') != api_commit
                 or commit_response.get('tree', {}).get('sha') != tree
                 or [item.get('sha') for item in commit_response.get('parents', [])] != [parent]
                 or remote.ref(MAIN_REF) != parent):
             fail('probe_readback')
         print(json.dumps({'status': 'journal_shape_api_verified', 'repository': REPOSITORY,
-            'write_method': 'git_data_api',
+            'write_method': 'git_data_api_ref_patch_force_false',
             'branch': branch, 'changed_paths': 1, 'synthetic_bytes': len(SYNTHETIC),
             'parent_verified': True, 'main_unchanged': True}, separators=(',', ':')), flush=True)
         return 0
