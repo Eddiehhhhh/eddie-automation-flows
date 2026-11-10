@@ -13,14 +13,15 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 import get_legacy_adapter as a
 import get_legacy_capture as c
 import get_private_preview_retention as r
-import get_private_runtime_report as diagnostic_report
 from get_mirror_incremental_replay import strict_capture_json, raw_source_version
 
 CONTRACT='get-legacy-manual-transaction-1'
@@ -29,22 +30,10 @@ ANCHOR = _private_bindings.value('get_legacy_manual', 'ANCHOR')
 INITIAL_SHA = _private_bindings.value('get_legacy_manual', 'INITIAL_SHA')
 MAX_CHANGED_BYTES=64*c.MIB
 MAX_MANAGED=1152
+NOTION_JOURNAL_PATH='.sync/get-notion/state.json'
 PROTECTED={**c.PROTECTED,c.REF:CAPTURE}
 ERRORS={'manual_failed','manual_target','manual_ref_changed','manual_parent_changed','manual_initial_changed','manual_state_anchor','manual_source_payload','manual_budget','manual_plan','manual_scope','manual_readback','manual_readback_ref','manual_readback_transport','manual_uncertain_write','manual_write_unconfirmed','manual_rollback_conflict','manual_checkpoint','manual_approval_changed','manual_approval_required'}
 CAS_ERROR_CATEGORIES=frozenset(('missing_object','shallow_history','authentication_or_permission','network','size_or_remote_rejection','ref_changed','resource_limit','other'))
-CAS_DIAGNOSTIC_STAGES=frozenset(('merge_base','push_start','push_exit','push_timeout','push_exception'))
-CAS_EXCEPTION_KINDS=frozenset(('timeout','spawn_error','other'))
-
-def cas_error_category(stderr):
-    value=stderr.lower() if isinstance(stderr,bytes) else b''
-    if any(x in value for x in (b'authentication failed',b'permission denied',b'403',b'could not read username')):return 'authentication_or_permission'
-    if any(x in value for x in (b'missing blob',b'missing tree',b'missing object',b'bad object',b'unable to read',b'could not read')):return 'missing_object'
-    if b'shallow' in value:return 'shallow_history'
-    if any(x in value for x in (b'stale info',b'fetch first',b'non-fast-forward')):return 'ref_changed'
-    if any(x in value for x in (b'cannot allocate memory',b'file size limit',b'killed by signal')):return 'resource_limit'
-    if any(x in value for x in (b'connection',b'timed out',b'network',b'resolve host',b'broken pipe')):return 'network'
-    if any(x in value for x in (b'file too large',b'exceeds',b'oversized',b'413',b'remote rejected',b'pre-receive hook declined',b'remote unpack failed',b'gh001',b'gh013')):return 'size_or_remote_rejection'
-    return 'other'
 
 class CasPushFailure(Exception):
     def __init__(self,category,diagnostic=None):
@@ -82,21 +71,106 @@ class Remote(c.Remote):
     """The only write primitive is one exact-lease fast-forward of fixed main."""
     def cas_main(self,parent,commit):
         a.checked(parent,40);a.checked(commit,40)
-        for stage,args in (('merge_base',('merge-base','--is-ancestor',parent,commit)),
-                           ('push_exit',('push','--porcelain','--no-verify','--force-with-lease='+r.MAIN_REF+':'+parent,r.REMOTE_URL,commit+':'+r.MAIN_REF))):
+        import get_gitdata_staging as staging
+
+        stage='candidate_commit_validation';ref_changed=False
+        try:
+            parents=self.local.run('rev-list','--parents','-n','1',commit).decode().strip().split()
+            tree=self.local.run('rev-parse',commit+'^{tree}').decode().strip()
+            parent_tree=self.local.run('rev-parse',parent+'^{tree}').decode().strip()
+            if parents!=[commit,parent]:raise ValueError()
+            api=staging.API(self.token)
+            def flat_tree(revision):
+                result={}
+                for record in self.local.run('ls-tree','-rzr',revision).split(b'\0'):
+                    if not record:continue
+                    metadata,path=record.split(b'\t',1)
+                    mode,kind,oid=metadata.decode('ascii').split()
+                    decoded=path.decode('utf-8')
+                    if decoded in result:raise ValueError()
+                    result[decoded]=(mode,kind,a.checked(oid,40))
+                return result
+            before=flat_tree(parent);after=flat_tree(commit);changed=[]
+            for path in sorted(before.keys()|after.keys()):
+                old,new=before.get(path),after.get(path)
+                if old==new:continue
+                if path.startswith(r.GET+'/'):r.safe_path(path)
+                elif path!=NOTION_JOURNAL_PATH:raise ValueError()
+                if old and old[:2]!=('100644','blob') or new and new[:2]!=('100644','blob'):
+                    raise ValueError()
+                changed.append(path)
+            if (not changed or any(path.startswith(r.GET+'/') for path in changed)
+                    and any(path==NOTION_JOURNAL_PATH for path in changed)):
+                raise ValueError()
+            entries=[]
+            for path in changed:
+                new=after.get(path)
+                if new:
+                    stage='blob_create'
+                    data=self.local.blob(new[2])
+                    blob=api.call('POST','/git/blobs',{'content':base64.b64encode(data).decode('ascii'),'encoding':'base64'})
+                    if blob.get('sha')!=new[2]:raise ValueError()
+                entries.append({'path':path,'mode':'100644','type':'blob','sha':new[2] if new else None})
+
+            stage='tree_create'
+            result=api.call('POST','/git/trees',{'base_tree':parent_tree,'tree':entries})
+            if result.get('sha')!=tree:raise ValueError()
+
+            stage='commit_create'
+            headers,separator,message=self.local.run('cat-file','commit',commit).partition(b'\n\n')
+            values={}
+            if not separator:raise ValueError()
+            for line in headers.splitlines():
+                key,space,value=line.partition(b' ')
+                if not space or key.decode('ascii') in values:raise ValueError()
+                values[key.decode('ascii')]=value
+            if set(values)!={'tree','parent','author','committer'} or values['tree'].decode()!=tree or values['parent'].decode()!=parent:
+                raise ValueError()
+            def identity(raw):
+                match=re.fullmatch(rb'(.+) <([^<>]+)> ([0-9]+) ([+-])([0-9]{2})([0-9]{2})',raw)
+                if match is None:raise ValueError()
+                name,email,seconds,sign,hours,minutes=match.groups()
+                offset=(int(hours)*60+int(minutes))*(1 if sign==b'+' else -1)
+                date=datetime.fromtimestamp(int(seconds),timezone(timedelta(minutes=offset))).isoformat(timespec='seconds')
+                return {'name':name.decode('utf-8'),'email':email.decode('ascii'),'date':date}
+            result=api.call('POST','/git/commits',{'message':message.decode('utf-8'),'tree':tree,'parents':[parent],
+                'author':identity(values['author']),'committer':identity(values['committer'])})
+            if result.get('sha')!=commit:raise ValueError()
+
+            stage='repository_lookup'
+            owner,name=r.REPOSITORY.split('/',1)
+            repository=api.graphql('query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}',
+                {'owner':owner,'name':name}).get('repository')
+            if not isinstance(repository,dict) or not isinstance(repository.get('id'),str):raise ValueError()
+
+            stage='graphql_update'
             try:
-                result=self.local.command(*args)
-            except Exception as exc:
-                kind=getattr(exc,'git_exception_kind','other')
-                if not isinstance(kind,str) or kind not in CAS_EXCEPTION_KINDS:kind='other'
-                failed_stage=stage if stage=='merge_base' else ('push_timeout' if kind=='timeout' else 'push_start' if kind=='spawn_error' else 'push_exception')
-                raise CasPushFailure('other',{'stage':failed_stage,'exception':kind}) from None
-            if result.returncode:
-                stdout=cas_error_category(result.stdout) if result.stdout else 'none'
-                stderr=cas_error_category(result.stderr) if result.stderr else 'none'
-                category=stderr if stderr not in ('none','other') else stdout if stdout not in ('none','other') else 'other'
-                raise CasPushFailure(category,{'stage':stage,'exit_code':result.returncode,'stdout_category':stdout,'stderr_category':stderr,
-                    'stdout_words':diagnostic_report.git_word_hits(result.stdout),'stderr_words':diagnostic_report.git_word_hits(result.stderr)})
+                updated=api.graphql('mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}',
+                    {'input':{'repositoryId':repository['id'],'refUpdates':[{'name':r.MAIN_REF,
+                        'beforeOid':parent,'afterOid':commit,'force':False}]}})
+                if not isinstance(updated.get('updateRefs'),dict):raise ValueError()
+            except Exception:
+                # The mutation outcome may be unknown. Read main once; never resend it here.
+                stage='ref_readback'
+                observed=self.ref(r.MAIN_REF)
+                if observed==commit:return
+                if observed!=parent:ref_changed=True;raise ValueError()
+                raise
+            if self.ref(r.MAIN_REF)!=commit:raise ValueError()
+        except Exception as exc:
+            diagnostic={'stage':stage}
+            api_diagnostic=getattr(exc,'api_diagnostic',None)
+            if isinstance(api_diagnostic,dict):
+                failure=api_diagnostic.get('failure')
+                status=api_diagnostic.get('http_status')
+                if isinstance(failure,str):diagnostic['api_failure']=failure
+                if type(status) is int:diagnostic['http_status']=status
+            category='ref_changed' if ref_changed else 'network' if isinstance(api_diagnostic,dict) and api_diagnostic.get('failure') in ('timeout','transport_error') else 'other'
+            if isinstance(api_diagnostic,dict) and api_diagnostic.get('failure') in ('http_error','unexpected_status'):
+                if api_diagnostic.get('http_status') in (401,403):category='authentication_or_permission'
+                elif api_diagnostic.get('http_status')==429:category='resource_limit'
+                elif type(api_diagnostic.get('http_status')) is int and api_diagnostic['http_status']>=500:category='network'
+            raise CasPushFailure(category,diagnostic) from None
 
 def guard(remote,parent=None):
     metadata=remote.metadata()

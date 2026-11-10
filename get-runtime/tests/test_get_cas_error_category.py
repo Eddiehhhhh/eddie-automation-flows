@@ -15,6 +15,8 @@ with patch.object(get_private_runtime_bindings, 'value', return_value=None):
     import get_legacy_manual as manual
     import get_recurring_runtime as runtime
     import get_private_preview_retention as retention
+    import get_private_runtime_report as runtime_report
+    import get_gitdata_staging as staging
 
 def inert_journal_binding(module, name):
     if module == 'get_notion_sink_plan': return '0' * 64
@@ -166,21 +168,11 @@ class CasErrorCategory(unittest.TestCase):
         publish.assert_not_called()
         remote.cas_main.assert_not_called()
 
-    def test_stderr_maps_only_to_fixed_categories(self):
-        samples = ((b'fatal: missing blob private-note', 'missing_object'),
-                   (b'shallow update not allowed private-note', 'shallow_history'),
-                   (b'could not read username private-note', 'authentication_or_permission'),
-                   (b'connection reset private-note', 'network'),
-                   (b'remote: error GH001: large files private-note', 'size_or_remote_rejection'),
-                   (b'private-note', 'other'))
-        for raw, expected in samples:
-            self.assertEqual(manual.cas_error_category(raw), expected)
-
-    def test_cas_failure_retains_one_push_six_reads_and_safe_public_field(self):
+    def test_cas_failure_retains_one_write_six_reads_and_safe_public_field(self):
         parent, commit = 'a' * 40, 'b' * 40
         plan = {'parent_commit': parent, 'candidate_commit': commit, 'transaction_bytes': 5}
         remote = types.SimpleNamespace(cas_main=Mock(side_effect=manual.CasPushFailure('missing_object',
-            {'stage': 'push_exit', 'exit_code': 128, 'stdout_category': 'none', 'stderr_category': 'missing_object'})))
+            {'stage': 'graphql_update', 'api_failure': 'transport_error'})))
         sleep = Mock()
         with patch.object(manual, 'guard', return_value=parent) as guard:
             with self.assertRaises(manual.ManualFailure) as caught:
@@ -194,17 +186,14 @@ class CasErrorCategory(unittest.TestCase):
         self.assertEqual(sleep.call_count, 5)
         projected = runtime.public_result(runtime.failure(caught.exception, attempt_started=True))
         self.assertEqual(projected['cas_error_category'], 'missing_object')
-        self.assertEqual(projected['cas_diagnostic'], {'stage': 'push_exit', 'exit_code': 128,
-                         'stdout_category': 'none', 'stderr_category': 'missing_object'})
+        self.assertEqual(projected['cas_diagnostic'], {'stage': 'graphql_update','api_failure':'transport_error'})
         self.assertEqual(projected['cas_candidate_metrics'], {'changed_paths': 1, 'changed_bytes': 5,
                                                                'transaction_bytes': 5})
         self.assertNotIn('private-note', str(projected))
 
     def test_remote_journal_keeps_only_safe_cas_diagnostic_after_poll_failure(self):
         parent, commit, tree, blob = 'a' * 40, 'b' * 40, 'c' * 40, 'f' * 40
-        failure = manual.CasPushFailure('missing_object', {'stage': 'push_exit', 'exit_code': 128,
-            'stdout_category': 'none', 'stderr_category': 'missing_object',
-            'stderr_words': ['missing', 'object']})
+        failure = manual.CasPushFailure('network', {'stage': 'graphql_update','api_failure':'transport_error'})
         cas_main = Mock(side_effect=failure)
         calls = []
         def timed_call(name, function, *args):
@@ -239,58 +228,80 @@ class CasErrorCategory(unittest.TestCase):
         self.assertEqual((caught.exception.stage, caught.exception.outcome), ('poll', 'unknown'), (str(caught.exception), calls))
         self.assertEqual(cas_main.call_count, 1)
         self.assertEqual(calls.count('poll_ref'), 6)
-        self.assertIn("'cas_error_category': 'missing_object'", output.getvalue())
-        self.assertIn("'stage': 'push_exit'", output.getvalue())
+        self.assertIn("'cas_error_category': 'network'", output.getvalue())
+        self.assertIn("'stage': 'graphql_update'", output.getvalue())
         self.assertNotIn('private note', output.getvalue())
 
-    def test_real_remote_push_failure_is_classified_without_stderr(self):
-        remote = object.__new__(manual.Remote)
-        remote.local = types.SimpleNamespace(command=Mock(side_effect=[
-            types.SimpleNamespace(returncode=0, stdout=b'', stderr=b''),
-            types.SimpleNamespace(returncode=1, stdout=b'', stderr=b'fatal: missing blob private-note')]))
-        with self.assertRaises(manual.CasPushFailure) as caught:
-            remote.cas_main('a' * 40, 'b' * 40)
-        self.assertEqual(caught.exception.cas_error_category, 'missing_object')
-        self.assertNotIn('private-note', str(caught.exception))
-        self.assertEqual(remote.local.command.call_count, 2)
-        self.assertEqual(caught.exception.cas_diagnostic['stage'], 'push_exit')
+    def _api_remote(self, *, graphql_side_effect=None, ref_result='b' * 40, path='Raw/03 Get/note.md'):
+        parent, commit, tree, old_blob, new_blob = 'a' * 40, 'b' * 40, 'c' * 40, 'd' * 40, 'e' * 40
+        raw_commit=(b'tree '+tree.encode()+b'\nparent '+parent.encode()+
+            b'\nauthor A <a@example.com> 1700000000 +0000\ncommitter A <a@example.com> 1700000000 +0000\n\nmessage\n')
+        def local_run(*args):
+            if args[:3]==('rev-list','--parents','-n'):return (commit+' '+parent+'\n').encode()
+            if args[0]=='rev-parse':return (tree if args[1]==commit+'^{tree}' else 'f'*40).encode()
+            if args[:2]==('ls-tree','-rzr'):
+                oid=old_blob if args[2]==parent else new_blob
+                return ('100644 blob '+oid+'\t'+path+'\0').encode()
+            if args[:2]==('cat-file','commit'):return raw_commit
+            raise AssertionError(args)
+        local=types.SimpleNamespace(run=Mock(side_effect=local_run),blob=Mock(return_value=b'new note'))
+        api=types.SimpleNamespace(call=Mock(side_effect=[{'sha':new_blob},{'sha':tree},{'sha':commit}]),
+            graphql=Mock(side_effect=graphql_side_effect or [{'repository':{'id':'repo-id'}},{'updateRefs':{}}]))
+        remote=object.__new__(manual.Remote);remote.local=local;remote.token='secret'
+        remote.ref=Mock(return_value=ref_result)
+        return remote,api,parent,commit,tree,new_blob
 
-    def test_merge_base_failure_never_starts_push(self):
-        remote = object.__new__(manual.Remote)
-        remote.local = types.SimpleNamespace(command=Mock(return_value=types.SimpleNamespace(
-            returncode=1, stdout=b'', stderr=b'private-note')))
-        with self.assertRaises(manual.CasPushFailure) as caught:
-            remote.cas_main('a' * 40, 'b' * 40)
-        self.assertEqual(caught.exception.cas_diagnostic['stage'], 'merge_base')
-        self.assertEqual(remote.local.command.call_count, 1)
+    def test_main_cas_uses_github_gitdata_and_exact_graphql_before_oid(self):
+        remote,api,parent,commit,tree,blob=self._api_remote()
+        with patch.object(staging,'API',return_value=api):remote.cas_main(parent,commit)
+        self.assertEqual([call.args[1] for call in api.call.call_args_list],['/git/blobs','/git/trees','/git/commits'])
+        self.assertEqual(api.call.call_args_list[1].args[2]['tree'][0]['sha'],blob)
+        mutation,variables=api.graphql.call_args_list[1].args
+        self.assertIn('updateRefs',mutation)
+        self.assertEqual(variables['input']['refUpdates'],[{'name':manual.r.MAIN_REF,
+            'beforeOid':parent,'afterOid':commit,'force':False}])
+        self.assertEqual(remote.ref.call_args.args,(manual.r.MAIN_REF,))
 
-    def test_push_exit_classifies_stdout_and_stderr_without_raw_content(self):
-        remote = object.__new__(manual.Remote)
-        remote.local = types.SimpleNamespace(command=Mock(side_effect=[
-            types.SimpleNamespace(returncode=0, stdout=b'', stderr=b''),
-            types.SimpleNamespace(returncode=1, stdout=b'! [remote rejected] private-note',
-                                  stderr=b'error: failed to push private-note')]))
-        with self.assertRaises(manual.CasPushFailure) as caught:
-            remote.cas_main('a' * 40, 'b' * 40)
-        diagnostic = caught.exception.cas_diagnostic
-        self.assertEqual((diagnostic['stage'], diagnostic['exit_code'], diagnostic['stdout_category']),
-                         ('push_exit', 1, 'size_or_remote_rejection'))
-        self.assertEqual(diagnostic['stdout_words'], ['rejected', 'remote'])
-        self.assertEqual(diagnostic['stderr_words'], ['error', 'failed', 'push'])
-        self.assertNotIn('private-note', str(diagnostic))
+    def test_notion_journal_state_path_remains_supported(self):
+        remote,api,parent,commit,_,_=self._api_remote(path=manual.NOTION_JOURNAL_PATH)
+        with patch.object(staging,'API',return_value=api):remote.cas_main(parent,commit)
+        self.assertEqual(api.call.call_args_list[1].args[2]['tree'][0]['path'],manual.NOTION_JOURNAL_PATH)
 
-    def test_push_timeout_and_start_errors_have_distinct_fixed_stages(self):
-        for kind, stage in (('timeout', 'push_timeout'), ('spawn_error', 'push_start'), ('other', 'push_exception')):
-            with self.subTest(kind=kind):
-                error = retention.RetentionFailure('git_operation_failed')
-                error.git_exception_kind = kind
-                remote = object.__new__(manual.Remote)
-                remote.local = types.SimpleNamespace(command=Mock(side_effect=[
-                    types.SimpleNamespace(returncode=0, stdout=b'', stderr=b''), error]))
-                with self.assertRaises(manual.CasPushFailure) as caught:
-                    remote.cas_main('a' * 40, 'b' * 40)
-                self.assertEqual(caught.exception.cas_diagnostic, {'stage': stage, 'exception': kind})
-                self.assertEqual(remote.local.command.call_count, 2)
+    def test_unapproved_path_is_rejected_before_remote_object_writes(self):
+        remote,api,parent,commit,_,_=self._api_remote(path='.github/state/notion-wiki-mirror-state.json')
+        with patch.object(staging,'API',return_value=api),self.assertRaises(manual.CasPushFailure):
+            remote.cas_main(parent,commit)
+        api.call.assert_not_called();api.graphql.assert_not_called()
+
+    def test_mixed_get_and_notion_journal_candidate_is_rejected_before_writes(self):
+        remote,api,parent,commit,_,_=self._api_remote()
+        original=remote.local.run.side_effect
+        def two_path_tree(*args):
+            if args[:2]==('ls-tree','-rzr'):
+                first='d'*40 if args[2]==parent else 'e'*40
+                second='1'*40 if args[2]==parent else '2'*40
+                return (f'100644 blob {first}\tRaw/03 Get/note.md\0'
+                        f'100644 blob {second}\t{manual.NOTION_JOURNAL_PATH}\0').encode()
+            return original(*args)
+        remote.local.run.side_effect=two_path_tree
+        with patch.object(staging,'API',return_value=api),self.assertRaises(manual.CasPushFailure):
+            remote.cas_main(parent,commit)
+        api.call.assert_not_called();api.graphql.assert_not_called()
+
+    def test_ambiguous_graphql_result_reads_ref_once_and_never_retries(self):
+        error=staging.StageFailure('gitdata_staging_failed',{'operation':'graphql_update','failure':'transport_error'})
+        remote,api,parent,commit,_,_=self._api_remote(graphql_side_effect=[{'repository':{'id':'repo-id'}},error])
+        with patch.object(staging,'API',return_value=api):remote.cas_main(parent,commit)
+        self.assertEqual(api.graphql.call_count,2)
+        self.assertEqual(remote.ref.call_count,1)
+
+    def test_graphql_failure_with_unchanged_main_is_sanitized(self):
+        error=staging.StageFailure('gitdata_staging_failed',{'operation':'graphql_update','failure':'transport_error'})
+        remote,api,parent,commit,_,_=self._api_remote(graphql_side_effect=[{'repository':{'id':'repo-id'}},error],ref_result='a'*40)
+        with patch.object(staging,'API',return_value=api),self.assertRaises(manual.CasPushFailure) as caught:
+            remote.cas_main(parent,commit)
+        self.assertEqual(caught.exception.cas_diagnostic,{'stage':'ref_readback','api_failure':'transport_error'})
+        self.assertEqual(caught.exception.cas_error_category,'network')
 
     def test_local_git_sanitizes_timeout_and_spawn_exceptions(self):
         local = object.__new__(retention.LocalGit)
@@ -306,19 +317,18 @@ class CasErrorCategory(unittest.TestCase):
 
     def test_public_diagnostic_rejects_untrusted_fields(self):
         error = manual.ManualFailure('manual_uncertain_write', 'uncertain', 1)
-        error.cas_diagnostic = {'stage': 'push_exit', 'exit_code': 128, 'stdout_category': 'other',
+        error.cas_diagnostic = {'stage': 'graphql_update', 'api_failure':'private-note', 'http_status':999,
                                 'stderr_category': 'private-note', 'extra': 'private-note'}
         projected = runtime.public_result(runtime.failure(error))
-        self.assertEqual(projected['cas_diagnostic'], {'stage': 'push_exit', 'exit_code': 128,
-                                                       'stdout_category': 'other'})
+        self.assertEqual(projected['cas_diagnostic'], {'stage': 'graphql_update'})
         self.assertNotIn('private-note', str(projected))
 
     def test_word_hits_and_metrics_are_bounded_and_never_echo_raw_output(self):
         raw = b'fatal: remote rejected private-note https://private.invalid/path auth-token object error'
-        self.assertEqual(manual.diagnostic_report.git_word_hits(raw),
+        self.assertEqual(runtime_report.git_word_hits(raw),
                          ['auth', 'error', 'fatal', 'object', 'rejected', 'remote'])
         error = manual.ManualFailure('manual_uncertain_write', 'uncertain', 1)
-        error.cas_diagnostic = {'stage': 'push_exit', 'stdout_words': ['fatal', 'private-note'],
+        error.cas_diagnostic = {'stage': 'graphql_update', 'stdout_words': ['fatal', 'private-note'],
                                 'stderr_words': ['error', 'fatal'], 'extra': raw}
         error.cas_candidate_metrics = {'changed_paths': 2, 'changed_bytes': 100,
                                        'transaction_bytes': 64 * 1024 * 1024 + 1}
