@@ -77,6 +77,13 @@ class PublicBudgetDiagnostics(unittest.TestCase):
         self.assertEqual(client.logs(1), b'ok')
         self.assertEqual(client.requests, 2)
 
+    def test_single_server_retry_counts_against_physical_read_budget(self):
+        opener = Opener(Response(b'busy', 503), Response(b'{}'))
+        client = provenance.AnonymousGithub(opener=opener, sleep=lambda _seconds: None)
+        self.assertEqual(client.request('/actions/workflows/387242896', 1024), b'{}')
+        self.assertEqual(client.requests, 2)
+        self.assertEqual(opener.calls, 2)
+
     def test_public_report_keeps_only_fixed_budget_code(self):
         error = provenance.ProvenanceFailure('provenance_budget_requests')
         error.runtime_stage = 'receipt_provenance'

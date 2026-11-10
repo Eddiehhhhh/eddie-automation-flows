@@ -87,7 +87,9 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
     if out['status']=='recurring_failed' and category in cas_categories:
         out['cas_error_category']=category
     diagnostic=result.get('cas_diagnostic')
-    if out['status']=='recurring_failed' and isinstance(diagnostic,dict) and diagnostic.get('stage') in ('merge_base','push_start','push_exit','push_timeout','push_exception'):
+    if out['status']=='recurring_failed' and isinstance(diagnostic,dict) and diagnostic.get('stage') in (
+            'merge_base','push_start','push_exit','push_timeout','push_exception','candidate_commit_validation','blob_create','tree_create',
+            'commit_create','repository_lookup','graphql_update','ref_readback'):
         safe={'stage':diagnostic['stage']}
         code=diagnostic.get('exit_code')
         if type(code) is int and -255<=code<=255:safe['exit_code']=code
@@ -100,6 +102,11 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
             value=diagnostic.get(key)
             if type(value) is list and len(value)<=len(CAS_GIT_WORDS) and all(isinstance(x,str) and x in CAS_GIT_WORDS for x in value) and value==sorted(set(value)):
                 safe[key]=value
+        if diagnostic.get('api_failure') in ('unexpected_status','http_error','timeout','transport_error',
+                'response_too_large','invalid_json','invalid_shape','guard_rejected'):
+            safe['api_failure']=diagnostic['api_failure']
+        status=diagnostic.get('http_status')
+        if type(status) is int and 100<=status<=599:safe['http_status']=status
         out['cas_diagnostic']=safe
     metrics=result.get('cas_candidate_metrics')
     if out['status']=='recurring_failed' and type(metrics) is dict and set(metrics)=={'changed_paths','changed_bytes','transaction_bytes'}:

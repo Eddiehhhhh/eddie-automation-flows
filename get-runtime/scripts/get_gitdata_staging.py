@@ -110,6 +110,38 @@ class API:
             api_fail(method, path, 'invalid_shape', response.status)
         return value
 
+    def graphql(self, query, variables):
+        def fail_graphql(kind, status=None):
+            error=StageFailure('gitdata_staging_failed', {'operation':'graphql_update','failure':kind,
+                **({'http_status':status} if type(status) is int and 100<=status<=599 else {})})
+            raise error from None
+        data = json.dumps({'query': query, 'variables': variables}, separators=(',', ':')).encode()
+        request = urllib.request.Request('https://api.github.com/graphql', data=data, method='POST',
+            headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
+                     'Content-Type': 'application/json', 'User-Agent': 'get-private-staging'})
+        try:
+            with self.opener.open(request, timeout=60) as response:
+                if response.status != 200:
+                    fail_graphql('unexpected_status', response.status)
+                raw = response.read(1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            fail_graphql('http_error', exc.code)
+        except StageFailure:
+            raise
+        except TimeoutError:
+            fail_graphql('timeout')
+        except Exception:
+            fail_graphql('transport_error')
+        if len(raw) > 1024 * 1024:
+            fail_graphql('response_too_large', response.status)
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            fail_graphql('invalid_json', response.status)
+        if not isinstance(value, dict) or value.get('errors') or not isinstance(value.get('data'), dict):
+            fail_graphql('invalid_shape', response.status)
+        return value['data']
+
     def list_stage_refs(self):
         return self.call('GET', '/git/matching-refs/heads/codex/get-stage-', list_result=True)
 
