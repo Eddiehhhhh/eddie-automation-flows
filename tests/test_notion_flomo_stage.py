@@ -705,7 +705,9 @@ class StageTests(unittest.TestCase):
 
     def test_actual_workflow_configuration_script_defaults_off_and_validates(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/sync-notion-personal-data.yml'
-        snippet = path.read_text().split('      - name: Require Flomo staging configuration', 1)[1]
+        workflow = path.read_text()
+        self.assertIn('NOTION_API_KEY: ${{ secrets.NOTION_FLOMO_API_KEY }}', workflow)
+        snippet = workflow.split('      - name: Require Flomo staging configuration', 1)[1]
         script = textwrap.dedent(snippet.split("python - <<'PYTHON'\n", 1)[1].split('          PYTHON', 1)[0])
         config = self.root / '.github/state/notion-flomo-config.json'
         with mock.patch.dict(os.environ, {'VAULT_ROOT': str(self.root)}):
