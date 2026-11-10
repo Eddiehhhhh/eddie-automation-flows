@@ -1,9 +1,9 @@
 """Probe a journal-shaped commit on one private branch, never main."""
 import json
 import os
-import re
-import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 import get_notion_outbox as codec
 import get_notion_remote_journal as journal
@@ -22,54 +22,47 @@ def fail(code):
     raise ValueError(code) from None
 
 
-def classify_push_error(raw):
-    value = raw.lower() if isinstance(raw, bytes) else b''
-    if not value:
-        return 'none'
-    if (any(x in value for x in (b'authentication failed', b'permission denied', b'write access to repository not granted', b'could not read username'))
-            or (b'permission to ' in value and b'denied to ' in value)):
-        return 'authentication_or_permission'
-    if b'repository not found' in value:
-        return 'repository_not_found'
-    if any(x in value for x in (b'gh006', b'gh013', b'protected branch', b'ruleset', b'pre-receive hook declined')):
-        return 'branch_policy_rejection'
-    if any(x in value for x in (b'stale info', b'fetch first', b'non-fast-forward')):
-        return 'ref_rejected'
-    if any(x in value for x in (b'missing blob', b'missing tree', b'missing object', b'bad object', b'could not read object')):
-        return 'missing_object'
-    if b'shallow' in value:
-        return 'shallow_history'
-    if any(x in value for x in (b'cannot allocate memory', b'file size limit', b'killed by signal')):
-        return 'resource_limit'
-    if any(x in value for x in (b'file too large', b'exceeds', b'oversized', b'gh001')):
-        return 'size_or_remote_rejection'
-    if re.search(rb'\b413\b', value):
-        return 'http_payload_too_large'
-    if any(x in value for x in (b'429', b'rate limit')) and re.search(rb'\b429\b', value):
-        return 'rate_limited'
-    if re.search(rb'\b5(?:00|02|03|04)\b', value):
-        return 'http_server_error'
-    if re.search(rb'\b(?:401|403)\b', value):
-        return 'authentication_or_permission'
-    if re.search(rb'\b(?:400|404|422)\b', value):
-        return 'http_client_error'
-    if b'remote unpack failed' in value:
-        return 'remote_unpack_failed'
-    if any(x in value for x in (b'rpc failed', b'remote end hung up', b'unexpected disconnect', b'sideband packet')):
-        return 'transport_disconnect'
-    if any(x in value for x in (b'protocol error', b'bad line length', b'invalid packet', b'sideband packet')):
-        return 'git_protocol_error'
-    if any(x in value for x in (b'connection', b'timed out', b'network', b'resolve host', b'broken pipe')):
-        return 'network'
-    return 'other'
+class ApiWriteFailure(Exception):
+    def __init__(self, status=None):
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
 
 
-def push_failure(stage, result):
+def api_write(token, method, path, payload):
+    request = urllib.request.Request('https://api.github.com/repos/' + REPOSITORY + path,
+        data=json.dumps(payload, separators=(',', ':')).encode(), method=method,
+        headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
+                 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'get-journal-shape-probe',
+                 'Content-Type': 'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), retention.NoRedirect())
+    try:
+        with opener.open(request, timeout=30) as response:
+            raw = response.read(1024 * 1024 + 1)
+            if response.status not in (200, 201) or len(raw) > 1024 * 1024:
+                raise ApiWriteFailure(response.status)
+    except urllib.error.HTTPError as error:
+        raise ApiWriteFailure(error.code) from None
+    except ApiWriteFailure:
+        raise
+    except Exception:
+        raise ApiWriteFailure() from None
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise ApiWriteFailure(response.status) from None
+    if not isinstance(value, dict):
+        raise ApiWriteFailure(response.status)
+    return value
+
+
+def api_failure(stage, error):
+    status = error.status
+    category = ('authentication_or_permission' if status in (401, 403) else
+                'rate_limited' if status == 429 else
+                'http_server_error' if status is not None and status >= 500 else
+                'http_client_error' if status is not None else 'network_or_response')
     print('GET_JOURNAL_SHAPE_PROBE ' + json.dumps({'status': 'failed', 'stage': stage,
-        'exit_code': result.returncode, 'stdout_category': classify_push_error(result.stdout),
-        'stderr_category': classify_push_error(result.stderr),
-        'stdout_words': report.git_word_hits(result.stdout),
-        'stderr_words': report.git_word_hits(result.stderr)}, separators=(',', ':')), flush=True)
+        'api_category': category, 'http_status': status}, separators=(',', ':')), flush=True)
+    return 1
 
 
 def run():
@@ -107,40 +100,53 @@ def run():
         builder = journal.RemoteJournal(local.vault, wrapped, anchor=anchor,
             load_commit=loader, guard=lambda _head: True, confirm=lambda _receipt: True)
         _, before = builder._local_tree(parent)
-        commit, tree, _blob, _wanted = builder._build(parent, before, SYNTHETIC)
-        changed = local.run('diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', parent, commit).split(b'\0')
+        local_commit, tree, blob, _wanted = builder._build(parent, before, SYNTHETIC)
+        changed = local.run('diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', parent, local_commit).split(b'\0')
         if changed != [PATH.encode(), b'']:
             fail('probe_diff_scope')
-        if local.run('rev-list', '--parents', '-n', '1', commit).decode().split() != [commit, parent]:
+        if local.run('rev-list', '--parents', '-n', '1', local_commit).decode().split() != [local_commit, parent]:
             fail('probe_parent')
         if remote.ref(MAIN_REF) != parent:
-            fail('probe_main_changed_before_push')
-        seed = subprocess.run(['git', '-C', str(local.vault), '-c', 'http.version=HTTP/1.1', 'push', '--porcelain', '--no-verify',
-            '--force-with-lease=' + target_ref + ':', retention.REMOTE_URL, parent + ':' + target_ref],
-            env=local.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=120, check=False, preexec_fn=local.child_limits)
-        if seed.returncode:
-            push_failure('seed_branch', seed)
-            return 1
-        if remote.request('/git/ref/' + target_ref.removeprefix('refs/'), missing=True).get('object', {}).get('sha') != parent:
-            fail('probe_seed_readback')
-        if remote.ref(MAIN_REF) != parent:
-            fail('probe_main_changed_after_seed')
-        push = subprocess.run(['git', '-C', str(local.vault), '-c', 'http.version=HTTP/1.1', 'push', '--porcelain', '--no-verify',
-            '--force-with-lease=' + target_ref + ':' + parent, retention.REMOTE_URL, commit + ':' + target_ref],
-            env=local.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=120, check=False, preexec_fn=local.child_limits)
-        if push.returncode:
-            push_failure('update_branch', push)
-            return 1
+            fail('probe_main_changed_before_write')
+        base_tree = local.run('rev-parse', parent + '^{tree}').decode().strip()
+        try:
+            blob_result = api_write(token, 'POST', '/git/blobs',
+                {'content': SYNTHETIC.decode('utf-8'), 'encoding': 'utf-8'})
+            if blob_result.get('sha') != blob:
+                fail('probe_blob_mismatch')
+            tree_result = api_write(token, 'POST', '/git/trees', {'base_tree': base_tree,
+                'tree': [{'path': PATH, 'mode': '100644', 'type': 'blob', 'sha': blob}]})
+            if tree_result.get('sha') != tree:
+                fail('probe_tree_mismatch')
+            commit_result = api_write(token, 'POST', '/git/commits', {'message': 'Get journal shape probe',
+                'tree': tree, 'parents': [parent]})
+            api_commit = journal.checked(commit_result.get('sha'), 40)
+        except ApiWriteFailure as error:
+            return api_failure('git_data_object_create', error)
+        api_commit_result = remote.request('/git/commits/' + api_commit)
+        if (api_commit_result.get('tree', {}).get('sha') != tree
+                or [item.get('sha') for item in api_commit_result.get('parents', [])] != [parent]):
+            fail('probe_api_commit_mismatch')
+        try:
+            ref_result = api_write(token, 'POST', '/git/refs', {'ref': target_ref, 'sha': api_commit})
+        except ApiWriteFailure as error:
+            try:
+                observed = remote.request('/git/ref/' + target_ref.removeprefix('refs/'), missing=True)
+            except Exception:
+                observed = None
+            if not isinstance(observed, dict) or observed.get('object', {}).get('sha') != api_commit:
+                return api_failure('create_ref', error)
+            ref_result = observed
         after = remote.request('/git/ref/' + target_ref.removeprefix('refs/'))
-        commit_response = remote.request('/git/commits/' + commit)
-        if (after.get('object', {}).get('sha') != commit or commit_response.get('sha') != commit
+        commit_response = remote.request('/git/commits/' + api_commit)
+        if (ref_result.get('ref') != target_ref or ref_result.get('object', {}).get('sha') != api_commit
+                or after.get('object', {}).get('sha') != api_commit or commit_response.get('sha') != api_commit
                 or commit_response.get('tree', {}).get('sha') != tree
                 or [item.get('sha') for item in commit_response.get('parents', [])] != [parent]
                 or remote.ref(MAIN_REF) != parent):
             fail('probe_readback')
-        print(json.dumps({'status': 'journal_shape_push_verified', 'repository': REPOSITORY,
+        print(json.dumps({'status': 'journal_shape_api_verified', 'repository': REPOSITORY,
+            'write_method': 'git_data_api',
             'branch': branch, 'changed_paths': 1, 'synthetic_bytes': len(SYNTHETIC),
             'parent_verified': True, 'main_unchanged': True}, separators=(',', ':')), flush=True)
         return 0
