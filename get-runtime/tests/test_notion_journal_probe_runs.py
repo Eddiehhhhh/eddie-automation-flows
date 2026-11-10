@@ -41,6 +41,17 @@ assert not m._known_read_only_probe(other, policy)
 try: m._latest_run(other, policy)
 except m.CheckpointFailure: pass
 else: raise AssertionError('unregistered branch run must fail closed')
+import get_notion_idle_rotation as rotation
+import get_notion_runtime as runtime
+import get_private_runtime_report as report
+for error, expected in ((rotation.RotationFailure('rotation_policy_changed'), 'rotation_policy_changed'),
+                        (rotation.RotationFailure('private note title'), 'journal_provenance_failed'),
+                        (ValueError('private note title'), 'journal_provenance_failed')):
+    try: m.fail_unexpected_provenance(error)
+    except m.CheckpointFailure as caught: assert str(caught) == expected
+    else: raise AssertionError('provenance failures must remain fail closed')
+assert report.public({'status':'failed','reason':'rotation_policy_changed'},
+                     runtime.DIAGNOSTIC_ERRORS)['reason'] == 'rotation_policy_changed'
 '''
 
 

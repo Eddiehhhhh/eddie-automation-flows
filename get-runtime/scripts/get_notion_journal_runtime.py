@@ -61,8 +61,42 @@ class CheckpointFailure(ValueError):
     pass
 
 
+SAFE_PROVENANCE_DIAGNOSTICS = frozenset({
+    'rotation_unverified', 'rotation_attempt_changed', 'rotation_budget', 'rotation_busy',
+    'rotation_checkpoint_changed', 'rotation_downgrade', 'rotation_history_unverified',
+    'rotation_incomplete', 'rotation_native_changed', 'rotation_native_unverified',
+    'rotation_not_idle', 'rotation_policy_changed', 'rotation_schema_changed',
+    'rotation_source_unverified', 'rotation_state_changed', 'rotation_unknown_write',
+    'rotation_unpaired_receipt', 'rotation_writer', 'entry_history_witness',
+    'journal_provenance_changed', 'journal_provenance_controller_step',
+    'journal_provenance_job', 'journal_provenance_steps', 'journal_provenance_time',
+    'provenance_budget', 'provenance_budget_elapsed', 'provenance_budget_requests',
+    'provenance_budget_response_bytes', 'provenance_budget_total_bytes',
+    'provenance_candidate_bound', 'provenance_controller_mismatch', 'provenance_controller_policy',
+    'provenance_credentials', 'provenance_exclusion', 'provenance_history_witness',
+    'provenance_job', 'provenance_job_bound', 'provenance_log_redirect', 'provenance_logs_shape',
+    'provenance_logs_unavailable', 'provenance_no_receipt', 'provenance_no_verified_publication',
+    'provenance_policy', 'provenance_prepare_only', 'provenance_receipt_fork',
+    'provenance_receipt_sequence', 'provenance_record', 'provenance_record_count',
+    'provenance_repository', 'provenance_run', 'provenance_run_bound', 'provenance_run_changed',
+    'provenance_schema', 'provenance_target', 'provenance_timestamp', 'provenance_transport',
+    'provenance_unavailable', 'provenance_unconfirmed', 'provenance_workflow'})
+
+
 def fail(code):
     raise CheckpointFailure(code) from None
+
+
+def fail_unexpected_provenance(exc):
+    """Preserve only fixed validator codes; never surface arbitrary exception text."""
+    import get_notion_idle_rotation as rotation
+    if type(exc) in (rotation.RotationFailure, provenance.ProvenanceFailure):
+        code = str(exc)
+        if code in SAFE_PROVENANCE_DIAGNOSTICS:
+            fail(code)
+    if type(exc) is private_proof.PrivateProofError:
+        fail('private_proof_unverified')
+    fail('journal_provenance_failed')
 
 
 def context(value):
@@ -598,8 +632,8 @@ def recover_anchor(client, *, run_id, run_attempt, public_policy,
     except provenance.ProvenanceFailure as exc:
         if str(exc) == 'provenance_controller_mismatch':
             fail('journal_provenance_other_controller')
-        fail('journal_provenance_failed')
-    except Exception: fail('journal_provenance_failed')
+        fail_unexpected_provenance(exc)
+    except Exception as exc: fail_unexpected_provenance(exc)
 
 
 class _ReadBudget:
@@ -896,4 +930,4 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
             if checked < (3 if locator is not None else 4): previous(row)
         fail('journal_provenance_missing')
     except CheckpointFailure: raise
-    except Exception: fail('journal_provenance_failed')
+    except Exception as exc: fail_unexpected_provenance(exc)
