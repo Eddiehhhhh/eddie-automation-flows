@@ -1,7 +1,9 @@
 """Probe a journal-shaped commit on one private branch, never main."""
 import json
 import os
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.request
 
@@ -65,6 +67,35 @@ def api_failure(stage, error):
     return 1
 
 
+def parse_commit(local, commit, expected_tree, parent):
+    raw = local.run('cat-file', 'commit', commit)
+    headers, separator, message = raw.partition(b'\n\n')
+    if not separator:
+        fail('probe_commit_format')
+    values = {}
+    for line in headers.splitlines():
+        key, space, value = line.partition(b' ')
+        if not space or key.decode() in values:
+            fail('probe_commit_format')
+        values[key.decode()] = value
+    if values.get('tree', b'').decode() != expected_tree or values.get('parent', b'').decode() != parent:
+        fail('probe_commit_format')
+
+    def identity(raw_value):
+        matched = re.fullmatch(rb'(.+) <([^<>]+)> ([0-9]+) ([+-])([0-9]{2})([0-9]{2})', raw_value)
+        if matched is None:
+            fail('probe_commit_format')
+        name, email, seconds, sign, hours, minutes = matched.groups()
+        offset = (int(hours) * 60 + int(minutes)) * (1 if sign == b'+' else -1)
+        date = datetime.fromtimestamp(int(seconds), timezone(timedelta(minutes=offset))).isoformat(timespec='seconds')
+        return {'name': name.decode('utf-8'), 'email': email.decode('ascii'), 'date': date}
+
+    if set(values) != {'tree', 'parent', 'author', 'committer'}:
+        fail('probe_commit_format')
+    return {'tree': expected_tree, 'parents': [parent], 'message': message.decode('utf-8'),
+            'author': identity(values['author']), 'committer': identity(values['committer'])}
+
+
 def run():
     token = os.environ.get('PRIVATE_VAULT_TOKEN')
     if not token:
@@ -118,9 +149,10 @@ def run():
                 'tree': [{'path': PATH, 'mode': '100644', 'type': 'blob', 'sha': blob}]})
             if tree_result.get('sha') != tree:
                 fail('probe_tree_mismatch')
-            commit_result = api_write(token, 'POST', '/git/commits', {'message': 'Get journal shape probe',
-                'tree': tree, 'parents': [parent]})
+            commit_result = api_write(token, 'POST', '/git/commits', parse_commit(local, local_commit, tree, parent))
             api_commit = journal.checked(commit_result.get('sha'), 40)
+            if api_commit != local_commit:
+                fail('probe_api_commit_sha_mismatch')
         except ApiWriteFailure as error:
             return api_failure('git_data_object_create', error)
         api_commit_result = remote.request('/git/commits/' + api_commit)
