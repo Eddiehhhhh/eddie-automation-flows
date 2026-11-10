@@ -63,6 +63,16 @@ def safe_failure_diagnostic(exc):
             except (json.JSONDecodeError, AttributeError): code = None
             if isinstance(code, str) and code in NOTION_ERROR_CODES:
                 result['notion_error_code'] = code
+        route = re.search(r'Notion API (GET|POST|PATCH|DELETE) (/[^\s?]+)', str(exc))
+        if route:
+            method, path = route.groups()
+            parts = path.strip('/').split('/')
+            operation = ('database_query' if method == 'POST' and len(parts) == 3 and parts[0] == 'databases' and parts[2] == 'query'
+                else 'page_properties' if method == 'GET' and len(parts) == 4 and parts[0] == 'pages' and parts[2] == 'properties'
+                else 'page' if parts[0] == 'pages' and len(parts) == 2
+                else 'block_children' if method == 'GET' and len(parts) == 3 and parts[0] == 'blocks' and parts[2] == 'children'
+                else 'block' if parts[0] == 'blocks' and len(parts) == 2 else 'other')
+            if operation != 'other': result['operation'] = operation
         return result
     if isinstance(cause, (urllib.error.URLError, TimeoutError, ConnectionError)):
         return {'category': 'network_error'}
