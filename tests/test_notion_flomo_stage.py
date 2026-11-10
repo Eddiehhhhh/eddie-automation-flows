@@ -98,6 +98,26 @@ class StageTests(unittest.TestCase):
             RuntimeError('notion_retry_delay_exceeds_budget')), {
                 'category': 'notion_http_error', 'http_status': 429,
                 'notion_error_code': 'rate_limited'})
+        missing_block = RuntimeError('Notion API GET /blocks/private-block/children failed (404): ' + json.dumps({
+            'code': 'object_not_found', 'message': 'private page title'}))
+        missing_block.__cause__ = urllib.error.HTTPError('https://api.notion.com/v1', 404, 'Not Found', {}, io.BytesIO())
+        self.assertEqual(bridge.safe_failure_diagnostic(missing_block), {
+            'category': 'notion_http_error', 'http_status': 404,
+            'notion_error_code': 'object_not_found', 'operation': 'block_children'})
+        self.assertNotIn('private-block', json.dumps(bridge.safe_failure_diagnostic(missing_block)))
+        for method, path, expected in (
+            ('POST', '/databases/db/query', 'database_query'),
+            ('GET', '/pages/page/properties/property', 'page_properties'),
+            ('GET', '/pages/page', 'page'),
+            ('PATCH', '/blocks/block', 'block'),
+            ('GET', '/unknown/resource', None),
+        ):
+            with self.subTest(method=method, expected=expected):
+                failure = RuntimeError(f'Notion API {method} {path} failed (404): {{}}')
+                failure.__cause__ = urllib.error.HTTPError('https://api.notion.com/v1', 404, 'Not Found', {}, io.BytesIO())
+                diagnostic = bridge.safe_failure_diagnostic(failure)
+                self.assertEqual(diagnostic.get('operation'), expected)
+                self.assertNotIn('resource', json.dumps(diagnostic))
 
         partial = {'notion_pages': 4, 'flomo_ids': 3, 'written': 0, 'pending': 1,
                    'held': {'private-memo-id': 'stage_edited',
@@ -623,6 +643,7 @@ class StageTests(unittest.TestCase):
         self.assertIn("steps.flomo_sync.outcome == 'failure'", final)
         self.assertIn("print('\\n'.join(lines))", final)
         self.assertIn("'notion_error_code'", final)
+        self.assertIn("'operation'", final)
         self.assertIn('flomo-sync-result.json', final)
         self.assertIn('exit 2', final)
 
@@ -630,7 +651,9 @@ class StageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'flomo-sync-result.json').write_text(json.dumps({'diagnostic': {
-                'category': 'partial_capture', 'notion_pages': 4, 'flomo_ids': 3,
+                'category': 'notion_http_error', 'http_status': 404,
+                'notion_error_code': 'object_not_found', 'operation': 'block_children',
+                'notion_pages': 4, 'flomo_ids': 3,
                 'written': 0, 'pending': 1, 'held': {'stage_edited': 1,
                     'private-note-id': 2, 'private error text': 3}}}))
             summary = root / 'summary.md'
@@ -638,7 +661,9 @@ class StageTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()) as output:
                     exec(compile(script, 'workflow-flomo-report', 'exec'), {})
             report = summary.read_text()
-            self.assertIn('Category: partial_capture', report)
+            self.assertIn('Category: notion_http_error', report)
+            self.assertIn('Notion operation: block_children', report)
+            self.assertIn('Notion error: object_not_found', report)
             self.assertEqual(output.getvalue(), report)
             self.assertIn('Held reasons: other=2, other=3, stage_edited=1', report)
             self.assertNotIn('private-note-id', report)

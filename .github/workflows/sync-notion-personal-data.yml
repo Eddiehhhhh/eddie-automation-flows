@@ -130,6 +130,9 @@ jobs:
           lines.append('- Category: ' + (category if isinstance(category, str) and category in categories else 'details_unavailable'))
           if type(diagnostic.get('http_status')) is int and 100 <= diagnostic['http_status'] <= 599:
               lines.append('- HTTP status: ' + str(diagnostic['http_status']))
+          operations = {'database_query', 'page_properties', 'page', 'block_children', 'block', 'other'}
+          if isinstance(diagnostic.get('operation'), str) and diagnostic['operation'] in operations:
+              lines.append('- Notion operation: ' + diagnostic['operation'])
           errors = {'unauthorized', 'restricted_resource', 'object_not_found', 'rate_limited', 'invalid_json', 'invalid_request_url', 'invalid_request', 'validation_error', 'conflict_error', 'internal_server_error', 'service_unavailable', 'request_timeout'}
           if isinstance(diagnostic.get('notion_error_code'), str) and diagnostic['notion_error_code'] in errors:
               lines.append('- Notion error: ' + diagnostic['notion_error_code'])
