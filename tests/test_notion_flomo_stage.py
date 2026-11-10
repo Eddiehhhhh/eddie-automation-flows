@@ -621,7 +621,7 @@ class StageTests(unittest.TestCase):
         self.assertIn('always() && !cancelled()', final)
         self.assertIn('--verify-remote-state', readback)
         self.assertIn("steps.flomo_sync.outcome == 'failure'", final)
-        self.assertIn("safe diagnostic summary was written", final)
+        self.assertIn("print('\\n'.join(lines))", final)
         self.assertIn("'notion_error_code'", final)
         self.assertIn('flomo-sync-result.json', final)
         self.assertIn('exit 2', final)
@@ -635,9 +635,11 @@ class StageTests(unittest.TestCase):
                     'private-note-id': 2, 'private error text': 3}}}))
             summary = root / 'summary.md'
             with mock.patch.dict(os.environ, {'RUNNER_TEMP': temp, 'GITHUB_STEP_SUMMARY': str(summary)}):
-                exec(compile(script, 'workflow-flomo-report', 'exec'), {})
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    exec(compile(script, 'workflow-flomo-report', 'exec'), {})
             report = summary.read_text()
             self.assertIn('Category: partial_capture', report)
+            self.assertEqual(output.getvalue(), report)
             self.assertIn('Held reasons: other=2, other=3, stage_edited=1', report)
             self.assertNotIn('private-note-id', report)
             self.assertNotIn('private error text', report)
