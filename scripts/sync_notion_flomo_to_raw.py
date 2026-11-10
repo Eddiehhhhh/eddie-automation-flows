@@ -41,6 +41,11 @@ NOTION_ERROR_CODES = frozenset(('unauthorized', 'restricted_resource', 'object_n
     'rate_limited', 'invalid_json', 'invalid_request_url', 'invalid_request',
     'validation_error', 'conflict_error', 'internal_server_error', 'service_unavailable',
     'request_timeout'))
+SAFE_HOLD_CODES = frozenset(('source_identity_not_observed', 'stage_edited',
+    'source_identity_changed', 'incomplete_asset', 'incomplete_relation', 'unsupported_block',
+    'block_cycle', 'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source',
+    'incomplete_property_proof', 'unsupported_property_renderer_revision', 'state_changed',
+    'source_changed_during_read', 'source_or_stage_failed'))
 
 
 def safe_failure_diagnostic(exc):
@@ -71,6 +76,34 @@ def write_safe_failure_summary(exc):
     lines = ['### Flomo sync diagnostic', '- Category: ' + value['category']]
     if 'http_status' in value: lines.append('- HTTP status: ' + str(value['http_status']))
     if 'notion_error_code' in value: lines.append('- Notion error: ' + value['notion_error_code'])
+    with open(path, 'a', encoding='utf-8') as handle:
+        handle.write('\n'.join(lines) + '\n')
+
+
+def safe_partial_diagnostic(result):
+    held = result.get('held') if isinstance(result, dict) else None
+    counts = {}
+    if isinstance(held, dict):
+        for code in held.values():
+            safe = code if isinstance(code, str) and code in SAFE_HOLD_CODES else 'other'
+            counts[safe] = counts.get(safe, 0) + 1
+    return {'category': 'partial_capture',
+        'notion_pages': result.get('notion_pages') if type(result.get('notion_pages')) is int else None,
+        'flomo_ids': result.get('flomo_ids') if type(result.get('flomo_ids')) is int else None,
+        'written': result.get('written') if type(result.get('written')) is int else None,
+        'pending': result.get('pending') if type(result.get('pending')) is int else None,
+        'held': dict(sorted(counts.items()))}
+
+
+def write_safe_partial_summary(result):
+    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if not path: return
+    value = safe_partial_diagnostic(result)
+    lines = ['### Flomo sync diagnostic', '- Category: ' + value['category']]
+    for key in ('notion_pages', 'flomo_ids', 'written', 'pending'):
+        if value[key] is not None: lines.append('- ' + key.replace('_', ' ') + ': ' + str(value[key]))
+    if value['held']:
+        lines.append('- Held reasons: ' + ', '.join(code + '=' + str(count) for code, count in value['held'].items()))
     with open(path, 'a', encoding='utf-8') as handle:
         handle.write('\n'.join(lines) + '\n')
 
@@ -820,7 +853,11 @@ def main():
         'complete', 'capture_complete', 'unmerged_variant_group_count', 'semantic_merge_complete', 'renderer_rewritten', 'property_hydrated')}
     summary['incremental_complete'] = incremental_complete(result)
     print(json.dumps(summary))
-    return sync_exit_code(result, args.apply)
+    exit_code = sync_exit_code(result, args.apply)
+    if exit_code:
+        try: write_safe_partial_summary(result)
+        except OSError: pass
+    return exit_code
 
 
 if __name__ == '__main__':

@@ -105,6 +105,19 @@ class StageTests(unittest.TestCase):
         self.assertIn('Notion error: restricted_resource', summary.read_text())
         self.assertNotIn('private page title', summary.read_text())
 
+        partial = {'notion_pages': 4, 'flomo_ids': 3, 'written': 0, 'pending': 1,
+                   'held': {'private-memo-id': 'stage_edited',
+                            'another-private-id': 'private error text'}}
+        self.assertEqual(bridge.safe_partial_diagnostic(partial), {
+            'category': 'partial_capture', 'notion_pages': 4, 'flomo_ids': 3,
+            'written': 0, 'pending': 1, 'held': {'other': 1, 'stage_edited': 1}})
+        with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(summary)}):
+            bridge.write_safe_partial_summary(partial)
+        text = summary.read_text()
+        self.assertIn('Held reasons: other=1, stage_edited=1', text)
+        self.assertNotIn('private-memo-id', text)
+        self.assertNotIn('private error text', text)
+
     def test_private_identity_failure_never_writes(self):
         self.identity.stop()
         self.assertIsNotNone(VERIFY_PRIVATE, 'shared private-checkout helper must land first')
