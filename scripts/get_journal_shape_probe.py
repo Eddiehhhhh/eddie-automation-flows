@@ -33,7 +33,7 @@ def classify_push_error(raw):
         return 'repository_not_found'
     if any(x in value for x in (b'gh006', b'gh013', b'protected branch', b'ruleset', b'pre-receive hook declined')):
         return 'branch_policy_rejection'
-    if any(x in value for x in (b'stale info', b'fetch first', b'non-fast-forward', b'failed to push some refs')):
+    if any(x in value for x in (b'stale info', b'fetch first', b'non-fast-forward')):
         return 'ref_rejected'
     if any(x in value for x in (b'missing blob', b'missing tree', b'missing object', b'bad object', b'could not read object')):
         return 'missing_object'
@@ -55,7 +55,7 @@ def classify_push_error(raw):
         return 'http_client_error'
     if b'remote unpack failed' in value:
         return 'remote_unpack_failed'
-    if any(x in value for x in (b'rpc failed', b'remote end hung up', b'unexpected disconnect')):
+    if any(x in value for x in (b'rpc failed', b'remote end hung up', b'unexpected disconnect', b'sideband packet')):
         return 'transport_disconnect'
     if any(x in value for x in (b'protocol error', b'bad line length', b'invalid packet', b'sideband packet')):
         return 'git_protocol_error'
