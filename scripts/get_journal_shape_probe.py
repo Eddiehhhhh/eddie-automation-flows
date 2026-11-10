@@ -107,7 +107,7 @@ def run():
             fail('probe_parent')
         if remote.ref(MAIN_REF) != parent:
             fail('probe_main_changed_before_push')
-        push = subprocess.run(['git', '-C', str(local.vault), 'push', '--porcelain', '--no-verify',
+        push = subprocess.run(['git', '-C', str(local.vault), '-c', 'http.version=HTTP/1.1', 'push', '--porcelain', '--no-verify',
             '--force-with-lease=' + target_ref + ':', retention.REMOTE_URL, commit + ':' + target_ref],
             env=local.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=120, check=False, preexec_fn=local.child_limits)
