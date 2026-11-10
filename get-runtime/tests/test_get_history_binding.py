@@ -1,13 +1,25 @@
 import importlib
+import importlib.util
 import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import get_private_runtime_bindings
 with patch.object(get_private_runtime_bindings, 'value', return_value=None):
     entry = importlib.import_module('get_recurring_entry')
+fake_outbox = types.ModuleType('get_notion_outbox')
+spec = importlib.util.spec_from_file_location(
+    'get_confirmed_source_under_test',
+    Path(__file__).resolve().parents[1] / 'scripts' / 'get_confirmed_source.py',
+)
+confirmed_source = importlib.util.module_from_spec(spec)
+with patch.dict(sys.modules, {'get_notion_outbox': fake_outbox}):
+    spec.loader.exec_module(confirmed_source)
 
 
 class Local:
@@ -152,6 +164,39 @@ class MainlineHistory(unittest.TestCase):
         parents = {self.root: [], self.linear: [self.root], self.side: [self.root], self.merge: [self.linear, self.side]}
         trees = {self.root: self.tree, self.linear: self.tree, self.side: self.changed, self.merge: self.tree}
         entry.unchanged_get_history(Reader(parents, trees), self.root, self.merge)
+
+    def test_confirmed_source_loader_accepts_verified_first_parent_merge(self):
+        parents = {self.root: [], self.linear: [self.root], self.side: [self.root], self.merge: [self.linear, self.side]}
+        trees = {self.root: self.tree, self.linear: self.tree, self.side: self.changed, self.merge: self.tree}
+        reader = Reader(parents, trees)
+        local = reader.local
+        with tempfile.TemporaryDirectory() as vault:
+            local.vault = vault
+            loader = confirmed_source.Loader.__new__(confirmed_source.Loader)
+            loader.local = local
+            loader.reader = reader
+            loader.history_witness = None
+            with patch.object(loader, 'commit'):
+                loader.unchanged(self.root, self.merge)
+
+    def test_registered_interval_preserves_and_hydrates_history_witness(self):
+        history_witness = object()
+        witness = SimpleNamespace(receipt_commit=self.root)
+        reader = Reader({self.root: [], self.linear: [self.root]},
+                        {self.root: self.tree, self.linear: self.tree})
+        with tempfile.TemporaryDirectory() as vault:
+            reader.local.vault = vault
+            loader = confirmed_source.Loader.__new__(confirmed_source.Loader)
+            loader.local = reader.local
+            loader.reader = reader
+            loader.history_witness = history_witness
+            with patch.object(loader, 'commit'), \
+                 patch.object(loader, 'blob') as blob, \
+                 patch.object(entry, 'select_history_witness', return_value=witness), \
+                 patch.object(entry, 'unchanged_get_history') as verify:
+                loader._registered_interval(self.root, self.linear)
+        blob.assert_called_once_with(self.root, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
+        self.assertIs(verify.call_args.kwargs['history_witness'], history_witness)
 
     def test_changed_merge_result_fails(self):
         parents = {self.root: [], self.linear: [self.root], self.side: [self.root], self.merge: [self.linear, self.side]}
