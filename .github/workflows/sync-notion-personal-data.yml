@@ -148,6 +148,6 @@ jobs:
                   lines.append('- Held reasons: ' + ', '.join(sorted(safe)))
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as handle:
               handle.write('\n'.join(lines) + '\n')
-          print('Flomo sync is incomplete; safe diagnostic summary was written.')
+          print('\n'.join(lines))
           PY
           exit 2
