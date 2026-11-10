@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 import sync_notion_to_raw as notion
@@ -36,6 +37,42 @@ CREDENTIAL_SHAPE = re.compile(
     r'(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}'
     r'|sk-[A-Za-z0-9_-]{20,}|(?:ntn_|secret_)[A-Za-z0-9]{30,})(?![A-Za-z0-9_])'
     r'|-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----')
+NOTION_ERROR_CODES = frozenset(('unauthorized', 'restricted_resource', 'object_not_found',
+    'rate_limited', 'invalid_json', 'invalid_request_url', 'invalid_request',
+    'validation_error', 'conflict_error', 'internal_server_error', 'service_unavailable',
+    'request_timeout'))
+
+
+def safe_failure_diagnostic(exc):
+    if str(exc) == 'notion_retry_delay_exceeds_budget':
+        return {'category': 'notion_http_error', 'http_status': 429,
+                'notion_error_code': 'rate_limited'}
+    cause = exc
+    while getattr(cause, '__cause__', None) is not None:
+        cause = cause.__cause__
+    if isinstance(cause, urllib.error.HTTPError):
+        result = {'category': 'notion_http_error', 'http_status': cause.code}
+        match = re.search(r'failed \([0-9]{3}\):\s*(\{.*\})\s*$', str(exc), re.S)
+        if match:
+            try: code = json.loads(match.group(1)).get('code')
+            except (json.JSONDecodeError, AttributeError): code = None
+            if isinstance(code, str) and code in NOTION_ERROR_CODES:
+                result['notion_error_code'] = code
+        return result
+    if isinstance(cause, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return {'category': 'network_error'}
+    return {'category': 'staging_error'}
+
+
+def write_safe_failure_summary(exc):
+    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if not path: return
+    value = safe_failure_diagnostic(exc)
+    lines = ['### Flomo sync diagnostic', '- Category: ' + value['category']]
+    if 'http_status' in value: lines.append('- HTTP status: ' + str(value['http_status']))
+    if 'notion_error_code' in value: lines.append('- Notion error: ' + value['notion_error_code'])
+    with open(path, 'a', encoding='utf-8') as handle:
+        handle.write('\n'.join(lines) + '\n')
 
 
 def reject_credentials(raw):
@@ -786,4 +823,9 @@ def main():
     return sync_exit_code(result, args.apply)
 
 
-if __name__ == '__main__': raise SystemExit(main())
+if __name__ == '__main__':
+    try: raise SystemExit(main())
+    except Exception as exc:
+        try: write_safe_failure_summary(exc)
+        except OSError: pass
+        raise

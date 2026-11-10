@@ -2,6 +2,7 @@
 import copy
 from contextlib import nullcontext
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -11,6 +12,7 @@ import re
 import unittest
 from unittest import mock
 import os
+import urllib.error
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -69,6 +71,39 @@ class StageTests(unittest.TestCase):
 
     def run_sync(self, **kwargs):
         return bridge.run(self.root, 'synthetic-db', 'synthetic-credential', **kwargs)
+
+    def test_safe_failure_diagnostic_keeps_only_http_metadata(self):
+        http = urllib.error.HTTPError('https://api.notion.com/v1', 403, 'Forbidden', {}, io.BytesIO())
+        error = RuntimeError('Notion API POST /private-path failed (403): ' + json.dumps({
+            'code': 'restricted_resource', 'message': 'private page title'}))
+        error.__cause__ = http
+        self.assertEqual(bridge.safe_failure_diagnostic(error), {
+            'category': 'notion_http_error', 'http_status': 403,
+            'notion_error_code': 'restricted_resource'})
+        self.assertNotIn('private', json.dumps(bridge.safe_failure_diagnostic(error)))
+
+        unknown = RuntimeError('Notion API POST /private-path failed (403): ' + json.dumps({
+            'code': 'private-page-title', 'message': 'private page title'}))
+        unknown.__cause__ = http
+        self.assertEqual(bridge.safe_failure_diagnostic(unknown), {
+            'category': 'notion_http_error', 'http_status': 403})
+
+        malformed = RuntimeError('Notion API POST /private-path failed (403): ' + json.dumps({
+            'code': ['restricted_resource'], 'message': 'private page title'}))
+        malformed.__cause__ = http
+        self.assertEqual(bridge.safe_failure_diagnostic(malformed), {
+            'category': 'notion_http_error', 'http_status': 403})
+        self.assertEqual(bridge.safe_failure_diagnostic(
+            RuntimeError('notion_retry_delay_exceeds_budget')), {
+                'category': 'notion_http_error', 'http_status': 429,
+                'notion_error_code': 'rate_limited'})
+
+        summary = self.root / 'step-summary.md'
+        with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(summary)}):
+            bridge.write_safe_failure_summary(error)
+        self.assertIn('HTTP status: 403', summary.read_text())
+        self.assertIn('Notion error: restricted_resource', summary.read_text())
+        self.assertNotIn('private page title', summary.read_text())
 
     def test_private_identity_failure_never_writes(self):
         self.identity.stop()
