@@ -114,8 +114,8 @@ with patch('get_publication_provenance.validate_policy',return_value=policy), \
     try:
         m.discover_anchor(Client(),public_policy=policy,approved_public_policy_sha256='0'*64,
                           notion_policy_sha256='0'*64)
-    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_probe_budget'
-    else: raise AssertionError('failed run discovery must stop at its explicit cap')
+    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_missing'
+    else: raise AssertionError('exhausted negative candidates must not become a probe-budget failure')
 
 runs = [{'id':i+1,'run_attempt':2,'event':'workflow_dispatch','status':'completed',
          'conclusion':'failure','created_at':'2026-11-10T00:00:00Z',
@@ -135,7 +135,7 @@ with patch('get_publication_provenance.validate_policy',return_value=policy), \
     try:
         m.discover_anchor(client,public_policy=policy,approved_public_policy_sha256='0'*64,
                           notion_policy_sha256='0'*64)
-    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_probe_budget'
+    except m.CheckpointFailure as caught: assert str(caught)=='journal_provenance_previous_budget'
     else: raise AssertionError('rerun ancestry probes must stop at the explicit cap')
 prior_reads=sum('/attempts/1' in call for call in client.calls)
 assert 0 < prior_reads <= provenance.MAX_JOURNAL_PREVIOUS_ATTEMPTS
