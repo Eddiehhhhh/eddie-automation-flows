@@ -249,7 +249,7 @@ def import_original(runtime, name):
 
 
 def source_once(provenance, private_proof, remote, public_token, observations):
-    if (provenance.MAX_REQUESTS != 40 or private_proof.MAX_COMMITS != 1024
+    if (provenance.MAX_REQUESTS != 1350 or private_proof.MAX_COMMITS != 1024
             or private_proof.MAX_PRIVATE_BYTES != 256 * 1024 * 1024): fail()
     policy = provenance.validate_policy(POLICY, POLICY_SHA)
     client = provenance.PublicGithub(public_token)

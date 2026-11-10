@@ -642,7 +642,7 @@ class _ReadBudget:
         self.client = client; self.requests = 0; self.bytes = 0; self.controllers = {}; self.repository = None
 
     def call(self, kind, value):
-        if self.requests >= 40: fail('journal_provenance_budget')
+        if self.requests >= provenance.MAX_REQUESTS: fail('journal_provenance_budget')
         self.requests += 1
         answer = getattr(self.client, kind)(value)
         raw = answer if kind == 'logs' else provenance.a.encoded(answer)
@@ -731,13 +731,18 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 fail('journal_provenance_changed')
             if exclude_run_id in latest: _same_run(latest[exclude_run_id], current)
             latest[exclude_run_id] = current
+        previous_attempts = 0
         def enqueue(row, *, from_attempt=False):
             key = (row['id'], row['run_attempt'])
             if key in seen: fail('journal_provenance_changed')
             seen.add(key); candidates.append(row)
             if from_attempt:attempt_candidates.add(key)
         def previous(row):
+            nonlocal previous_attempts
             if row['run_attempt'] <= 1: return
+            if previous_attempts >= provenance.MAX_JOURNAL_PREVIOUS_ATTEMPTS:
+                fail('journal_provenance_budget')
+            previous_attempts += 1
             number = row['run_attempt'] - 1
             prior = _terminal_run(bounded.json('/actions/runs/' + str(row['id'])
                 + '/attempts/' + str(number)), policy)
@@ -784,7 +789,7 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
         if locator == (exclude_run_id, exclude_run_attempt): fail('journal_provenance_context')
         if locator is not None and locator_envelope is None:
             candidates = [r for r in candidates if (r['id'],r['run_attempt']) != locator]
-        checked = 0; locator_used = False
+        checked = 0; locator_used = False; probe_attempts = 0
         while (candidates or (locator is not None and not locator_used)) and checked < 4:
             candidates.sort(key=lambda row: (provenance.timestamp(row['updated_at']),
                 row['id'], row['run_attempt']), reverse=True)
@@ -799,6 +804,9 @@ def discover_anchor(client, *, public_policy, approved_public_policy_sha256,
                 row = candidates.pop(0)
                 if locator_envelope is not None and (row['id'], row['run_attempt']) == locator:
                     locator_used = True
+            if probe_attempts >= provenance.MAX_JOURNAL_PROBE_ATTEMPTS:
+                fail('journal_provenance_budget')
+            probe_attempts += 1
             checked += 1
             # Exact target-scoped evidence is selected BEFORE an otherwise
             # deterministic mismatching-controller read. Each original

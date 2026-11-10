@@ -34,10 +34,18 @@ MARKER = 'GET_CANONICAL_PUBLICATION_V1 '
 MAX_JSON = 2 * 1024 * 1024
 MAX_LOG = 4 * 1024 * 1024
 MAX_TOTAL = 16 * 1024 * 1024
-MAX_REQUESTS = 40
 MAX_RUN_PAGES = 3
 RUN_PAGE_SIZE = 30
 MAX_CANDIDATES = 4
+MAX_DISCOVERY_ATTEMPTS = 32
+MAX_JOURNAL_PROBE_ATTEMPTS = 32
+MAX_JOURNAL_PREVIOUS_ATTEMPTS = 32
+# The shared client performs execution verification, capacity discovery and
+# journal discovery. Each pass allows 32 proofs and 90 row probes; one 5xx
+# retry is allowed per read. Time and byte limits still apply.
+MAX_REQUESTS = 2 * (12 + 2 * MAX_RUN_PAGES * RUN_PAGE_SIZE
+                    + MAX_DISCOVERY_ATTEMPTS * 7 + MAX_JOURNAL_PROBE_ATTEMPTS * 7
+                    + MAX_JOURNAL_PREVIOUS_ATTEMPTS + 3)
 MAX_FAILED_RUN_PROBES = 8
 MAX_SECONDS = 120
 REGISTERED_REPLAY_SEQUENCE = 3
@@ -887,7 +895,7 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
     locator_positions = {0: locator[1]} if locator is not None else {}
     observations = {}
     found = []; checked = 0; failed_run_probes = 0; verified_controllers = set(); rejected_controllers = set()
-    checked_attempts = set()
+    checked_attempts = set(); discovery_attempts = 0
     for position, run in enumerate(listed):
         located_attempt = locator_positions.get(position)
         # A first attempt listed as terminal failure cannot contain a successful
@@ -933,6 +941,9 @@ def discover(client, policy, *, exclude_run_id=None, exclude_run_attempt=None, r
                 if checked >= candidate_limit:
                     break
                 checked += 1
+            if discovery_attempts >= MAX_DISCOVERY_ATTEMPTS:
+                fail('provenance_budget_requests')
+            discovery_attempts += 1
             checked_attempts.add((run['id'], attempt))
             value = verified_candidate(client, run, verification_policy, run_attempt=attempt,
                                        verified_controllers=verified_controllers,
