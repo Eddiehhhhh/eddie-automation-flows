@@ -25,8 +25,9 @@ def fail(code):
 
 
 class ApiWriteFailure(Exception):
-    def __init__(self, status=None):
+    def __init__(self, status=None, category=None):
         self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.category = category
 
 
 def api_write(token, method, path, payload):
@@ -56,9 +57,36 @@ def api_write(token, method, path, payload):
     return value
 
 
+def graphql_request(token, query, variables):
+    request = urllib.request.Request('https://api.github.com/graphql',
+        data=json.dumps({'query': query, 'variables': variables}, separators=(',', ':')).encode(),
+        method='POST', headers={'Authorization': 'Bearer ' + token,
+            'Accept': 'application/vnd.github+json', 'User-Agent': 'get-journal-shape-probe',
+            'Content-Type': 'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), retention.NoRedirect())
+    try:
+        with opener.open(request, timeout=30) as response:
+            raw = response.read(1024 * 1024 + 1)
+            if response.status != 200 or len(raw) > 1024 * 1024:
+                raise ApiWriteFailure(response.status)
+    except urllib.error.HTTPError as error:
+        raise ApiWriteFailure(error.code) from None
+    except ApiWriteFailure:
+        raise
+    except Exception:
+        raise ApiWriteFailure() from None
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise ApiWriteFailure(response.status) from None
+    if not isinstance(value, dict) or value.get('errors') or not isinstance(value.get('data'), dict):
+        raise ApiWriteFailure(response.status, 'graphql_rejected')
+    return value['data']
+
+
 def api_failure(stage, error):
     status = error.status
-    category = ('authentication_or_permission' if status in (401, 403) else
+    category = error.category or ('authentication_or_permission' if status in (401, 403) else
                 'rate_limited' if status == 429 else
                 'http_server_error' if status is not None and status >= 500 else
                 'http_client_error' if status is not None else 'network_or_response')
@@ -161,28 +189,48 @@ def run():
             fail('probe_api_commit_mismatch')
         try:
             ref_result = api_write(token, 'POST', '/git/refs', {'ref': target_ref, 'sha': parent})
-            if ref_result.get('ref') != target_ref or ref_result.get('object', {}).get('sha') != parent:
-                fail('probe_seed_ref_mismatch')
-            patch_result = api_write(token, 'PATCH', '/git/refs/' + target_ref.removeprefix('refs/'),
-                {'sha': api_commit, 'force': False})
         except ApiWriteFailure as error:
             try:
-                observed = remote.request('/git/ref/' + target_ref.removeprefix('refs/'), missing=True)
+                ref_result = remote.request('/git/ref/' + target_ref.removeprefix('refs/'), missing=True)
             except Exception:
-                observed = None
-            if not isinstance(observed, dict) or observed.get('object', {}).get('sha') != api_commit:
-                return api_failure('update_ref', error)
-            patch_result = observed
+                ref_result = None
+            if not isinstance(ref_result, dict) or ref_result.get('object', {}).get('sha') != parent:
+                return api_failure('seed_ref', error)
+        if ref_result.get('ref') != target_ref or ref_result.get('object', {}).get('sha') != parent:
+            fail('probe_seed_ref_mismatch')
+        try:
+            repository = graphql_request(token,
+                'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}',
+                {'owner': REPOSITORY.split('/')[0], 'name': REPOSITORY.split('/')[1]}).get('repository')
+        except ApiWriteFailure as error:
+            return api_failure('repository_lookup', error)
+        if not isinstance(repository, dict) or not isinstance(repository.get('id'), str):
+            fail('probe_graphql_repository')
+        try:
+            result = graphql_request(token,
+                'mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}',
+                {'input': {'repositoryId': repository['id'], 'refUpdates': [
+                    {'name': target_ref, 'beforeOid': parent, 'afterOid': api_commit, 'force': False}]}})
+            if not isinstance(result.get('updateRefs'), dict):
+                fail('probe_graphql_update')
+            update_result = remote.request('/git/ref/' + target_ref.removeprefix('refs/'))
+        except ApiWriteFailure as error:
+            try:
+                update_result = remote.request('/git/ref/' + target_ref.removeprefix('refs/'), missing=True)
+            except Exception:
+                update_result = None
+            if not isinstance(update_result, dict) or update_result.get('object', {}).get('sha') != api_commit:
+                return api_failure('update_refs', error)
         after = remote.request('/git/ref/' + target_ref.removeprefix('refs/'))
         commit_response = remote.request('/git/commits/' + api_commit)
-        if (patch_result.get('ref') != target_ref or patch_result.get('object', {}).get('sha') != api_commit
+        if (update_result.get('ref') != target_ref or update_result.get('object', {}).get('sha') != api_commit
                 or after.get('object', {}).get('sha') != api_commit or commit_response.get('sha') != api_commit
                 or commit_response.get('tree', {}).get('sha') != tree
                 or [item.get('sha') for item in commit_response.get('parents', [])] != [parent]
                 or remote.ref(MAIN_REF) != parent):
             fail('probe_readback')
         print(json.dumps({'status': 'journal_shape_api_verified', 'repository': REPOSITORY,
-            'write_method': 'git_data_api_ref_patch_force_false',
+            'write_method': 'graphql_updateRefs_beforeOid',
             'branch': branch, 'changed_paths': 1, 'synthetic_bytes': len(SYNTHETIC),
             'parent_verified': True, 'main_unchanged': True}, separators=(',', ':')), flush=True)
         return 0
