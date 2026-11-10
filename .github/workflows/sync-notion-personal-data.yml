@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
-      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
+      NOTION_API_KEY: ${{ secrets.NOTION_FLOMO_API_KEY }}
       VAULT_ROOT: ${{ github.workspace }}/vault
     steps:
       - name: Check out automation repository

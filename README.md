@@ -26,6 +26,7 @@ at runtime, then write back to the private vault through a GitHub token.
 - `GETNOTE_CLIENT_ID`
 - `FLOMO_TOKEN`
 - `NOTION_API_KEY`
+- `NOTION_FLOMO_API_KEY` (read-only access to the 碎片中心 database)
 - `NOTION_WIKI_MIRROR_PARENT_PAGE_ID` or `NOTION_WIKI_MIRROR_PARENT_PAGE_TITLE`
 - `NOTION_WIKI_MIRROR_BUNDLE_PASSPHRASE`
 - `XINZHI_CLI_ACCESS_TOKEN`
