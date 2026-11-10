@@ -1,5 +1,6 @@
 """Synthetic sources; never use real credentials, files, network or Notion writes."""
 import copy
+import contextlib
 from contextlib import nullcontext
 import hashlib
 import io
@@ -98,25 +99,35 @@ class StageTests(unittest.TestCase):
                 'category': 'notion_http_error', 'http_status': 429,
                 'notion_error_code': 'rate_limited'})
 
-        summary = self.root / 'step-summary.md'
-        with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(summary)}):
-            bridge.write_safe_failure_summary(error)
-        self.assertIn('HTTP status: 403', summary.read_text())
-        self.assertIn('Notion error: restricted_resource', summary.read_text())
-        self.assertNotIn('private page title', summary.read_text())
-
         partial = {'notion_pages': 4, 'flomo_ids': 3, 'written': 0, 'pending': 1,
                    'held': {'private-memo-id': 'stage_edited',
                             'another-private-id': 'private error text'}}
         self.assertEqual(bridge.safe_partial_diagnostic(partial), {
             'category': 'partial_capture', 'notion_pages': 4, 'flomo_ids': 3,
             'written': 0, 'pending': 1, 'held': {'other': 1, 'stage_edited': 1}})
-        with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(summary)}):
-            bridge.write_safe_partial_summary(partial)
-        text = summary.read_text()
-        self.assertIn('Held reasons: other=1, stage_edited=1', text)
-        self.assertNotIn('private-memo-id', text)
-        self.assertNotIn('private error text', text)
+        self.assertNotIn('private-memo-id', json.dumps(bridge.safe_partial_diagnostic(partial)))
+        self.assertNotIn('private error text', json.dumps(bridge.safe_partial_diagnostic(partial)))
+
+    def test_partial_sync_emits_safe_diagnostic_to_captured_stdout(self):
+        result = {'notion_pages': 4, 'flomo_ids': 3, 'flomo_source_pages': 3,
+            'written': 0, 'unchanged': 0, 'pending': 1, 'complete': False,
+            'capture_complete': False, 'unmerged_variant_group_count': 0,
+            'semantic_merge_complete': False, 'renderer_rewritten': 0,
+            'property_hydrated': 0, 'held': {'private-id': 'stage_edited'}}
+        output = io.StringIO()
+        with mock.patch.object(sys, 'argv', ['sync', '--database-id', 'db', '--apply']), \
+             mock.patch.dict(os.environ, {'VAULT_ROOT': str(self.root)}), \
+             mock.patch.object(bridge.notion, 'load_notion_api_key', return_value='secret'), \
+             mock.patch.object(bridge, 'run', return_value=result), \
+             mock.patch.object(bridge, 'incremental_complete', return_value=False), \
+             mock.patch.object(bridge, 'sync_exit_code', return_value=2), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(bridge.main(), 2)
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary['diagnostic'], {
+            'category': 'partial_capture', 'notion_pages': 4, 'flomo_ids': 3,
+            'written': 0, 'pending': 1, 'held': {'stage_edited': 1}})
+        self.assertNotIn('private-id', output.getvalue())
 
     def test_private_identity_failure_never_writes(self):
         self.identity.stop()
@@ -596,6 +607,7 @@ class StageTests(unittest.TestCase):
         readback = steps['Verify private Flomo state']
         final = steps['Report incomplete Flomo sync']
         self.assertIn('        continue-on-error: true', stage)
+        self.assertIn('--stdout-file "$RUNNER_TEMP/flomo-sync-result.json"', stage)
         self.assertIn("!cancelled() && (steps.flomo_sync.outcome == 'success' || steps.flomo_sync.outcome == 'failure')", commit)
         self.assertLess(text.index('Stage Flomo-ID notes from Notion only'), text.index('Persist Flomo staging and progress'))
         self.assertLess(text.index('Persist Flomo staging and progress'), text.index('Verify private Flomo state'))
@@ -609,7 +621,26 @@ class StageTests(unittest.TestCase):
         self.assertIn('always() && !cancelled()', final)
         self.assertIn('--verify-remote-state', readback)
         self.assertIn("steps.flomo_sync.outcome == 'failure'", final)
+        self.assertIn("safe diagnostic summary was written", final)
+        self.assertIn("'notion_error_code'", final)
+        self.assertIn('flomo-sync-result.json', final)
         self.assertIn('exit 2', final)
+
+        script = textwrap.dedent(final.split("python - <<'PY'\n", 1)[1].split('          PY\n', 1)[0])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'flomo-sync-result.json').write_text(json.dumps({'diagnostic': {
+                'category': 'partial_capture', 'notion_pages': 4, 'flomo_ids': 3,
+                'written': 0, 'pending': 1, 'held': {'stage_edited': 1,
+                    'private-note-id': 2, 'private error text': 3}}}))
+            summary = root / 'summary.md'
+            with mock.patch.dict(os.environ, {'RUNNER_TEMP': temp, 'GITHUB_STEP_SUMMARY': str(summary)}):
+                exec(compile(script, 'workflow-flomo-report', 'exec'), {})
+            report = summary.read_text()
+            self.assertIn('Category: partial_capture', report)
+            self.assertIn('Held reasons: other=2, other=3, stage_edited=1', report)
+            self.assertNotIn('private-note-id', report)
+            self.assertNotIn('private error text', report)
 
     def test_flomo_conditions_preserve_partial_results_without_starting_cancelled_writes(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/sync-notion-personal-data.yml'
