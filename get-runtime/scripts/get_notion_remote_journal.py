@@ -580,6 +580,7 @@ class RemoteJournal:
         self.recovery = None
         self.confirm_entered = False
         attempted = False
+        cas_failure = None
         try:
             checked(expected_sha, 64)
             if getattr(self,'rotation_required',False):
@@ -639,7 +640,8 @@ class RemoteJournal:
             attempted = True
             try:
                 self._timing.call('push', self.remote.cas_main, parent, commit)
-            except Exception:
+            except Exception as exc:
+                cas_failure = exc
                 pass  # Ambiguous response: exact readback, NEVER a second CAS.
             self.stage = 'poll'
             for attempt in range(self.poll_attempts):
@@ -663,8 +665,9 @@ class RemoteJournal:
         except Exception as exc:
             # Callback/readback failures may follow a committed journal. Preserve
             # only verified candidate metadata; block all subsequent API eligibility.
-            category = getattr(exc, 'cas_error_category', None)
-            diagnostic = getattr(exc, 'cas_diagnostic', None)
+            diagnostic_source = exc if hasattr(exc, 'cas_error_category') else cas_failure
+            category = getattr(diagnostic_source, 'cas_error_category', None)
+            diagnostic = getattr(diagnostic_source, 'cas_diagnostic', None)
             if attempted and isinstance(category, str) and isinstance(diagnostic, dict):
                 import get_private_runtime_report as report
                 safe = report.public({'status': 'recurring_failed', 'cas_error_category': category,

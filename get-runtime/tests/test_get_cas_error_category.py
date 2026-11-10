@@ -1,6 +1,8 @@
 """CAS diagnostics must not change retry safety or reveal stderr."""
 from pathlib import Path
 from contextlib import ExitStack
+import contextlib
+import io
 import subprocess
 import sys
 import types
@@ -13,6 +15,16 @@ with patch.object(get_private_runtime_bindings, 'value', return_value=None):
     import get_legacy_manual as manual
     import get_recurring_runtime as runtime
     import get_private_preview_retention as retention
+
+def inert_journal_binding(module, name):
+    if module == 'get_notion_sink_plan': return '0' * 64
+    if module == 'get_notion_content_scope':
+        return {'REVIEWED': {}, 'NEWLY_REVIEWED': {}, 'HELD': {}, 'EMPTY_SHA256': '0' * 64}[name]
+    if name in ('APPROVED_MANIFESTS', 'APPROVED_CAPTURE_MANIFESTS'): return {}
+    return '0' * 64
+
+with patch.object(get_private_runtime_bindings, 'value', side_effect=inert_journal_binding):
+    import get_notion_remote_journal as journal
 
 
 class CasErrorCategory(unittest.TestCase):
@@ -187,6 +199,49 @@ class CasErrorCategory(unittest.TestCase):
         self.assertEqual(projected['cas_candidate_metrics'], {'changed_paths': 1, 'changed_bytes': 5,
                                                                'transaction_bytes': 5})
         self.assertNotIn('private-note', str(projected))
+
+    def test_remote_journal_keeps_only_safe_cas_diagnostic_after_poll_failure(self):
+        parent, commit, tree, blob = 'a' * 40, 'b' * 40, 'c' * 40, 'f' * 40
+        failure = manual.CasPushFailure('missing_object', {'stage': 'push_exit', 'exit_code': 128,
+            'stdout_category': 'none', 'stderr_category': 'missing_object',
+            'stderr_words': ['missing', 'object']})
+        cas_main = Mock(side_effect=failure)
+        calls = []
+        def timed_call(name, function, *args):
+            calls.append(name)
+            if name == 'push': return function(*args)
+            return parent
+        remote = types.SimpleNamespace(cas_main=cas_main)
+        store = object.__new__(journal.RemoteJournal)
+        store.poisoned = False; store.recovery = None; store.confirm_entered = False
+        store.rotation_required = False; store.remote = remote; store.charged_blobs = set()
+        store.commits_attempted = 0; store.max_commits = 10; store.new_blob_bytes = 0
+        store.max_batch_bytes = 1024; store._locator_message = None; store.locator = None
+        store.stage = 'anchor'; store.post_cas_paths = frozenset(); store.post_cas_mirror = False
+        store.poll_attempts = 6; store.sleep = Mock(); store._timing = types.SimpleNamespace(call=timed_call)
+        store._current = Mock(return_value=(parent, {}, {}, {'engine_state': {}}, 'e' * 64, 'd' * 40, b'old'))
+        store._head = Mock(return_value=parent)
+        store._build = Mock(return_value=(commit, tree, blob, {}))
+        output = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(get_private_runtime_bindings, 'value', side_effect=inert_journal_binding))
+            stack.enter_context(patch.object(journal.codec, 'encoded', return_value=b'new'))
+            stack.enter_context(patch.object(journal.codec, 'check_state'))
+            stack.enter_context(patch.object(journal.codec.png_store, 'preserve'))
+            stack.enter_context(patch.object(journal.engine.plan_recovery, 'preserve_holds'))
+            stack.enter_context(patch('get_notion_historical.preserve_captures'))
+            stack.enter_context(patch('get_notion_historical_active_recovery.preserve'))
+            stack.enter_context(patch('get_notion_authenticated_recovery.preserve'))
+            stack.enter_context(patch.object(journal.retention, 'oid', return_value=blob))
+            stack.enter_context(contextlib.redirect_stderr(output))
+            with self.assertRaises(journal.JournalFailure) as caught:
+                store._compare_and_set('e' * 64, {'engine_state': {}, 'private': 'private note'})
+        self.assertEqual((caught.exception.stage, caught.exception.outcome), ('poll', 'unknown'), (str(caught.exception), calls))
+        self.assertEqual(cas_main.call_count, 1)
+        self.assertEqual(calls.count('poll_ref'), 6)
+        self.assertIn("'cas_error_category': 'missing_object'", output.getvalue())
+        self.assertIn("'stage': 'push_exit'", output.getvalue())
+        self.assertNotIn('private note', output.getvalue())
 
     def test_real_remote_push_failure_is_classified_without_stderr(self):
         remote = object.__new__(manual.Remote)
