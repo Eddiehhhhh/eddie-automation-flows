@@ -180,6 +180,9 @@ class Loader:
         return value
 
     def _registered_interval(self, ancestor, descendant):
+        witness = entry.select_history_witness(self.history_witness, ancestor=ancestor)
+        history_start = (witness.observed_commit
+            if witness is not None and ancestor == witness.receipt_commit else ancestor)
         self.commit(ancestor)
         self.commit(descendant)
         # The journal loader can supply both endpoints in separate shallow
@@ -187,9 +190,14 @@ class Loader:
         if (Path(self.local.vault) / '.git/shallow').exists():
             first_parents = self.local.run('rev-list', '--first-parent',
                 '--max-count=' + str(entry.MAX_INTERVENING + 1), descendant)
-            if ancestor.encode() not in first_parents.splitlines():
+            if history_start.encode() not in first_parents.splitlines():
                 self.fetch(descendant)
-        witness = entry.select_history_witness(self.history_witness, ancestor=ancestor)
+        commits = self.local.run('rev-list', '--first-parent',
+            '--max-count=' + str(entry.MAX_INTERVENING + 1), descendant).decode().splitlines()
+        for commit in commits:
+            self.commit(entry.a.checked(commit, 40))
+            if commit == history_start:
+                break
         if witness is not None and ancestor == witness.receipt_commit:
             self.blob(ancestor, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
         return entry.unchanged_get_history(

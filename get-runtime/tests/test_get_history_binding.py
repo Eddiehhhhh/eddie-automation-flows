@@ -28,6 +28,14 @@ class Local:
 
     def run(self, *args):
         commit = args[-1]
+        if args[0] == 'rev-list' and '--first-parent' in args:
+            limit = int(next(arg.split('=', 1)[1] for arg in args if arg.startswith('--max-count=')))
+            chain = []
+            while commit and len(chain) < limit:
+                chain.append(commit)
+                parents = self.parents[commit]
+                commit = parents[0] if parents else None
+            return '\n'.join(chain).encode()
         return ' '.join([commit, *self.parents[commit]]).encode()
 
 
@@ -38,6 +46,9 @@ class Reader:
 
     def source_get_tree(self, commit):
         return self.trees[commit]
+
+    def tree(self, _commit):
+        return {}
 
 
 class MainlineHistory(unittest.TestCase):
@@ -179,9 +190,31 @@ class MainlineHistory(unittest.TestCase):
             with patch.object(loader, 'commit'):
                 loader.unchanged(self.root, self.merge)
 
+    def test_confirmed_source_loader_keeps_cumulative_commit_budget(self):
+        middle1, middle2, second_root, second_tip = (
+            format(i, '040x') for i in range(20, 24))
+        parents = {self.root: [], middle1: [self.root], middle2: [middle1],
+                   self.merge: [middle2, self.side], second_root: [], second_tip: [second_root]}
+        trees = {commit: self.tree for commit in parents}
+        reader = Reader(parents, trees)
+        with tempfile.TemporaryDirectory() as vault:
+            reader.local.vault = vault
+            loader = confirmed_source.Loader.__new__(confirmed_source.Loader)
+            loader.local = reader.local
+            loader.reader = reader
+            loader.history_witness = None
+            loader.commits = set()
+            loader.metadata_seen = set()
+            loader.object_info = lambda _commit: ('commit', 1)
+            with patch.object(confirmed_source, 'MAX_COMMITS', 4), \
+                 patch.object(entry, 'unchanged_get_history'):
+                loader._registered_interval(self.root, self.merge)
+                with self.assertRaisesRegex(confirmed_source.SourceFailure, 'source_history_budget'):
+                    loader._registered_interval(second_root, second_tip)
+
     def test_registered_interval_preserves_and_hydrates_history_witness(self):
         history_witness = object()
-        witness = SimpleNamespace(receipt_commit=self.root)
+        witness = SimpleNamespace(receipt_commit=self.root, observed_commit=self.root)
         reader = Reader({self.root: [], self.linear: [self.root]},
                         {self.root: self.tree, self.linear: self.tree})
         with tempfile.TemporaryDirectory() as vault:
@@ -197,6 +230,27 @@ class MainlineHistory(unittest.TestCase):
                 loader._registered_interval(self.root, self.linear)
         blob.assert_called_once_with(self.root, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
         self.assertIs(verify.call_args.kwargs['history_witness'], history_witness)
+
+    def test_registered_interval_stops_budget_walk_at_witness_observation(self):
+        receipt, observed, middle, descendant = (format(i, '040x') for i in range(30, 34))
+        parents = {receipt: [], observed: [], middle: [observed], descendant: [middle]}
+        reader = Reader(parents, dict.fromkeys(parents, self.tree))
+        witness = SimpleNamespace(receipt_commit=receipt, observed_commit=observed)
+        with tempfile.TemporaryDirectory() as vault:
+            reader.local.vault = vault
+            loader = confirmed_source.Loader.__new__(confirmed_source.Loader)
+            loader.local = reader.local
+            loader.reader = reader
+            loader.history_witness = object()
+            with patch.object(loader, 'commit') as commit, \
+                 patch.object(loader, 'blob') as blob, \
+                 patch.object(entry, 'select_history_witness', return_value=witness), \
+                 patch.object(entry, 'unchanged_get_history') as verify:
+                loader._registered_interval(receipt, descendant)
+        self.assertEqual([call.args[0] for call in commit.call_args_list],
+                         [receipt, descendant, descendant, middle, observed])
+        blob.assert_called_once_with(receipt, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
+        self.assertEqual(verify.call_args.args[1:], (receipt, descendant))
 
     def test_changed_merge_result_fails(self):
         parents = {self.root: [], self.linear: [self.root], self.side: [self.root], self.merge: [self.linear, self.side]}
