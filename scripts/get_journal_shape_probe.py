@@ -64,6 +64,14 @@ def classify_push_error(raw):
     return 'other'
 
 
+def push_failure(stage, result):
+    print('GET_JOURNAL_SHAPE_PROBE ' + json.dumps({'status': 'failed', 'stage': stage,
+        'exit_code': result.returncode, 'stdout_category': classify_push_error(result.stdout),
+        'stderr_category': classify_push_error(result.stderr),
+        'stdout_words': report.git_word_hits(result.stdout),
+        'stderr_words': report.git_word_hits(result.stderr)}, separators=(',', ':')), flush=True)
+
+
 def run():
     token = os.environ.get('PRIVATE_VAULT_TOKEN')
     if not token:
@@ -107,18 +115,23 @@ def run():
             fail('probe_parent')
         if remote.ref(MAIN_REF) != parent:
             fail('probe_main_changed_before_push')
+        seed = subprocess.run(['git', '-C', str(local.vault), '-c', 'http.version=HTTP/1.1', 'push', '--porcelain', '--no-verify',
+            '--force-with-lease=' + target_ref + ':', retention.REMOTE_URL, parent + ':' + target_ref],
+            env=local.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=120, check=False, preexec_fn=local.child_limits)
+        if seed.returncode:
+            push_failure('seed_branch', seed)
+            return 1
+        if remote.request('/git/ref/' + target_ref.removeprefix('refs/'), missing=True).get('object', {}).get('sha') != parent:
+            fail('probe_seed_readback')
+        if remote.ref(MAIN_REF) != parent:
+            fail('probe_main_changed_after_seed')
         push = subprocess.run(['git', '-C', str(local.vault), '-c', 'http.version=HTTP/1.1', 'push', '--porcelain', '--no-verify',
-            '--force-with-lease=' + target_ref + ':', retention.REMOTE_URL, commit + ':' + target_ref],
+            '--force-with-lease=' + target_ref + ':' + parent, retention.REMOTE_URL, commit + ':' + target_ref],
             env=local.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=120, check=False, preexec_fn=local.child_limits)
         if push.returncode:
-            fail_report = {'status': 'failed', 'stage': 'push_exit',
-                'exit_code': push.returncode,
-                'stdout_category': classify_push_error(push.stdout),
-                'stderr_category': classify_push_error(push.stderr),
-                'stdout_words': report.git_word_hits(push.stdout),
-                'stderr_words': report.git_word_hits(push.stderr)}
-            print('GET_JOURNAL_SHAPE_PROBE ' + json.dumps(fail_report, separators=(',', ':')), flush=True)
+            push_failure('update_branch', push)
             return 1
         after = remote.request('/git/ref/' + target_ref.removeprefix('refs/'))
         commit_response = remote.request('/git/commits/' + commit)
