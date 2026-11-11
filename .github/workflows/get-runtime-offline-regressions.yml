@@ -11,6 +11,7 @@ on:
       - 'get-runtime/tests/test_notion_single_id_input.py'
       - 'get-runtime/tests/test_private_runtime_report.py'
       - 'get-runtime/tests/test_publication_provenance_budget.py'
+      - 'get-runtime/tests/test_publication_provenance_binding.py'
       - 'get-runtime/tests/test_single_note_selection.py'
 
 permissions:
@@ -33,4 +34,5 @@ jobs:
           get-runtime.tests.test_notion_single_id_input
           get-runtime.tests.test_single_note_selection
           get-runtime.tests.test_publication_provenance_budget
+          get-runtime.tests.test_publication_provenance_binding
           get-runtime.tests.test_private_runtime_report

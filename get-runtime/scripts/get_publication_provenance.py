@@ -428,6 +428,13 @@ def run_binding(run):
     return result
 
 
+def check_attempt_readback(run, expected, policy):
+    check_run_identity(run, policy)
+    if run_binding(run) != run_binding(expected):
+        fail('provenance_run_changed')
+    return run
+
+
 def run_semantic_binding(run):
     # List/latest and exact-attempt endpoints have distinct timestamp clocks.
     # created_at is separately bounded to the observed one-second endpoint skew.
@@ -602,9 +609,7 @@ def verified_candidate(client, listed, policy, *, run_attempt=None, verified_con
     # Re-read the *original* attempt, then ensure latest is still the same run.
     # A failed/in-progress later rerun cannot erase this successful publication,
     # or inherit it: the record remains bound to the original attempt and job.
-    original = check_run(client.json(attempt_path), policy)
-    if run_binding(original) != run_binding(run):
-        fail('provenance_run_changed')
+    original = check_attempt_readback(client.json(attempt_path), run, policy)
     current = check_run_identity(client.json(root), policy)
     if (original_recovery and run_id == recovery.run57_recovery.RUN
             and (run_binding(listed) != recovery.run57_recovery.RUN_BINDING
