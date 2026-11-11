@@ -670,7 +670,7 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if present:
                 if public_policy is None:fail('notion_state_anchor')
                 stage='journal_baseline'
-                found=idle_recovery.reviewed_baseline_anchor(reader.read(parent,outbox.STATE_PATH,outbox.MAX_STATE),public_policy,modes)
+                found=idle_recovery.reviewed_baseline_anchor(reader.read(parent,outbox.STATE_PATH,outbox.MAX_STATE),public_policy,modes,parent)
                 stage='journal'
                 if found is None:
                     stage='journal_discovery'
@@ -779,8 +779,10 @@ def run(token,request,writers_guard,*,expected_parent=None,apply=False,public_po
             if present and found.get('recovery_anchor')==idle_recovery.REVIEWED_BASELINE_TAG:
                 candidate=idle_recovery.transition_reviewed_baseline(current,sha,public_policy['get_policy_sha256'])
                 write_possible=apply
-                if apply:current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
-                else:store=ReadOnlyStore(candidate);current,sha=store.read()
+                if apply and candidate!=current:
+                    current,sha=outbox.confirmed_compare_and_set(durable,sha,candidate)
+                    if current!=candidate:fail('notion_state_anchor')
+                elif not apply:store=ReadOnlyStore(candidate);current,sha=store.read()
             if present and found.get('recovery_anchor')==idle_recovery.TAG:
                 write_possible=apply
                 candidate=idle_recovery.transition_outer(current,sha,
