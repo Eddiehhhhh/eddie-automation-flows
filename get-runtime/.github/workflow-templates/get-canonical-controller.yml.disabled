@@ -266,6 +266,10 @@ jobs:
           ref: '@@RUNTIME_SHA@@'
           path: get-runtime
           persist-credentials: false
+      - name: Verify pinned reviewed runtime
+        env:
+          RUNTIME_SHA: '@@RUNTIME_SHA@@'
+        run: test "$(git -C get-runtime rev-parse HEAD)" = "$RUNTIME_SHA"
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
