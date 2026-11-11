@@ -1,0 +1,36 @@
+name: Get runtime offline regressions
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/get-runtime-offline-regressions.yml'
+      - 'get-runtime/scripts/get_notion_outbox.py'
+      - 'get-runtime/scripts/get_private_runtime_report.py'
+      - 'get-runtime/scripts/get_publication_provenance.py'
+      - 'get-runtime/scripts/get_recurring_runtime.py'
+      - 'get-runtime/tests/test_notion_single_id_input.py'
+      - 'get-runtime/tests/test_private_runtime_report.py'
+      - 'get-runtime/tests/test_publication_provenance_budget.py'
+      - 'get-runtime/tests/test_single_note_selection.py'
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Run targeted Get runtime regressions
+        run: >-
+          python -m unittest
+          get-runtime.tests.test_notion_single_id_input
+          get-runtime.tests.test_single_note_selection
+          get-runtime.tests.test_publication_provenance_budget
+          get-runtime.tests.test_private_runtime_report
