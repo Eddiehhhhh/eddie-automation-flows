@@ -68,6 +68,40 @@ def read_json(path):
         return {}
 
 
+def same_shanghai_day(value, day):
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(SHANGHAI).date().isoformat() == day
+    except (AttributeError, ValueError):
+        return False
+
+
+def candidate_evidence(root, audit):
+    """Read every selected candidate fully; export only non-reversible aggregates."""
+    root = root.resolve()
+    candidates = audit['candidates']
+    seen_paths = set()
+    body_digests = set()
+    manifest = []
+    weak_dates = 0
+    for item in candidates:
+        relative = Path(item['path'])
+        path = (root / relative).resolve()
+        if (relative.is_absolute() or root not in path.parents or
+                not path.is_file() or path.suffix.lower() != '.md' or
+                relative.as_posix() in seen_paths):
+            raise ValueError('Invalid candidate evidence path')
+        seen_paths.add(relative.as_posix())
+        body_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        body_digests.add(body_hash)
+        weak_dates += item.get('evidence_field') == 'mtime_weak'
+        manifest.append((relative.as_posix(), body_hash))
+    if len(candidates) != audit['counts']['total_candidates']:
+        raise ValueError('Candidate count mismatch')
+    digest = hashlib.sha256(json.dumps(sorted(manifest), ensure_ascii=True).encode()).hexdigest()
+    return {'files_read': len(manifest), 'exact_body_duplicates': len(manifest) - len(body_digests),
+            'weak_date_candidates': weak_dates, 'evidence_digest': digest}
+
+
 def health(root, now):
     """Same completion/cursor contract as big_system_guard; no Mac probes."""
     day = now.astimezone(SHANGHAI).date().isoformat()
@@ -98,7 +132,15 @@ def health(root, now):
                 scan.get('head_sha') == head[1] and scan.get('cursor_advanced') is True and valid_result):
                 promotion = 'healthy'
     hermes = read_json(root / 'Raw/00 Meta/hermes-runtime-state.json')
+    get = read_json(root / 'Raw/03 Get/03 State/sync-health.json')
+    get_ok = (get.get('status') == 'ok' and same_shanghai_day(get.get('checked_at'), day) and
+              get.get('state_error') in (None, '', False) and
+              get.get('last_sync_failed_count') == 0 and
+              get.get('cached_remote_missing_local_count') == 0 and
+              get.get('local_duplicate_note_id_count') == 0 and
+              get.get('local_duplicate_extra_file_count') == 0)
     return {'source_arrival': 'healthy' if source_ok else 'blocked',
+            'getnote_sync': 'healthy' if get_ok else 'blocked',
             'promotion': promotion,
             'hermes_policy': 'disabled_by_owner' if hermes.get('status') == 'disabled_by_owner' else 'unverified',
             'local_maintenance': 'not_checked_cloud',
@@ -129,19 +171,27 @@ def main():
         env={**os.environ, 'VAULT_ROOT': str(root), 'PYTHONDONTWRITEBYTECODE': '1'},
         capture_output=True, timeout=300, check=True)
     weekly = json.loads(result.stdout)
+    period = weekly['period']['label']
+    audit_result = subprocess.run([sys.executable, str(Path(__file__).with_name('iteration_incremental_audit.py')),
+        '--target-date', weekly['period']['window_end'], '--window-days', '7', '--format', 'json'],
+        env={**os.environ, 'VAULT_ROOT': str(root), 'PYTHONDONTWRITEBYTECODE': '1'},
+        capture_output=True, timeout=300, check=True)
+    evidence = candidate_evidence(root, json.loads(audit_result.stdout))
     counts = weekly['audit']['counts']
     # Explicit projection: never emit titles, paths, IDs, warnings or exception text.
     safe_counts = {k: int(counts[k]) for k in ('total_candidates', 'high_priority_candidates')}
+    if evidence['files_read'] != safe_counts['total_candidates']:
+        raise ValueError('Pipeline and evidence counts disagree')
     unchanged = (vault_fingerprint(root) == before_fingerprint and
                  git(root, 'status', '--porcelain', '--untracked-files=all') == before)
     if not unchanged:
         raise ValueError('dry run changed vault')
-    period = weekly['period']['label']
     payload = {'schema_version': 1, 'mode': 'readonly_acceptance', 'production_enabled': False,
         'acceptance_passed': True, 'vault_unchanged': unchanged,
         'snapshot_digest': hashlib.sha256(sha.encode()).hexdigest(),
         'run_key': hashlib.sha256(('weekly:' + period + ':' + sha).encode()).hexdigest(),
-        'weekly': {'period': period, 'counts': safe_counts, 'llm_synthesis': 'not_executed'},
+        'weekly': {'period': period, 'counts': safe_counts, 'evidence': evidence,
+                   'llm_synthesis': 'not_executed'},
         'health': health(root, now)}
     output.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(payload))
