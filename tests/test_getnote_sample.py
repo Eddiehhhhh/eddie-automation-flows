@@ -40,7 +40,7 @@ class GetSampleTests(unittest.TestCase):
         policy_bytes = base64.b64decode(encoded, validate=True)
         policy = json.loads(policy_bytes)
         runtime_sha = re.search(r"RUNTIME_SHA: '([0-9a-f]{40})'", workflow).group(1)
-        self.assertEqual(runtime_sha, '8bf0a455fe7343fe5af6673bb2fdf232a1eb3b14')
+        self.assertEqual(runtime_sha, '0ee8920138f253f43de441a4d405497b0a32c5df')
         self.assertEqual(re.findall(r"(?m)^\s+ref: '([0-9a-f]{40})'$", workflow),
                          [runtime_sha, runtime_sha])
         self.assertEqual(workflow.count('- name: Verify pinned reviewed runtime'), 2)
@@ -48,15 +48,15 @@ class GetSampleTests(unittest.TestCase):
         self.assertEqual(policy['code_sha'], runtime_sha)
         self.assertEqual(policy['controller_template_sha256'],
                          '59dcc462719f391e554fd9974c9395a291c1e027efb7b9b322321129329ae762')
-        self.assertEqual(policy['rules_sha256'], '24c678bccbfe75bdcdd267fe325edaed7d4d607e295e7472423bce574e84e6e5')
-        self.assertEqual(policy['get_policy_sha256'], 'd7435f2a6ac714efb6a846ad789b674a80217f99ce845548d7e61a2ed7492819')
-        expected_policy_sha256 = 'eea348e92995947f0301cc7e9e6ae29cc532e7fca7ae2331cc7d2baaddbf2c60'
+        self.assertEqual(policy['rules_sha256'], 'b078130acf647d94b9f89df0d03e6e0384a967d3f8e474f380ac8c279ab1296e')
+        self.assertEqual(policy['get_policy_sha256'], '0526a26972fc85bac93fe59e1edcf1d48fed79b8603bb48140c5ce2f574851da')
+        expected_policy_sha256 = '9c25ded3fd7c405e4d9064612e8982e65298382e84b08b01968309c70bf55f6d'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         scope_sha = re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1)
         self.assertEqual(scope_sha,
-                         'c54990670246e09cbbba6990cb3867d5532bc174a334ae1ff54fed59017c2910')
+                         'ada01d25bf1eb669992e1743fd03e568d6cde2dd071b2e8a74942bce334a79e2')
         template = (Path(__file__).resolve().parents[1] /
                     'get-runtime/.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
         rendered = (template.replace('@@RUNTIME_SHA@@', runtime_sha)
