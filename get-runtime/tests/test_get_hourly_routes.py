@@ -7,6 +7,7 @@ class HourlyRoutes(unittest.TestCase):
         template = (Path(__file__).resolve().parents[1] / '.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
         self.assertIn("    - cron: '23 * * * *'", template)
         self.assertIn('permissions:\n  actions: read\n  contents: read\n', template)
+        self.assertEqual(template.count('- name: Verify pinned reviewed runtime'), 2)
         for name in ('Validate bounded Notion route before Get', 'Validate complete private Notion route before Get', 'Sync confirmed Get content to Notion'):
             section = template.split('      - name: ' + name, 1)[1].split('      - name:', 1)[0]
             self.assertIn("github.event_name == 'workflow_dispatch'", section)
