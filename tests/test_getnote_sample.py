@@ -40,7 +40,7 @@ class GetSampleTests(unittest.TestCase):
         policy_bytes = base64.b64decode(encoded, validate=True)
         policy = json.loads(policy_bytes)
         runtime_sha = re.search(r"RUNTIME_SHA: '([0-9a-f]{40})'", workflow).group(1)
-        self.assertEqual(runtime_sha, '872b456f294d93b914e57b044ce9b0a51ca4ee5e')
+        self.assertEqual(runtime_sha, 'd636043bb4259414ccd551c1ebf56a54064f174d')
         self.assertEqual(re.findall(r"(?m)^\s+ref: '([0-9a-f]{40})'$", workflow),
                          [runtime_sha, runtime_sha])
         self.assertEqual(workflow.count('- name: Verify pinned reviewed runtime'), 2)
@@ -50,7 +50,7 @@ class GetSampleTests(unittest.TestCase):
                          '59dcc462719f391e554fd9974c9395a291c1e027efb7b9b322321129329ae762')
         self.assertEqual(policy['rules_sha256'], '52364cd5fcb35ae2ddc9b772019961c4c414ea1042bdd66140ee6c65157cc419')
         self.assertEqual(policy['get_policy_sha256'], 'e451687d363150f14e36e694865aa0bef3a1716ef3742dff36ed91bd7be346d7')
-        expected_policy_sha256 = 'fd2364b99804fb27e86a382a489196899a1192dba12a93c9d7ee728aace46f54'
+        expected_policy_sha256 = '2a280d6ab998989e599e1d9025bbf8b1858b37fac7f643948f40b401960d5045'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
