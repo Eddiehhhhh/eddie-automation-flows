@@ -56,7 +56,7 @@ class GetSampleTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         scope_sha = re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1)
         self.assertEqual(scope_sha,
-                         '41af5531c6e7911ceaaeb84af5e8057c1a04159d02afb312d27b5f29f6b3f7d8')
+                         '44051946b9757d452dc19ec91015cd978db905b391b6c02e085005cd74940288')
         template = (Path(__file__).resolve().parents[1] /
                     'get-runtime/.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
         rendered = (template.replace('@@RUNTIME_SHA@@', runtime_sha)
