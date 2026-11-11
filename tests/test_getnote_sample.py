@@ -50,7 +50,7 @@ class GetSampleTests(unittest.TestCase):
                          '59dcc462719f391e554fd9974c9395a291c1e027efb7b9b322321129329ae762')
         self.assertEqual(policy['rules_sha256'], '52364cd5fcb35ae2ddc9b772019961c4c414ea1042bdd66140ee6c65157cc419')
         self.assertEqual(policy['get_policy_sha256'], 'e451687d363150f14e36e694865aa0bef3a1716ef3742dff36ed91bd7be346d7')
-        expected_policy_sha256 = '51b501f9e05c64a9ca839dadfe059d5e4414eca0533c94e7eaf723561130ca0f'
+        expected_policy_sha256 = 'fd2364b99804fb27e86a382a489196899a1192dba12a93c9d7ee728aace46f54'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
