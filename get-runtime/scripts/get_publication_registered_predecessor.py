@@ -75,14 +75,18 @@ def discovery_locator(policy):
     coordinate=exact.source_discovery_locator(policy)
     if coordinate is not None:return coordinate
     import get_recurring_policy_recovery as recovery
-    binding = bindings.value('get_recurring_policy_recovery', 'SEQ9_BINDING')
-    if isinstance(binding, dict) and isinstance(binding.get('record'), dict):
+    for name in ('SEQ9_BINDING', 'SEQ7_BINDING'):
+        binding = bindings.value('get_recurring_policy_recovery', name)
+        if not isinstance(binding, dict) or not isinstance(binding.get('record'), dict):
+            continue
         record = binding['record']
         run = {'id': record.get('run_id'), 'run_attempt': record.get('run_attempt'),
                'head_sha': record.get('controller_sha'),
                'event': binding.get('event', 'workflow_dispatch')}
         selected, admitted = recovery.candidate_policy(policy, run)
-        if admitted and selected == binding.get('public_policy'):
+        if admitted:
+            if selected != binding.get('public_policy'):
+                p.fail('provenance_record')
             return run['id'], run['run_attempt']
     eligible = [row for row in registry() if idle._forward_policy(policy, row)]
     if not eligible:
