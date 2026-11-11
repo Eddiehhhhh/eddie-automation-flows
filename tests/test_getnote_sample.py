@@ -48,15 +48,15 @@ class GetSampleTests(unittest.TestCase):
         self.assertEqual(policy['code_sha'], runtime_sha)
         self.assertEqual(policy['controller_template_sha256'],
                          '59dcc462719f391e554fd9974c9395a291c1e027efb7b9b322321129329ae762')
-        self.assertEqual(policy['rules_sha256'], '8ebe7d2d5c64499129098e9dab68cec976aad00054be2226e10f8163fd47b328')
-        self.assertEqual(policy['get_policy_sha256'], 'e007a84ecb47e504c6ef68f3b26ebc0955fdb56d5fa2a06c2e6bf17ee19cadbd')
-        expected_policy_sha256 = '4e1a4b300182d42448a8b05c8d8c4de347dcdad5b0cc1f465e3c934117112e91'
+        self.assertEqual(policy['rules_sha256'], '24c678bccbfe75bdcdd267fe325edaed7d4d607e295e7472423bce574e84e6e5')
+        self.assertEqual(policy['get_policy_sha256'], 'd7435f2a6ac714efb6a846ad789b674a80217f99ce845548d7e61a2ed7492819')
+        expected_policy_sha256 = 'eea348e92995947f0301cc7e9e6ae29cc532e7fca7ae2331cc7d2baaddbf2c60'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
         scope_sha = re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1)
         self.assertEqual(scope_sha,
-                         '08fd0ebe475f9fcda30e76a175cac0515492a6cc51d0c663e8531acada2149d4')
+                         'c54990670246e09cbbba6990cb3867d5532bc174a334ae1ff54fed59017c2910')
         template = (Path(__file__).resolve().parents[1] /
                     'get-runtime/.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
         rendered = (template.replace('@@RUNTIME_SHA@@', runtime_sha)
