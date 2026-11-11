@@ -5,10 +5,12 @@ on:
     paths:
       - '.github/workflows/get-runtime-offline-regressions.yml'
       - 'get-runtime/scripts/get_notion_outbox.py'
+      - 'get-runtime/scripts/get_confirmed_source.py'
       - 'get-runtime/scripts/get_private_runtime_report.py'
       - 'get-runtime/scripts/get_publication_provenance.py'
       - 'get-runtime/scripts/get_recurring_runtime.py'
       - 'get-runtime/tests/test_notion_single_id_input.py'
+      - 'get-runtime/tests/test_get_history_binding.py'
       - 'get-runtime/tests/test_private_runtime_report.py'
       - 'get-runtime/tests/test_publication_provenance_budget.py'
       - 'get-runtime/tests/test_publication_provenance_binding.py'
@@ -33,6 +35,7 @@ jobs:
           python -m unittest
           get-runtime.tests.test_notion_single_id_input
           get-runtime.tests.test_single_note_selection
+          get-runtime.tests.test_get_history_binding
           get-runtime.tests.test_publication_provenance_budget
           get-runtime.tests.test_publication_provenance_binding
           get-runtime.tests.test_private_runtime_report

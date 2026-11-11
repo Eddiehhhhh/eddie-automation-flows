@@ -226,21 +226,21 @@ class Loader:
             parents = self.ancestry_metadata(cursor)
             if cursor == ancestor:
                 return
+            if not 0 < len(parents) <= 2 or len(set(parents)) != len(parents):
+                fail('source_chain_invalid')
+            parent = parents[0]
             witness = entry.select_history_witness(self.history_witness, ancestor=ancestor)
             # A witness authenticates only its exact receipt-to-observed
             # interval. Other requested ancestors may be inside that interval;
             # follow their entire original chain rather than jumping over them.
             if (witness is not None and ancestor == witness.receipt_commit
                     and cursor == witness.observed_commit):
-                if parents != (entry.single_parent(self.reader, cursor),):
-                    fail('source_chain_invalid')
                 self.commit(witness.receipt_commit)
                 self.blob(witness.receipt_commit, entry.FULL_RECEIPT, entry.MAX_RECEIPT)
                 cursor = outbox.witness_parent(self.reader, cursor, witness)
                 continue
-            parent = entry.single_parent(self.reader, cursor)
-            if parents != (parent,):
-                fail('source_chain_invalid')
+            # Only follow the first-parent line; a merge's side branch is never
+            # accepted as proof that the requested ancestor belongs to this source history.
             cursor = parent
             self.reader.cache.clear()
         fail('source_history_budget')
