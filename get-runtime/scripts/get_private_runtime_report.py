@@ -52,6 +52,9 @@ def public(result,allowed_codes=(),*,allowed_stages=(),allowed_execution_reasons
         if result.get(key) in ('not_attempted','confirmed','unknown','uncertain'):out[key]=result[key]
     for key in ('reason','error'):
         if isinstance(result.get(key),str) and result[key] in allowed_codes:out[key]=result[key]
+    provenance_check=result.get('provenance_check')
+    if out.get('error')=='provenance_run' and provenance_check in ('run_shape','run_origin','workflow_binding','run_event','run_status'):
+        out['provenance_check']=provenance_check
     scope_check = result.get('scope_check')
     if out.get('error') == 'runtime_scope' and isinstance(scope_check, str) and scope_check in SCOPE_CHECKS:
         out['scope_check'] = scope_check

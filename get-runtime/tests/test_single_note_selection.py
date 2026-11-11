@@ -40,7 +40,7 @@ def scope_checker():
 def notion_scope_selector():
     path = Path(__file__).resolve().parents[1] / 'scripts/get_notion_outbox.py'
     tree = ast.parse(path.read_text())
-    nodes = [x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name in ('single_note_selection', 'single_note_delivery', 'single_note_records_allowed')]
+    nodes = [x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name in ('single_note_selection', 'single_note_delivery', 'validate_source_records')]
     def identity(value):
         if not isinstance(value, str) or re.fullmatch(r'[0-9]{1,64}', value) is None:
             raise ValueError('canonical_identity')
@@ -48,14 +48,14 @@ def notion_scope_selector():
         raise ValueError(code)
     namespace = {'p': types.SimpleNamespace(note_id=identity), 'fail': fail}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), namespace)
-    return namespace['single_note_selection'], namespace['single_note_delivery'], namespace['single_note_records_allowed']
+    return namespace['single_note_selection'], namespace['single_note_delivery'], namespace['validate_source_records']
 
 
 class SingleNoteSelection(unittest.TestCase):
     def setUp(self):
         self.select_new = selected_function()
         self.verify_scope = scope_checker()
-        self.select_notion, self.notion_delivery, self.single_records = notion_scope_selector()
+        self.select_notion, self.notion_delivery, self.validate_source_records = notion_scope_selector()
         self.registry = {'reserved': {'111': 'legacy'}, 'newById': {'222': {}},
                          'conflictsById': {}, 'scan_cursor': None}
 
@@ -109,28 +109,33 @@ class SingleNoteSelection(unittest.TestCase):
             self.verify_scope({'single_source_id': '333', 'source_scope': 'single_note',
                                'catalog_complete': False, 'changes': []})
 
-    def test_notion_selects_only_target_from_current_publication(self):
+    def test_notion_selects_only_target_while_other_receipts_stay_queued(self):
         state = {'engine_state': {'journal': None},
                  'pending_by_id': {'222': {'sequence': 8, 'commit': 'current', 'receipt_sha256': 'proof'},
                                    '333': {'sequence': 7, 'commit': 'older', 'receipt_sha256': 'old-proof'}},
                  'observed_publication_tip': {'sequence': 8, 'commit': 'current', 'receipt_sha256': 'proof'}}
         self.assertEqual(self.select_notion(state, '222'), ['222'])
+        self.assertEqual(self.select_notion(state, '333'), ['333'])
         self.assertEqual(self.select_notion(state, '444'), [])
+        self.assertEqual(set(state['pending_by_id']), {'222', '333'})
         already_done = {**state, 'pending_by_id': {}, 'rotation_order': [],
                         'engine_state': {'journal': None, 'receipts': {'222': {}}}}
         self.assertEqual(self.notion_delivery(already_done, '222'), [])
         with self.assertRaises(ValueError):
             self.notion_delivery(state, '444')
-        with self.assertRaises(ValueError):
-            self.select_notion(state, '333')
 
-    def test_notion_resumes_only_exact_single_note_journal(self):
+    def test_notion_resumes_exact_single_note_journal_from_older_receipt(self):
         state = {'engine_state': {'journal': {'plan': {'publication': {'records': {'222': {}},
                     'commit': 'current', 'outbox_receipt_sha256': 'proof'}}}},
                  'pending_by_id': {'222': {'sequence': 8, 'commit': 'current', 'receipt_sha256': 'proof'}},
                  'observed_publication_tip': {'sequence': 8, 'commit': 'current', 'receipt_sha256': 'proof'}}
         self.assertEqual(self.select_notion(state, '222', resume=True), ['222'])
-        stale = {**state, 'pending_by_id': {'222': {'sequence': 7, 'commit': 'current', 'receipt_sha256': 'proof'}}}
+        older = {'engine_state': {'journal': {'plan': {'publication': {'records': {'222': {}},
+                    'commit': 'older', 'outbox_receipt_sha256': 'old-proof'}}}},
+                 'pending_by_id': {'222': {'sequence': 7, 'commit': 'older', 'receipt_sha256': 'old-proof'}},
+                 'observed_publication_tip': {'sequence': 8, 'commit': 'current', 'receipt_sha256': 'proof'}}
+        self.assertEqual(self.select_notion(older, '222', resume=True), ['222'])
+        stale = {**state, 'pending_by_id': {'222': {'sequence': 7, 'commit': 'wrong', 'receipt_sha256': 'wrong'}}}
         with self.assertRaises(ValueError):
             self.select_notion(stale, '222', resume=True)
         state['engine_state']['journal']['plan']['publication']['records']['333'] = {}
@@ -139,11 +144,11 @@ class SingleNoteSelection(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.select_notion(state, '222')
 
-    def test_single_note_outbox_rejects_sibling_ids_before_state_write(self):
-        self.single_records({'222': {}}, '222')
-        self.single_records({}, '222')
+    def test_single_note_enqueue_keeps_other_source_ids_for_later_delivery(self):
+        self.validate_source_records({'222': {}, '333': {}}, '222')
+        self.validate_source_records({}, '222')
         with self.assertRaises(ValueError):
-            self.single_records({'222': {}, '333': {}}, '222')
+            self.validate_source_records({'not-an-id': {}}, '222')
 
 
 if __name__ == '__main__':
