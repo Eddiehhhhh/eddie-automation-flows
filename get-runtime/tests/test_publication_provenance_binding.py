@@ -66,6 +66,7 @@ class PartialGetPublication(unittest.TestCase):
         self.assertFalse(provenance._notion_failed_after_publication(
             self.run, self.job, {'publication_step_name': provenance.controller.STEP_NAME}))
 
+
     def test_failed_get_step_is_not_a_publication_anchor(self):
         self.job['steps'][0]['conclusion'] = 'failure'
         self.assertFalse(provenance._notion_failed_after_publication(
@@ -88,6 +89,34 @@ class PartialGetPublication(unittest.TestCase):
         self.job['steps'][2]['number'] = 14
         self.assertFalse(provenance._notion_failed_after_publication(
             self.run, self.job, {'publication_step_name': provenance.controller.STEP_NAME}))
+
+
+class CandidateAttemptReadback(unittest.TestCase):
+    def setUp(self):
+        self.policy = {
+            'repository_id': 1270807355,
+            'workflow_id': 387242896,
+            'workflow_path': '.github/workflows/get-canonical.yml',
+            'head_branch': 'main',
+        }
+        repository = {'id': 1270807355, 'full_name': 'Eddiehhhhh/eddie-automation-flows', 'private': False}
+        self.run = {
+            'id': 42969044610, 'run_attempt': 1, 'repository': repository,
+            'head_repository': repository, 'workflow_id': 387242896,
+            'path': '.github/workflows/get-canonical.yml', 'head_branch': 'main',
+            'head_sha': 'a' * 40, 'created_at': '2026-11-11T05:56:57Z',
+            'updated_at': '2026-11-11T06:09:07Z', 'event': 'workflow_dispatch',
+            'status': 'completed', 'conclusion': 'failure',
+        }
+
+    def test_readback_accepts_unchanged_get_success_with_later_notion_failure(self):
+        checked = provenance.check_attempt_readback(self.run, self.run, self.policy)
+        self.assertEqual(checked['conclusion'], 'failure')
+
+    def test_readback_rejects_attempt_state_change(self):
+        changed = {**self.run, 'conclusion': 'success'}
+        with self.assertRaises(provenance.ProvenanceFailure):
+            provenance.check_attempt_readback(changed, self.run, self.policy)
 
 
 if __name__ == '__main__':
