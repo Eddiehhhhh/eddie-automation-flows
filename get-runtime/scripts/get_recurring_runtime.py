@@ -681,6 +681,9 @@ def failure(exc=None, *, attempt_started=False):
         return result
     code = str(exc)
     result['error'] = code if code in ERRORS | m.ERRORS | ENTRY_ERRORS | m.c.ERRORS | CORE_ERRORS else SOURCE_ERRORS.get(code, 'runtime_failed')
+    provenance_check = getattr(exc, 'provenance_check', None)
+    if result['error'] == 'provenance_run' and provenance_check in ('run_shape', 'run_origin', 'workflow_binding', 'run_event', 'run_status'):
+        result['provenance_check'] = provenance_check
     scope_check = getattr(exc, 'scope_check', None)
     if result['error'] == 'runtime_scope' and isinstance(scope_check, str) and scope_check in SCOPE_CHECKS:
         result['scope_check'] = scope_check

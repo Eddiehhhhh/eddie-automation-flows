@@ -36,6 +36,13 @@ class PrivateRuntimeReport(unittest.TestCase):
                                    'source_phase': 'single_detail'})
         self.assertEqual(projected['source_phase'], 'single_detail')
 
+    def test_provenance_check_projection_accepts_only_fixed_names(self):
+        value = {'status': 'recurring_failed', 'error': 'provenance_run',
+                 'provenance_check': 'run_origin'}
+        self.assertEqual(report.public(value, allowed_codes=('provenance_run',))['provenance_check'], 'run_origin')
+        value['provenance_check'] = 'private note title'
+        self.assertNotIn('provenance_check', report.public(value, allowed_codes=('provenance_run',)))
+
     def test_scope_failure_projects_only_fixed_check_names(self):
         projected = report.public({'status': 'recurring_failed', 'error': 'runtime_scope',
                                    'scope_check': 'scope_keys_or_hash'}, allowed_codes=('runtime_scope',))

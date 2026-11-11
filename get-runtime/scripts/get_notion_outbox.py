@@ -66,24 +66,21 @@ class Blocked(ValueError):pass
 def fail(reason):raise Blocked(reason) from None
 
 def single_note_selection(state,note_id,*,resume=False):
-    """Select one exact ID from the current publication; never drain peers."""
+    """Select one exact queued ID, even when newer publications have peers."""
     if note_id is None:return None
     p.note_id(note_id)
     journal=state['engine_state']['journal']
+    pending=state['pending_by_id'].get(note_id);tip=state['observed_publication_tip']
+    if pending is not None and pending['sequence']>tip['sequence']:fail('outbox_source_invalid')
     if journal is not None:
         records=journal['plan']['publication']['records']
         if not resume or set(records)!={note_id}:fail('outbox_source_invalid')
-        pending=state['pending_by_id'].get(note_id);tip=state['observed_publication_tip']
         desc=journal['plan']['publication']
-        if (pending is None or pending['sequence']!=tip['sequence'] or pending['commit']!=tip['commit'] or pending['receipt_sha256']!=tip['receipt_sha256']
-                or desc['commit']!=tip['commit'] or desc['outbox_receipt_sha256']!=tip['receipt_sha256']):fail('outbox_source_invalid')
+        if (pending is None or pending['commit']!=desc['commit']
+                or pending['receipt_sha256']!=desc['outbox_receipt_sha256']):fail('outbox_source_invalid')
         return [note_id]
     if resume:fail('outbox_state_invalid')
-    pending=state['pending_by_id'].get(note_id)
     if pending is None:return []
-    tip=state['observed_publication_tip']
-    if pending['sequence']!=tip['sequence'] or pending['commit']!=tip['commit'] or pending['receipt_sha256']!=tip['receipt_sha256']:
-        fail('outbox_source_invalid')
     return [note_id]
 
 def single_note_delivery(state,note_id):
@@ -92,10 +89,13 @@ def single_note_delivery(state,note_id):
     if note_id in state['engine_state'].get('receipts',{}):return []
     fail('outbox_source_invalid')
 
-def single_note_records_allowed(records,note_id):
+def validate_source_records(records,note_id):
+    if not isinstance(records,dict):fail('outbox_source_invalid')
     if note_id is not None:
         p.note_id(note_id)
-        if not isinstance(records,dict) or any(ident!=note_id for ident in records):fail('outbox_source_invalid')
+    try:
+        for ident in records:p.note_id(ident)
+    except Exception:fail('outbox_source_invalid')
 
 def initial_state():
     return {'contract':CONTRACT,'origin':None,'policy_sha256':None,'last_enqueued_publication':None,
@@ -217,7 +217,7 @@ def enqueue(root,state,expected_state_sha,chain,expected_chain_sha,*,history_wit
     previous=value['last_enqueued_publication']
     for row in rows:
         receipt,records=verified_publication(reader,row,value['policy_sha256'],previous,budget,history_witness=history_witness)
-        single_note_records_allowed(records,only_note_id)
+        validate_source_records(records,only_note_id)
         e.metadata_pending.retain_source_state_signal(value,row,receipt)
         for ident,source in records.items():
             if ident not in value['pending_by_id']:value['rotation_order'].append(ident)
@@ -269,10 +269,12 @@ class QueuePublication:
             wanted=[i for i in order if state['pending_by_id'][i]['commit']==row['commit']][:max_records]
         receipt,actual=verified_publication(self.repo,row,state['policy_sha256'],history_witness=history_witness)
         if not wanted or any(i not in actual for i in wanted):fail('outbox_source_invalid')
-        if journal is None:
-            for ident in wanted:
-                pending=state['pending_by_id'][ident]
-                if {k:pending[k] for k in actual[ident]}!=actual[ident] or pending['sequence']!=receipt['sequence'] or pending['receipt_sha256']!=row['receipt_sha256']:fail('outbox_source_invalid')
+        for ident in wanted:
+            pending=state['pending_by_id'].get(ident)
+            if (pending is None or {k:pending[k] for k in actual[ident]}!=actual[ident]
+                    or pending['commit']!=row['commit'] or pending['parent']!=row['parent']
+                    or pending['sequence']!=receipt['sequence'] or pending['receipt_sha256']!=row['receipt_sha256']):
+                fail('outbox_source_invalid')
         tree=self.repo.tree(row['commit'])
         self.descriptor={'repository':p.REPOSITORY,'commit':row['commit'],'parent':row['parent'],
             'changed_content_ids':sorted(actual),'records':{i:actual[i] for i in wanted},'initial_cohort':None,

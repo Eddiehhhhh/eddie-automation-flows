@@ -95,6 +95,20 @@ class PublicBudgetDiagnostics(unittest.TestCase):
         unknown = recurring.public_result(recurring.failure(RuntimeError('private detail')))
         self.assertNotIn('private detail', str(unknown))
 
+    def test_public_report_keeps_only_fixed_run_check_name(self):
+        policy = {'repository_id': 1, 'workflow_id': 2,
+                  'workflow_path': '.github/workflows/get-canonical.yml', 'head_branch': 'main'}
+        run = {'id': 3, 'run_attempt': 1, 'repository': {'id': 9}, 'head_repository': {'id': 1}}
+        with self.assertRaises(provenance.ProvenanceFailure) as raised:
+            provenance.check_run_origin(run, policy)
+        raised.exception.runtime_stage = 'receipt_provenance'
+        report = recurring.public_result(recurring.failure(raised.exception))
+        self.assertEqual(report['provenance_check'], 'run_origin')
+        self.assertNotIn('repository', report)
+        raised.exception.provenance_check = 'private note title'
+        report = recurring.public_result(recurring.failure(raised.exception))
+        self.assertNotIn('provenance_check', report)
+
 
 if __name__ == '__main__':
     unittest.main()

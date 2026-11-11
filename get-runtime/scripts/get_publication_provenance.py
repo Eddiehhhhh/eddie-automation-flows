@@ -62,8 +62,11 @@ class ProvenanceFailure(a.ParityFailure):
     pass
 
 
-def fail(code):
-    raise ProvenanceFailure(code)
+def fail(code, *, check=None):
+    error = ProvenanceFailure(code)
+    if check in {'run_shape', 'run_origin', 'workflow_binding', 'run_event', 'run_status'}:
+        error.provenance_check = check
+    raise error
 
 
 def positive(value):
@@ -380,13 +383,17 @@ def verified_prepare_only(raw, policy, run, job, emission):
 
 def check_run_origin(run, policy):
     if not isinstance(run, dict):
-        fail('provenance_run')
-    positive(run.get('id')); positive(run.get('run_attempt'))
+        fail('provenance_run', check='run_shape')
+    try:
+        positive(run.get('id')); positive(run.get('run_attempt'))
+    except ProvenanceFailure as exc:
+        exc.provenance_check = 'run_shape'
+        raise
     repo = run.get('repository'); head_repo = run.get('head_repository')
     if any(not isinstance(x, dict) or x.get('id') != policy['repository_id'] or x.get('full_name') != REPOSITORY or x.get('private') is not False for x in (repo, head_repo)):
-        fail('provenance_run')
+        fail('provenance_run', check='run_origin')
     if run.get('workflow_id') != policy['workflow_id'] or run.get('path') != policy['workflow_path'] or run.get('head_branch') != policy['head_branch']:
-        fail('provenance_run')
+        fail('provenance_run', check='workflow_binding')
     a.checked(run.get('head_sha'), 40)
     timestamp(run.get('created_at')); timestamp(run.get('updated_at'))
     return run
@@ -395,13 +402,13 @@ def check_run_origin(run, policy):
 def check_run_identity(run, policy):
     check_run_origin(run, policy)
     if run.get('event') not in ('workflow_dispatch', 'schedule'):
-        fail('provenance_run')
+        fail('provenance_run', check='run_event')
     return run
 
 def check_run(run, policy):
     check_run_identity(run, policy)
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
-        fail('provenance_run')
+        fail('provenance_run', check='run_status')
     return run
 
 

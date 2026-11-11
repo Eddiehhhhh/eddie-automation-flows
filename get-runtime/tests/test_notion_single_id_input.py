@@ -24,6 +24,47 @@ with patch.dict(sys.modules):
 
 
 class SingleNoteNotionInput(unittest.TestCase):
+    def test_single_note_publication_keeps_peers_queued_and_rejects_source_drift(self):
+        outbox = runtime.outbox
+        target, peer = '222', '333'
+        commit, parent, receipt_sha = 'a' * 40, 'b' * 40, 'c' * 64
+        actual = {
+            target: {'path': 'Raw/03 Get/01 Notes/222.md', 'blob': 'd' * 40, 'sha256': 'e' * 64},
+            peer: {'path': 'Raw/03 Get/01 Notes/333.md', 'blob': 'f' * 40, 'sha256': '1' * 64},
+        }
+        state = {
+            'last_enqueued_publication': {'commit': commit, 'receipt_sha256': receipt_sha, 'sequence': 7},
+            'observed_publication_tip': {'commit': commit, 'receipt_sha256': receipt_sha, 'sequence': 7},
+            'pending_by_id': {ident: {**actual[ident], 'commit': commit, 'parent': parent,
+                'receipt_sha256': receipt_sha, 'sequence': 7} for ident in (target, peer)},
+            'rotation_order': [target, peer], 'engine_state': {'journal': None},
+            'policy_sha256': '2' * 64,
+        }
+        receipt = {'sequence': 7}
+        tree = {row['path']: ('100644', 'blob', row['blob']) for row in actual.values()}
+        def verify_publication(_repo, row, _policy_sha, history_witness=None):
+            if row != {'commit': commit, 'parent': parent, 'receipt_sha256': receipt_sha}:
+                raise outbox.Blocked('outbox_source_invalid')
+            return receipt, actual
+        with patch.object(outbox, 'check_state'), \
+             patch.object(outbox, 'verified_publication', side_effect=verify_publication), \
+             patch.object(outbox, 'BoundedSourceReader') as reader, \
+             patch.object(outbox.e.GitPublication, 'check', return_value=None), \
+             patch.dict(sys.modules, {'get_notion_png_expired_recovery':
+                 types.SimpleNamespace(only_note_id=lambda _state: None)}):
+            reader.return_value.tree.return_value = tree
+            publication = outbox.QueuePublication(None, state, outbox.digest(state), only_note_id=target)
+            self.assertEqual(set(publication.descriptor['records']), {target})
+            self.assertEqual(set(publication.descriptor['changed_content_ids']), {target, peer})
+            self.assertEqual(set(publication.state['pending_by_id']), {target, peer})
+            for field, wrong in (('parent', '9' * 40), ('sequence', 6),
+                                 ('receipt_sha256', '8' * 64), ('path', 'wrong.md'),
+                                 ('blob', '7' * 40), ('sha256', '6' * 64)):
+                changed = {**state, 'pending_by_id': {**state['pending_by_id'], target: {
+                    **state['pending_by_id'][target], field: wrong}}}
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'outbox_source_invalid'):
+                    outbox.QueuePublication(None, changed, outbox.digest(changed), only_note_id=target)
+
     def test_stale_idle_baseline_is_not_accepted(self):
         binding = {
             'contract': runtime.idle_recovery.REVIEWED_BASELINE_TAG,
