@@ -38,6 +38,7 @@ on:
   schedule:
     - cron: '23 * * * *'
 permissions:
+  actions: read
   contents: read
 concurrency:
   group: eddie-private-vault-writers
