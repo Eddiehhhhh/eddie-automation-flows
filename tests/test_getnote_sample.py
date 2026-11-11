@@ -34,24 +34,36 @@ def note(ident, kind='plain_text'):
 class GetSampleTests(unittest.TestCase):
     def test_canonical_policy_matches_reviewed_runtime_pin(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
+        permissions = workflow.split('permissions:\n', 1)[1].split('concurrency:\n', 1)[0]
+        self.assertEqual(permissions, '  actions: read\n  contents: read\n')
         encoded = re.search(r"POLICY_B64: '([^']+)'", workflow).group(1)
         policy_bytes = base64.b64decode(encoded, validate=True)
         policy = json.loads(policy_bytes)
         runtime_sha = re.search(r"RUNTIME_SHA: '([0-9a-f]{40})'", workflow).group(1)
-        self.assertEqual(runtime_sha, 'e5f0cf08c076ea466f1f51ced81dfecb5afd12dd')
+        self.assertEqual(runtime_sha, '8bf0a455fe7343fe5af6673bb2fdf232a1eb3b14')
         self.assertEqual(re.findall(r"(?m)^\s+ref: '([0-9a-f]{40})'$", workflow),
                          [runtime_sha, runtime_sha])
         self.assertEqual(workflow.count('- name: Verify pinned reviewed runtime'), 2)
         self.assertIn('run: test "$(git -C get-runtime rev-parse HEAD)" = "$RUNTIME_SHA"', workflow)
         self.assertEqual(policy['code_sha'], runtime_sha)
+        self.assertEqual(policy['controller_template_sha256'],
+                         '59dcc462719f391e554fd9974c9395a291c1e027efb7b9b322321129329ae762')
         self.assertEqual(policy['rules_sha256'], '8ebe7d2d5c64499129098e9dab68cec976aad00054be2226e10f8163fd47b328')
         self.assertEqual(policy['get_policy_sha256'], 'e007a84ecb47e504c6ef68f3b26ebc0955fdb56d5fa2a06c2e6bf17ee19cadbd')
-        expected_policy_sha256 = '7900623f635ee09acf5e6f80ea8b521d408f4d89beb73829d171d7958d86d654'
+        expected_policy_sha256 = '4e1a4b300182d42448a8b05c8d8c4de347dcdad5b0cc1f465e3c934117112e91'
         self.assertEqual(re.findall(r"(?m)^\s+POLICY_SHA256: '([0-9a-f]{64})'$", workflow),
                          [expected_policy_sha256] * 3)
         self.assertEqual(hashlib.sha256(policy_bytes).hexdigest(), expected_policy_sha256)
-        self.assertEqual(re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1),
-                         '48a908ffa6e229e5ad21fbd78cbf2a8c299b942492ce549f8ec3d3d85b8e58ef')
+        scope_sha = re.search(r"SCOPE_SHA256: '([0-9a-f]{64})'", workflow).group(1)
+        self.assertEqual(scope_sha,
+                         '08fd0ebe475f9fcda30e76a175cac0515492a6cc51d0c663e8531acada2149d4')
+        template = (Path(__file__).resolve().parents[1] /
+                    'get-runtime/.github/workflow-templates/get-canonical-controller.yml.disabled').read_text()
+        rendered = (template.replace('@@RUNTIME_SHA@@', runtime_sha)
+                    .replace('@@POLICY_B64@@', encoded)
+                    .replace('@@POLICY_SHA256@@', expected_policy_sha256)
+                    .replace('@@SCOPE_SHA256@@', scope_sha))
+        self.assertEqual(workflow, rendered)
 
     def test_cloud_test_note_reuses_complete_paginated_lookup(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/get-canonical.yml').read_text()
