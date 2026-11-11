@@ -190,6 +190,46 @@ class MainlineHistory(unittest.TestCase):
             with patch.object(loader, 'commit'):
                 loader.unchanged(self.root, self.merge)
 
+    def ancestry_loader(self, reader, *, witness=None):
+        loader = confirmed_source.Loader.__new__(confirmed_source.Loader)
+        loader.local = reader.local
+        loader.reader = reader
+        loader.history_witness = witness
+        loader.commits = set()
+        loader.metadata_seen = set()
+        loader.ancestry_metadata = lambda commit: tuple(reader.local.parents[commit])
+        reader.cache = {}
+        return loader
+
+    def test_source_ancestry_accepts_first_parent_merge(self):
+        parents = {self.root: [], self.linear: [self.root], self.side: [self.root], self.merge: [self.linear, self.side]}
+        reader = Reader(parents, {commit: self.tree for commit in parents})
+        self.ancestry_loader(reader).ancestry(self.root, self.merge)
+
+    def test_source_ancestry_rejects_second_parent_only_path(self):
+        parents = {self.root: [], self.linear: [self.root], self.side: [self.root], self.merge: [self.linear, self.side]}
+        reader = Reader(parents, {commit: self.tree for commit in parents})
+        with self.assertRaisesRegex(confirmed_source.SourceFailure, 'source_chain_invalid'):
+            self.ancestry_loader(reader).ancestry(self.side, self.merge)
+
+    def test_source_ancestry_rejects_octopus_merge(self):
+        third = 'e' * 40
+        parents = {self.root: [], self.linear: [self.root], self.side: [self.root],
+                   third: [self.root], self.merge: [self.linear, self.side, third]}
+        reader = Reader(parents, {commit: self.tree for commit in parents})
+        with self.assertRaisesRegex(confirmed_source.SourceFailure, 'source_chain_invalid'):
+            self.ancestry_loader(reader).ancestry(self.root, self.merge)
+
+    def test_witnessed_source_ancestry_accepts_verified_merge_interval(self):
+        parents = {self.root: [], self.linear: [self.root], self.side: [self.root], self.merge: [self.linear, self.side]}
+        reader = Reader(parents, {commit: self.tree for commit in parents})
+        witness = SimpleNamespace(receipt_commit=self.root, observed_commit=self.merge)
+        loader = self.ancestry_loader(reader, witness=object())
+        with patch.object(entry, 'select_history_witness', return_value=witness), \
+             patch.object(fake_outbox, 'witness_parent', return_value=self.root, create=True), \
+             patch.object(loader, 'commit'), patch.object(loader, 'blob'):
+            loader.ancestry(self.root, self.merge)
+
     def test_confirmed_source_loader_keeps_cumulative_commit_budget(self):
         middle1, middle2, second_root, second_tip = (
             format(i, '040x') for i in range(20, 24))
