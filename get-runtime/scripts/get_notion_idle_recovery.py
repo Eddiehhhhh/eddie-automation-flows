@@ -7,6 +7,7 @@ No clock exception, transport, writer, permission or budget is introduced here.
 """
 import get_private_runtime_bindings as _private_bindings
 from copy import deepcopy
+import re
 
 TAG = 'exact_idle_predecessor_checkpoint_v1'
 # Deliberately empty. Never predict a future run, checkpoint or state pin.
@@ -423,12 +424,23 @@ def reviewed_baseline():
     return deepcopy(b)
 
 
-def _reviewed_idle_state(state,sha,b):
+def _reviewed_idle_state(state,sha,b,*,target_policy=None):
     import get_notion_outbox as o
+    import get_private_preview_retention as retention
     o.check_state(state)
     engine=state['engine_state']
-    if (o.digest(state)!=sha or sha!=b['anchor']['state_sha256'] or len(o.encoded(state))!=b['state_bytes']
-            or state['policy_sha256']!=b['old_policy_sha256'] or engine['journal']is not None
+    raw=o.encoded(state)
+    exact_baseline=(state['policy_sha256']==b['old_policy_sha256']
+        and sha==b['anchor']['state_sha256'] and len(raw)==b['state_bytes']
+        and retention.oid(raw)==b['anchor']['state_blob'])
+    exact_successor=False
+    if target_policy is not None and state['policy_sha256']==target_policy:
+        predecessor=deepcopy(state);predecessor['policy_sha256']=b['old_policy_sha256']
+        previous_raw=o.encoded(predecessor)
+        exact_successor=(len(raw)==b['state_bytes'] and len(previous_raw)==b['state_bytes']
+            and o.digest(previous_raw)==b['anchor']['state_sha256']
+            and retention.oid(previous_raw)==b['anchor']['state_blob'])
+    if (o.digest(raw)!=sha or not (exact_baseline or exact_successor) or engine['journal']is not None
             or len(engine['receipts'])!=b['body_receipts'] or o.digest(engine['receipts'])!=b['body_receipts_sha256']
             or len(engine.get('property_receipts',{}))!=b['property_receipts'] or o.digest(engine.get('property_receipts',{}))!=b['property_receipts_sha256']
             or len(engine.get('unresolved_by_id',{}))!=b['unresolved'] or o.digest(engine.get('unresolved_by_id',{}))!=b['unresolved_sha256']
@@ -436,7 +448,7 @@ def _reviewed_idle_state(state,sha,b):
         o.fail('outbox_state_invalid')
 
 
-def reviewed_baseline_anchor(raw,public_policy,modes):
+def reviewed_baseline_anchor(raw,public_policy,modes,state_commit=None):
     """Selection is read-only; the original RemoteJournal revalidates this pin."""
     import get_notion_outbox as o
     import get_private_preview_retention as retention
@@ -445,11 +457,22 @@ def reviewed_baseline_anchor(raw,public_policy,modes):
     if b is None or any(mode is not None for mode in modes):return None
     if (public_policy.get('get_policy_sha256')!=entry.policy_sha256(entry.rules_sha256(),entry.BOOTSTRAP)
             or public_policy.get('rules_sha256')!=entry.rules_sha256()):o.fail('approval_missing')
-    # Changed state uses normal authenticated discovery; it never borrows this grant.
-    if not isinstance(raw,bytes) or o.digest(raw)!=b['anchor']['state_sha256']:return None
-    if len(raw)!=b['state_bytes'] or retention.oid(raw)!=b['anchor']['state_blob']:o.fail('outbox_state_invalid')
-    state=retention.strict_json(raw);_reviewed_idle_state(state,b['anchor']['state_sha256'],b)
-    return {'anchor':deepcopy(b['anchor']),'recovery_anchor':REVIEWED_BASELINE_TAG,
+    if not isinstance(raw,bytes):return None
+    digest=o.digest(raw);state=retention.strict_json(raw)
+    if o.encoded(state)!=raw:o.fail('outbox_state_invalid')
+    if digest==b['anchor']['state_sha256']:
+        _reviewed_idle_state(state,digest,b)
+        anchor=deepcopy(b['anchor'])
+    elif state.get('policy_sha256')==public_policy.get('get_policy_sha256'):
+        predecessor=deepcopy(state);predecessor['policy_sha256']=b['old_policy_sha256']
+        previous_raw=o.encoded(predecessor)
+        if (not isinstance(state_commit,str) or not re.fullmatch('[0-9a-f]{40}',state_commit)
+                or len(previous_raw)!=b['state_bytes'] or o.digest(previous_raw)!=b['anchor']['state_sha256']
+                or retention.oid(previous_raw)!=b['anchor']['state_blob']):return None
+        _reviewed_idle_state(state,digest,b,target_policy=public_policy['get_policy_sha256'])
+        anchor={'commit':state_commit,'state_blob':retention.oid(raw),'state_sha256':digest}
+    else:return None
+    return {'anchor':anchor,'recovery_anchor':REVIEWED_BASELINE_TAG,
             'approval_source':'reviewed_successor_capsule','get_run_success_claim':False,'private_readback_required':True}
 
 
@@ -459,8 +482,11 @@ def transition_reviewed_baseline(state,sha,new_get_policy_sha256):
     import get_recurring_policy_recovery as recovery
     b=reviewed_baseline()
     if b is None or new_get_policy_sha256!=recovery.current_get_policy() or new_get_policy_sha256==b['old_policy_sha256']:o.fail('approval_missing')
+    if state.get('policy_sha256')==new_get_policy_sha256:
+        _reviewed_idle_state(state,sha,b,target_policy=new_get_policy_sha256)
+        return deepcopy(state)
     _reviewed_idle_state(state,sha,b)
     result=deepcopy(state);result['policy_sha256']=new_get_policy_sha256
     o.check_state(result)
-    if {k:v for k,v in result.items()if k!='policy_sha256'}!={k:v for k,v in state.items()if k!='policy_sha256'}:o.fail('outbox_state_invalid')
+    _reviewed_idle_state(result,o.digest(result),b,target_policy=new_get_policy_sha256)
     return result

@@ -1,7 +1,9 @@
 """Explicitly disabled registries retain denial fences; no private inputs or API."""
 import ast
 from copy import deepcopy
+import json
 from pathlib import Path
+import re
 import sys
 import types
 import unittest
@@ -118,13 +120,14 @@ class ReviewedPolicyHandoff(unittest.TestCase):
             'body_receipts_sha256':self.digest(e['receipts']),'property_receipts_sha256':self.digest(e['property_receipts']),
             'unresolved_sha256':self.digest(e['unresolved_by_id'])}
         self.policy={'get_policy_sha256':'b'*64,'rules_sha256':'c'*64}
+        self.successor={**self.state,'policy_sha256':self.policy['get_policy_sha256']}
         codec=types.SimpleNamespace(check_state=lambda x:x,digest=self.digest,encoded=self.encode,fail=fail)
         mods={'get_notion_outbox':codec,'get_recurring_policy_recovery':types.SimpleNamespace(current_get_policy=lambda:'b'*64),
             'get_private_preview_retention':types.SimpleNamespace(oid=self.oid,strict_json=json.loads),
             'get_recurring_entry':types.SimpleNamespace(rules_sha256=lambda:'c'*64,BOOTSTRAP={},policy_sha256=lambda *args:'b'*64)}
         patcher=patch.dict(sys.modules,mods);patcher.start();self.addCleanup(patcher.stop)
         self.ns=functions('get_notion_idle_recovery.py',{'_reviewed_idle_state','reviewed_baseline_anchor','transition_reviewed_baseline'},
-            {'reviewed_baseline':lambda:deepcopy(self.binding),'deepcopy':deepcopy,'REVIEWED_BASELINE_TAG':'reviewed_successor_idle_baseline_v1',
+            {'reviewed_baseline':lambda:deepcopy(self.binding),'deepcopy':deepcopy,'re':re,'REVIEWED_BASELINE_TAG':'reviewed_successor_idle_baseline_v1',
              '_private_bindings':types.SimpleNamespace(value=lambda *args:deepcopy(self.state['engine_state']['unresolved_by_id']))})
 
     def test_reviewed_handoff_changes_only_outer_policy_not_any_receipt_hold_or_cursor(self):
@@ -132,23 +135,41 @@ class ReviewedPolicyHandoff(unittest.TestCase):
         self.assertEqual(after,{**self.state,'policy_sha256':'b'*64});self.assertEqual(self.state,old)
 
     def test_baseline_is_new_approval_not_fabricated_github_attempt(self):
-        found=self.ns['reviewed_baseline_anchor'](self.raw,self.policy,(None,None))
+        found=self.ns['reviewed_baseline_anchor'](self.raw,self.policy,(None,None),'d'*40)
         self.assertEqual(found['approval_source'],'reviewed_successor_capsule')
         self.assertFalse(found['get_run_success_claim']);self.assertNotIn('checkpoint',found);self.assertNotIn('run_id',found)
 
-    def test_changed_or_already_adopted_state_uses_normal_discovery(self):
-        after={**self.state,'policy_sha256':'b'*64}
-        self.assertIsNone(self.ns['reviewed_baseline_anchor'](self.encode(after),self.policy,(None,None)))
+    def test_noncanonical_state_encoding_is_rejected(self):
+        raw=json.dumps(self.state,ensure_ascii=False,separators=(',',':')).encode()
+        self.assertNotEqual(raw,self.raw)
+        with self.assertRaisesRegex(ValueError,'outbox_state_invalid'):
+            self.ns['reviewed_baseline_anchor'](raw,self.policy,(None,None),'d'*40)
+
+    def test_exact_successor_is_readable_and_transition_is_idempotent_after_failed_followup(self):
+        raw=self.encode(self.successor)
+        found=self.ns['reviewed_baseline_anchor'](raw,self.policy,(None,None),'d'*40)
+        self.assertEqual(found['anchor'],{'commit':'d'*40,'state_blob':self.oid(raw),'state_sha256':self.digest(raw)})
+        self.assertEqual(self.ns['transition_reviewed_baseline'](self.successor,self.digest(raw),'b'*64),self.successor)
+
+    def test_changed_successor_state_uses_normal_discovery(self):
         changed={**self.state,'source_cursor':{'changed':True}}
-        self.assertIsNone(self.ns['reviewed_baseline_anchor'](self.encode(changed),self.policy,(None,None)))
+        self.assertIsNone(self.ns['reviewed_baseline_anchor'](self.encode(changed),self.policy,(None,None),'d'*40))
+        changed_successor={**self.successor,'source_cursor':{'changed':True}}
+        self.assertIsNone(self.ns['reviewed_baseline_anchor'](self.encode(changed_successor),self.policy,(None,None),'d'*40))
+
+    def test_successor_with_any_non_policy_change_is_rejected(self):
+        changed={**self.successor,'source_cursor':{'changed':True}}
+        self.assertIsNone(self.ns['reviewed_baseline_anchor'](self.encode(changed),self.policy,(None,None),'d'*40))
+        with self.assertRaisesRegex(ValueError,'outbox_state_invalid'):
+            self.ns['transition_reviewed_baseline'](changed,self.digest(changed),'b'*64)
 
     def test_historical_modes_never_get_baseline_handoff(self):
-        self.assertIsNone(self.ns['reviewed_baseline_anchor'](self.raw,self.policy,({},None)))
+        self.assertIsNone(self.ns['reviewed_baseline_anchor'](self.raw,self.policy,({},None),'d'*40))
 
     def test_wrong_new_policy_or_unapproved_rules_rejected(self):
         with self.assertRaisesRegex(ValueError,'approval_missing'):self.ns['transition_reviewed_baseline'](self.state,self.digest(self.state),'d'*64)
         for key in self.policy:
-            with self.assertRaisesRegex(ValueError,'approval_missing'):self.ns['reviewed_baseline_anchor'](self.raw,{**self.policy,key:'d'*64},(None,None))
+            with self.assertRaisesRegex(ValueError,'approval_missing'):self.ns['reviewed_baseline_anchor'](self.raw,{**self.policy,key:'d'*64},(None,None),'d'*40)
 
     def test_active_changed_receipt_deleted_hold_or_changed_old_policy_rejected(self):
         for field in ('journal','receipts','property_receipts','unresolved_by_id','policy_sha256','source_cursor'):
