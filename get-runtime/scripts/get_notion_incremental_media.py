@@ -92,7 +92,8 @@ def _manifest(row):
 def source_assets(root, commit, ident, data, path, registry_row):
     """Return exact immutable assets after matching source refs and Git blobs."""
     try:
-        body = _source_body(data, ident)
+        from get_notion_credential_projection import render_body
+        body = render_body(data, ident, _source_body(data, ident))
         refs = []
         for match in re.finditer(r'!\[([^\]\r\n]*)\]\(([^\s()<>]+)\)', body):
             reference = match.group(2)

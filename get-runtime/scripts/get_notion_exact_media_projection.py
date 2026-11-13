@@ -2,12 +2,13 @@
 from copy import deepcopy
 import hashlib
 import json
+import get_exact_media_bindings as _private_bindings
 
-ID_SHA = '6f4340202c4bc131642b9e447933724dc3f4dff4721cba228716280da1b2868e'
-SOURCE_SHA = '41b28d545280e9ba762ac755781444a64b698feb384629dc49fdd7d6f73c4d42'
-IMAGE_LINE_SHA = '2087f79635e4229846d98735a1c568ce3123b15790a74e7f1b59f946339fd5fb'
-AUDIO_URL_SHA = '52b06d2a24c04a44bb5bad0a1ad19acc5b1fbf92dce931736b681d59bda09e8d'
-METADATA_SHA = 'f8f5e65d9d4a26a2b1b4163ec356989f5dae8e2019899d063da7976f33b9c138'
+ID_SHA = _private_bindings.value('get_notion_exact_media_projection', 'ID_SHA')
+SOURCE_SHA = _private_bindings.value('get_notion_exact_media_projection', 'SOURCE_SHA')
+IMAGE_LINE_SHA = _private_bindings.value('get_notion_exact_media_projection', 'IMAGE_LINE_SHA')
+AUDIO_URL_SHA = _private_bindings.value('get_notion_exact_media_projection', 'AUDIO_URL_SHA')
+METADATA_SHA = _private_bindings.value('get_notion_exact_media_projection', 'METADATA_SHA')
 
 
 def sha(raw):
