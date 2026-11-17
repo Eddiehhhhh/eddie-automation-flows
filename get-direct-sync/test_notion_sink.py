@@ -55,6 +55,13 @@ class Fake:
         assert len(json.dumps(b).encode())<=400000
 
 class Tests(unittest.TestCase):
+    def test_empty_title_uses_native_get_display_title(self):
+        from core import snapshot
+        n={'note_id':'1','title':'','display_title':'Synthetic native display','content':'body','updated_at':'synthetic','attachments':[]}
+        h=Fake();result=NotionSink(h,'db',Journal()).sync(snapshot(n))
+        self.assertEqual(result['title'],n['display_title'])
+        self.assertEqual(n['title'],'')
+
     def setUp(self):
         self.http=Fake(); self.j=Journal(); self.sink=NotionSink(self.http,'db',self.j)
         self.snap={'id':'123','version':'a'*64,'note':{'title':'title','content':'hello'}}

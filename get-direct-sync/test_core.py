@@ -21,6 +21,55 @@ class Sink:
   if self.fail:raise Hold('failure')
   return {'version':s['version']}
 class Tests(unittest.TestCase):
+ def test_verified_signature_only_change_keeps_version_and_original(self):
+  import copy
+  n=note();n['attachments']=[{'type':'image','url':'https://mediacdn.umiwi.com/a.png?Expires=1&OSSAccessKeyId=a&Signature=x&size=%2f#fragment'}]
+  newer=copy.deepcopy(n);newer['attachments'][0]['url']=newer['attachments'][0]['url'].replace('Expires=1','Expires=2').replace('Signature=x','Signature=y')
+  original=canonical(newer);self.assertEqual(snapshot(n)['version'],snapshot(newer)['version']);self.assertEqual(canonical(newer),original)
+  store=Store(':memory:');store.accept([snapshot(n)]);store.accept([snapshot(newer)]);self.assertEqual(store.pending_count(),0)
+  for change in ('path','query','content','unknown','host','link','partial','case'):
+   a=copy.deepcopy(n);b=copy.deepcopy(newer)
+   if change=='path':b['attachments'][0]['url']=b['attachments'][0]['url'].replace('/a.png','/b.png')
+   elif change=='query':b['attachments'][0]['url']=b['attachments'][0]['url'].replace('%2f','%2F')
+   elif change=='content':b['content']='edited'
+   elif change=='unknown':b['future_field']={'value':True}
+   elif change=='host':
+    for v in (a,b):v['attachments'][0]['url']=v['attachments'][0]['url'].replace('mediacdn.umiwi.com','get-notes.umiwi.com')
+   elif change=='link':
+    for v in (a,b):v['attachments'][0]['type']='link'
+   elif change=='partial':
+    for v in (a,b):v['attachments'][0]['url']=v['attachments'][0]['url'].replace('&OSSAccessKeyId=a','')
+   elif change=='case':
+    for v in (a,b):v['attachments'][0]['url']=v['attachments'][0]['url'].replace('Expires','expires')
+   with self.subTest(change=change):
+    self.assertNotEqual(snapshot(a)['version'],snapshot(b)['version'])
+    st=Store(':memory:');st.accept([snapshot(a)]);st.accept([snapshot(b)]);self.assertEqual(st.pending_count(),1)
+ def test_same_journal_and_hold_do_not_rewrite(self):
+  checkpoints=[];store=Store(':memory:',checkpoint=lambda db:checkpoints.append(db.total_changes));store.set('a',{'x':1,'y':2});count=len(checkpoints);changes=store.db.total_changes
+  store.set('a',{'y':2,'x':1});self.assertEqual((len(checkpoints),store.db.total_changes),(count,changes));store._held('notion','1','v',Hold('transport_uncertain'));changes=store.db.total_changes
+  store._held('notion','1','v',Hold('transport_uncertain'));self.assertEqual(store.db.total_changes,changes)
+ def test_bounded_drain_fair_fifo_and_restart(self):
+  class Selective(Sink):
+   def __init__(self):super().__init__();self.seen=[]
+   def sync(self,s,r=None):
+    self.seen.append((s['id'],s['version']))
+    if s['id']!='11':raise Hold('transport_uncertain')
+    return super().sync(s,r)
+  with tempfile.TemporaryDirectory() as d:
+   path=d+'/s';store=Store(path);store.accept([]);store.accept([snapshot(note(str(i))) for i in range(1,12)]);first=snapshot(note('11'));second=snapshot(note('11',text='second'));store.accept([second])
+   sink=Selective();store.drain({'github':sink,'notion':Sink()},limit=10);self.assertEqual(len(sink.seen),10);self.assertNotIn('11',[x[0] for x in sink.seen]);store.db.close()
+   store=Store(path);sink=Selective();store.drain({'github':sink,'notion':Sink()},limit=1);self.assertEqual(sink.seen,[('11',first['version'])]);self.assertEqual(store.pending_count(),11)
+   for _ in range(12):store.drain({'github':sink,'notion':Sink()},limit=1)
+   self.assertEqual([v for nid,v in sink.seen if nid=='11'],[first['version'],second['version']]);self.assertEqual(store.pending_count(),10)
+ def test_paused_pending_never_reaches_either_sink(self):
+  for limit in (None,1,10):
+   with self.subTest(limit=limit):
+    store=Store(':memory:');store.accept([]);first=snapshot(note('1'));store.accept([first,snapshot(note('2'))]);store.accept([snapshot(note('1',text='new'))])
+    a=Sink();b=Sink();result=store.drain({'github':a,'notion':b},limit=limit,paused_ids={'1'})
+    self.assertEqual((a.calls,b.calls),(1,1));self.assertEqual(result['pending'],2)
+    self.assertIsNone(store.receipt('github','1'));self.assertEqual(store.db.execute('SELECT count(*) FROM pending WHERE id=?',('1',)).fetchone()[0],2)
+    store.drain({'github':a,'notion':b},limit=10,paused_ids={'1'});self.assertEqual((a.calls,b.calls),(1,1))
+    store.drain({'github':a,'notion':b},limit=10);self.assertEqual(store.pending_count(),0)
  def test_baseline_new_modified_independent(self):
   store=Store(':memory:');a=Sink();b=Sink(True)
   store.accept([snapshot(note())]);self.assertEqual(store.drain({'github':a,'notion':b})['github']['verified'],0)
@@ -130,6 +179,17 @@ class Tests(unittest.TestCase):
   self.assertEqual(held[0]['id'],'1');self.assertEqual(held[0]['reason'],'recording_transcript_unavailable')
   self.assertIn('note',held[0])
   with self.assertRaisesRegex(Hold,'transcript'):GetSource(API()).scan()
+
+ def test_selected_history_still_reads_full_list_but_only_chosen_details(self):
+  class API:
+   def __init__(self):self.details=0;self.lists=0
+   def request(self,m,p,b=None):
+    if '/detail?' in p:self.details+=1;return {'success':True,'data':{'note':note('1')}}
+    self.lists+=1;second='cursor=' in p
+    return {'success':True,'data':{'notes':[note('2' if second else '1')],'has_more':not second,'cursor':'next'}}
+  api=API();source=GetSource(api);items=source.scan(select_note=lambda n:identity(n)=='1')
+  self.assertEqual([s['id'] for s in items],['1']);self.assertEqual((api.lists,api.details),(2,1))
+  self.assertEqual(source.observed_count,2)
 
  def test_incomplete_scan_no_accept(self):
   class API:

@@ -8,7 +8,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from urllib.parse import urlencode
-from render import render_text
+from render import render_text, source_title
 
 OWNER = 'get-direct-v1'
 
@@ -117,7 +117,7 @@ class NotionSink:
                 'properties': {
                     self.idprop: {'rich_text': rich(sid)},
                     self.ownerprop: {'rich_text': rich(self.owner)},
-                    self.titleprop: {'title': rich(utf16_chunks(str(snapshot['note'].get('title') or sid))[0])},
+                    self.titleprop: {'title': rich(utf16_chunks(source_title(snapshot))[0])},
                 }})
             state = {'phase': 'page_known', 'page_id': page['id'], 'version': version}
             self.journal.set(key, state)
@@ -132,7 +132,7 @@ class NotionSink:
             raise Hold('page_ownership_mismatch')
         parent = page.get('parent', {})
         if parent.get('database_id', '').replace('-', '') != self.database.replace('-', ''): raise Hold('page_parent_mismatch')
-        desired_title = utf16_chunks(str(snapshot['note'].get('title') or sid))[0]
+        desired_title = utf16_chunks(source_title(snapshot))[0]
         observed_title = plain(props.get(self.titleprop, {}).get('title', []))
         journal_receipt = state.get('receipt') if state.get('phase') == 'verified' else None
         if journal_receipt and receipt and journal_receipt['page_id'] != receipt['page_id']: raise Hold('page_identity_changed')

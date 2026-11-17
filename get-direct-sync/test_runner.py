@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from assets import asset_references
-from core import CheckpointFailure, Hold, snapshot
+from core import CheckpointFailure, Hold, Store, digest, snapshot
 from remote_state import unpack_checkpoint
 from test_core import note
 from test_remote_state import GitStateFake
@@ -32,13 +32,23 @@ class Source:
         self.error = None
         self.holds = []
 
-    def scan(self, *, on_note_hold=None):
+    def scan(self, *, on_note_hold=None, select_note=None):
         self.calls += 1
         if self.error:
             raise self.error
+        self.scan_complete = False
+        self.summaries = {s['id']: digest(s['note']) for s in self.notes + self.holds}
+        result = []
         for value in self.holds:
-            on_note_hold(copy.deepcopy(value))
-        return copy.deepcopy(self.notes)
+            value['summary_hash'] = self.summaries[value['id']]
+            if select_note is None or select_note(value['note']):
+                on_note_hold(copy.deepcopy(value))
+        self.observed_count=len(self.notes)+len(self.holds)
+        for s in self.notes:
+            if select_note is None or select_note(s['note']):
+                result.append(dict(s, summary_hash=self.summaries[s['id']]))
+        self.scan_complete = True
+        return copy.deepcopy(result)
 
 
 class Text:
@@ -99,12 +109,15 @@ class Tests(unittest.TestCase):
         self.ghtext, self.notext, self.ghmedia, self.nomedia = Text(), Text(), Media(), Media()
         Archive.calls = []
         for name, value in [('GetSource', self.source), ('VaultGitHubSink', self.ghtext),
-                            ('NotionSink', self.notext), ('GitHubMedia', self.ghmedia),
+                            ('NotionSink', self.notext), ('ProjectedNotionSink', self.notext), ('GitHubMedia', self.ghmedia),
                             ('NotionMedia', self.nomedia)]:
             p = patch('runner.' + name, return_value=value)
             p.start()
             self.addCleanup(p.stop)
         p = patch('runner.AssetArchive', Archive)
+        p.start()
+        self.addCleanup(p.stop)
+        p = patch('runner.publish_source_index', return_value={'status': 'partial', 'summary': {}})
         p.start()
         self.addCleanup(p.stop)
 
@@ -115,6 +128,65 @@ class Tests(unittest.TestCase):
         result, status = self.run_mode('baseline')
         self.assertEqual(status, 0)
         self.assertEqual(result['pending'], 0)
+
+    def update_private_state(self, change):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            root.chmod(0o700)
+            remote = runner.RemoteState(self.github, self.cfg['private_repo'],
+                                        self.cfg['state_branch'], self.cfg['namespace'], 'test-owner')
+            remote.acquire(root / 'state.sqlite')
+            store = Store(root / 'state.sqlite', checkpoint=remote.checkpoint)
+            try:
+                change(store)
+            finally:
+                store.db.close()
+                remote.release()
+
+    def test_private_pause_policy_skips_source_details_and_target_writes(self):
+        self.baseline()
+        self.update_private_state(lambda s: s.set('sync_policy', {'paused_ids': ['1']}))
+        self.source.notes = [snapshot(note('1', text='paused change')), snapshot(note('2'))]
+        result, status = self.run_mode('sync')
+        self.assertEqual(status, 0)
+        self.assertEqual(result['paused_sources'], 1)
+        self.assertEqual([s['id'] for s, _ in self.ghtext.calls], ['2'])
+
+    def test_delivery_budget_retains_work_for_next_run(self):
+        self.baseline()
+        self.source.notes = [snapshot(note(str(i))) for i in range(2, 7)]
+        first, status = self.run_mode('sync', 2)
+        self.assertEqual(status, 0)
+        self.assertEqual(first['pending'], 3)
+        second, status = self.run_mode('drain', 2)
+        self.assertEqual(status, 0)
+        self.assertEqual(second['pending'], 1)
+        self.assertEqual(len(self.ghtext.calls), 4)
+
+    def test_pause_policy_also_protects_previously_pending_notes(self):
+        self.baseline()
+        self.source.notes = [snapshot(note(text='pending change'))]
+        self.notext.error = Hold('managed_content_modified')
+        self.run_mode('sync')
+        self.update_private_state(lambda s: s.set('sync_policy', {'paused_ids': ['1']}))
+        before = (len(self.ghtext.calls), len(self.notext.calls))
+        result, status = self.run_mode('drain')
+        self.assertEqual(status, 0)
+        self.assertEqual((result['pending'], result['paused_pending']), (1, 1))
+        self.assertEqual((len(self.ghtext.calls), len(self.notext.calls)), before)
+
+    def test_incomplete_metadata_retains_retry_after_text_success(self):
+        self.baseline()
+        self.source.notes = [snapshot(note('2'))]
+        original = self.notext.sync
+        self.notext.sync = lambda s, receipt=None: dict(original(s, receipt), projection={'status': 'partial'})
+        result, status = self.run_mode('sync')
+        self.assertEqual(status, 2)
+        self.assertEqual(result['pending'], 1)
+        self.assertEqual(result['held_reasons'], {'metadata_projection_incomplete': 1})
+        self.notext.sync = original
+        result, status = self.run_mode('drain')
+        self.assertEqual((status, result['pending']), (0, 0))
 
     def test_baseline_never_delivers_and_repeat_never_rescans(self):
         self.baseline()
@@ -224,6 +296,10 @@ class Tests(unittest.TestCase):
         self.assertEqual((result['source_holds'], result['source_holds_active']), (1, 1))
         self.assertEqual(result['github']['verified'], 1)
         self.assertEqual(result['pending'], 0)
+        again, status = self.run_mode('sync')
+        self.assertEqual(status, 0)
+        self.assertEqual(again['source_holds_active'], 1)
+        self.assertEqual(again['new_source_holds'], 0)
         self.source.holds = []
         recovered = note('9', text='now valid')
         self.source.notes.append(snapshot(recovered))
@@ -338,7 +414,68 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.source.calls, 0)
 
 
+class CutoverTests(unittest.TestCase):
+    def check(self, *, active=False, queued_jobs=0, enabled=False, invalid=False):
+        cfg = dict(config(), scope='production')
+        class Control:
+            def request(self, method, path, body=None):
+                if '/jobs?' in path:
+                    return {'total_count': queued_jobs, 'jobs': [] if not queued_jobs else [{}]}
+                if '/runs?' in path:
+                    rows = [{'id': 123}] if active or 'status=queued' in path else []
+                    return {'total_count': len(rows) + int(invalid), 'workflow_runs': rows}
+                return {'state': 'active' if enabled else 'disabled_manually'}
+        runner.verify_legacy_writers(cfg, Control(), {'GITHUB_REPOSITORY': 'owner/runtime'})
+
+    def test_disabled_old_program_with_unassigned_phantom_is_readable(self):
+        self.check()
+
+    def test_old_program_cannot_overlap_new_writer(self):
+        for options in ({'active': True}, {'queued_jobs': 1}, {'enabled': True}, {'invalid': True}):
+            with self.subTest(options=options), self.assertRaises(Hold):
+                self.check(**options)
+
+    def test_production_without_official_runtime_context_holds(self):
+        with self.assertRaisesRegex(Hold, 'production_control_plane_required'):
+            runner.verify_legacy_writers(dict(config(), scope='production'), object(), {})
+
+
 class ManifestRecoveryTests(unittest.TestCase):
+    def test_expired_first_archive_refreshes_only_same_source_revision(self):
+        from assets import AssetArchive
+        from retry import HTTPFailure
+        from test_assets import Transport
+        from test_notion_sink import Journal
+        old = note()
+        base = 'https://mediacdn.umiwi.com/test.ogg?Expires='
+        old['attachments'] = [{'url': base + '1&OSSAccessKeyId=key&Signature=old', 'type': 'audio'}]
+        fresh = copy.deepcopy(old)
+        fresh['attachments'][0]['url'] = base + '2&OSSAccessKeyId=key&Signature=fresh'
+        class Expiring(Transport):
+            def open(self, url):
+                if 'Expires=1&' in url:
+                    raise HTTPFailure(403)
+                return super().open(url)
+        class SourceHTTP:
+            def request(self, method, path, body=None):
+                return {'success': True, 'data': {'note': fresh}}
+        original = copy.deepcopy(old)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = AssetArchive(Path(directory).resolve(), Expiring())
+            try:
+                journal = Journal()
+                s = snapshot(old)
+                manifest = runner.ManifestCache(archive, journal, get_http=SourceHTTP()).get(s)
+                self.assertEqual(len(runner.manifest_assets(s, manifest)), 1)
+                asset = manifest['assets'][0]
+                self.assertNotEqual(asset['source_url_sha256'], asset['retrieval_url_sha256'])
+                self.assertEqual(old, original)
+                fresh['content'] = 'new source content'
+                with self.assertRaisesRegex(Hold, 'asset_refresh_revision_changed'):
+                    runner.ManifestCache(archive, Journal(), get_http=SourceHTTP()).get(s)
+            finally:
+                archive.close()
+
     def recovery_case(self, *, changed_bytes=False, source_id='1', same_url=False):
         from assets import AssetArchive
         from media_delivery import GitHubMedia

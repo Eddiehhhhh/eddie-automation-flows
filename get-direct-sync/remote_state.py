@@ -2,7 +2,8 @@
 
 The branch must already exist and be dedicated to this namespace. The caller uses
 an empty private runner directory, acquire(path), Store(path, checkpoint=checkpoint),
-and finally release(). A crashed lease needs explicit owner recovery; no expiry.
+and finally release(). Only verified completed attempts of this same workflow
+may recover a crashed lease; elapsed time never authorizes takeover.
 """
 import base64
 import hashlib
@@ -23,6 +24,7 @@ MAX_COMPRESSED = 8 * 1024 * 1024
 MAX_RAW = 128 * 1024 * 1024
 STATE_FILE = 'get-direct-state.json'
 SCHEMA = 'get-direct-remote-state-v1'
+WORKFLOW_PATH = '.github/workflows/get-direct-sync.yml'
 
 
 def git_blob_sha(data):
@@ -67,6 +69,7 @@ class RemoteState:
         self.owner = owner
         self.lease = None
         self.path = None
+        self.recovery_evidence = None
         self.prefix = '/repos/' + repo
         self.ref = 'heads/' + urllib.parse.quote(branch, safe='/')
 
@@ -113,7 +116,19 @@ class RemoteState:
         unpack_checkpoint(doc['checkpoint'])
         return head, tree_sha, doc
 
-    def _publish(self, head, tree_sha, doc):
+    def _publish(self, head, tree_sha, doc, *, recovery=None):
+        message = 'Checkpoint private Get synchronization state'
+        if recovery is not None:
+            if (set(recovery) != {'previous_run_id', 'previous_attempt', 'previous_status', 'checkpoint_sha256'} or
+                    type(recovery['previous_run_id']) is not int or recovery['previous_run_id'] <= 0 or
+                    type(recovery['previous_attempt']) is not int or recovery['previous_attempt'] <= 0 or
+                    recovery['previous_status'] != 'completed' or
+                    recovery['checkpoint_sha256'] is not None and
+                    not re.fullmatch('[0-9a-f]{64}', recovery['checkpoint_sha256'])):
+                raise Hold('remote_state_recovery_evidence_invalid')
+            message = ('Recover completed Get sync run ' + str(recovery['previous_run_id']) +
+                       ' attempt ' + str(recovery['previous_attempt']) + '; status=completed; checkpoint=' +
+                       (recovery['checkpoint_sha256'] or 'none'))
         body = canonical(doc).encode()
         blob = self.http.request('POST', self.prefix + '/git/blobs', {
             'encoding': 'base64', 'content': base64.b64encode(body).decode()})
@@ -123,7 +138,7 @@ class RemoteState:
             'base_tree': tree_sha, 'tree': [{'path': STATE_FILE, 'mode': '100644',
                                           'type': 'blob', 'sha': blob['sha']}]})
         commit = self.http.request('POST', self.prefix + '/git/commits', {
-            'message': 'Checkpoint private Get synchronization state',
+            'message': message,
             'tree': tree['sha'], 'parents': [head]})
         desired = commit['sha']
         try:
@@ -138,6 +153,85 @@ class RemoteState:
             raise Hold('remote_state_readback_mismatch')
         return desired
 
+
+    @staticmethod
+    def _owner_attempt(owner):
+        if not isinstance(owner, str):
+            return None
+        match = re.fullmatch(r'(?:get-direct|github|get-run-get-direct)-([1-9][0-9]{0,30})-([1-9][0-9]{0,5})', owner)
+        return (int(match[1]), int(match[2])) if match else None
+
+    def _github_attempt(self, runtime_repo, run_id, attempt):
+        path = '/repos/' + runtime_repo + '/actions/runs/' + str(run_id) + '/attempts/' + str(attempt)
+        try:
+            row = self.http.request('GET', path)
+        except Exception:
+            raise Hold('remote_state_control_plane_unavailable') from None
+        if not isinstance(row, dict):
+            raise Hold('remote_state_control_plane_unverified')
+        repository, head = row.get('repository'), row.get('head_repository')
+        wire_path = row.get('path')
+        workflow, separator, ref = wire_path.partition('@') if isinstance(wire_path, str) else ('', '', '')
+        if (type(row.get('id')) is not int or row['id'] != run_id or
+                type(row.get('run_attempt')) is not int or row['run_attempt'] != attempt or
+                workflow != WORKFLOW_PATH or separator and
+                (not ref or not re.fullmatch(r'[A-Za-z0-9_./-]+', ref) or '..' in ref or '//' in ref) or
+                type(row.get('workflow_id')) is not int or row['workflow_id'] <= 0 or
+                not isinstance(repository, dict) or not isinstance(head, dict) or
+                repository.get('full_name') != runtime_repo or head.get('full_name') != runtime_repo or
+                type(repository.get('id')) is not int or repository['id'] <= 0 or
+                type(head.get('id')) is not int or repository['id'] != head['id'] or
+                repository.get('fork') is not False or head.get('fork') is not False or
+                not isinstance(row.get('head_sha'), str) or not re.fullmatch('[0-9a-f]{40}', row['head_sha'])):
+            raise Hold('remote_state_control_plane_unverified')
+        return row
+
+    def recover_completed_lease(self, *, environ=None):
+        """Recover only a completed same-program attempt proven by GitHub's API."""
+        if self.lease is not None:
+            raise Hold('remote_state_already_acquired')
+        env = os.environ if environ is None else environ
+        current = self._owner_attempt(self.owner)
+        runtime_repo, workflow_ref = env.get('GITHUB_REPOSITORY'), env.get('GITHUB_WORKFLOW_REF')
+        run, attempt = env.get('GITHUB_RUN_ID'), env.get('GITHUB_RUN_ATTEMPT')
+        if (current is None or not isinstance(runtime_repo, str) or
+                not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}', runtime_repo) or
+                runtime_repo.split('/')[1] in ('.', '..') or not isinstance(workflow_ref, str) or
+                not workflow_ref.startswith(runtime_repo + '/' + WORKFLOW_PATH + '@') or
+                not isinstance(run, str) or not re.fullmatch('[1-9][0-9]{0,30}', run) or
+                not isinstance(attempt, str) or not re.fullmatch('[1-9][0-9]{0,5}', attempt) or
+                current != (int(run), int(attempt))):
+            raise Hold('remote_state_owned_no_takeover')
+        ref = workflow_ref[len(runtime_repo + '/' + WORKFLOW_PATH + '@'):]
+        if not re.fullmatch(r'refs/(?:heads|tags)/[A-Za-z0-9][A-Za-z0-9_./-]{0,200}', ref) or '..' in ref or '//' in ref:
+            raise Hold('remote_state_owned_no_takeover')
+        head, tree, doc = self._read()
+        previous_lease = doc['lease']
+        previous = self._owner_attempt(previous_lease.get('owner')) if previous_lease else None
+        if previous is None or previous == current:
+            raise Hold('remote_state_owned_no_takeover')
+        active = self._github_attempt(runtime_repo, *current)
+        completed = self._github_attempt(runtime_repo, *previous)
+        if (active.get('status') != 'in_progress' or completed.get('status') != 'completed' or
+                active['workflow_id'] != completed['workflow_id'] or
+                active['repository']['id'] != completed['repository']['id']):
+            raise Hold('remote_state_owner_not_verified_completed')
+        fresh_head, fresh_tree, fresh = self._read()
+        if fresh_head != head or fresh != doc:
+            raise Hold('remote_state_recovery_raced')
+        checkpoint = doc['checkpoint']['sha256'] if doc['checkpoint'] else None
+        proof = {'previous_run_id': previous[0], 'previous_attempt': previous[1],
+                 'previous_status': 'completed', 'checkpoint_sha256': checkpoint}
+        fresh['lease'] = None
+        recovery_commit = self._publish(fresh_head, fresh_tree, fresh, recovery=proof)
+        self.recovery_evidence = {**proof, 'reason': 'verified_completed_same_program_attempt',
+            'runtime_repository': runtime_repo, 'workflow_path': WORKFLOW_PATH,
+            'previous_owner': previous_lease['owner'], 'previous_head_sha': completed['head_sha'],
+            'current_run_id': current[0], 'current_attempt': current[1],
+            'current_head_sha': active['head_sha'], 'state_before_head': head,
+            'recovery_commit': recovery_commit}
+        return dict(self.recovery_evidence)
+
     def acquire(self, sqlite_path):
         if self.lease is not None:
             raise Hold('remote_state_already_acquired')
@@ -150,7 +244,10 @@ class RemoteState:
             raise Hold('remote_state_private_empty_path_required')
         head, tree, doc = self._read()
         if doc['lease'] is not None:
-            raise Hold('remote_state_owned_no_takeover')
+            self.recover_completed_lease()
+            head, tree, doc = self._read()
+            if doc['lease'] is not None:
+                raise Hold('remote_state_recovery_raced')
         raw = unpack_checkpoint(doc['checkpoint'])
         lease = {'owner': self.owner, 'lease_id': secrets.token_hex(16)}
         doc['lease'] = lease

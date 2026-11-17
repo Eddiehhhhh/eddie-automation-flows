@@ -1,6 +1,7 @@
 """Cloud-only Get fan-out runner. Logs contain counts, never source snapshots."""
 import argparse
 from collections import Counter
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,12 +11,15 @@ import tempfile
 
 from assets import AssetArchive, AssetTransport, asset_references
 from core import CheckpointFailure, GetSource, Hold, Store, identity, requires_binary_assets, snapshot
+from incremental_source import IncrementalSelector
 from live_http import HTTP, NotionDownload, PacedHTTP
 from media_delivery import GitHubMedia, NotionMedia, manifest_assets, read_asset_bytes
 from notion_sink import NotionSink
+from notion_projection import ProjectedNotionSink
 from remote_state import RemoteState
 from retry import HTTPFailure
 from vault_sink import VaultGitHubSink
+from source_index import publish as publish_source_index
 
 ENV_NAMES = ('GET_SYNC_CONFIG_JSON', 'GETNOTE_API_KEY', 'GETNOTE_CLIENT_ID',
              'PRIVATE_VAULT_TOKEN', 'NOTION_API_KEY')
@@ -139,6 +143,28 @@ class ManifestCache:
         self.archive, self.store, self.cache = archive, store, {}
         self.github_media, self.get_http = github_media, get_http
 
+    def _archive(self, s):
+        try:
+            return self.archive.archive_snapshot(s)
+        except HTTPFailure as error:
+            if self.get_http is None or error.status not in (401, 403, 404, 410):
+                raise
+        from urllib.parse import urlencode
+        result = self.get_http.request('GET', '/open/api/v1/resource/note/detail?' +
+                                       urlencode({'id': s['id'], 'image_quality': 'original'}))
+        if not result or result.get('success') is not True:
+            raise Hold('asset_refresh_source_invalid')
+        fresh = snapshot(result.get('data', {}).get('note', {}))
+        if fresh['id'] != s['id'] or fresh['version'] != s['version']:
+            raise Hold('asset_refresh_revision_changed')
+        manifest = self.archive.archive_snapshot(fresh)
+        original = {ref['field']: hashlib.sha256(ref['url'].encode()).hexdigest()
+                    for ref in asset_references(s['note'])}
+        for asset in manifest_assets(fresh, manifest):
+            asset['retrieval_url_sha256'] = asset['source_url_sha256']
+            asset['source_url_sha256'] = original[asset['source_field']]
+        return manifest
+
     def _restore(self, s, manifest):
         refs = {ref['field']: ref['url'] for ref in asset_references(s['note'])}
         refreshed = None
@@ -175,7 +201,7 @@ class ManifestCache:
                 self._restore(s, previous)
                 manifest = previous
             else:
-                manifest = self.archive.archive_snapshot(s)
+                manifest = self._archive(s)
                 manifest_assets(s, manifest)
                 if previous is not None and previous != manifest:
                     raise Hold('asset_manifest_changed')
@@ -200,6 +226,8 @@ class CompleteSink:
             raise Hold('unverified_receipt')
         self.store.set(key, text)
         if not binary:
+            if text.get('projection', {}).get('status') == 'partial':
+                raise Hold('metadata_projection_incomplete')
             return text
         self.store.set('media_intent:' + self.name + ':' + s['id'] + ':' + s['version'],
                        {'phase': 'delivery_intent', 'version': s['version']})
@@ -209,6 +237,8 @@ class CompleteSink:
             media = self.media.sync(s, text, manifest, self.root)
         if media.get('version') != s['version'] or media.get('binary_assets_verified') is not True:
             raise Hold('binary_assets_not_verified')
+        if text.get('projection', {}).get('status') == 'partial':
+            raise Hold('metadata_projection_incomplete')
         return {**text, 'media': media, 'binary_assets_verified': True,
                 'content_scope': 'text_and_binary_assets'}
 
@@ -219,11 +249,40 @@ def complete(store, s):
                for k in ('github', 'notion'))
 
 
+def verify_legacy_writers(cfg, github_http, environ=None):
+    if cfg['scope'] != 'production':
+        return
+    env = os.environ if environ is None else environ
+    repo = env.get('GITHUB_REPOSITORY')
+    if not isinstance(repo, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
+        raise Hold('production_control_plane_required')
+    for workflow in ('get-canonical.yml', 'get-notion-incremental.yml'):
+        path = '/repos/' + repo + '/actions/workflows/' + workflow
+        definition = github_http.request('GET', path)
+        if not definition or definition.get('state') != 'disabled_manually':
+            raise Hold('legacy_writer_not_disabled')
+        for status in ('in_progress', 'queued'):
+            result = github_http.request('GET', path + '/runs?per_page=100&status=' + status)
+            if (not isinstance(result, dict) or type(result.get('total_count')) is not int or
+                    result['total_count'] > 100 or not isinstance(result.get('workflow_runs'), list) or
+                    result['total_count'] != len(result['workflow_runs'])):
+                raise Hold('legacy_writer_control_unverified')
+            for run in result['workflow_runs']:
+                if status == 'in_progress':
+                    raise Hold('legacy_writer_running')
+                if type(run.get('id')) is not int or run['id'] <= 0:
+                    raise Hold('legacy_writer_control_unverified')
+                jobs = github_http.request('GET', '/repos/' + repo + '/actions/runs/' + str(run['id']) + '/jobs?per_page=100')
+                if not isinstance(jobs, dict) or jobs.get('total_count') != 0 or jobs.get('jobs') != []:
+                    raise Hold('legacy_writer_queued_with_jobs')
+
+
 def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=None):
     if mode not in MODES or type(batch_size) is not int or not 1 <= batch_size <= 10:
         raise Hold('runner_arguments_invalid')
     if mode == 'inspect':
         return inspect(cfg, get_http, github_http, notion_http), 0
+    verify_legacy_writers(cfg, github_http)
     remote = RemoteState(github_http, cfg['private_repo'], cfg['state_branch'],
                          cfg['namespace'], owner or run_owner({}))
     store, archive = None, None
@@ -236,6 +295,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
         try:
             remote.acquire(root / 'state.sqlite')
             store = Store(root / 'state.sqlite', checkpoint=remote.checkpoint)
+            if getattr(remote, 'recovery_evidence', None):
+                store.set('last_verified_lease_recovery', remote.recovery_evidence)
             initialized = store.db.execute("SELECT 1 FROM meta WHERE k='initialized'").fetchone() is not None
             if mode == 'baseline' and (initialized or store.pending_count() or
                                       store.db.execute('SELECT count(*) FROM inventory').fetchone()[0]):
@@ -243,14 +304,45 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
             if mode != 'baseline' and not initialized:
                 raise Hold('baseline_required')
             store.bind(cfg)
-            observed, selected, source_holds = 0, 0, []
+            observed, selected, source_holds, new_source_holds = 0, 0, [], []
+            policy = store.get('sync_policy') or {'paused_ids': []}
+            paused_ids = policy.get('paused_ids')
+            if (not isinstance(paused_ids, list) or len(paused_ids) > 10000 or
+                    any(not isinstance(sid, str) or not re.fullmatch('[0-9]+', sid) for sid in paused_ids)):
+                raise Hold('source_policy_invalid')
             if mode in ('baseline', 'sync', 'backfill'):
                 def source_hold(value):
                     source_holds.append(value['id'])
-                    store.set('source_hold_history:' + value['id'] + ':' + value['version'], value)
+                selector = IncrementalSelector(store, paused_ids) if mode == 'sync' else None
+                staged_holds = []
+                def stage_source_hold(value):
+                    source_hold(value)
+                    staged_holds.append(value)
+                if mode=='backfill':
+                    waiting_ids={row[0] for row in store.db.execute('SELECT id FROM pending')}
+                    delivered=set(store.db.execute('SELECT id,version FROM delivered'))
+                    inventory=dict(store.db.execute('SELECT id,version FROM inventory'))
+                    chosen=set()
+                    def selector(summary):
+                        sid=identity(summary)
+                        if len(chosen)>=batch_size or sid in paused_ids or sid in waiting_ids or (sid,inventory.get(sid)) in delivered:return False
+                        prior=store.get('source_hold:'+sid)
+                        if (prior and prior.get('status')=='held'
+                            and prior.get('note',{}).get('updated_at')==summary.get('updated_at')):return False
+                        chosen.add(sid);return True
+                source=GetSource(get_http)
+                snapshots = source.scan(on_note_hold=stage_source_hold,select_note=selector)
+                observed = getattr(source,'observed_count',len(snapshots)+len(source_holds))
+                for value in staged_holds:
+                    previous = store.get('source_hold:' + value['id'])
+                    if (previous and previous.get('status') == 'held' and
+                            all(previous.get(k) == value[k] for k in ('version', 'reason'))):
+                        continue
+                    new_source_holds.append(value['id'])
+                    history_key = 'source_hold_history:' + value['id'] + ':' + value['version']
+                    if store.get(history_key) is None:
+                        store.set(history_key, value)
                     store.set('source_hold:' + value['id'], dict(value, status='held'))
-                snapshots = GetSource(get_http).scan(on_note_hold=source_hold)
-                observed = len(snapshots) + len(source_holds)
                 for s in snapshots:
                     current_key = 'source_hold:' + s['id']
                     previous = store.get(current_key)
@@ -266,6 +358,9 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                     # Only this reviewed batch advances inventory and enters the outbox.
                     store.accept(batch)
                     store.enqueue(batch)
+                elif mode == 'sync':
+                    selector.commit(source, snapshots)
+                    selected = len(snapshots)
                 else:
                     store.accept(snapshots)
             counts = {'github': {'verified': 0, 'held': 0}, 'notion': {'verified': 0, 'held': 0}}
@@ -275,6 +370,7 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                                              cfg['namespace'], store, raw_prefix=cfg['raw_prefix'])
                 notion_text = NotionSink(notion_http, cfg['notion_database_id'], store,
                                         namespace=cfg['namespace'], **cfg['notion_properties'])
+                notion_text = ProjectedNotionSink(notion_text,notion_http,cfg['notion_database_id'],store,cfg['namespace'])
                 github_media = GitHubMedia(github_http, cfg['private_repo'], cfg['data_branch'], cfg['namespace'])
                 manifests = ManifestCache(archive, store, github_media, get_http)
                 notion_media = NotionMedia(notion_http, cfg['notion_database_id'], store,
@@ -282,14 +378,20 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                                           **cfg['notion_properties'])
                 counts = store.drain({
                     'github': CompleteSink('github', github_text, github_media, store, manifests, assets),
-                    'notion': CompleteSink('notion', notion_text, notion_media, store, manifests, assets)})
+                    'notion': CompleteSink('notion', notion_text, notion_media, store, manifests, assets)},
+                    limit=batch_size, paused_ids=paused_ids)
+            index = publish_source_index(store, github_http, cfg)
             reasons = dict(Counter(row[0] for row in store.db.execute('SELECT reason FROM held')))
             active_source_holds = sum(json.loads(row[0]).get('status') != 'resolved'
                                       for row in store.db.execute("SELECT v FROM journal WHERE k LIKE 'source_hold:%'"))
             report = {'phase': mode, 'observed': observed, 'selected': selected,
                       'source_holds': len(source_holds), 'source_holds_active': active_source_holds,
+                      'new_source_holds': len(new_source_holds), 'paused_sources': len(paused_ids),
+                      'paused_pending': sum(row[0] in set(paused_ids)
+                                            for row in store.db.execute('SELECT id FROM pending')),
                       'pending': store.pending_count(), 'github': counts['github'],
-                      'notion': counts['notion'], 'held_reasons': reasons}
+                      'notion': counts['notion'], 'held_reasons': reasons,
+                      'inventory_status': index['status'], 'index_summary': index['summary']}
         finally:
             if archive is not None:
                 archive.close()
@@ -297,7 +399,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 store.db.close()
             if remote.lease is not None:
                 remote.release()
-    return report, 2 if report['pending'] or report['source_holds_active'] else 0
+    failed = report['new_source_holds'] or any(report[name]['held'] for name in ('github', 'notion'))
+    return report, 2 if failed else 0
 
 
 def main(argv=None, environ=None):
