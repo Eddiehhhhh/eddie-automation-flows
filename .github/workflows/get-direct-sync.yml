@@ -1,0 +1,124 @@
+# Manual-only runtime; production scheduling remains disabled until acceptance.
+# Runtime source modules are expected at get-direct-sync/ in the public code repo.
+name: Direct Get dual destination sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Explicit operation (inspect is read only)
+        type: choice
+        options: [inspect, baseline, sync, backfill, drain]
+        default: inspect
+        required: true
+      batch_size:
+        description: Maximum historical notes enqueued (1 to 10)
+        type: string
+        default: '10'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      GIT_TERMINAL_PROMPT: '0'
+      CODEX_THREAD_ID: get-direct-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out current public runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: get-runtime
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Check out private rules without note or media bodies
+        env:
+          GH_TOKEN: ${{ secrets.GET_DIRECT_PRIVATE_TOKEN || secrets.PRIVATE_VAULT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
+          gh auth setup-git --hostname github.com
+          git init -q vault
+          git -C vault remote add origin https://github.com/Eddiehhhhh/eddie-llm-wiki.git
+          git -C vault config core.sparseCheckout true
+          cat > vault/.git/info/sparse-checkout <<'SPARSE'
+          /AGENTS.md
+          /Wiki/
+          /Schema/
+          /scripts/
+          /Scripts/
+          /.github/
+          /.sync/get-notion/
+          /.sync/get-notion-incremental/
+          /Raw/03 Get/03 State/
+          SPARSE
+          git -C vault fetch --filter=blob:none --no-tags origin refs/heads/main > "$RUNNER_TEMP/get-direct-checkout.txt" 2>&1
+          git -C vault checkout -q -b main FETCH_HEAD
+          test "$(git -C vault rev-parse --is-shallow-repository)" = false
+          test "$(git -C vault rev-parse origin/main)" = "$(git -C vault rev-parse HEAD)"
+          test -z "$(git -C vault status --porcelain --untracked-files=all)"
+      - name: Read private rules
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('AGENTS.md', 'Wiki/索引.md', 'Wiki/06 Systems/01 Routing/规则入口索引.md',
+                       'Schema/执行规范.md', 'Schema/同步规范.md'):
+              assert Path(name).read_text(encoding='utf-8').strip()
+          print('Required private-vault rules read.')
+          PY
+      - name: Check read-only context
+        if: ${{ inputs.mode == 'inspect' }}
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 Scripts/task_preflight.py --context-only > "$RUNNER_TEMP/get-direct-context.txt"
+      - name: Acquire private write lease
+        if: ${{ inputs.mode != 'inspect' }}
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-direct-preflight.txt"
+          grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-direct-preflight.txt"
+      - name: Execute explicit direct sync mode
+        working-directory: get-runtime/get-direct-sync
+        env:
+          GET_SYNC_CONFIG_JSON: ${{ secrets.GET_SYNC_CONFIG_JSON }}
+          GETNOTE_API_KEY: ${{ secrets.GET_DIRECT_API_KEY || secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.GET_DIRECT_PRIVATE_TOKEN || secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.GET_DIRECT_NOTION_TOKEN || secrets.NOTION_API_KEY }}
+          RUN_MODE: ${{ inputs.mode }}
+          RUN_BATCH_SIZE: ${{ inputs.batch_size }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 runner.py --mode "$RUN_MODE" --batch-size "$RUN_BATCH_SIZE"
+      - name: Release only this run's private rule lease
+        if: ${{ always() && inputs.mode != 'inspect' }}
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('Scripts').resolve()))
+          from task_guard import guard_directory, release_guard
+          from vault_integration_guard import release
+          root = Path.cwd()
+          release(root)
+          release_guard(guard_directory(root))
+          PY

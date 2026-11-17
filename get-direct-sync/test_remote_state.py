@@ -1,0 +1,336 @@
+"""In-memory Git graph and SQLite tests; no credentials or network."""
+import base64
+import copy
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from core import CheckpointFailure, Hold, Store, canonical, snapshot
+from remote_state import RemoteState, STATE_FILE, git_blob_sha, unpack_checkpoint
+from test_core import Sink, note
+
+
+class GitStateFake:
+    def __init__(self):
+        self.calls = []
+        self.private = True
+        self.blobs, self.trees, self.commits = {}, {}, {}
+        self.before_patch = None
+        self.patch_fault = None
+        tree = self.object_sha('tree', [])
+        self.trees[tree] = []
+        self.head = self.object_sha('commit', {'tree': tree, 'parents': []})
+        self.commits[self.head] = {'tree': {'sha': tree}, 'parents': []}
+
+    @staticmethod
+    def object_sha(kind, value):
+        return hashlib.sha1((kind + ':' + canonical(value)).encode()).hexdigest()
+
+    def ancestor(self, before, after):
+        if before == after:
+            return True
+        return any(self.ancestor(before, x['sha']) for x in self.commits[after]['parents'])
+
+    def document(self):
+        tree = self.trees[self.commits[self.head]['tree']['sha']]
+        entry = next(x for x in tree if x['path'] == STATE_FILE)
+        return json.loads(base64.b64decode(self.blobs[entry['sha']]['content']))
+
+    def request(self, method, path, body=None):
+        self.calls.append((method, path, copy.deepcopy(body)))
+        path = path.removeprefix('/repos/owner/private')
+        if path == '':
+            return {'private': self.private, 'default_branch': 'main'}
+        if path.startswith('/git/ref/'):
+            return {'object': {'sha': self.head}}
+        if path.startswith('/git/blobs/'):
+            return copy.deepcopy(self.blobs[path.split('/')[-1]])
+        if path.startswith('/git/trees/'):
+            return {'tree': copy.deepcopy(self.trees[path.split('/')[-1]]), 'truncated': False}
+        if path.startswith('/git/commits/'):
+            return copy.deepcopy(self.commits[path.split('/')[-1]])
+        if method == 'POST' and path == '/git/blobs':
+            raw = base64.b64decode(body['content'])
+            sha = git_blob_sha(raw)
+            self.blobs[sha] = {'sha': sha, 'encoding': 'base64', 'content': body['content']}
+            return {'sha': sha}
+        if method == 'POST' and path == '/git/trees':
+            tree = {x['path']: x for x in copy.deepcopy(self.trees[body['base_tree']])}
+            tree.update({x['path']: x for x in body['tree']})
+            value = sorted(tree.values(), key=lambda x: x['path'])
+            sha = self.object_sha('tree', value)
+            self.trees[sha] = value
+            return {'sha': sha}
+        if method == 'POST' and path == '/git/commits':
+            sha = self.object_sha('commit', body)
+            self.commits[sha] = {'tree': {'sha': body['tree']},
+                                 'parents': [{'sha': p} for p in body['parents']]}
+            return {'sha': sha}
+        if method == 'PATCH' and path.startswith('/git/refs/'):
+            self.assert_nonforce(body)
+            if self.before_patch:
+                callback, self.before_patch = self.before_patch, None
+                callback()
+            if not self.ancestor(self.head, body['sha']):
+                raise Hold('http_422')
+            if self.patch_fault == 'before':
+                self.patch_fault = None
+                raise TimeoutError('synthetic_unknown')
+            self.head = body['sha']
+            if self.patch_fault == 'after':
+                self.patch_fault = None
+                raise TimeoutError('synthetic_unknown')
+            return {'object': {'sha': self.head}}
+        raise AssertionError((method, path))
+
+    @staticmethod
+    def assert_nonforce(body):
+        assert body['force'] is False
+
+
+class Tests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.git = GitStateFake()
+
+    def state(self, owner='run-1', namespace='test'):
+        return RemoteState(self.git, 'owner/private', 'codex/get-state-test', namespace, owner)
+
+    def directory(self, name):
+        p = self.root / name
+        p.mkdir(mode=0o700)
+        return p / 'state.sqlite'
+
+    def test_roundtrip_checkpoint_and_intent_survives_new_worker(self):
+        first = self.state()
+        path = self.directory('one')
+        self.assertFalse(first.acquire(path)['restored'])
+        store = Store(path, checkpoint=first.checkpoint)
+        store.bind({'namespace': 'test'})
+        store.accept([])
+        store.accept([snapshot(note())])
+        intent = {'phase': 'page_create_intent', 'version': 'synthetic'}
+        store.set('notion:test', intent)
+        self.assertEqual(store.pending_count(), 1)
+        store.db.close()
+        first.release()
+        second = self.state('run-2')
+        path2 = self.directory('two')
+        self.assertTrue(second.acquire(path2)['restored'])
+        restored = Store(path2, checkpoint=second.checkpoint)
+        self.assertEqual(restored.get('notion:test'), intent)
+        self.assertEqual(restored.pending_count(), 1)
+        self.assertEqual(restored.db.execute('PRAGMA quick_check').fetchone()[0], 'ok')
+        restored.db.close()
+        second.release()
+        self.assertIsNone(self.git.document()['lease'])
+
+    def test_racing_owners_only_one_wins(self):
+        a, b = self.state('run-a'), self.state('run-b')
+        self.git.before_patch = lambda: b.acquire(self.directory('b'))
+        with self.assertRaisesRegex(Hold, 'ref_update_unconfirmed'):
+            a.acquire(self.directory('a'))
+        self.assertEqual(self.git.document()['lease']['owner'], 'run-b')
+        self.assertIsNone(a.lease)
+        b.release()
+
+    def test_old_lease_is_not_stolen_even_by_same_owner_name(self):
+        first = self.state()
+        first.acquire(self.directory('one'))
+        head = self.git.head
+        for name in ('run-2', 'run-1'):
+            with self.assertRaisesRegex(Hold, 'owned_no_takeover'):
+                self.state(name).acquire(self.directory(name))
+        self.assertEqual(self.git.head, head)
+        first.release()
+
+    def test_unknown_ref_response_is_read_back_without_second_patch(self):
+        self.git.patch_fault = 'after'
+        state = self.state()
+        state.acquire(self.directory('one'))
+        writes = [x for x in self.git.calls if x[0] == 'PATCH']
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(self.git.document()['lease'], state.lease)
+
+    def test_unknown_unapplied_ref_is_not_retried(self):
+        head = self.git.head
+        self.git.patch_fault = 'before'
+        with self.assertRaisesRegex(Hold, 'ref_update_unconfirmed'):
+            self.state().acquire(self.directory('one'))
+        self.assertEqual(self.git.head, head)
+        self.assertEqual(len([x for x in self.git.calls if x[0] == 'PATCH']), 1)
+
+    def test_checkpoint_failure_after_first_receipt_stops_second_sink(self):
+        fail = [False]
+        def checkpoint(db):
+            if fail[0] and db.execute('SELECT count(*) FROM receipts').fetchone()[0]:
+                raise OSError('synthetic storage failure')
+        store = Store(':memory:', checkpoint=checkpoint)
+        store.accept([])
+        store.accept([snapshot(note())])
+        a, b = Sink(), Sink()
+        fail[0] = True
+        with self.assertRaises(CheckpointFailure):
+            store.drain({'github': a, 'notion': b})
+        self.assertEqual((a.calls, b.calls), (1, 0))
+        with self.assertRaises(CheckpointFailure):
+            store.drain({'github': a, 'notion': b})
+        self.assertEqual((a.calls, b.calls), (1, 0))
+
+    def test_journal_checkpoint_error_prevents_target_write(self):
+        fail = [False]
+        def checkpoint(db):
+            if fail[0] and db.execute("SELECT 1 FROM journal WHERE k='intent'").fetchone():
+                raise OSError('synthetic unavailable')
+        store = Store(':memory:', checkpoint=checkpoint)
+        store.accept([])
+        store.accept([snapshot(note())])
+        calls = []
+        class Writer:
+            def sync(self, s, receipt):
+                store.set('intent', {'phase': 'intent'})
+                calls.append('external-write')
+        fail[0] = True
+        other = Sink()
+        with self.assertRaises(CheckpointFailure):
+            store.drain({'github': Writer(), 'notion': other})
+        self.assertEqual(calls, [])
+        self.assertEqual(other.calls, 0)
+
+    def test_historical_batches_are_idempotent_and_keep_receipts(self):
+        store = Store(':memory:')
+        s = snapshot(note())
+        store.accept([s])
+        self.assertEqual(store.enqueue([s])['enqueued'], 1)
+        self.assertEqual(store.enqueue([s])['enqueued'], 0)
+        self.assertEqual(store.drain({'github': Sink(), 'notion': Sink()})['pending'], 0)
+        before = store.receipt('github', s['id'])
+        self.assertEqual(store.enqueue([s])['enqueued'], 0)
+        self.assertEqual(store.receipt('github', s['id']), before)
+        self.assertEqual(store.pending_count(), 0)
+
+    def test_replayed_old_history_cannot_roll_back_new_delivery(self):
+        store = Store(':memory:')
+        first = snapshot(note())
+        second = snapshot(note(text='newer', updated='2026-11-18'))
+        store.accept([first])
+        store.enqueue([first])
+        store.drain({'github': Sink(), 'notion': Sink()})
+        store.accept([second])
+        store.drain({'github': Sink(), 'notion': Sink()})
+        self.assertEqual(store.enqueue([first])['enqueued'], 0)
+        self.assertEqual(store.receipt('notion', first['id'])['version'], second['version'])
+        self.assertEqual(store.pending_count(), 0)
+
+    def test_undelivered_stale_history_batch_is_rejected(self):
+        store = Store(':memory:')
+        old = snapshot(note())
+        current = snapshot(note(text='newer', updated='2026-11-18'))
+        store.accept([current])
+        with self.assertRaisesRegex(Hold, 'history_snapshot_not_current'):
+            store.enqueue([old])
+        self.assertEqual(store.pending_count(), 0)
+
+    def test_history_requires_existing_baseline(self):
+        with self.assertRaisesRegex(Hold, 'requires_baseline'):
+            Store(':memory:').enqueue([snapshot(note())])
+
+    def test_held_reason_is_durable_and_private_exception_is_redacted(self):
+        path = self.directory('one')
+        store = Store(path)
+        store.accept([])
+        store.accept([snapshot(note())])
+        class PrivateError:
+            def sync(self, s, receipt):
+                raise RuntimeError('https://signed.invalid/private?token=synthetic-secret')
+        result = store.drain({'github': PrivateError(), 'notion': Sink()})
+        self.assertEqual(result['pending'], 1)
+        store.db.close()
+        restored = Store(path)
+        rows = restored.db.execute('SELECT reason FROM held').fetchall()
+        self.assertEqual(rows, [('unexpected_sink_failure',)])
+        restored._held('github','1','v',Hold('lowercase_private_secret'))
+        self.assertEqual(restored.db.execute("SELECT reason FROM held WHERE version='v'").fetchone()[0], 'unexpected_sink_failure')
+        restored.db.close()
+
+    def test_binding_and_public_repo_blocked(self):
+        state = self.state()
+        state.acquire(self.directory('one'))
+        state.release()
+        with self.assertRaisesRegex(Hold, 'binding_mismatch'):
+            self.state('run-2', 'different').acquire(self.directory('two'))
+        self.git.private = False
+        with self.assertRaisesRegex(Hold, 'private_state_branch'):
+            self.state('run-3').acquire(self.directory('three'))
+
+    def test_default_branch_and_existing_local_file_blocked(self):
+        with self.assertRaises(Hold):
+            RemoteState(self.git, 'owner/private', 'main', 'test', 'run-1')
+        path = self.directory('one')
+        path.write_bytes(b'keep')
+        with self.assertRaisesRegex(Hold, 'empty_path'):
+            self.state().acquire(path)
+        self.assertEqual(path.read_bytes(), b'keep')
+        self.assertFalse(any(x[0] == 'PATCH' for x in self.git.calls))
+
+    def test_release_requires_exact_lease_not_display_owner(self):
+        state = self.state()
+        state.acquire(self.directory('one'))
+        forged = self.state()
+        forged.lease = {'owner': 'run-1', 'lease_id': 'other'}
+        with self.assertRaisesRegex(Hold, 'release_not_owner'):
+            forged.release()
+        self.assertEqual(self.git.document()['lease'], state.lease)
+        state.release()
+
+    def test_remote_blob_corruption_is_rejected_before_lock_or_restore(self):
+        state = self.state()
+        state.acquire(self.directory('one'))
+        state.release()
+        entry = self.git.trees[self.git.commits[self.git.head]['tree']['sha']][0]
+        self.git.blobs[entry['sha']]['content'] = base64.b64encode(b'changed').decode()
+        before = len(self.git.calls)
+        with self.assertRaisesRegex(Hold, 'blob_invalid'):
+            self.state('run-2').acquire(self.directory('two'))
+        self.assertFalse(any(x[0] == 'PATCH' for x in self.git.calls[before:]))
+
+    def test_compressed_limit_fails_without_publishing_new_checkpoint(self):
+        state = self.state()
+        path = self.directory('one')
+        state.acquire(path)
+        db = sqlite3.connect(':memory:')
+        db.execute('CREATE TABLE sample(value)')
+        head = self.git.head
+        with patch('remote_state.MAX_COMPRESSED', 16):
+            with self.assertRaises(CheckpointFailure):
+                state.checkpoint(db)
+        self.assertEqual(self.git.head, head)
+        self.assertIsNone(self.git.document()['checkpoint'])
+        db.close()
+
+    def test_mutations_are_checkpointed_and_lease_loss_stops_targets(self):
+        state = self.state()
+        path = self.directory('one')
+        state.acquire(path)
+        store = Store(path, checkpoint=state.checkpoint)
+        store.bind({'target': 'test'})
+        store.accept([])
+        store.set('intent', {'phase': 'write'})
+        raw = unpack_checkpoint(self.git.document()['checkpoint'])
+        self.assertTrue(raw.startswith(b'SQLite format 3\0'))
+        state.release()
+        a, b = Sink(), Sink()
+        with self.assertRaises(CheckpointFailure):
+            store.accept([snapshot(note())])
+        self.assertEqual((a.calls, b.calls), (0, 0))
+        store.db.close()
+
+
+if __name__ == '__main__':
+    unittest.main()
