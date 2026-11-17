@@ -14,8 +14,8 @@ at most `batch-size` revisions (1–10), rotating across IDs without reordering 
 versions of one ID. The authenticated private journal may pause reviewed source
 IDs without putting personal IDs into public configuration.
 
-The workflow is manual until a production cutover has been verified. Configuration
-is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `data_branch`,
+The workflow schedules `sync` hourly at minute 33 and retains explicit manual modes.
+Configuration is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `data_branch`,
 `state_branch`, `namespace`, `raw_prefix`, `notion_database_id`,
 `notion_properties`, `allowed_asset_hosts` and `scope`. The runtime requires
 `GETNOTE_API_KEY`, `GETNOTE_CLIENT_ID`, `PRIVATE_VAULT_TOKEN`, `NOTION_API_KEY`.

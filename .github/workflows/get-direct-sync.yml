@@ -1,8 +1,10 @@
-# Manual-only runtime; production scheduling remains disabled until acceptance.
+# One production schedule; the legacy writers remain disabled.
 # Runtime source modules are expected at get-direct-sync/ in the public code repo.
 name: Direct Get dual destination sync
 
 on:
+  schedule:
+    - cron: '33 * * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -12,7 +14,7 @@ on:
         default: inspect
         required: true
       batch_size:
-        description: Maximum historical notes enqueued (1 to 10)
+        description: Maximum revisions delivered per run (1 to 10)
         type: string
         default: '10'
         required: true
@@ -101,8 +103,8 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
           PRIVATE_VAULT_TOKEN: ${{ secrets.GET_DIRECT_PRIVATE_TOKEN || secrets.PRIVATE_VAULT_TOKEN }}
           NOTION_API_KEY: ${{ secrets.GET_DIRECT_NOTION_TOKEN || secrets.NOTION_API_KEY }}
-          RUN_MODE: ${{ inputs.mode }}
-          RUN_BATCH_SIZE: ${{ inputs.batch_size }}
+          RUN_MODE: ${{ inputs.mode || 'sync' }}
+          RUN_BATCH_SIZE: ${{ inputs.batch_size || '10' }}
         run: |
           set -euo pipefail
           umask 077
