@@ -192,6 +192,7 @@ class Store:
             'final_readback_mismatch','notion_database_unavailable','notion_database_property_type_mismatch',
             'notion_database_schema_unavailable','notion_database_not_live','notion_multiple_data_sources_unsupported',
             'target_unreadable','target_ownership_or_edit_conflict','target_missing','github_readback_mismatch',
+            'github_write_response_invalid','github_write_requires_reconcile',
             'snapshot_exceeds_validated_limit','asset_url_not_allowed','asset_address_not_public',
             'asset_size_limit','asset_time_limit','asset_length_mismatch','asset_hash_mismatch',
             'transport_uncertain','retry_attempt_limit','retry_elapsed_budget','retry_server_delay_exceeds_budget'}
@@ -265,6 +266,26 @@ class GitHubSink:
             if not item or item.get('sha')!=sha or item.get('encoding')!='base64':raise Hold('blob_readback_invalid')
         if item.get('encoding') not in (None,'base64'):raise Hold('unsupported_content_encoding')
         return base64.b64decode(item['content'])
+    def put_verified(self,path,payload,desired,*,uncertain_reason='github_write_requires_reconcile',mismatch_reason='github_readback_mismatch'):
+        expected_sha=hashlib.sha1(b'blob '+str(len(desired)).encode()+b'\0'+desired).hexdigest()
+        try:response=self.http.request('PUT',path,payload)
+        except CheckpointFailure:raise
+        except Exception:
+            # A lost write response gets one branch reconciliation, never another PUT.
+            try:
+                check=self.http.request('GET',path+'?'+urllib.parse.urlencode({'ref':self.branch}))
+                if check and check.get('sha')==expected_sha and self.content(check)==desired:return check
+            except CheckpointFailure:raise
+            except Exception:pass
+            raise Hold(uncertain_reason) from None
+        commit=response.get('commit') if isinstance(response,dict) else None
+        content=response.get('content') if isinstance(response,dict) else None
+        commit_sha=commit.get('sha') if isinstance(commit,dict) else None
+        if not isinstance(commit_sha,str) or not re.fullmatch('[0-9a-f]{40}',commit_sha) or not isinstance(content,dict) or content.get('sha')!=expected_sha:
+            raise Hold('github_write_response_invalid')
+        check=self.http.request('GET',path+'?'+urllib.parse.urlencode({'ref':commit_sha}))
+        if not check or check.get('sha')!=expected_sha or self.content(check)!=desired:raise Hold(mismatch_reason)
+        return check
     def sync(self,s,receipt=None):
         r=self.http.request('GET','/repos/'+self.repo)
         if not r or r.get('private') is not True: raise Hold('private_repository_required')
@@ -282,8 +303,5 @@ class GitHubSink:
         elif receipt:raise Hold('target_missing')
         payload={'message':'Update Get snapshot','content':base64.b64encode(desired).decode(),'branch':self.branch}
         if old:payload['sha']=old['sha']
-        # Uncertain result is reconciled by exact deterministic content on the next run.
-        self.http.request('PUT',path,payload)
-        check=self.http.request('GET',path+query)
-        if not check or self.content(check)!=desired:raise Hold('github_readback_mismatch')
+        check=self.put_verified(path,payload,desired)
         return {'version':s['version'],'sha':check['sha'],'target':path,'body_hash':hashlib.sha256(desired).hexdigest(),'content_scope':'text_and_metadata'}

@@ -115,11 +115,12 @@ class GitHubMedia:
         if old:
             if sink.content(old) != data:
                 raise Hold('media_github_content_conflict')
+            observed = old
         else:
-            sink.http.request('PUT', path, {
+            observed = sink.put_verified(path, {
                 'message': 'Archive Get binary asset',
-                'content': base64.b64encode(data).decode(), 'branch': sink.branch})
-        observed = sink.http.request('GET', path + query)
+                'content': base64.b64encode(data).decode(), 'branch': sink.branch}, data,
+                mismatch_reason='media_github_readback_mismatch')
         if not observed or sink.content(observed) != data:
             raise Hold('media_github_readback_mismatch')
         return {'sha256': sha, 'bytes': size, 'target': path, 'blob_sha': observed['sha'],

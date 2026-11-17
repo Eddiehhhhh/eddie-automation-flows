@@ -92,7 +92,8 @@ def transports(environ):
         'Authorization': environ['GETNOTE_API_KEY'], 'X-Client-ID': environ['GETNOTE_CLIENT_ID']})
     github = HTTP('https://api.github.com', {
         'Authorization': 'Bearer ' + environ['PRIVATE_VAULT_TOKEN'],
-        'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+        'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+        'Cache-Control': 'no-cache', 'Pragma': 'no-cache'})
     notion = HTTP('https://api.notion.com', {
         'Authorization': 'Bearer ' + environ['NOTION_API_KEY'], 'Notion-Version': '2022-06-28'})
     return (PacedHTTP(get, min_interval=0.25), PacedHTTP(github, min_interval=0.2),
@@ -421,7 +422,8 @@ def main(argv=None, environ=None):
         stage = getattr(error, 'stage', None)
         if stage in ('context', 'read_repository', 'read_ref', 'read_commit', 'read_tree', 'read_blob',
                      'write_blob', 'write_tree', 'write_commit', 'write_ref', 'confirm_ref',
-                     'verify_readback', 'sqlite_backup', 'compress_checkpoint'):
+                     'verify_readback', 'sqlite_backup', 'compress_checkpoint', 'read_expected_tree',
+                     'check_publish_ref', 'write_contents', 'verify_contents_blob', 'verify_contents_parent'):
             report['checkpoint_stage'] = stage
     except Exception:
         report, status = {'phase': 'held', 'held_reasons': {'runtime_held': 1}}, 1

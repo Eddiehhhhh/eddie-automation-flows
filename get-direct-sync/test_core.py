@@ -1,19 +1,27 @@
-import base64,json,os,tempfile,unittest
+import base64,copy,json,os,tempfile,unittest
 from core import *
 
 def note(n='1',text='hello',updated='2026-11-17'):
  return {'note_id':n,'title':'test','content':text,'updated_at':updated,'attachments':[]}
 class GitFake:
- def __init__(self):self.file=None;self.private=True;self.writes=0;self.uncertain=False;self.conflict=False
+ def __init__(self):self.file=None;self.private=True;self.writes=0;self.uncertain=False;self.conflict=False;self.commits={};self.calls=[];self.stale_after_write=False;self.stale=None
  def request(self,m,p,body=None):
+  self.calls.append((m,p))
   if '/contents/' not in p:return {'private':self.private}
-  if m=='GET':return self.file
+  if m=='GET':
+   ref=urllib.parse.parse_qs(urllib.parse.urlsplit(p).query).get('ref',[''])[0]
+   if ref in self.commits:return copy.deepcopy(self.commits[ref])
+   return copy.deepcopy(self.stale if self.stale_after_write and self.writes else self.file)
   self.writes+=1
   if self.conflict:raise Hold('http_409')
   if self.file and body.get('sha')!=self.file['sha']:raise Hold('http_409')
-  self.file={'sha':str(self.writes),'content':body['content']}
+  self.stale=copy.deepcopy(self.file)
+  raw=base64.b64decode(body['content']);sha=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+  self.file={'sha':sha,'content':body['content']}
+  commit_body=('tree '+sha+'\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\nWrite '+str(self.writes)+'\n').encode()
+  commit=hashlib.sha1(b'commit '+str(len(commit_body)).encode()+b'\0'+commit_body).hexdigest();self.commits[commit]=copy.deepcopy(self.file)
   if self.uncertain:self.uncertain=False;raise Hold('transport_uncertain')
-  return {}
+  return {'commit':{'sha':commit},'content':{'sha':sha}}
 class Sink:
  def __init__(self,fail=False):self.fail=fail;self.calls=0
  def sync(self,s,r=None):
@@ -142,8 +150,65 @@ class Tests(unittest.TestCase):
   with self.assertRaises(Hold):sink.sync(snapshot(note(text='third')),r)
  def test_github_uncertain_create(self):
   f=GitFake();f.uncertain=True;sink=GitHubSink(f,'owner/private','main','isolated');s=snapshot(note())
-  with self.assertRaises(Hold):sink.sync(s)
+  self.assertEqual(sink.sync(s)['version'],s['version'])
   sink.sync(s);self.assertEqual(f.writes,1)
+ def test_github_success_reads_immutable_commit_when_branch_is_stale(self):
+  f=GitFake();f.stale_after_write=True;sink=GitHubSink(f,'owner/private','main','isolated')
+  result=sink.sync(snapshot(note()))
+  self.assertEqual(result['sha'],f.file['sha']);self.assertEqual(f.writes,1)
+  self.assertTrue(any('ref='+commit in path for method,path in f.calls for commit in f.commits if method=='GET'))
+ def test_github_update_reads_new_commit_even_if_branch_still_has_previous_bytes(self):
+  f=GitFake();sink=GitHubSink(f,'owner/private','main','test');first=sink.sync(snapshot(note()));original=f.request
+  def request(method,path,body=None):
+   result=original(method,path,body)
+   if method=='PUT':f.stale_after_write=True
+   return result
+  f.request=request;updated=snapshot(note(text='changed complete body'))
+  second=sink.sync(updated,first)
+  self.assertEqual(second['version'],updated['version']);self.assertNotEqual(second['sha'],first['sha']);self.assertEqual(f.writes,2)
+ def test_github_immutable_large_object_readback_downloads_exact_blob(self):
+  f=GitFake();original=f.request;blob_reads=[]
+  def request(method,path,body=None):
+   if '/git/blobs/' in path:
+    blob_reads.append(path);return {**copy.deepcopy(f.file),'encoding':'base64'}
+   result=original(method,path,body)
+   if method=='GET' and any('ref='+commit in path for commit in f.commits):return {'sha':result['sha'],'encoding':'none','content':''}
+   return result
+  f.request=request;s=snapshot(note(text='full'*400000))
+  self.assertEqual(GitHubSink(f,'owner/private','main','test').sync(s)['version'],s['version'])
+  self.assertEqual(len(blob_reads),1);self.assertEqual(f.writes,1)
+ def test_github_response_identity_is_required_before_readback(self):
+  for response in ({},{'commit':{'sha':'bad'},'content':{'sha':'0'*40}},{'commit':[],'content':None},'wrong_blob'):
+   with self.subTest(response=response):
+    f=GitFake();original=f.request
+    def request(method,path,body=None):
+     result=original(method,path,body)
+     if method=='PUT':
+      if response=='wrong_blob':result['content']['sha']='0'*40;return result
+      return response
+     return result
+    f.request=request
+    with self.assertRaisesRegex(Hold,'github_write_response_invalid'):GitHubSink(f,'owner/private','main','test').sync(snapshot(note()))
+    self.assertEqual(f.writes,1)
+ def test_github_unknown_put_only_one_branch_read_and_no_second_put(self):
+  f=GitFake();f.stale_after_write=True;f.uncertain=True
+  with self.assertRaisesRegex(Hold,'github_write_requires_reconcile'):GitHubSink(f,'owner/private','main','test').sync(snapshot(note()))
+  self.assertEqual(f.writes,1)
+  reads=[path for method,path in f.calls if method=='GET' and '/contents/' in path]
+  self.assertEqual(len(reads),2);self.assertTrue(all('ref=main' in path for path in reads))
+ def test_github_immutable_readback_compares_full_bytes_and_blob_identity(self):
+  for tamper in ('body','sha'):
+   with self.subTest(tamper=tamper):
+    f=GitFake();original=f.request
+    def request(method,path,body=None):
+     result=original(method,path,body)
+     if method=='GET' and any('ref='+commit in path for commit in f.commits):
+      if tamper=='body':result['content']=base64.b64encode(b'tampered').decode()
+      else:result['sha']='f'*40
+     return result
+    f.request=request
+    with self.assertRaisesRegex(Hold,'github_readback_mismatch'):GitHubSink(f,'owner/private','main','test').sync(snapshot(note()))
+    self.assertEqual(f.writes,1)
  def test_public_blocked(self):
   f=GitFake();f.private=False
   with self.assertRaises(Hold):GitHubSink(f,'owner/repo','main','x').sync(snapshot(note()))

@@ -1,18 +1,34 @@
-import base64,unittest
+import base64,copy,hashlib,unittest
+from urllib.parse import parse_qs,urlsplit
 from core import Store,snapshot,Hold
 from test_core import note
 from vault_sink import VaultGitHubSink,markdown
 class Git:
-    def __init__(self):self.files={};self.count=0
+    def __init__(self):self.files={};self.count=0;self.commits={};self.stale={};self.stale_after_write=False;self.calls=[]
     def request(self,m,p,b=None):
+        self.calls.append((m,p))
         if '/contents/' not in p:return {'private':True}
         path=p.split('?')[0]
-        if m=='GET':return self.files.get(path)
+        if m=='GET':
+            ref=parse_qs(urlsplit(p).query).get('ref',[''])[0]
+            files=self.commits.get(ref,self.stale if self.stale_after_write and self.count else self.files)
+            return copy.deepcopy(files.get(path))
         if path in self.files and b.get('sha')!=self.files[path]['sha']:raise Hold('http_409')
         self.count+=1
-        self.files[path]={'sha':str(self.count),'encoding':'base64','content':b['content']}
-        return {}
+        self.stale=copy.deepcopy(self.files)
+        raw=base64.b64decode(b['content']);sha=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+        self.files[path]={'sha':sha,'encoding':'base64','content':b['content']}
+        body=('tree '+sha+'\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\nWrite '+str(self.count)+'\n').encode()
+        commit=hashlib.sha1(b'commit '+str(len(body)).encode()+b'\0'+body).hexdigest();self.commits[commit]=copy.deepcopy(self.files)
+        return {'commit':{'sha':commit},'content':{'sha':sha}}
 class Tests(unittest.TestCase):
+    def test_all_three_source_writes_read_their_immutable_commits(self):
+        git=Git();git.stale_after_write=True;journal=Store(':memory:')
+        sink=VaultGitHubSink(git,'owner/private','proof','test',journal,raw_prefix='Raw/Get/current')
+        result=sink.sync(snapshot(note()))
+        self.assertEqual(git.count,3)
+        self.assertEqual(len([path for method,path in git.calls if method=='GET' and parse_qs(urlsplit(path).query).get('ref',[''])[0] in git.commits]),3)
+        self.assertEqual(result['source_json']['version'],result['version'])
     def test_native_display_title_and_tag_names_remain_readable(self):
         n=note();n['title']='';n['display_title']='Native source display';n['tags']=[{'id':'2','name':'Source tag'}]
         body=markdown(snapshot(n),'test','Raw/Get/current').decode()

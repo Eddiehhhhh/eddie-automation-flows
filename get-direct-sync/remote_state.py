@@ -31,13 +31,14 @@ _CHECKPOINT_HOLDS = frozenset(('remote_checkpoint_context', 'remote_checkpoint_s
     'private_state_branch_required', 'remote_state_branch_missing', 'remote_state_tree_incomplete',
     'remote_state_file_invalid', 'remote_state_blob_invalid', 'remote_state_binding_mismatch',
     'remote_state_lease_invalid', 'remote_state_lease_lost', 'remote_state_blob_write_mismatch',
-    'remote_state_ref_update_unconfirmed', 'remote_state_readback_old_head',
+    'remote_state_ref_update_unconfirmed', 'remote_state_contents_update_unconfirmed',
+    'remote_state_publish_head_changed', 'remote_state_publish_parent_changed', 'remote_state_readback_old_head',
     'remote_state_readback_other_head', 'remote_state_readback_content_mismatch'))
 
 
 def _checkpoint_reason(error):
     """Only trusted exception types and fixed local codes may reach public logs."""
-    if isinstance(error, _UnconfirmedRef):
+    if isinstance(error, _UnconfirmedContents):
         return error.checkpoint_reason
     if isinstance(error, HTTPFailure) and type(error.status) is int and 100 <= error.status <= 599:
         return 'checkpoint_http_' + str(error.status)
@@ -60,9 +61,9 @@ def _checkpoint_reason(error):
     return 'checkpoint_other'
 
 
-class _UnconfirmedRef(Hold):
+class _UnconfirmedContents(Hold):
     def __init__(self, update_error):
-        super().__init__('remote_state_ref_update_unconfirmed')
+        super().__init__('remote_state_contents_update_unconfirmed')
         self.checkpoint_reason = _checkpoint_reason(update_error)
 
 
@@ -174,35 +175,54 @@ class RemoteState:
                        ' attempt ' + str(recovery['previous_attempt']) + '; status=completed; checkpoint=' +
                        (recovery['checkpoint_sha256'] or 'none'))
         body = canonical(doc).encode()
-        blob = self._request('write_blob', 'POST', self.prefix + '/git/blobs', {
-            'encoding': 'base64', 'content': base64.b64encode(body).decode()})
-        if blob.get('sha') != git_blob_sha(body):
-            raise Hold('remote_state_blob_write_mismatch')
-        tree = self._request('write_tree', 'POST', self.prefix + '/git/trees', {
-            'base_tree': tree_sha, 'tree': [{'path': STATE_FILE, 'mode': '100644',
-                                          'type': 'blob', 'sha': blob['sha']}]})
-        commit = self._request('write_commit', 'POST', self.prefix + '/git/commits', {
-            'message': message,
-            'tree': tree['sha'], 'parents': [head]})
-        desired = commit['sha']
+        expected_blob = git_blob_sha(body)
+        tree = self._request('read_expected_tree', 'GET', self.prefix + '/git/trees/' + tree_sha)
+        if tree.get('truncated'):
+            raise Hold('remote_state_tree_incomplete')
+        entries = [entry for entry in tree['tree'] if entry['path'] == STATE_FILE]
+        if len(entries) > 1 or entries and (entries[0].get('type') != 'blob' or entries[0].get('mode') != '100644'):
+            raise Hold('remote_state_file_invalid')
+        before = self._request('check_publish_ref', 'GET', self.prefix + '/git/ref/' + self.ref)
+        if not before or before.get('object', {}).get('sha') != head:
+            raise Hold('remote_state_publish_head_changed')
+        payload = {'message': message, 'branch': self.branch,
+                   'content': base64.b64encode(body).decode()}
+        if entries:
+            payload['sha'] = entries[0]['sha']
+        update_error, response = None, None
         try:
-            self._request('write_ref', 'PATCH', self.prefix + '/git/refs/' + self.ref,
-                              {'sha': desired, 'force': False})
-        except Exception as update_error:
-            observed = self._request('confirm_ref', 'GET', self.prefix + '/git/ref/' + self.ref)
-            if not observed or observed.get('object', {}).get('sha') != desired:
-                # Still fail closed; retain only the typed HTTP/transport reason.
-                if isinstance(update_error, (HTTPFailure, TransportFailure, TimeoutError, RetryStopped)):
-                    self._stage = 'write_ref'
-                    raise _UnconfirmedRef(update_error) from None
-                raise Hold('remote_state_ref_update_unconfirmed') from None
-        current, _, readback = self._read()
+            response = self._request('write_contents', 'PUT', self.prefix + '/contents/' + STATE_FILE, payload)
+        except Exception as error:
+            update_error = error
+        # A one-shot write is never retried, including when its response is lost.
+        current, current_tree, readback = self._read()
         self._stage = 'verify_readback'
-        if current != desired:
-            raise Hold('remote_state_readback_old_head' if current == head else 'remote_state_readback_other_head')
+        if update_error is not None:
+            if current == head or readback != doc:
+                self._stage = 'write_contents'
+                raise _UnconfirmedContents(update_error) from None
+            desired = current
+        else:
+            desired = response.get('commit', {}).get('sha') if isinstance(response, dict) else None
+            if (not isinstance(desired, str) or not re.fullmatch('[0-9a-f]{40}', desired)
+                    or response.get('content', {}).get('sha') != expected_blob):
+                raise Hold('remote_state_blob_write_mismatch')
+            if current != desired:
+                raise Hold('remote_state_readback_old_head' if current == head else 'remote_state_readback_other_head')
         if readback != doc:
             raise Hold('remote_state_readback_content_mismatch')
+        final_tree = self._request('verify_contents_blob', 'GET', self.prefix + '/git/trees/' + current_tree)
+        final_entries = [entry for entry in final_tree.get('tree', []) if entry['path'] == STATE_FILE]
+        if (final_tree.get('truncated') or len(final_entries) != 1
+                or final_entries[0].get('type') != 'blob' or final_entries[0].get('mode') != '100644'
+                or final_entries[0].get('sha') != expected_blob):
+            raise Hold('remote_state_blob_write_mismatch')
+        commit = self._request('verify_contents_parent', 'GET', self.prefix + '/git/commits/' + current)
+        if [parent.get('sha') for parent in commit.get('parents', [])] != [head]:
+            # Contents CAS protects the file; a separate branch-head race still freezes us.
+            raise Hold('remote_state_publish_parent_changed')
         return desired
+
 
 
     @staticmethod

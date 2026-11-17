@@ -67,15 +67,9 @@ def write_verified(sink, journal, key, relative_path, desired, *, immutable=Fals
                    'content': base64.b64encode(desired).decode(), 'branch': sink.branch}
         if observed:
             payload['sha'] = observed['sha']
-        try:
-            sink.http.request('PUT', path, payload)
-        except Exception:
-            check = sink.http.request('GET', path + query)
-            if not check or sink.content(check) != desired:
-                raise Hold('source_write_requires_reconcile') from None
-        observed = sink.http.request('GET', path + query)
-        if not observed or sink.content(observed) != desired:
-            raise Hold('managed_source_readback_mismatch')
+        observed = sink.put_verified(path, payload, desired,
+            uncertain_reason='source_write_requires_reconcile',
+            mismatch_reason='managed_source_readback_mismatch')
     result = {'sha': observed['sha'], 'sha256': digest, 'path': path, 'relative_path': relative_path}
     journal.set(key, {'phase': 'verified', 'relative_path': relative_path, 'receipt': result})
     return result

@@ -22,8 +22,10 @@ is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `data_branch`,
 `scope` is `isolated-validation` or `production`; target IDs are configured privately.
 
 The pre-existing private state branch must be dedicated to this namespace and
-must differ from the data/default branch. Its atomically updated lease and full
-compressed SQLite checkpoint survive runner replacement. No timeout permits lease
+must differ from the data/default branch. A single conditional Contents update
+keeps its lease and full compressed SQLite checkpoint together across runners.
+Other writers must not modify this state file. Head and parent checks additionally
+freeze publication if unrelated branch changes race the update. No timeout permits lease
 stealing. Before external writes, checkpoint failures freeze the entire runner.
 In GitHub Actions only, a completed attempt of this exact workflow can be recovered
 after GitHub verifies both attempts, their repository identities and current status.
@@ -51,6 +53,9 @@ checkpoint and records the proof; local CLI owners cannot automatically take ove
   through revalidation per run. Human changes may be detected on a later audit.
 - Each destination has independent receipts. Same-ID versions remain ordered.
   Unknown ownership, duplicate Notion IDs, human edits and uncertain writes hold.
+- GitHub successful writes are read at the exact returned commit and checked against
+  the actual Git blob hash and all bytes, avoiding mutable-branch readback ambiguity.
+  A lost response gets one exact branch reconciliation, never an automatic repeat PUT.
 - Media are content-addressed in the private repository and uploaded to
   Notion-managed storage. Completion requires exact downloaded bytes at both ends.
   Signed source URLs alone never satisfy binary delivery.

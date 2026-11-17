@@ -135,9 +135,23 @@ class MediaTests(unittest.TestCase):
         gh = GitFake()
         gh.uncertain = True
         sink = GitHubMedia(gh, 'owner/private', 'proof', 'test')
-        with self.assertRaises(Hold):
-            sink.sync(self.asset, self.data)
         self.assertTrue(sink.sync(self.asset, self.data)['binary_assets_verified'])
+        self.assertTrue(sink.sync(self.asset, self.data)['binary_assets_verified'])
+        self.assertEqual(gh.writes, 1)
+
+    def test_github_binary_success_reads_immutable_commit_with_stale_branch(self):
+        gh = GitFake()
+        gh.stale_after_write = True
+        result = GitHubMedia(gh, 'owner/private', 'proof', 'test').sync(self.asset, self.data)
+        self.assertTrue(result['binary_assets_verified'])
+        self.assertEqual(result['blob_sha'], gh.file['sha'])
+        self.assertEqual(gh.writes, 1)
+
+    def test_github_unknown_binary_write_with_stale_branch_remains_held(self):
+        gh = GitFake()
+        gh.uncertain = gh.stale_after_write = True
+        with self.assertRaisesRegex(Hold, 'github_write_requires_reconcile'):
+            GitHubMedia(gh, 'owner/private', 'proof', 'test').sync(self.asset, self.data)
         self.assertEqual(gh.writes, 1)
 
     def test_github_conflict_and_digest_mismatch(self):

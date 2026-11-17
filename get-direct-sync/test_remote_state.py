@@ -56,6 +56,34 @@ class GitStateFake:
             return {'tree': copy.deepcopy(self.trees[path.split('/')[-1]]), 'truncated': False}
         if path.startswith('/git/commits/'):
             return copy.deepcopy(self.commits[path.split('/')[-1]])
+        if method == 'PUT' and path == '/contents/' + STATE_FILE:
+            if self.before_patch:
+                callback, self.before_patch = self.before_patch, None
+                callback()
+            current_tree = self.trees[self.commits[self.head]['tree']['sha']]
+            entry = next((item for item in current_tree if item['path'] == STATE_FILE), None)
+            if body.get('sha') != (entry['sha'] if entry else None):
+                raise HTTPFailure(409)
+            if self.patch_fault == 'before':
+                self.patch_fault = None
+                raise TimeoutError('synthetic_unknown')
+            raw = base64.b64decode(body['content'])
+            sha = git_blob_sha(raw)
+            self.blobs[sha] = {'sha': sha, 'encoding': 'base64', 'content': body['content']}
+            rows = {item['path']: copy.deepcopy(item) for item in current_tree}
+            rows[STATE_FILE] = {'path': STATE_FILE, 'mode': '100644', 'type': 'blob', 'sha': sha}
+            tree = sorted(rows.values(), key=lambda item: item['path'])
+            tree_sha = self.object_sha('tree', tree)
+            self.trees[tree_sha] = tree
+            parents = [{'sha': self.head}]
+            commit = {'message': body['message'], 'tree': tree_sha, 'parents': [self.head]}
+            head = self.object_sha('commit', commit)
+            self.commits[head] = {'tree': {'sha': tree_sha}, 'parents': parents}
+            self.head = head
+            if self.patch_fault == 'after':
+                self.patch_fault = None
+                raise TimeoutError('synthetic_unknown')
+            return {'content': {'sha': sha}, 'commit': {'sha': head, 'parents': parents}}
         if method == 'POST' and path == '/git/blobs':
             raw = base64.b64decode(body['content'])
             sha = git_blob_sha(raw)
@@ -110,6 +138,92 @@ class Tests(unittest.TestCase):
         p.mkdir(mode=0o700)
         return p / 'state.sqlite'
 
+    def test_state_publish_is_one_contents_write_and_file_sha_cas(self):
+        state=self.state()
+        path=self.directory('one')
+        before=len(self.git.calls)
+        state.acquire(path)
+        writes=[row for row in self.git.calls[before:] if row[0]!='GET']
+        self.assertEqual(len(writes),1)
+        self.assertEqual(writes[0][0],'PUT')
+        self.assertTrue(writes[0][1].endswith('/contents/'+STATE_FILE))
+        self.assertNotIn('sha',writes[0][2])
+        store=Store(path,checkpoint=state.checkpoint)
+        before_doc=self.git.document()
+        previous_blob=git_blob_sha(canonical(before_doc).encode())
+        before=len(self.git.calls)
+        store.set('synthetic-intent',{'phase':'write_intent'})
+        writes=[row for row in self.git.calls[before:] if row[0]!='GET']
+        self.assertEqual(len(writes),1)
+        self.assertEqual(writes[0][0],'PUT')
+        self.assertEqual(writes[0][2]['sha'],previous_blob)
+        self.assertEqual(writes[0][2]['branch'],'codex/get-state-test')
+        store.db.close()
+        state.release()
+
+    def test_legacy_gitdata_checkpoint_survives_contents_writer(self):
+        import zlib
+        from remote_state import SCHEMA
+        legacy_path=self.directory('legacy')
+        old=Store(legacy_path)
+        old.set('legacy-intent',{'phase':'page_create_intent','value':'synthetic'})
+        old.db.close()
+        raw=legacy_path.read_bytes();packed=zlib.compress(raw)
+        checkpoint={'encoding':'zlib+base64','bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),
+                    'compressed_sha256':hashlib.sha256(packed).hexdigest(),
+                    'data':base64.b64encode(packed).decode()}
+        doc={'schema':SCHEMA,'binding':{'repo':'owner/private','branch':'codex/get-state-test','namespace':'test'},
+             'lease':None,'checkpoint':checkpoint}
+        prefix='/repos/owner/private'
+        blob=self.git.request('POST',prefix+'/git/blobs',{'encoding':'base64','content':base64.b64encode(canonical(doc).encode()).decode()})
+        parent=self.git.head;tree_before=self.git.commits[parent]['tree']['sha']
+        tree=self.git.request('POST',prefix+'/git/trees',{'base_tree':tree_before,
+             'tree':[{'path':STATE_FILE,'mode':'100644','type':'blob','sha':blob['sha']}]})
+        commit=self.git.request('POST',prefix+'/git/commits',{'message':'Synthetic legacy state',
+                                     'tree':tree['sha'],'parents':[parent]})
+        self.git.request('PATCH',prefix+'/git/refs/heads/codex/get-state-test',{'sha':commit['sha'],'force':False})
+        before=len(self.git.calls)
+        state=self.state();restored=self.directory('restored')
+        self.assertTrue(state.acquire(restored)['restored'])
+        self.assertEqual(restored.read_bytes(),raw)
+        self.assertEqual(self.git.document()['checkpoint'],checkpoint)
+        value=Store(restored)
+        self.assertEqual(value.get('legacy-intent'),{'phase':'page_create_intent','value':'synthetic'})
+        value.db.close();state.release()
+        writes=[row for row in self.git.calls[before:] if row[0]!='GET']
+        self.assertTrue(all(method=='PUT' and route.endswith('/contents/'+STATE_FILE) for method,route,body in writes))
+        self.assertEqual(self.git.document()['checkpoint'],checkpoint)
+
+    def test_branch_head_changed_before_put_prevents_any_write(self):
+        state=self.state();original=self.git.request
+        changed=[False]
+        def request(method,path,body=None):
+            if state._stage=='check_publish_ref' and not changed[0]:
+                changed[0]=True
+                before=self.git.head
+                after=self.git.object_sha('commit',{'other':'synthetic','parent':before})
+                self.git.commits[after]={'tree':copy.deepcopy(self.git.commits[before]['tree']),'parents':[{'sha':before}]}
+                self.git.head=after
+            return original(method,path,body)
+        with patch.object(self.git,'request',request),self.assertRaisesRegex(Hold,'publish_head_changed'):
+            state.acquire(self.directory('one'))
+        self.assertFalse(any(method=='PUT' for method,path,body in self.git.calls))
+        self.assertIsNone(state.lease)
+
+    def test_unrelated_head_race_inside_contents_put_freezes_before_claiming_lease(self):
+        def unrelated():
+            before=self.git.head
+            after=self.git.object_sha('commit',{'other':'synthetic','parent':before})
+            self.git.commits[after]={'tree':copy.deepcopy(self.git.commits[before]['tree']),'parents':[{'sha':before}]}
+            self.git.head=after
+        state=self.state()
+        self.git.before_patch=unrelated
+        with self.assertRaisesRegex(Hold,'publish_parent_changed'):
+            state.acquire(self.directory('one'))
+        self.assertIsNone(state.lease)
+        self.assertEqual(sum(method=='PUT' for method,path,body in self.git.calls),1)
+        self.assertEqual(self.git.document()['lease']['owner'],state.owner)
+
     def test_roundtrip_checkpoint_and_intent_survives_new_worker(self):
         first = self.state()
         path = self.directory('one')
@@ -137,7 +251,7 @@ class Tests(unittest.TestCase):
     def test_racing_owners_only_one_wins(self):
         a, b = self.state('run-a'), self.state('run-b')
         self.git.before_patch = lambda: b.acquire(self.directory('b'))
-        with self.assertRaisesRegex(Hold, 'ref_update_unconfirmed'):
+        with self.assertRaisesRegex(Hold, 'contents_update_unconfirmed'):
             a.acquire(self.directory('a'))
         self.assertEqual(self.git.document()['lease']['owner'], 'run-b')
         self.assertIsNone(a.lease)
@@ -157,17 +271,17 @@ class Tests(unittest.TestCase):
         self.git.patch_fault = 'after'
         state = self.state()
         state.acquire(self.directory('one'))
-        writes = [x for x in self.git.calls if x[0] == 'PATCH']
+        writes = [x for x in self.git.calls if x[0] == 'PUT']
         self.assertEqual(len(writes), 1)
         self.assertEqual(self.git.document()['lease'], state.lease)
 
     def test_unknown_unapplied_ref_is_not_retried(self):
         head = self.git.head
         self.git.patch_fault = 'before'
-        with self.assertRaisesRegex(Hold, 'ref_update_unconfirmed'):
+        with self.assertRaisesRegex(Hold, 'contents_update_unconfirmed'):
             self.state().acquire(self.directory('one'))
         self.assertEqual(self.git.head, head)
-        self.assertEqual(len([x for x in self.git.calls if x[0] == 'PATCH']), 1)
+        self.assertEqual(len([x for x in self.git.calls if x[0] == 'PUT']), 1)
 
     def test_checkpoint_failure_after_first_receipt_stops_second_sink(self):
         fail = [False]
@@ -280,7 +394,7 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, 'empty_path'):
             self.state().acquire(path)
         self.assertEqual(path.read_bytes(), b'keep')
-        self.assertFalse(any(x[0] == 'PATCH' for x in self.git.calls))
+        self.assertFalse(any(x[0] == 'PUT' for x in self.git.calls))
 
     def test_release_requires_exact_lease_not_display_owner(self):
         state = self.state()
@@ -301,7 +415,7 @@ class Tests(unittest.TestCase):
         before = len(self.git.calls)
         with self.assertRaisesRegex(Hold, 'blob_invalid'):
             self.state('run-2').acquire(self.directory('two'))
-        self.assertFalse(any(x[0] == 'PATCH' for x in self.git.calls[before:]))
+        self.assertFalse(any(x[0] == 'PUT' for x in self.git.calls[before:]))
 
     def test_compressed_limit_fails_without_publishing_new_checkpoint(self):
         state = self.state()
@@ -351,10 +465,8 @@ class CheckpointDiagnosticTests(unittest.TestCase):
     def test_http_status_and_fixed_stage_survive_without_private_details(self):
         for status in (403, 429, 503):
             for method, suffix, stage in (('GET', '/git/ref/', 'read_ref'),
-                    ('POST', '/git/blobs', 'write_blob'),
-                    ('POST', '/git/trees', 'write_tree'),
-                    ('POST', '/git/commits', 'write_commit'),
-                    ('PATCH', '/git/refs/', 'write_ref')):
+                    ('GET', '/git/trees/', 'read_tree'),
+                    ('PUT', '/contents/' + STATE_FILE, 'write_contents')):
                 with self.subTest(status=status, stage=stage), tempfile.TemporaryDirectory() as folder:
                     git = GitStateFake()
                     state = RemoteState(git, 'owner/private', 'codex/get-state-test', 'test', 'run-1')
@@ -382,7 +494,7 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                 return {'object': {'sha': stale.pop()}}
             old_head = self.git.head
             result = original(method, path, body)
-            if method == 'PATCH':
+            if method == 'PUT':
                 stale.append(old_head)
             return result
         with patch.object(self.git, 'request', request):
@@ -390,7 +502,7 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                 state.checkpoint(db)
         self.assertEqual(caught.exception.reason, 'checkpoint_readback_old_head')
         self.assertIsNotNone(self.git.document()['checkpoint'])
-        self.assertEqual(sum(x[0] == 'PATCH' for x in self.git.calls[before:]), 1)
+        self.assertEqual(sum(x[0] == 'PUT' for x in self.git.calls[before:]), 1)
 
     def test_other_head_and_content_mismatch_remain_distinct_and_closed(self):
         for mode in ('other_head', 'content_mismatch'):
@@ -415,6 +527,16 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                         state.checkpoint(db)
                 self.assertEqual(caught.exception.reason, 'checkpoint_readback_' + mode)
 
+    def test_contents_response_blob_mismatch_is_not_accepted_as_checkpoint(self):
+        state,db=self.prepared();original=self.git.request
+        def request(method,path,body=None):
+            result=original(method,path,body)
+            if method=='PUT':result['content']['sha']='f'*40
+            return result
+        with patch.object(self.git,'request',request),self.assertRaises(CheckpointFailure) as caught:
+            state.checkpoint(db)
+        self.assertEqual(caught.exception.reason,'checkpoint_blob_write_mismatch')
+
     def test_lease_loss_has_fixed_reason(self):
         state, db = self.prepared()
         state.lease = {'owner': state.owner, 'lease_id': 'different'}
@@ -437,7 +559,7 @@ class CheckpointDiagnosticTests(unittest.TestCase):
         original = self.git.request
         calls = []
         def request(method, path, body=None):
-            if method == 'PATCH':
+            if method == 'PUT':
                 calls.append(method)
                 raise TransportFailure()
             return original(method, path, body)
@@ -445,8 +567,8 @@ class CheckpointDiagnosticTests(unittest.TestCase):
             with self.assertRaises(CheckpointFailure) as caught:
                 state.checkpoint(db)
         self.assertEqual(caught.exception.reason, 'checkpoint_transport_uncertain')
-        self.assertEqual(caught.exception.stage, 'write_ref')
-        self.assertEqual(calls, ['PATCH'])
+        self.assertEqual(caught.exception.stage, 'write_contents')
+        self.assertEqual(calls, ['PUT'])
 
 
 class ActionGitStateFake(GitStateFake):
@@ -527,7 +649,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(new.recovery_evidence['previous_status'], 'completed')
         self.assertEqual(new.recovery_evidence['checkpoint_sha256'], checkpoint['sha256'])
         messages = [body['message'] for method, route, body in self.git.calls
-                    if method == 'POST' and route.endswith('/git/commits')]
+                    if method == 'PUT' and route.endswith('/contents/' + STATE_FILE)]
         recovery = [message for message in messages if message.startswith('Recover completed Get sync run ')]
         self.assertEqual(len(recovery), 1)
         self.assertIn('100 attempt 1', recovery[0])
