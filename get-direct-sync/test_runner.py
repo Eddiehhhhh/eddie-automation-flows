@@ -332,6 +332,30 @@ class Tests(unittest.TestCase):
         self.assertIsNone(self.github.document()['lease'])
         self.assertEqual(self.ghtext.calls, [])
 
+    def test_checkpoint_reason_survives_freeze_and_is_safely_reported(self):
+        failure = CheckpointFailure('private exception message')
+        failure.reason = 'checkpoint_remote_state_readback_mismatch'
+        enabled = [False]
+        def persist(db):
+            if enabled[0]:
+                raise failure
+        store = Store(':memory:', checkpoint=persist)
+        enabled[0] = True
+        with self.assertRaises(CheckpointFailure) as caught:
+            store.set('synthetic', {})
+        self.assertIs(caught.exception, failure)
+        with self.assertRaises(CheckpointFailure):
+            store.set('later', {})
+        env = {k: 'synthetic' for k in runner.ENV_NAMES}
+        env['GET_SYNC_CONFIG_JSON'] = json.dumps(self.cfg)
+        for reason, expected in ((failure.reason, failure.reason), ('PRIVATE_ERROR_PAYLOAD', 'checkpoint_failed')):
+            failure.reason = reason
+            output = io.StringIO()
+            with patch('runner.transports', return_value=(None, None, None)), patch('runner.execute', side_effect=failure), contextlib.redirect_stdout(output):
+                self.assertEqual(runner.main(['--mode', 'sync'], env), 1)
+            self.assertEqual(json.loads(output.getvalue())['held_reasons'], {expected: 1})
+            self.assertNotIn('private exception message', output.getvalue())
+
     def test_config_change_is_bound_and_held(self):
         self.baseline()
         self.cfg['raw_prefix'] = 'Raw/03 Get/other'

@@ -14,6 +14,7 @@ from unittest.mock import patch
 from core import CheckpointFailure, Hold, Store, canonical, snapshot
 from remote_state import RemoteState, STATE_FILE, git_blob_sha, unpack_checkpoint
 from test_core import Sink, note
+from retry import HTTPFailure, TransportFailure
 
 
 class GitStateFake:
@@ -332,6 +333,120 @@ class Tests(unittest.TestCase):
             store.accept([snapshot(note())])
         self.assertEqual((a.calls, b.calls), (0, 0))
         store.db.close()
+
+
+class CheckpointDiagnosticTests(unittest.TestCase):
+    setUp = Tests.setUp
+    state = Tests.state
+    directory = Tests.directory
+
+    def prepared(self):
+        state = self.state()
+        state.acquire(self.directory('one'))
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        db.execute('CREATE TABLE sample(value)')
+        return state, db
+
+    def test_http_status_and_fixed_stage_survive_without_private_details(self):
+        for status in (403, 429, 503):
+            for method, suffix, stage in (('GET', '/git/ref/', 'read_ref'),
+                    ('POST', '/git/blobs', 'write_blob'),
+                    ('POST', '/git/trees', 'write_tree'),
+                    ('POST', '/git/commits', 'write_commit'),
+                    ('PATCH', '/git/refs/', 'write_ref')):
+                with self.subTest(status=status, stage=stage), tempfile.TemporaryDirectory() as folder:
+                    git = GitStateFake()
+                    state = RemoteState(git, 'owner/private', 'codex/get-state-test', 'test', 'run-1')
+                    state.acquire(Path(folder).resolve() / 'state.sqlite')
+                    original = git.request
+                    def request(m, p, body=None):
+                        if m == method and suffix in p:
+                            raise HTTPFailure(status, 'https://private.invalid/?token=secret')
+                        return original(m, p, body)
+                    with sqlite3.connect(':memory:') as db, patch.object(git, 'request', request):
+                        db.execute('CREATE TABLE sample(value)')
+                        with self.assertRaises(CheckpointFailure) as caught:
+                            state.checkpoint(db)
+                    error = caught.exception
+                    self.assertEqual(error.reason, 'checkpoint_http_' + str(status))
+                    self.assertEqual(error.stage, stage)
+                    self.assertNotIn('secret', repr(error) + repr(vars(error)))
+
+    def test_old_head_readback_fails_closed_without_second_write(self):
+        state, db = self.prepared()
+        original = self.git.request
+        stale, before = [], len(self.git.calls)
+        def request(method, path, body=None):
+            if method == 'GET' and '/git/ref/' in path and stale:
+                return {'object': {'sha': stale.pop()}}
+            old_head = self.git.head
+            result = original(method, path, body)
+            if method == 'PATCH':
+                stale.append(old_head)
+            return result
+        with patch.object(self.git, 'request', request):
+            with self.assertRaises(CheckpointFailure) as caught:
+                state.checkpoint(db)
+        self.assertEqual(caught.exception.reason, 'checkpoint_readback_old_head')
+        self.assertIsNotNone(self.git.document()['checkpoint'])
+        self.assertEqual(sum(x[0] == 'PATCH' for x in self.git.calls[before:]), 1)
+
+    def test_other_head_and_content_mismatch_remain_distinct_and_closed(self):
+        for mode in ('other_head', 'content_mismatch'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                git = GitStateFake()
+                state = RemoteState(git, 'owner/private', 'codex/get-state-test', 'test', 'run-1')
+                state.acquire(Path(folder).resolve() / 'state.sqlite')
+                original = state._read
+                reads = []
+                def read():
+                    head, tree, doc = original()
+                    reads.append(head)
+                    if len(reads) == 2:
+                        if mode == 'other_head':
+                            head = 'f' * 40
+                        else:
+                            doc['lease'] = None
+                    return head, tree, doc
+                with sqlite3.connect(':memory:') as db, patch.object(state, '_read', read):
+                    db.execute('CREATE TABLE sample(value)')
+                    with self.assertRaises(CheckpointFailure) as caught:
+                        state.checkpoint(db)
+                self.assertEqual(caught.exception.reason, 'checkpoint_readback_' + mode)
+
+    def test_lease_loss_has_fixed_reason(self):
+        state, db = self.prepared()
+        state.lease = {'owner': state.owner, 'lease_id': 'different'}
+        with self.assertRaises(CheckpointFailure) as caught:
+            state.checkpoint(db)
+        self.assertEqual(caught.exception.reason, 'checkpoint_lease_lost')
+
+    def test_unrecognized_exception_details_and_reason_are_redacted(self):
+        state, db = self.prepared()
+        error = Hold('https://private.invalid/?token=secret')
+        error.reason = 'checkpoint_private_secret'
+        with patch.object(state, '_read', side_effect=error):
+            with self.assertRaises(CheckpointFailure) as caught:
+                state.checkpoint(db)
+        self.assertEqual(caught.exception.reason, 'checkpoint_other')
+        self.assertNotIn('secret', repr(caught.exception) + repr(vars(caught.exception)))
+
+    def test_transport_failure_is_fixed_and_does_not_retry_writes(self):
+        state, db = self.prepared()
+        original = self.git.request
+        calls = []
+        def request(method, path, body=None):
+            if method == 'PATCH':
+                calls.append(method)
+                raise TransportFailure()
+            return original(method, path, body)
+        with patch.object(self.git, 'request', request):
+            with self.assertRaises(CheckpointFailure) as caught:
+                state.checkpoint(db)
+        self.assertEqual(caught.exception.reason, 'checkpoint_transport_uncertain')
+        self.assertEqual(caught.exception.stage, 'write_ref')
+        self.assertEqual(calls, ['PATCH'])
 
 
 class ActionGitStateFake(GitStateFake):

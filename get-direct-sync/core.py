@@ -111,6 +111,9 @@ class Store:
         if self.failed:raise CheckpointFailure('state_checkpoint_failed')
         if self._persist:
             try:self._persist(self.db)
+            except CheckpointFailure:
+                self.failed=True
+                raise
             except Exception:
                 self.failed=True
                 raise CheckpointFailure('state_checkpoint_failed') from None

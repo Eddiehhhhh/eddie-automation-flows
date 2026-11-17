@@ -19,12 +19,51 @@ import urllib.parse
 import zlib
 
 from core import CheckpointFailure, Hold, canonical
+from retry import HTTPFailure, RetryStopped, TransportFailure
 
 MAX_COMPRESSED = 8 * 1024 * 1024
 MAX_RAW = 128 * 1024 * 1024
 STATE_FILE = 'get-direct-state.json'
 SCHEMA = 'get-direct-remote-state-v1'
 WORKFLOW_PATH = '.github/workflows/get-direct-sync.yml'
+_CHECKPOINT_HOLDS = frozenset(('remote_checkpoint_context', 'remote_checkpoint_size',
+    'remote_checkpoint_compressed_size', 'remote_checkpoint_invalid', 'remote_checkpoint_corrupt',
+    'private_state_branch_required', 'remote_state_branch_missing', 'remote_state_tree_incomplete',
+    'remote_state_file_invalid', 'remote_state_blob_invalid', 'remote_state_binding_mismatch',
+    'remote_state_lease_invalid', 'remote_state_lease_lost', 'remote_state_blob_write_mismatch',
+    'remote_state_ref_update_unconfirmed', 'remote_state_readback_old_head',
+    'remote_state_readback_other_head', 'remote_state_readback_content_mismatch'))
+
+
+def _checkpoint_reason(error):
+    """Only trusted exception types and fixed local codes may reach public logs."""
+    if isinstance(error, _UnconfirmedRef):
+        return error.checkpoint_reason
+    if isinstance(error, HTTPFailure) and type(error.status) is int and 100 <= error.status <= 599:
+        return 'checkpoint_http_' + str(error.status)
+    if isinstance(error, (TransportFailure, TimeoutError)):
+        return 'checkpoint_transport_uncertain'
+    if isinstance(error, RetryStopped) and error.reason in ('attempt_limit', 'elapsed_budget', 'server_delay_exceeds_budget'):
+        return 'checkpoint_retry_' + error.reason
+    if (isinstance(error, Hold) and len(error.args) == 1 and
+            isinstance(error.args[0], str) and error.args[0] in _CHECKPOINT_HOLDS):
+        code = error.args[0]
+        if code.startswith('remote_state_'):
+            code = code[len('remote_state_'):]
+        elif code.startswith('remote_checkpoint_'):
+            code = code[len('remote_checkpoint_'):]
+        return 'checkpoint_' + code
+    if isinstance(error, sqlite3.Error):
+        return 'checkpoint_sqlite_error'
+    if isinstance(error, OSError):
+        return 'checkpoint_os_error'
+    return 'checkpoint_other'
+
+
+class _UnconfirmedRef(Hold):
+    def __init__(self, update_error):
+        super().__init__('remote_state_ref_update_unconfirmed')
+        self.checkpoint_reason = _checkpoint_reason(update_error)
 
 
 def git_blob_sha(data):
@@ -70,20 +109,25 @@ class RemoteState:
         self.lease = None
         self.path = None
         self.recovery_evidence = None
+        self._stage = 'context'
         self.prefix = '/repos/' + repo
         self.ref = 'heads/' + urllib.parse.quote(branch, safe='/')
 
+    def _request(self, stage, method, path, body=None):
+        self._stage = stage
+        return self.http.request(method, path, body)
+
     def _read(self):
-        repo = self.http.request('GET', self.prefix)
+        repo = self._request('read_repository', 'GET', self.prefix)
         if not repo or repo.get('private') is not True or repo.get('default_branch') == self.branch:
             raise Hold('private_state_branch_required')
-        ref = self.http.request('GET', self.prefix + '/git/ref/' + self.ref)
+        ref = self._request('read_ref', 'GET', self.prefix + '/git/ref/' + self.ref)
         if not ref:
             raise Hold('remote_state_branch_missing')
         head = ref['object']['sha']
-        commit = self.http.request('GET', self.prefix + '/git/commits/' + head)
+        commit = self._request('read_commit', 'GET', self.prefix + '/git/commits/' + head)
         tree_sha = commit['tree']['sha']
-        tree = self.http.request('GET', self.prefix + '/git/trees/' + tree_sha)
+        tree = self._request('read_tree', 'GET', self.prefix + '/git/trees/' + tree_sha)
         if tree.get('truncated'):
             raise Hold('remote_state_tree_incomplete')
         entries = [x for x in tree['tree'] if x['path'] == STATE_FILE]
@@ -93,7 +137,7 @@ class RemoteState:
         if len(entries) != 1 or entries[0].get('type') != 'blob' or entries[0].get('mode') != '100644':
             raise Hold('remote_state_file_invalid')
         entry = entries[0]
-        blob = self.http.request('GET', self.prefix + '/git/blobs/' + entry['sha'])
+        blob = self._request('read_blob', 'GET', self.prefix + '/git/blobs/' + entry['sha'])
         try:
             if blob.get('encoding') != 'base64':
                 raise Hold('remote_state_blob_invalid')
@@ -130,27 +174,34 @@ class RemoteState:
                        ' attempt ' + str(recovery['previous_attempt']) + '; status=completed; checkpoint=' +
                        (recovery['checkpoint_sha256'] or 'none'))
         body = canonical(doc).encode()
-        blob = self.http.request('POST', self.prefix + '/git/blobs', {
+        blob = self._request('write_blob', 'POST', self.prefix + '/git/blobs', {
             'encoding': 'base64', 'content': base64.b64encode(body).decode()})
         if blob.get('sha') != git_blob_sha(body):
             raise Hold('remote_state_blob_write_mismatch')
-        tree = self.http.request('POST', self.prefix + '/git/trees', {
+        tree = self._request('write_tree', 'POST', self.prefix + '/git/trees', {
             'base_tree': tree_sha, 'tree': [{'path': STATE_FILE, 'mode': '100644',
                                           'type': 'blob', 'sha': blob['sha']}]})
-        commit = self.http.request('POST', self.prefix + '/git/commits', {
+        commit = self._request('write_commit', 'POST', self.prefix + '/git/commits', {
             'message': message,
             'tree': tree['sha'], 'parents': [head]})
         desired = commit['sha']
         try:
-            self.http.request('PATCH', self.prefix + '/git/refs/' + self.ref,
+            self._request('write_ref', 'PATCH', self.prefix + '/git/refs/' + self.ref,
                               {'sha': desired, 'force': False})
-        except Exception:
-            observed = self.http.request('GET', self.prefix + '/git/ref/' + self.ref)
+        except Exception as update_error:
+            observed = self._request('confirm_ref', 'GET', self.prefix + '/git/ref/' + self.ref)
             if not observed or observed.get('object', {}).get('sha') != desired:
+                # Still fail closed; retain only the typed HTTP/transport reason.
+                if isinstance(update_error, (HTTPFailure, TransportFailure, TimeoutError, RetryStopped)):
+                    self._stage = 'write_ref'
+                    raise _UnconfirmedRef(update_error) from None
                 raise Hold('remote_state_ref_update_unconfirmed') from None
         current, _, readback = self._read()
-        if current != desired or readback != doc:
-            raise Hold('remote_state_readback_mismatch')
+        self._stage = 'verify_readback'
+        if current != desired:
+            raise Hold('remote_state_readback_old_head' if current == head else 'remote_state_readback_other_head')
+        if readback != doc:
+            raise Hold('remote_state_readback_content_mismatch')
         return desired
 
 
@@ -271,12 +322,14 @@ class RemoteState:
                 doc['checkpoint']['sha256'] if doc['checkpoint'] else None}
 
     def checkpoint(self, connection):
+        self._stage = 'context'
         try:
             if self.lease is None or self.path is None or connection.in_transaction:
                 raise Hold('remote_checkpoint_context')
             head, tree, doc = self._read()
             if doc['lease'] != self.lease:
                 raise Hold('remote_state_lease_lost')
+            self._stage = 'sqlite_backup'
             fd, backup_path = tempfile.mkstemp(prefix='.sqlite-checkpoint-', dir=str(self.path.parent))
             os.close(fd)
             try:
@@ -291,6 +344,7 @@ class RemoteState:
             finally:
                 os.unlink(backup_path)
             packed = zlib.compress(raw)
+            self._stage = 'compress_checkpoint'
             if len(packed) > MAX_COMPRESSED:
                 raise Hold('remote_checkpoint_compressed_size')
             checkpoint = {'encoding': 'zlib+base64', 'bytes': len(raw),
@@ -300,8 +354,11 @@ class RemoteState:
             if checkpoint != doc['checkpoint']:
                 doc['checkpoint'] = checkpoint
                 self._publish(head, tree, doc)
-        except Exception:
-            raise CheckpointFailure('remote_checkpoint_failed') from None
+        except Exception as error:
+            failure = CheckpointFailure('remote_checkpoint_failed')
+            failure.reason = _checkpoint_reason(error)
+            failure.stage = self._stage
+            raise failure from None
 
     def release(self):
         if self.lease is None:

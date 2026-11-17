@@ -413,8 +413,16 @@ def main(argv=None, environ=None):
     try:
         cfg = configuration(environ)
         report, status = execute(cfg, args.mode, args.batch_size, *transports(environ), owner=run_owner(environ))
-    except CheckpointFailure:
-        report, status = {'phase': 'held', 'held_reasons': {'checkpoint_failed': 1}}, 1
+    except CheckpointFailure as error:
+        reason = getattr(error, 'reason', 'checkpoint_failed')
+        if not re.fullmatch(r'(?:checkpoint_[a-z_]{1,60}|checkpoint_http_[1-5][0-9]{2})', reason):
+            reason = 'checkpoint_failed'
+        report, status = {'phase': 'held', 'held_reasons': {reason: 1}}, 1
+        stage = getattr(error, 'stage', None)
+        if stage in ('context', 'read_repository', 'read_ref', 'read_commit', 'read_tree', 'read_blob',
+                     'write_blob', 'write_tree', 'write_commit', 'write_ref', 'confirm_ref',
+                     'verify_readback', 'sqlite_backup', 'compress_checkpoint'):
+            report['checkpoint_stage'] = stage
     except Exception:
         report, status = {'phase': 'held', 'held_reasons': {'runtime_held': 1}}, 1
     print(json.dumps(report, sort_keys=True))
