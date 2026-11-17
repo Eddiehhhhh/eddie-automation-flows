@@ -1,10 +1,9 @@
-# One production schedule; the legacy writers remain disabled.
+# Manual-only public worker; the private controller owns scheduled triggers.
 # Runtime source modules are expected at get-direct-sync/ in the public code repo.
 name: Direct Get dual destination sync
+run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -18,6 +17,11 @@ on:
         type: string
         default: '10'
         required: true
+      dispatch_key:
+        description: Optional controller dispatch correlation key
+        type: string
+        default: ''
+        required: false
 
 permissions:
   contents: read
