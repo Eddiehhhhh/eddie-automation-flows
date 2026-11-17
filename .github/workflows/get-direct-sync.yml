@@ -4,7 +4,7 @@ name: Direct Get dual destination sync
 
 on:
   schedule:
-    - cron: '33 * * * *'
+    - cron: '53 * * * *'
   workflow_dispatch:
     inputs:
       mode:
