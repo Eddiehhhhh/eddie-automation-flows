@@ -5,7 +5,7 @@ run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
 
 on:
   schedule:
-    - cron: '10 * * * *'
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       mode:
