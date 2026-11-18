@@ -13,7 +13,7 @@ import secrets
 import stat
 from urllib.parse import urlencode
 
-from assets import asset_references, open_regular, private_directory, safe_mime
+from assets import asset_references, manifest_coverage, open_regular, private_directory, safe_mime
 from core import GitHubSink, Hold, canonical
 from notion_sink import NotionSink, plain, rich
 from render import render_text
@@ -80,16 +80,12 @@ def read_asset_bytes(asset, archive_root):
 
 
 def manifest_assets(snapshot, manifest):
+    refs = asset_references(snapshot['note'])
     if (not isinstance(manifest, dict) or manifest.get('source_id') != snapshot['id']
             or manifest.get('source_version') != snapshot['version']
-            or manifest.get('coverage') != 'declared_attachments_and_audio_only'):
+            or manifest.get('coverage') != manifest_coverage(refs)):
         raise Hold('media_manifest_identity_or_coverage')
-    # shortcut: inline media is held; add a reviewed embedded-media parser before accepting it.
-    content = snapshot['note'].get('content', '')
-    if '![' in content or '<img' in content.lower():
-        raise Hold('media_embedded_coverage_unverified')
     assets = manifest.get('assets')
-    refs = asset_references(snapshot['note'])
     if (not isinstance(assets, list) or any(not isinstance(a, dict) for a in assets) or len(assets) != len(refs)
             or [a.get('source_field') for a in assets] != [r['field'] for r in refs]):
         raise Hold('media_manifest_incomplete')

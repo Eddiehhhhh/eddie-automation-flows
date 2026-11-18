@@ -185,8 +185,14 @@ class AssetArchive:
         assets=[]
         for ref in refs:
             result=self.fetch_with_retry(ref['url'],expected_size=ref.get('expected_size'),expected_sha256=ref.get('expected_sha256'))
+            if ref['field'].startswith('content/image/'):
+                with os.fdopen(open_regular(result['local_name'], self.dir_fd), 'rb') as stream:
+                    mime = binary_mime('application/octet-stream', stream.read(32))
+                if not mime.startswith('image/'):
+                    raise Hold('media_embedded_image_unverified')
+                result['content_type'] = mime
             assets.append({**result,'source_field':ref['field']})
-        manifest={'source_id':snapshot['id'],'source_version':snapshot['version'],'assets':assets,'coverage':'declared_attachments_and_audio_only','destination_delivery':'not_verified'}
+        manifest={'source_id':snapshot['id'],'source_version':snapshot['version'],'assets':assets,'coverage':manifest_coverage(refs),'destination_delivery':'not_verified'}
         # Only publish complete manifest. Partial downloads are reusable by content hash.
         data=canonical(manifest).encode();name='manifest-'+hashlib.sha256((snapshot['id']+':'+snapshot['version']).encode()).hexdigest()+'.json'
         final=name
@@ -202,6 +208,33 @@ class AssetArchive:
             os.fsync(self.dir_fd)
         finally:os.unlink(tmp,dir_fd=self.dir_fd)
         return manifest
+
+def manifest_coverage(refs):
+    if any(ref['field'].startswith('content/image/') for ref in refs):
+        return 'declared_attachments_audio_and_standalone_images'
+    return 'declared_attachments_and_audio_only'
+
+
+def recording_images(note):
+    content = note.get('content', '')
+    if '<img' in content.lower():
+        raise Hold('media_embedded_coverage_unverified')
+    if '![' not in content:
+        return []
+    # shortcut: support the recording export's standalone image lines; hold ambiguous Markdown.
+    if (note.get('note_type') != 'recorder_audio' or '<!--' in content
+            or re.search(r'(?m)^\s*(?:`{3}|~{3})', content)):
+        raise Hold('media_embedded_coverage_unverified')
+    refs = []
+    for line in content.splitlines():
+        if '![' not in line:
+            continue
+        match = re.fullmatch(r'!\[\]\((https://[^\s()<>\\\[\]"]+)\)', line)
+        if not match:
+            raise Hold('media_embedded_coverage_unverified')
+        refs.append({'field': 'content/image/' + str(len(refs)), 'url': match[1]})
+    return refs
+
 
 def asset_references(note):
     """Known API fields only. No arbitrary recursive URLs or webpage downloads."""
@@ -225,4 +258,4 @@ def asset_references(note):
         elif note.get('note_type') in ('audio','local_audio','recorder_audio','recorder_flash_audio') and not attachment_audio:
             raise Hold('asset_recording_url_missing')
     elif note.get('note_type') in ('audio','local_audio','recorder_audio','recorder_flash_audio') and not attachment_audio:raise Hold('asset_recording_url_missing')
-    return refs
+    return refs + recording_images(note)

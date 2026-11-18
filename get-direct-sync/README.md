@@ -94,8 +94,9 @@ checkpoint and records the proof; local CLI owners cannot automatically take ove
   budget remain explicit in `inventory_status`/counts without failing an otherwise
   healthy operation. An exit 0 does not mean historical synchronization is complete.
 
-Current limits: 100 MiB per binary asset; 8 MiB compressed/128 MiB raw SQLite;
-unknown MIME and embedded image coverage are held. Notion manual edits still have
+Current limits: 100 MiB per binary asset and 8 MiB compressed/128 MiB raw SQLite.
+Recording exports with standalone Markdown image lines archive each image alongside the audio.
+Unsupported image syntax and unknown media types remain pending. Notion manual edits still have
 an unavoidable check/write race because its API has no conditional update token.
 These limits must not be removed merely to make a job green.
 
