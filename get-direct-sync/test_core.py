@@ -84,6 +84,48 @@ class Tests(unittest.TestCase):
   store.accept([snapshot(note(text='edit')),snapshot(note('2'))]);store.drain({'github':a,'notion':b})
   self.assertEqual(store.db.execute('select count(*) from pending').fetchone()[0],2)
   b.fail=False;store.drain({'github':a,'notion':b});self.assertEqual(store.db.execute('select count(*) from pending').fetchone()[0],0)
+ def test_github_must_precede_notion_and_retry_only_unfinished_stage(self):
+  with tempfile.TemporaryDirectory() as directory:
+   path=os.path.join(directory,'state.sqlite')
+   store=Store(path);store.accept([]);store.accept([snapshot(note())])
+   github,notion=Sink(True),Sink(True)
+   sinks={'notion':notion,'github':github}
+   result=store.drain(sinks)
+   self.assertEqual((github.calls,notion.calls,result['pending']),(1,0,1))
+   github.fail=False
+   result=store.drain(sinks)
+   self.assertEqual((github.calls,notion.calls,result['pending']),(2,1,1))
+   store.db.close();store=Store(path)
+   github.fail=True;notion.fail=False
+   result=store.drain(sinks)
+   self.assertEqual((github.calls,notion.calls,result['pending']),(2,2,0))
+   self.assertEqual(result['github']['verified'],0)
+   store.drain(sinks)
+   self.assertEqual((github.calls,notion.calls),(2,2))
+   store.accept([snapshot(note(text='new version')),snapshot(note('2'))])
+   result=store.drain(sinks)
+   self.assertEqual((github.calls,notion.calls,result['pending']),(4,2,2))
+   store.db.close()
+
+ def test_held_github_receipt_is_not_reused(self):
+  store=Store(':memory:');store.accept([])
+  revision=snapshot(note());store.accept([revision])
+  github,notion=Sink(),Sink(True)
+  sinks={'github':github,'notion':notion}
+  store.drain(sinks)
+  store._held('github',revision['id'],revision['version'],Hold('target_missing'))
+  github.fail=True;notion.fail=False
+  result=store.drain(sinks)
+  self.assertEqual((github.calls,notion.calls,result['pending']),(2,1,1))
+
+ def test_partial_github_asset_receipt_never_opens_notion(self):
+  store=Store(':memory:');store.accept([])
+  n=note();n['attachments']=[{'url':'https://example.test/asset'}]
+  store.accept([snapshot(n)]);github,notion=Sink(),Sink()
+  for attempt in (1,2):
+   result=store.drain({'github':github,'notion':notion})
+   self.assertEqual((github.calls,notion.calls,result['github']['held'],result['pending']),(attempt,0,1,1))
+
  def test_persistent_recovery(self):
   with tempfile.TemporaryDirectory() as d:
    p=d+'/state.sqlite';store=Store(p);store.accept([]);store.accept([snapshot(note())]);store.db.close()

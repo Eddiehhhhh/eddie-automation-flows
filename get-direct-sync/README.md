@@ -71,7 +71,10 @@ checkpoint and records the proof; local CLI owners cannot automatically take ove
   `index.md` and `current.json` count verified receipts, not baseline observations.
   New/changed receipts are independently read back; five unchanged targets rotate
   through revalidation per run. Human changes may be detected on a later audit.
-- Each destination has independent receipts. Same-ID versions remain ordered.
+- Each revision reaches Notion only after its GitHub receipt is checkpointed, including
+  verified binary delivery when needed. If Notion fails, a retry uses the complete
+  same-revision GitHub receipt unless that stage was subsequently held. Same-ID
+  versions remain ordered.
   Unknown ownership, duplicate Notion IDs, human edits and uncertain writes hold.
 - GitHub successful writes are read at the exact returned commit and checked against
   the actual Git blob hash and all bytes, avoiding mutable-branch readback ambiguity.
