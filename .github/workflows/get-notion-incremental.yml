@@ -1,4 +1,4 @@
-# The established Get scheduler now runs only the direct dual-destination runtime.
+# Direct Get receiver: trusted cloud completion events and explicit manual modes.
 # Runtime source modules are expected at get-direct-sync/ in the public code repo.
 name: Direct Get dual destination sync
 run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
@@ -36,6 +36,10 @@ concurrency:
 
 jobs:
   sync:
+    if: >-
+      ${{ github.event_name != 'workflow_run' ||
+          github.event.workflow_run.event == 'schedule' ||
+          (github.event.workflow_run.name == 'Get cloud sync wake' && github.event.workflow_run.event == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
