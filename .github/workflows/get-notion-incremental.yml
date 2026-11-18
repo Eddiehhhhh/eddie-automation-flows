@@ -5,7 +5,7 @@ run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
 
 on:
   workflow_run:
-    workflows: [Audit Raw filenames, Link Notion workouts to diary, Sync Notion flomo notes to Raw, Get cloud sync wake]
+    workflows: [Audit Raw filenames, Link Notion workouts to diary, Sync Notion flomo notes to Raw, Get cloud sync wake, Get cloud clock]
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -29,6 +29,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: get-direct-production-writer
@@ -39,7 +40,7 @@ jobs:
     if: >-
       ${{ github.event_name != 'workflow_run' ||
           github.event.workflow_run.event == 'schedule' ||
-          (github.event.workflow_run.name == 'Get cloud sync wake' && github.event.workflow_run.event == 'workflow_dispatch') }}
+          (contains(fromJSON('["Get cloud sync wake","Get cloud clock"]'), github.event.workflow_run.name) && github.event.workflow_run.event == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
@@ -58,6 +59,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Verify cloud wake provenance before private access
+        id: provenance
         working-directory: get-runtime/get-direct-sync
         run: python3 trigger.py
       - name: Check out private rules without note or media bodies
@@ -124,6 +126,11 @@ jobs:
           set -euo pipefail
           umask 077
           python3 runner.py --mode "$RUN_MODE" --batch-size "$RUN_BATCH_SIZE"
+      - name: Recover the cloud clock if no future tick remains
+        if: ${{ always() && steps.provenance.conclusion == 'success' && inputs.mode != 'inspect' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 get-runtime/get-direct-sync/clock.py --recover
       - name: Release only this run's private rule lease
         if: ${{ always() && inputs.mode != 'inspect' }}
         working-directory: vault

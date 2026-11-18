@@ -23,6 +23,22 @@ Configuration is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `
 
 Completed scheduled runs of the existing filename audit, workout link and Notion Flomo workflows also wake Get through `workflow_run`, even when their independent business step fails. A dedicated `Get cloud sync wake` maintenance signal exercises this event path without rerunning those business jobs. The trigger guard accepts only reviewed source names and event types from the same repository main branch, before private credentials are loaded. It never consumes upstream code or artifacts, and Get does not listen to its own completion.
 
+`Get cloud clock` adds a GitHub-hosted server-delay timer. Its two environments
+must be configured before starting it: `get-clock-hourly` waits 60 minutes and
+`get-clock-validation` waits 1 minute, both limited to main with no reviewers.
+The wait consumes no runner time. Each released job verifies its timer policy,
+dispatches one successor using its short-lived Actions token, reads that successor
+back, and completes to wake Get. It contains no note credentials. Two bounded
+validation ticks transition automatically to the production hourly timer.
+`clock.py` reconciles an uncertain dispatch without repeating the POST, prevents
+reruns from forking the chain, and fails if the required timer is missing. Every
+trusted Get write run also rearms the hourly clock if no future clock remains;
+normal scheduled business completions therefore provide recovery. Inspect mode
+does not arm a clock. To stop, disable `get-cloud-clock.yml` and cancel its waiting
+run; the existing fallback business flows may still wake Get. Disable the Get
+receiver too for a complete stop. This is a server-delay chain, not proof that
+native cron delivery has recovered. A GitHub-wide Actions outage can delay both.
+
 The Get workflow uses its own concurrency group; the private state CAS lease remains the authoritative single-writer guard across runs. Unrelated main-branch writes still require conditional writes and verified readback.
 
 The pre-existing private state branch must be dedicated to this namespace and

@@ -1,0 +1,38 @@
+name: Get cloud clock
+run-name: Get clock ${{ inputs.parent_run || 'bootstrap' }}
+on:
+  workflow_dispatch:
+    inputs:
+      validation_ticks:
+        description: Short acceptance ticks before the hourly production timer
+        type: choice
+        options: ['0', '1', '2']
+        default: '0'
+        required: true
+      parent_run:
+        description: Previous clock run (set automatically)
+        type: string
+        default: ''
+        required: false
+permissions:
+  contents: read
+  actions: write
+  deployments: write
+concurrency:
+  group: get-cloud-clock
+  cancel-in-progress: false
+jobs:
+  tick:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    environment: ${{ inputs.validation_ticks != '0' && 'get-clock-validation' || 'get-clock-hourly' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify server timer and arm the next cloud tick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GET_CLOCK_VALIDATION_TICKS: ${{ inputs.validation_ticks }}
+        run: python3 get-direct-sync/clock.py

@@ -11,6 +11,7 @@ SOURCES = {
     'Link Notion workouts to diary': 'schedule',
     'Sync Notion flomo notes to Raw': 'schedule',
     'Get cloud sync wake': 'workflow_dispatch',
+    'Get cloud clock': 'workflow_dispatch',
 }
 
 
