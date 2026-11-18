@@ -214,6 +214,41 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(self.ghtext.calls), 2)
         self.assertIsNone(self.github.document()['lease'])
 
+    def test_reviewed_backfill_delivers_only_pinned_revision_and_is_idempotent(self):
+        self.source.notes = [snapshot(note(str(i))) for i in range(1, 4)]
+        self.baseline()
+        s = self.source.notes[2]
+        review = runner.revision_digest(s['id'], s['version'])
+        self.notext.pages = lambda sid: []
+        for expected in (1, 0):
+            result, status = runner.execute(self.cfg, 'backfill', 1, object(), self.github,
+                                             object(), review=review)
+            self.assertEqual((status, result['selected']), (0, expected))
+        self.assertEqual([s['id'] for s, _ in self.ghtext.calls], ['3'])
+        self.assertEqual([s['id'] for s, _ in self.notext.calls], ['3'])
+
+    def test_reviewed_backfill_stops_before_target_writes_if_evidence_changes(self):
+        self.baseline()
+        s = self.source.notes[0]
+        review = runner.revision_digest(s['id'], s['version'])
+        def run():
+            return runner.execute(self.cfg, 'backfill', 1, object(), self.github, object(),
+                                  review=review)
+        self.notext.pages = lambda sid: [{}]
+        with self.assertRaisesRegex(Hold, 'destination_changed'):
+            run()
+        self.source.notes = [snapshot(note(text='different content'))]
+        with self.assertRaisesRegex(Hold, 'source_changed'):
+            run()
+        self.update_private_state(lambda store: store.enqueue([snapshot(note('2'))]))
+        with self.assertRaisesRegex(Hold, 'pending_work'):
+            run()
+        self.assertFalse(self.ghtext.calls or self.notext.calls)
+
+    def test_production_backfill_requires_review_before_lease(self):
+        with self.assertRaisesRegex(Hold, 'reviewed_backfill_required'):
+            runner.execute(dict(self.cfg, scope='production'), 'backfill', 1, None, None, None)
+
     def test_backfill_only_selects_bounded_unverified_current_batch(self):
         self.source.notes = [snapshot(note(str(i))) for i in range(1, 26)]
         self.baseline()
