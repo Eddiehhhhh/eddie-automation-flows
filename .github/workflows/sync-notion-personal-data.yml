@@ -31,6 +31,14 @@ jobs:
       NOTION_API_KEY: ${{ secrets.NOTION_FLOMO_API_KEY }}
       VAULT_ROOT: ${{ github.workspace }}/vault
     steps:
+      - name: Check dedicated Notion read credential
+        shell: bash
+        run: |
+          if [[ -z "${NOTION_API_KEY//[[:space:]]/}" ]]; then
+            echo "::error::Configure the scoped NOTION_FLOMO_API_KEY repository secret."
+            exit 1
+          fi
+
       - name: Check out automation repository
         uses: actions/checkout@v7
         with:
