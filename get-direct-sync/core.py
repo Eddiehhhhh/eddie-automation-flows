@@ -193,6 +193,7 @@ class Store:
             'notion_database_schema_unavailable','notion_database_not_live','notion_multiple_data_sources_unsupported',
             'target_unreadable','target_ownership_or_edit_conflict','target_missing','github_readback_mismatch',
             'github_write_response_invalid','github_write_requires_reconcile',
+            'media_git_transport_failed','media_git_ref_changed','media_github_readback_mismatch',
             'snapshot_exceeds_validated_limit','asset_url_not_allowed','asset_address_not_public',
             'asset_size_limit','asset_time_limit','asset_length_mismatch','asset_hash_mismatch',
             'media_embedded_coverage_unverified','media_embedded_image_unverified',

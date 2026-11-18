@@ -19,6 +19,7 @@ from notion_sink import NotionSink, plain, rich
 from render import render_text
 from retry import HTTPFailure
 
+GIT_UPLOAD_THRESHOLD = 20 * 1024 * 1024
 MAX_GITHUB_BYTES = 100 * 1024 * 1024
 PART_BYTES = 10 * 1024 * 1024
 
@@ -96,7 +97,8 @@ def manifest_assets(snapshot, manifest):
 
 
 class GitHubMedia:
-    def __init__(self, http, repo, branch, namespace):
+    def __init__(self, http, repo, branch, namespace, *, publish_large=None):
+        self.publish_large = publish_large
         self.sink = GitHubSink(_PrivateTransport(http), repo, branch, namespace)
 
     def sync(self, asset, data):
@@ -105,13 +107,20 @@ class GitHubMedia:
         repo = sink.http.request('GET', '/repos/' + sink.repo)
         if not repo or repo.get('private') is not True:
             raise Hold('private_repository_required')
-        path = '/repos/' + sink.repo + '/contents/get-direct/' + sink.namespace + '/assets/' + sha + '.bin'
+        target = 'get-direct/' + sink.namespace + '/assets/' + sha + '.bin'
+        path = '/repos/' + sink.repo + '/contents/' + target
         query = '?' + urlencode({'ref': sink.branch})
         old = sink.http.request('GET', path + query)
         if old:
             if sink.content(old) != data:
                 raise Hold('media_github_content_conflict')
             observed = old
+        elif self.publish_large and size >= GIT_UPLOAD_THRESHOLD:
+            expected = hashlib.sha1(b'blob ' + str(size).encode() + b'\0' + data).hexdigest()
+            commit = self.publish_large(sink.http, sink.repo, sink.branch, target, data, expected)
+            observed = sink.http.request('GET', path + '?' + urlencode({'ref': commit}))
+            if not observed or observed.get('sha') != expected:
+                raise Hold('media_github_readback_mismatch')
         else:
             observed = sink.put_verified(path, {
                 'message': 'Archive Get binary asset',

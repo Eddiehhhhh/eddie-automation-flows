@@ -301,7 +301,7 @@ def reviewed_revisions(store, requested, batch_size, paused_ids):
 
 
 def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=None,
-            review=''):
+            review='', publish_large=None):
     if mode not in MODES or type(batch_size) is not int or not 1 <= batch_size <= 10:
         raise Hold('runner_arguments_invalid')
     if (review and mode != 'backfill' or mode == 'backfill' and
@@ -411,7 +411,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 notion_text = NotionSink(notion_http, cfg['notion_database_id'], store,
                                         namespace=cfg['namespace'], **cfg['notion_properties'])
                 notion_text = ProjectedNotionSink(notion_text,notion_http,cfg['notion_database_id'],store,cfg['namespace'])
-                github_media = GitHubMedia(github_http, cfg['private_repo'], cfg['data_branch'], cfg['namespace'])
+                github_media = GitHubMedia(github_http, cfg['private_repo'], cfg['data_branch'], cfg['namespace'],
+                                           publish_large=publish_large)
                 manifests = ManifestCache(archive, store, github_media, get_http)
                 notion_media = NotionMedia(notion_http, cfg['notion_database_id'], store,
                                           namespace=cfg['namespace'], download=NotionDownload(assets),
@@ -453,8 +454,10 @@ def main(argv=None, environ=None):
         environ = {k: os.environ.get(k) for k in ENV_NAMES + OWNER_ENV_NAMES}
     try:
         cfg = configuration(environ)
+        from git_media import publish_asset
+        publisher = lambda http, *args: publish_asset(http, environ['PRIVATE_VAULT_TOKEN'], *args)
         report, status = execute(cfg, args.mode, args.batch_size, *transports(environ), owner=run_owner(environ),
-                                 review=args.reviewed_revisions)
+                                 review=args.reviewed_revisions, publish_large=publisher)
     except CheckpointFailure as error:
         reason = getattr(error, 'reason', 'checkpoint_failed')
         if not re.fullmatch(r'(?:checkpoint_[a-z_]{1,60}|checkpoint_http_[1-5][0-9]{2})', reason):

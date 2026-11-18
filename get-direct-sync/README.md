@@ -81,7 +81,9 @@ checkpoint and records the proof; local CLI owners cannot automatically take ove
   A lost response gets exact branch reconciliation, never an automatic repeat PUT. State publication tolerates only the original pre-write ref for three bounded read-only checks (1/2/4 seconds); a competing ref, altered content or wrong parent still stops immediately.
 - Media are content-addressed in the private repository and uploaded to
   Notion-managed storage. Completion requires exact downloaded bytes at both ends.
-  Signed source URLs alone never satisfy binary delivery.
+  Assets of 20 MiB or more use Git transport in a temporary bare checkout.
+  The private branch is rechecked before a normal fast-forward push, and the asset
+  is read back at the resulting commit. Signed source URLs alone never satisfy binary delivery.
 - Expired first-download URLs may refresh only from the same normalized source
   revision. Existing manifests require the exact previously verified asset bytes;
   a new source revision cannot replace old evidence.
