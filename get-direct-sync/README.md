@@ -75,7 +75,7 @@ checkpoint and records the proof; local CLI owners cannot automatically take ove
   Unknown ownership, duplicate Notion IDs, human edits and uncertain writes hold.
 - GitHub successful writes are read at the exact returned commit and checked against
   the actual Git blob hash and all bytes, avoiding mutable-branch readback ambiguity.
-  A lost response gets one exact branch reconciliation, never an automatic repeat PUT.
+  A lost response gets exact branch reconciliation, never an automatic repeat PUT. State publication tolerates only the original pre-write ref for three bounded read-only checks (1/2/4 seconds); a competing ref, altered content or wrong parent still stops immediately.
 - Media are content-addressed in the private repository and uploaded to
   Notion-managed storage. Completion requires exact downloaded bytes at both ends.
   Signed source URLs alone never satisfy binary delivery.

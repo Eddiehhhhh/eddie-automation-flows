@@ -125,6 +125,9 @@ class GitStateFake:
 
 class Tests(unittest.TestCase):
     def setUp(self):
+        sleeper = patch('remote_state.time.sleep')
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
@@ -485,7 +488,7 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                     self.assertEqual(error.stage, stage)
                     self.assertNotIn('secret', repr(error) + repr(vars(error)))
 
-    def test_old_head_readback_fails_closed_without_second_write(self):
+    def test_transient_old_head_readback_reconciles_without_second_write(self):
         state, db = self.prepared()
         original = self.git.request
         stale, before = [], len(self.git.calls)
@@ -498,9 +501,63 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                 stale.append(old_head)
             return result
         with patch.object(self.git, 'request', request):
+            state.checkpoint(db)
+        self.assertIsNotNone(self.git.document()['checkpoint'])
+        self.assertEqual(sum(x[0] == 'PUT' for x in self.git.calls[before:]), 1)
+
+    def test_persistent_old_head_readback_still_fails_without_second_write(self):
+        state, db = self.prepared()
+        original = self.git.request
+        stale, before = [], len(self.git.calls)
+        def request(method, path, body=None):
+            if method == 'GET' and '/git/ref/' in path and stale:
+                return {'object': {'sha': stale[-1]}}
+            old_head = self.git.head
+            result = original(method, path, body)
+            if method == 'PUT':
+                stale.append(old_head)
+            return result
+        with patch.object(self.git, 'request', request):
             with self.assertRaises(CheckpointFailure) as caught:
                 state.checkpoint(db)
         self.assertEqual(caught.exception.reason, 'checkpoint_readback_old_head')
+        self.assertEqual(sum(x[0] == 'PUT' for x in self.git.calls[before:]), 1)
+
+    def test_old_head_followed_by_competing_head_is_rejected_immediately(self):
+        state, db = self.prepared()
+        original = state._read
+        old = self.git.head
+        reads = []
+        def read():
+            head, tree, doc = original()
+            reads.append(head)
+            if len(reads) == 2:
+                return old, tree, doc
+            if len(reads) == 3:
+                return 'f' * 40, tree, doc
+            return head, tree, doc
+        before = len(self.git.calls)
+        with patch.object(state, '_read', read), self.assertRaises(CheckpointFailure) as caught:
+            state.checkpoint(db)
+        self.assertEqual(caught.exception.reason, 'checkpoint_readback_other_head')
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(sum(x[0] == 'PUT' for x in self.git.calls[before:]), 1)
+
+    def test_lost_write_response_and_transient_old_head_reconcile_once(self):
+        state, db = self.prepared()
+        original = self.git.request
+        old_head, reads, before = self.git.head, [], len(self.git.calls)
+        def request(method, path, body=None):
+            if method == 'GET' and '/git/ref/' in path and reads:
+                reads.pop()
+                return {'object': {'sha': old_head}}
+            result = original(method, path, body)
+            if method == 'PUT':
+                reads.append(True)
+                raise TimeoutError()
+            return result
+        with patch.object(self.git, 'request', request):
+            state.checkpoint(db)
         self.assertIsNotNone(self.git.document()['checkpoint'])
         self.assertEqual(sum(x[0] == 'PUT' for x in self.git.calls[before:]), 1)
 

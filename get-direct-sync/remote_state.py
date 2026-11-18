@@ -15,6 +15,7 @@ import secrets
 import sqlite3
 import stat
 import tempfile
+import time
 import urllib.parse
 import zlib
 
@@ -196,6 +197,12 @@ class RemoteState:
             update_error = error
         # A one-shot write is never retried, including when its response is lost.
         current, current_tree, readback = self._read()
+        # GitHub may briefly serve the pre-write ref; only repeat reads of that exact head.
+        for delay in (1, 2, 4):
+            if current != head:
+                break
+            time.sleep(delay)
+            current, current_tree, readback = self._read()
         self._stage = 'verify_readback'
         if update_error is not None:
             if current == head or readback != doc:
