@@ -709,17 +709,25 @@ class StageTests(unittest.TestCase):
         self.assertIn('NOTION_API_KEY: ${{ secrets.NOTION_FLOMO_API_KEY }}', workflow)
         snippet = workflow.split('      - name: Require Flomo staging configuration', 1)[1]
         script = textwrap.dedent(snippet.split("python - <<'PYTHON'\n", 1)[1].split('          PYTHON', 1)[0])
+        # Substitute a synthetic target fingerprint; no production IDs in tests.
+        target = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        script = script.replace('1406dcba8558e8878231196caecdff0693085cf60b6a8b838a1ef5e5b88f40e8', hashlib.sha256(target.replace('-', '').encode()).hexdigest())
         config = self.root / '.github/state/notion-flomo-config.json'
         with mock.patch.dict(os.environ, {'VAULT_ROOT': str(self.root)}):
             with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
             config.parent.mkdir(parents=True, exist_ok=True)
             config.write_text(json.dumps({'version': 1, 'stage_enabled': False}))
             with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
-            approved = {'version': 1, 'database_id': '11233b33-7f23-8024-9555-cb8de8c58e02',
+            approved = {'version': 1, 'database_id': target,
                         'stage_enabled': True, 'original_source_enabled': False,
                         'current_export_enabled': False, 'property_proof_enabled': True}
             config.write_text(json.dumps({**approved, 'database_id': 'wrong-database'}))
             with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            for invalid in (None, '', [], {}, 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'):
+                config.write_text(json.dumps({**approved, 'database_id': invalid}))
+                with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
+            config.write_text(json.dumps({**approved, 'database_id': target.upper().replace('-', '')}))
+            exec(compile(script, 'workflow-flomo-config', 'exec'), {})
             config.write_text(json.dumps({**approved, 'original_source_enabled': True}))
             with self.assertRaises(SystemExit): exec(compile(script, 'workflow-flomo-config', 'exec'), {})
             config.write_text(json.dumps(approved))

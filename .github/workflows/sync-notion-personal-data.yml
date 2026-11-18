@@ -58,7 +58,7 @@ jobs:
         id: flomo_config
         run: |
           python - <<'PYTHON'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
           path = Path(os.environ["VAULT_ROOT"]) / ".github/state/notion-flomo-config.json"
           if not path.is_file():
@@ -66,7 +66,7 @@ jobs:
           value = json.loads(path.read_bytes())
           if value.get("version") != 1 or value.get("stage_enabled") is not True:
               raise SystemExit("Private Notion Flomo staging is not enabled.")
-          if value.get("database_id") != "11233b33-7f23-8024-9555-cb8de8c58e02":
+          if hashlib.sha256(str(value.get("database_id", "")).replace("-", "").lower().encode()).hexdigest() != "1406dcba8558e8878231196caecdff0693085cf60b6a8b838a1ef5e5b88f40e8":
               raise SystemExit("Private Notion Flomo staging must target the approved Fragments Center database.")
           if any(type(value.get(key, False)) is not bool for key in (
               "original_source_enabled", "current_export_enabled", "property_proof_enabled"
