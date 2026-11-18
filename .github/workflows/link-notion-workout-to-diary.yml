@@ -37,6 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      WORKOUT_PROBE_WORKOUT_ID: ${{ secrets.WORKOUT_PROBE_WORKOUT_ID }}
+      WORKOUT_PROBE_DIARY_ID: ${{ secrets.WORKOUT_PROBE_DIARY_ID }}
+      WORKOUT_PROBE_EXPECTED_BOT_ID: ${{ secrets.WORKOUT_PROBE_EXPECTED_BOT_ID }}
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       NOTION_WORKOUT_DATABASE_ID: ${{ secrets.NOTION_WORKOUT_DATABASE_ID }}
       NOTION_DIARY_DATABASE_ID: ${{ secrets.NOTION_DIARY_DATABASE_ID }}
