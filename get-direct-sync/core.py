@@ -195,6 +195,7 @@ class Store:
             'github_write_response_invalid','github_write_requires_reconcile',
             'snapshot_exceeds_validated_limit','asset_url_not_allowed','asset_address_not_public',
             'asset_size_limit','asset_time_limit','asset_length_mismatch','asset_hash_mismatch',
+            'media_embedded_coverage_unverified','media_embedded_image_unverified',
             'transport_uncertain','retry_attempt_limit','retry_elapsed_budget','retry_server_delay_exceeds_budget'}
         if message in safe_reasons or re.fullmatch('http_[1-5][0-9]{2}',message):reason=message
         row=self.db.execute('SELECT reason FROM held WHERE sink=? AND id=? AND version=?',(name,nid,version)).fetchone()

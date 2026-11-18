@@ -39,6 +39,44 @@ class Tests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()),[])
     def test_audio_provenance_field(self):
         self.assertEqual(asset_references({'audio':{'url':'https://cdn.example.test/a'}})[0]['field'],'audio/url')
+    def test_recording_inline_image_and_audio_have_independent_receipts(self):
+        from media_delivery import manifest_assets
+        n = note(text='summary\n![](https://cdn.example.test/image.png?quality=full)')
+        n.update(note_type='recorder_audio', audio={'original': 'transcript'},
+                 attachments=[{'type': 'audio', 'url': 'https://cdn.example.test/audio'}])
+        s = snapshot(n)
+        class TwoFiles:
+            def open(self, url):
+                data = b'ID3audio' if url.endswith('/audio') else b'\x89PNG\r\n\x1a\nimage'
+                return Conn(), Response(data)
+        archive = AssetArchive(self.root, TwoFiles())
+        self.addCleanup(archive.close)
+        manifest = archive.archive_snapshot(s)
+        assets = manifest_assets(s, manifest)
+        self.assertEqual([a['source_field'] for a in assets], ['attachments/0', 'content/image/0'])
+        self.assertEqual([a['content_type'] for a in assets], ['audio/mpeg', 'image/png'])
+        self.assertNotEqual(assets[0]['sha256'], assets[1]['sha256'])
+        with self.assertRaisesRegex(Hold, 'incomplete'):
+            manifest_assets(s, dict(manifest, assets=assets[:1]))
+        with self.assertRaisesRegex(Hold, 'coverage'):
+            manifest_assets(s, dict(manifest, coverage='declared_attachments_and_audio_only'))
+
+    def test_recording_images_hold_unsupported_shapes_and_non_image_bytes(self):
+        n = note(text='![](https://cdn.example.test/image.png)')
+        n.update(note_type='recorder_audio', audio={'original': 'transcript'},
+                 attachments=[{'type':'audio','url':'https://cdn.example.test/audio'}])
+        class InvalidImage:
+            def open(self, url):
+                return Conn(), Response(b'HTML')
+        archive = AssetArchive(self.root, InvalidImage())
+        self.addCleanup(archive.close)
+        with self.assertRaisesRegex(Hold, 'image_unverified'):
+            archive.archive_snapshot(snapshot(n))
+        for text in ('    ![](https://cdn.example.test/path)', '<img src="x">',
+                     '```\n![](https://cdn.example.test/image.png)\n```',
+                     '![](https://cdn.example.test/a) also ![](https://cdn.example.test/b)'):
+            with self.subTest(text=text), self.assertRaisesRegex(Hold, 'embedded_coverage'):
+                asset_references(dict(n, content=text))
     def test_nonfinite_limits_rejected(self):
         for options in ({'max_bytes':float('nan')},{'max_bytes':True},{'max_seconds':float('inf')},{'max_seconds':float('nan')},{'max_seconds':0}):
             with self.assertRaises(ValueError):AssetArchive(self.root,Transport(),**options)
