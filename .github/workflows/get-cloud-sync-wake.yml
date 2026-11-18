@@ -1,0 +1,10 @@
+name: Get cloud sync wake
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo 'Get cloud wake signal completed.'

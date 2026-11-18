@@ -6,6 +6,10 @@ run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
 on:
   schedule:
     - cron: '17 * * * *'
+  workflow_run:
+    workflows: [Audit Raw filenames, Link Notion workouts to diary, Sync Notion flomo notes to Raw, Get cloud sync wake]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       mode:
@@ -51,6 +55,9 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
+      - name: Verify cloud wake provenance before private access
+        working-directory: get-runtime/get-direct-sync
+        run: python3 trigger.py
       - name: Check out private rules without note or media bodies
         env:
           GH_TOKEN: ${{ secrets.GET_DIRECT_PRIVATE_TOKEN || secrets.PRIVATE_VAULT_TOKEN }}

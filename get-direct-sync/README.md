@@ -21,6 +21,8 @@ Configuration is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `
 `GETNOTE_API_KEY`, `GETNOTE_CLIENT_ID`, `PRIVATE_VAULT_TOKEN`, `NOTION_API_KEY`.
 `scope` is `isolated-validation` or `production`; target IDs are configured privately.
 
+Completed scheduled runs of the existing filename audit, workout link and Notion Flomo workflows also wake Get through `workflow_run`, even when their independent business step fails. A dedicated `Get cloud sync wake` maintenance signal exercises this event path without rerunning those business jobs. The trigger guard accepts only reviewed source names and event types from the same repository main branch, before private credentials are loaded. It never consumes upstream code or artifacts, and Get does not listen to its own completion.
+
 The Get workflow uses its own concurrency group; the private state CAS lease remains the authoritative single-writer guard across runs. Unrelated main-branch writes still require conditional writes and verified readback.
 
 The pre-existing private state branch must be dedicated to this namespace and
