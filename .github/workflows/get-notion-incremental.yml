@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: eddie-private-vault-writers
+  group: get-direct-production-writer
   cancel-in-progress: false
 
 jobs:

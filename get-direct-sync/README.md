@@ -21,6 +21,8 @@ Configuration is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `
 `GETNOTE_API_KEY`, `GETNOTE_CLIENT_ID`, `PRIVATE_VAULT_TOKEN`, `NOTION_API_KEY`.
 `scope` is `isolated-validation` or `production`; target IDs are configured privately.
 
+The Get workflow uses its own concurrency group; the private state CAS lease remains the authoritative single-writer guard across runs. Unrelated main-branch writes still require conditional writes and verified readback.
+
 The pre-existing private state branch must be dedicated to this namespace and
 must differ from the data/default branch. A single conditional Contents update
 keeps its lease and full compressed SQLite checkpoint together across runners.
