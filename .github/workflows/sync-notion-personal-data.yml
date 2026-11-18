@@ -152,7 +152,7 @@ jobs:
           if isinstance(held, dict):
               safe = []
               for key, value in held.items():
-                  code = key if key in {'source_identity_not_observed', 'stage_edited', 'source_identity_changed', 'incomplete_asset', 'incomplete_relation', 'unsupported_block', 'block_cycle', 'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source', 'incomplete_property_proof', 'unsupported_property_renderer_revision', 'state_changed', 'source_changed_during_read', 'source_or_stage_failed', 'other'} else 'other'
+                  code = key if key in {'source_identity_not_observed', 'stage_edited', 'source_identity_changed', 'incomplete_asset', 'incomplete_relation', 'relation_visibility_unverified', 'unsupported_block', 'block_cycle', 'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source', 'incomplete_property_proof', 'unsupported_property_renderer_revision', 'state_changed', 'source_changed_during_read', 'source_or_stage_failed', 'other'} else 'other'
                   if type(value) is int and 0 <= value <= 1000000:
                       safe.append(code + '=' + str(value))
               if safe:

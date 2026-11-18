@@ -73,6 +73,44 @@ class StageTests(unittest.TestCase):
     def run_sync(self, **kwargs):
         return bridge.run(self.root, 'synthetic-db', 'synthetic-credential', **kwargs)
 
+    def test_scoped_relation_shrink_keeps_last_seen_edges_without_fabricating_current_values(self):
+        previous = page()
+        current = copy.deepcopy(previous)
+        current['properties']['日记']['relation'] = []
+        unverified = bridge.relation_visibility(current, {'page': previous})
+        self.assertEqual(unverified, {'日记': ['synthetic-diary']})
+        self.assertEqual(current['properties']['日记']['relation'], [])
+        rendered = bridge.render_record(current, [block('New original body')], 'YWJj', [],
+                                        include_text_properties=True, unverified_relations=unverified).decode()
+        self.assertIn('New original body', rendered)
+        self.assertIn('当前连接无法验证', rendered)
+        self.assertIn('https://www.notion.so/syntheticdiary', rendered)
+        state = {'page': current, 'relation_visibility_unverified': unverified}
+        self.assertEqual(bridge.relation_visibility(current, state), unverified)
+        self.assertEqual(bridge.relation_visibility(previous, state), {})
+
+    def test_stage_advances_actual_body_and_preserves_unverified_relation_on_repeat(self):
+        self.rows[0]['parent'] = {'database_id': 'synthetic-db'}
+        with mock.patch('notion_complete_properties.hydrate_page',
+                        side_effect=lambda raw, request: {'proof_version': 1, 'hydrated_page': raw}):
+            first = self.run_sync(apply=True, property_proof_enabled=True)
+            first_path = self.record_path(suffix='.json')
+            first_bytes = first_path.read_bytes()
+            self.rows[0]['properties']['日记']['relation'].clear()
+            self.rows[0]['last_edited_time'] = '2026-11-01T00:00:00Z'
+            self.mocks['retrieve_block_children'].return_value = [block('Changed body')]
+            second = self.run_sync(apply=True, property_proof_enabled=True)
+            third = self.run_sync(apply=True, property_proof_enabled=True)
+        self.assertEqual((first['written'], second['written'], third['written']), (1, 1, 0))
+        self.assertEqual(second['held'], {'YWJj': 'relation_visibility_unverified'})
+        self.assertEqual(third['held'], second['held'])
+        self.assertIn('Changed body', self.record_path().read_text())
+        self.assertIn('https://www.notion.so/syntheticdiary', self.record_path().read_text())
+        self.assertEqual(first_path.read_bytes(), first_bytes)
+        second_record = json.loads(self.record_path(suffix='.json').read_text())
+        self.assertEqual(second_record['page']['properties']['日记']['relation'], [])
+        self.assertEqual(second_record['relation_visibility_unverified'], {'日记': ['synthetic-diary']})
+
     def test_safe_failure_diagnostic_keeps_only_http_metadata(self):
         http = urllib.error.HTTPError('https://api.notion.com/v1', 403, 'Forbidden', {}, io.BytesIO())
         error = RuntimeError('Notion API POST /private-path failed (403): ' + json.dumps({

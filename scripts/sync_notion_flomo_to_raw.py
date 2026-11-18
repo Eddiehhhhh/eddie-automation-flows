@@ -42,7 +42,7 @@ NOTION_ERROR_CODES = frozenset(('unauthorized', 'restricted_resource', 'object_n
     'validation_error', 'conflict_error', 'internal_server_error', 'service_unavailable',
     'request_timeout'))
 SAFE_HOLD_CODES = frozenset(('source_identity_not_observed', 'stage_edited',
-    'source_identity_changed', 'incomplete_asset', 'incomplete_relation', 'unsupported_block',
+    'source_identity_changed', 'incomplete_asset', 'incomplete_relation', 'relation_visibility_unverified', 'unsupported_block',
     'block_cycle', 'asset_file_budget', 'asset_batch_bound', 'potential_credential_in_source',
     'incomplete_property_proof', 'unsupported_property_renderer_revision', 'state_changed',
     'source_changed_during_read', 'source_or_stage_failed'))
@@ -231,8 +231,34 @@ def materialize_assets(value, files, downloader):
     return result
 
 
+def relation_visibility(page, prior_snapshot):
+    """Keep previously observed relations when the scoped reader no longer sees them."""
+    def targets(value):
+        return {name: {target['id'] for target in prop.get('relation', [])}
+                for name, prop in value.get('properties', {}).items() if prop.get('type') == 'relation'}
+
+    previous = targets(prior_snapshot['page'])
+    for name, ids in prior_snapshot.get('relation_visibility_unverified', {}).items():
+        previous.setdefault(name, set()).update(ids)
+    current = targets(page)
+    return {name: sorted(ids - current.get(name, set()))
+            for name, ids in previous.items() if ids - current.get(name, set())}
+
+
+def relation_visibility_note(relations):
+    if not relations:
+        return ''
+    lines = ['## Notion 既有关联（当前连接无法验证）',
+             '', '下面保留上一次可见的关联。本次读取范围仅限碎片中心。']
+    for name, ids in sorted(relations.items()):
+        lines.extend(['', str(name).replace('\n', ' '), ''])
+        lines.extend('- [关联原页](https://www.notion.so/' +
+                     urllib.parse.quote(target.replace('-', ''), safe='') + ')' for target in ids)
+    return '\n\n' + '\n'.join(lines)
+
+
 def render_record(page, blocks, mid, local_paths, *, embed_images=False, include_text_properties=False,
-                  property_renderer_revision=PROPERTY_RENDERER_REVISION):
+                  property_renderer_revision=PROPERTY_RENDERER_REVISION, unverified_relations=None):
     cache = {}
     def register(rows):
         for row in rows:
@@ -275,6 +301,7 @@ def render_record(page, blocks, mid, local_paths, *, embed_images=False, include
                 parts.append(text)
             text = ''.join(parts)
             if text.strip(): body += '\n\n## Notion 文本属性：' + str(name).replace('\n', ' ') + '\n\n' + text
+    body += relation_visibility_note(unverified_relations)
     return (notion.render_frontmatter(metadata) + '\n\n' + body + '\n').encode()
 
 
@@ -639,6 +666,8 @@ def _stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=
                     and (proof_budget is None or (prior.get('property_proof_version') == 1
                         and prior.get('metadata_fingerprint') == metadata_fingerprint(page)
                         and prior.get('property_renderer_revision', 1) == PROPERTY_RENDERER_REVISION))):
+                if prior.get('relation_visibility_unverified'):
+                    report['held'][failure_key] = 'relation_visibility_unverified'
                 report['unchanged'] += 1
                 continue
             if not apply or budget_reason or (max_pages and report['attempted'] >= max_pages):
@@ -673,12 +702,21 @@ def _stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=
                 blocks = deepcopy(snapshot['blocks']) if reused else block_tree(api_key, ident)
                 reject_credentials(encoded({'page': complete, 'blocks': blocks}))
                 material = deepcopy(snapshot['materialized']) if reused else materialize_assets({'page': complete, 'blocks': blocks}, files, downloader)
+                unverified_relations = {}
+                if property_capture is not None and prior.get('files'):
+                    relative = next(rel for rel in prior['files'] if rel.endswith('/' + mid + '.json'))
+                    raw_prior = safe_path(root / STAGE, relative).read_bytes()
+                    if digest(raw_prior) != prior['files'][relative]:
+                        raise ValueError('stage_edited')
+                    unverified_relations = relation_visibility(complete, json.loads(raw_prior))
                 files[mid + '.md'] = render_record(material['page'], material['blocks'], mid, local.get(mid, []),
-                                                 include_text_properties=property_capture is not None)
+                                                 include_text_properties=property_capture is not None,
+                                                 unverified_relations=unverified_relations)
                 reject_credentials(files[mid + '.md'])
                 if not reused:
                     snapshot = {'page': complete, 'blocks': blocks, 'materialized': material}
                     if property_capture is not None: snapshot['property_capture'] = property_capture
+                    if unverified_relations: snapshot['relation_visibility_unverified'] = unverified_relations
                     files[mid + '.json'] = encoded(snapshot)
                 latest = notion.notion_request(api_key, 'GET', '/pages/' + ident)
                 if (latest.get('last_edited_time') != page.get('last_edited_time')
@@ -700,6 +738,9 @@ def _stage(root, database_id, api_key, *, apply=False, max_pages=50, downloader=
                 if property_capture is not None:
                     receipt.update(property_proof_version=1, metadata_fingerprint=metadata_fingerprint(before),
                                    property_renderer_revision=PROPERTY_RENDERER_REVISION)
+                if unverified_relations:
+                    receipt['relation_visibility_unverified'] = True
+                    report['held'][failure_key] = 'relation_visibility_unverified'
                 candidate = deepcopy(state)
                 if grouped:
                     sources[ident] = receipt
