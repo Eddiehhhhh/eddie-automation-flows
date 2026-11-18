@@ -581,7 +581,7 @@ class ActionGitStateFake(GitStateFake):
 
     def attempt(self, run_id, attempt, status):
         row = {'id': run_id, 'run_attempt': attempt, 'status': status,
-               'path': '.github/workflows/get-direct-sync.yml', 'workflow_id': 7,
+               'path': '.github/workflows/get-notion-incremental.yml', 'workflow_id': 7,
                'repository': {'full_name': self.runtime_repo, 'id': 50, 'fork': False},
                'head_repository': {'full_name': self.runtime_repo, 'id': 50, 'fork': False},
                'head_sha': 'd' * 40, 'conclusion': 'failure' if status == 'completed' else None}
@@ -619,7 +619,7 @@ class RecoveryTests(unittest.TestCase):
 
     def context(self, run_id=200, attempt=1):
         return {'GITHUB_REPOSITORY': 'runtime/sync',
-                'GITHUB_WORKFLOW_REF': 'runtime/sync/.github/workflows/get-direct-sync.yml@refs/heads/main',
+                'GITHUB_WORKFLOW_REF': 'runtime/sync/.github/workflows/get-notion-incremental.yml@refs/heads/main',
                 'GITHUB_RUN_ID': str(run_id), 'GITHUB_RUN_ATTEMPT': str(attempt)}
 
     def seed(self, owner='get-direct-100-1'):
@@ -693,6 +693,7 @@ class RecoveryTests(unittest.TestCase):
         self.control()
         baseline = copy.deepcopy(self.git.attempts)
         mutations = [('path', '.github/workflows/other.yml'),
+                     ('path', '.github/workflows/get-direct-sync.yml'),
                      ('repository', {'full_name': 'other/repo', 'id': 50, 'fork': False}),
                      ('head_repository', {'full_name': 'other/fork', 'id': 51, 'fork': True}),
                      ('head_repository', {'full_name': 'runtime/sync', 'id': 50, 'fork': True})]

@@ -25,7 +25,7 @@ MAX_COMPRESSED = 8 * 1024 * 1024
 MAX_RAW = 128 * 1024 * 1024
 STATE_FILE = 'get-direct-state.json'
 SCHEMA = 'get-direct-remote-state-v1'
-WORKFLOW_PATH = '.github/workflows/get-direct-sync.yml'
+WORKFLOW_PATH = '.github/workflows/get-notion-incremental.yml'
 _CHECKPOINT_HOLDS = frozenset(('remote_checkpoint_context', 'remote_checkpoint_size',
     'remote_checkpoint_compressed_size', 'remote_checkpoint_invalid', 'remote_checkpoint_corrupt',
     'private_state_branch_required', 'remote_state_branch_missing', 'remote_state_tree_incomplete',

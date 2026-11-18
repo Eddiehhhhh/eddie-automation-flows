@@ -459,6 +459,16 @@ class CutoverTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(Hold):
                 self.check(**options)
 
+    def test_retired_direct_worker_must_be_disabled(self):
+        class Control:
+            def request(self, method, path, body=None):
+                if '/runs?' in path:
+                    return {'total_count': 0, 'workflow_runs': []}
+                return {'state': 'active' if path.endswith('/get-direct-sync.yml') else 'disabled_manually'}
+        with self.assertRaisesRegex(Hold, 'legacy_writer_not_disabled'):
+            runner.verify_legacy_writers(dict(config(), scope='production'), Control(),
+                                         {'GITHUB_REPOSITORY': 'owner/runtime'})
+
     def test_production_without_official_runtime_context_holds(self):
         with self.assertRaisesRegex(Hold, 'production_control_plane_required'):
             runner.verify_legacy_writers(dict(config(), scope='production'), object(), {})

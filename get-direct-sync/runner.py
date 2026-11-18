@@ -257,7 +257,7 @@ def verify_legacy_writers(cfg, github_http, environ=None):
     repo = env.get('GITHUB_REPOSITORY')
     if not isinstance(repo, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
         raise Hold('production_control_plane_required')
-    for workflow in ('get-canonical.yml', 'get-notion-incremental.yml'):
+    for workflow in ('get-canonical.yml', 'get-direct-sync.yml'):
         path = '/repos/' + repo + '/actions/workflows/' + workflow
         definition = github_http.request('GET', path)
         if not definition or definition.get('state') != 'disabled_manually':

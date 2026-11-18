@@ -14,7 +14,7 @@ at most `batch-size` revisions (1–10), rotating across IDs without reordering 
 versions of one ID. The authenticated private journal may pause reviewed source
 IDs without putting personal IDs into public configuration.
 
-The public workflow is an explicit worker without a cron schedule. A private controller owns the schedule and dispatches `sync`; optional `dispatch_key` correlates the controller request with its worker run.
+The established `get-notion-incremental.yml` workflow now runs this runtime directly. The retired direct worker and private dispatcher remain disabled. Scheduled runs default to `sync`; manual runs can select an explicit mode.
 Configuration is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `data_branch`,
 `state_branch`, `namespace`, `raw_prefix`, `notion_database_id`,
 `notion_properties`, `allowed_asset_hosts` and `scope`. The runtime requires

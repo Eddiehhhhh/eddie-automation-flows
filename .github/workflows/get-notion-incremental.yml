@@ -1,18 +1,26 @@
-name: Get notes from private GitHub to Notion
+# The established Get scheduler now runs only the direct dual-destination runtime.
+# Runtime source modules are expected at get-direct-sync/ in the public code repo.
+name: Direct Get dual destination sync
+run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
 
 on:
   schedule:
-    # Backup for queued notes when Get could not run.
-    - cron: '20 */6 * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
-      apply:
-        description: Write verified pending Get notes to Notion
-        type: boolean
-        default: false
+      mode:
+        description: Explicit operation (inspect is read only)
+        type: choice
+        options: [inspect, baseline, sync, backfill, drain]
+        default: inspect
         required: true
-      adopt_attempt_commit:
-        description: Private attempt commit to verify and adopt one existing Get page
+      batch_size:
+        description: Maximum revisions delivered per run (1 to 10)
+        type: string
+        default: '10'
+        required: true
+      dispatch_key:
+        description: Optional controller dispatch correlation key
         type: string
         default: ''
         required: false
@@ -27,29 +35,25 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 55
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       GIT_TERMINAL_PROMPT: '0'
-      CODEX_THREAD_ID: get-notion-${{ github.run_id }}-${{ github.run_attempt }}
+      CODEX_THREAD_ID: get-direct-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - name: Check out verified runtime
+      - name: Check out current public runtime
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: Eddiehhhhh/eddie-automation-flows
-          ref: 8688bebe32d770f94de7dc8ef7b117d9d6102626
+          ref: ${{ github.sha }}
           path: get-runtime
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Install verified metadata parser
-        working-directory: get-runtime/get-runtime
-        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r requirements-notion-properties.txt'
-      - name: Check out private vault without media blobs
+      - name: Check out private rules without note or media bodies
         env:
-          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GET_DIRECT_PRIVATE_TOKEN || secrets.PRIVATE_VAULT_TOKEN }}
         run: |
           set -euo pipefail
           test "$(gh api repos/Eddiehhhhh/eddie-llm-wiki --jq .private)" = true
@@ -68,53 +72,54 @@ jobs:
           /.sync/get-notion-incremental/
           /Raw/03 Get/03 State/
           SPARSE
-          git -C vault fetch --filter=blob:none --no-tags origin refs/heads/main
+          git -C vault fetch --filter=blob:none --no-tags origin refs/heads/main > "$RUNNER_TEMP/get-direct-checkout.txt" 2>&1
           git -C vault checkout -q -b main FETCH_HEAD
           test "$(git -C vault rev-parse --is-shallow-repository)" = false
           test "$(git -C vault rev-parse origin/main)" = "$(git -C vault rev-parse HEAD)"
           test -z "$(git -C vault status --porcelain --untracked-files=all)"
-      - name: Read rules and acquire private write lease
+      - name: Read private rules
         working-directory: vault
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          for name in ('AGENTS.md', 'Wiki/索引.md', 'Wiki/06 Systems/01 Routing/规则入口索引.md'):
+          for name in ('AGENTS.md', 'Wiki/索引.md', 'Wiki/06 Systems/01 Routing/规则入口索引.md',
+                       'Schema/执行规范.md', 'Schema/同步规范.md'):
               assert Path(name).read_text(encoding='utf-8').strip()
           print('Required private-vault rules read.')
           PY
-          python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-notion-preflight.txt"
-          grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-notion-preflight.txt"
-      - name: Materialize verified private runtime binding
-        working-directory: get-runtime/get-runtime
-        env:
-          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
-          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-        run: python3 scripts/get_private_runtime_bindings.py --destination "$GET_PRIVATE_BINDINGS_FILE"
-      - name: Check queued Get notes
-        env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          GH_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
-          GET_PRIVATE_BINDINGS_FILE: ${{ runner.temp }}/get-private-bindings/runtime-bindings.json
-          PYTHONPATH: ${{ github.workspace }}/get-runtime/get-runtime/scripts
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
-          ADOPT_ATTEMPT_COMMIT: ${{ inputs.adopt_attempt_commit }}
-        run: |
-          set -euo pipefail
-          args=(--vault vault)
-          if test "$APPLY" = true; then args+=(--apply); fi
-          if test -n "$ADOPT_ATTEMPT_COMMIT"; then args+=(--adopt-attempt-commit "$ADOPT_ATTEMPT_COMMIT"); fi
-          python3 - "${args[@]}" <<'PY'
-          import get_notion_incremental_controller as controller
-          # A held note must not block unrelated verified notes.
-          controller.HOLD_CODES = controller.HOLD_CODES | {'content_review_required', 'source_conflict'}
-          controller.main()
-          PY
-      - name: Release private write lease
-        if: always()
+      - name: Check read-only context
+        if: ${{ inputs.mode == 'inspect' }}
         working-directory: vault
         run: |
+          set -euo pipefail
+          python3 Scripts/task_preflight.py --context-only > "$RUNNER_TEMP/get-direct-context.txt"
+      - name: Acquire private write lease
+        if: ${{ inputs.mode != 'inspect' }}
+        working-directory: vault
+        run: |
+          set -euo pipefail
+          python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-direct-preflight.txt"
+          grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-direct-preflight.txt"
+      - name: Execute explicit direct sync mode
+        working-directory: get-runtime/get-direct-sync
+        env:
+          GET_SYNC_CONFIG_JSON: ${{ secrets.GET_SYNC_CONFIG_JSON }}
+          GETNOTE_API_KEY: ${{ secrets.GET_DIRECT_API_KEY || secrets.GETNOTE_API_KEY || secrets.GET_API_KEY }}
+          GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID || secrets.GET_CLIENT_ID }}
+          PRIVATE_VAULT_TOKEN: ${{ secrets.GET_DIRECT_PRIVATE_TOKEN || secrets.PRIVATE_VAULT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.GET_DIRECT_NOTION_TOKEN || secrets.NOTION_API_KEY }}
+          RUN_MODE: ${{ inputs.mode || 'sync' }}
+          RUN_BATCH_SIZE: ${{ inputs.batch_size || '10' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 runner.py --mode "$RUN_MODE" --batch-size "$RUN_BATCH_SIZE"
+      - name: Release only this run's private rule lease
+        if: ${{ always() && inputs.mode != 'inspect' }}
+        working-directory: vault
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import sys
           from pathlib import Path
