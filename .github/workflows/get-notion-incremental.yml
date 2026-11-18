@@ -5,7 +5,7 @@ run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
 
 on:
   workflow_run:
-    workflows: [Audit Raw filenames, Link Notion workouts to diary, Sync Notion flomo notes to Raw, Get cloud sync wake, Get cloud clock]
+    workflows: [Audit Raw filenames, Link Notion workouts to diary, Sync Notion flomo notes to Raw, Get cloud sync wake]
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
     if: >-
       ${{ github.event_name != 'workflow_run' ||
           github.event.workflow_run.event == 'schedule' ||
-          (contains(fromJSON('["Get cloud sync wake","Get cloud clock"]'), github.event.workflow_run.name) && github.event.workflow_run.event == 'workflow_dispatch') }}
+          (github.event.workflow_run.name == 'Get cloud sync wake' && github.event.workflow_run.event == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:

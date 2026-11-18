@@ -1,5 +1,5 @@
 import unittest
-from clock import arm
+from clock import arm, dispatch
 
 
 class ClockTests(unittest.TestCase):
@@ -45,12 +45,36 @@ class ClockTests(unittest.TestCase):
                 arm(env, self.api)
         self.assertFalse(any(b for _, b in self.calls))
 
-    def test_recovery_retains_hourly_cadence_and_does_not_require_validation_timer(self):
+    def test_recovery_checks_hourly_policy_before_rearming(self):
         self.env['GET_CLOCK_VALIDATION_TICKS'] = '0'
         self.env['GITHUB_EVENT_NAME'] = 'workflow_run'
+        self.timer = 60
         self.assertEqual(arm(self.env, self.api, recover=True), 'next_tick_verified')
-        self.assertFalse(any('/environments/' in p for p, _ in self.calls))
+        self.assertTrue(any(p.endswith('/environments/get-clock-hourly') for p, _ in self.calls))
         self.assertEqual(self.calls[-2][1]['inputs']['validation_ticks'], '0')
+
+    def test_sync_dispatch_is_explicit_and_reconciles_uncertain_response(self):
+        entries = []
+        posts = []
+        def api(path, body=None):
+            self.assertIn('/get-notion-incremental.yml/', path)
+            if body:
+                posts.append(body)
+                entries.append({'display_title': 'Direct Get clock-123'})
+                raise TimeoutError()
+            return {'workflow_runs': entries}
+        inputs = {'mode': 'sync', 'batch_size': '10', 'dispatch_key': 'clock-123'}
+        self.assertEqual(dispatch(api, 'repos/owner/repo', 'get-notion-incremental.yml',
+                                 'Direct Get clock-123', inputs), 'next_tick_verified')
+        self.assertEqual(dispatch(api, 'repos/owner/repo', 'get-notion-incremental.yml',
+                                 'Direct Get clock-123', inputs), 'successor_already_recorded')
+        self.assertEqual(posts, [{'ref': 'main', 'inputs': inputs}])
+
+    def test_broken_hourly_timer_never_restarts_from_recovery(self):
+        self.timer = 0
+        with self.assertRaises(ValueError):
+            arm(self.env, self.api, recover=True)
+        self.assertFalse(any(b for _, b in self.calls))
 
     def test_unconfirmed_post_fails_closed_and_completed_successor_is_not_replayed(self):
         def api(path, body=None):

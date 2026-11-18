@@ -14,7 +14,7 @@ at most `batch-size` revisions (1–10), rotating across IDs without reordering 
 versions of one ID. The authenticated private journal may pause reviewed source
 IDs without putting personal IDs into public configuration.
 
-The established `get-notion-incremental.yml` workflow now runs this runtime directly. The retired direct worker and private dispatcher remain disabled. The production hourly clock runs at minute 57 in `link-notion-workout-to-diary.yml`; that tick skips the workout business job and only emits the completion signal. Get consumes it as `workflow_run`, defaults to `sync`, and has no second independent cron. Manual runs can still select an explicit mode.
+The established `get-notion-incremental.yml` workflow runs this runtime directly. The retired direct worker and private dispatcher remain disabled. `Get cloud clock` uses a GitHub server wait timer, then explicitly dispatches Get in sync mode using its short-lived Actions token. Get has no independent cron. The experimental hourly workout tick has been removed, restoring that workflow to its original schedule and jobs. Manual Get runs can still select an explicit mode.
 Configuration is one JSON secret, `GET_SYNC_CONFIG_JSON`, with `private_repo`, `data_branch`,
 `state_branch`, `namespace`, `raw_prefix`, `notion_database_id`,
 `notion_properties`, `allowed_asset_hosts` and `scope`. The runtime requires
@@ -28,13 +28,13 @@ must be configured before starting it: `get-clock-hourly` waits 60 minutes and
 `get-clock-validation` waits 1 minute, both limited to main with no reviewers.
 The wait consumes no runner time. Each released job verifies its timer policy,
 dispatches one successor using its short-lived Actions token, reads that successor
-back, and completes to wake Get. It contains no note credentials. Two bounded
+back, then separately dispatches Get with a unique clock run key and reads it back. It contains no note credentials. Two bounded
 validation ticks transition automatically to the production hourly timer.
 `clock.py` reconciles an uncertain dispatch without repeating the POST, prevents
 reruns from forking the chain, and fails if the required timer is missing. Every
 trusted Get write run also rearms the hourly clock if no future clock remains;
-normal scheduled business completions therefore provide recovery. Inspect mode
-does not arm a clock. To stop, disable `get-cloud-clock.yml` and cancel its waiting
+normal scheduled business completions therefore provide recovery. Both the normal timer and recovery paths verify the hourly wait policy; missing protection stops rearming instead of creating an immediate loop. Inspect mode
+does not arm a clock. Restart a fully stopped chain with a new manual clock dispatch, not a rerun of an old parent. To stop, disable `get-cloud-clock.yml` and cancel its waiting
 run; the existing fallback business flows may still wake Get. Disable the Get
 receiver too for a complete stop. This is a server-delay chain, not proof that
 native cron delivery has recovered. A GitHub-wide Actions outage can delay both.
