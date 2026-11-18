@@ -210,7 +210,8 @@ def notion_body(root,mid,record,files,evidence):
     rewrite(material)
     rendered=shared.render_record(material['page'],material['blocks'],mid,[],embed_images=True,
         include_text_properties=(captured.get('property_capture') or {}).get('proof_version')==1,
-        property_renderer_revision=record.get('property_renderer_revision',1)).decode()
+        property_renderer_revision=record.get('property_renderer_revision',1),
+        unverified_relations=captured.get('relation_visibility_unverified')).decode()
     body=rendered.split('---',2)[2].lstrip()
     page=captured['page']; title=shared.notion.page_title(page,'Name')
     for prop_name,prop in material['page'].get('properties',{}).items():
@@ -267,10 +268,12 @@ def render(root,mid,notion_record,original_record,legacy,status,now):
     body+='\n\n## 来源与未合并版本\n\n'
     if not originals:body+='原 flomo 正文尚未取得或本轮未观察到；以下保留 Notion 来源，不据此判断删除。\n\n'
     if len(variants)>1:body+='Notion 来源并列保留，差异尚未合并；原源正文不抹去这些来源。\n\n'
-    for i,(_,page,name,_,relative) in enumerate(variants,1):
+    for i,(ident,page,name,_,relative) in enumerate(variants,1):
         target=link(os.path.relpath(root/shared.STAGE/relative,destination))
         variant_tags=shared.notion.summarize_properties(page).get('Tags',[])
         body+='- [Notion 来源 '+str(i)+'：'+label(name)+']('+target+')'
+        if sources(notion_record)[ident].get('relation_visibility_unverified'):
+            body+='（既有关联的可见性待核，见原稿）'
         if variant_tags:body+='（标签：'+label('、'.join(str(tag) for tag in variant_tags))+'）'
         source_date=((page.get('properties',{}).get('Created At') or {}).get('date') or {}).get('start')
         if source_date:body+='（Notion 记录日期：'+label(source_date)+'）'
