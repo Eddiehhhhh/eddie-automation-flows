@@ -26,8 +26,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: notion-workout-diary-link-writer
+  cancel-in-progress: false
 
 jobs:
   link:

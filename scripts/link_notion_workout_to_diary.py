@@ -84,7 +84,8 @@ def notion_request(
 
     url = f"{BASE_URL}{path}"
     last_error: Optional[Exception] = None
-    for attempt in range(5):
+    attempts = 1 if method.upper() == "PATCH" else 5
+    for attempt in range(attempts):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -93,18 +94,18 @@ def notion_request(
         except urllib.error.HTTPError as exc:
             last_error = exc
             body = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 429 and attempt < 4:
+            if exc.code == 429 and attempt < attempts - 1:
                 retry_after = exc.headers.get("Retry-After")
                 time.sleep(int(retry_after) if retry_after and retry_after.isdigit() else 10)
                 continue
-            if 500 <= exc.code < 600 and attempt < 4:
+            if 500 <= exc.code < 600 and attempt < attempts - 1:
                 time.sleep(5)
                 continue
             message = body or exc.reason
             raise RuntimeError(f"Notion API request failed (HTTP {exc.code})") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_error = exc
-            if attempt < 4:
+            if attempt < attempts - 1:
                 time.sleep(5)
                 continue
             raise RuntimeError("Notion network request failed") from None
@@ -163,6 +164,7 @@ def paginate_database(
     filter_obj: Optional[Dict[str, Any]] = None,
 ) -> Iterable[Dict[str, Any]]:
     cursor: Optional[str] = None
+    seen_cursors = set()
     while True:
         response = query_database(api_key, database_id, filter_obj=filter_obj, start_cursor=cursor)
         for item in response.get("results", []):
@@ -170,8 +172,9 @@ def paginate_database(
         if not response.get("has_more"):
             break
         cursor = response.get("next_cursor")
-        if not cursor:
-            break
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("Incomplete pagination")
+        seen_cursors.add(cursor)
 
 
 def rich_text_plain_text(parts: Sequence[Dict[str, Any]]) -> str:
@@ -284,6 +287,14 @@ def relation_ids(page: Dict[str, Any], property_name: str) -> List[str]:
     return ids
 
 
+def merged_relation_ids(page: Dict[str, Any], property_name: str, diary_id: str) -> List[str]:
+    prop = page_property(page, property_name)
+    if prop.get("type") != "relation" or prop.get("has_more"):
+        raise RuntimeError("Complete relation required before updating")
+    current = relation_ids(page, property_name)
+    return current if diary_id in current else current + [diary_id]
+
+
 def iso_cutoff(hours_back: float) -> str:
     cutoff = dt.datetime.now(TZ) - dt.timedelta(hours=hours_back)
     return cutoff.isoformat(timespec="seconds")
@@ -384,15 +395,23 @@ def main() -> int:
 
         diary_page_id = str(diary_entry.get("id"))
         current_relation_ids = relation_ids(page, workout_relation_property)
-        if current_relation_ids == [diary_page_id]:
+        if diary_page_id in current_relation_ids:
             stats["unchanged"] += 1
             continue
 
+        merged_relation_ids(page, workout_relation_property, diary_page_id)
         if args.dry_run:
             stats["linked"] += 1
             continue
 
-        update_page(api_key, page_id, {workout_relation_property: {"relation": [{"id": diary_page_id}]}})
+        fresh = notion_request(api_key, "GET", f"/pages/{normalize_notion_id(page_id)}")
+        if date_value(fresh, workout_date_property) != start_date:
+            raise RuntimeError("Workout date changed during processing")
+        merged = merged_relation_ids(fresh, workout_relation_property, diary_page_id)
+        if diary_page_id in relation_ids(fresh, workout_relation_property):
+            stats["unchanged"] += 1
+            continue
+        update_page(api_key, page_id, {workout_relation_property: {"relation": [{"id": value} for value in merged]}})
         stats["linked"] += 1
 
     print(json.dumps(stats, ensure_ascii=False, sort_keys=True))

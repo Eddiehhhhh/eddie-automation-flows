@@ -12,6 +12,13 @@ A = '11111111-1111-1111-1111-111111111111'
 B = '22222222-2222-2222-2222-222222222222'
 
 class SafetyTests(unittest.TestCase):
+    def test_relation_merge_preserves_existing(self):
+        page={'properties':{'link':{'type':'relation','relation':[{'id':A}]}}}
+        self.assertEqual(m.merged_relation_ids(page,'link',B),[A,B])
+        self.assertEqual(m.merged_relation_ids(page,'link',A),[A])
+        page['properties']['link']['has_more']=True
+        with self.assertRaises(RuntimeError): m.merged_relation_ids(page,'link',B)
+
     def test_missing_identity_never_searches(self):
         with patch.object(m, 'notion_request') as api:
             for value in (None, '', 'private title', 'https://example.com/'+A):
@@ -50,7 +57,7 @@ class SafetyTests(unittest.TestCase):
         page={'id':A,'properties':{'date':{'type':'date','date':{'start':'2026-01-01'}},'title':{'type':'title','title':[{'plain_text':'private title'}]},'link':{'type':'relation','relation':[]}}}
         for dry in (False,True):
             out=io.StringIO();err=io.StringIO()
-            with patch.dict(m.os.environ,{'NOTION_API_KEY':'token','NOTION_WORKOUT_DATABASE_ID':A,'NOTION_DIARY_DATABASE_ID':B,'NOTION_DRY_RUN':str(dry)},clear=True), patch.object(m.sys,'argv',['link']), patch.object(m,'resolve_database',side_effect=[workout,diary]), patch.object(m,'paginate_database',side_effect=[[page],[{'id':B}]]), patch.object(m,'update_page') as update, contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+            with patch.dict(m.os.environ,{'NOTION_API_KEY':'token','NOTION_WORKOUT_DATABASE_ID':A,'NOTION_DIARY_DATABASE_ID':B,'NOTION_DRY_RUN':str(dry)},clear=True), patch.object(m.sys,'argv',['link']), patch.object(m,'resolve_database',side_effect=[workout,diary]), patch.object(m,'paginate_database',side_effect=[[page],[{'id':B}]]), patch.object(m,'notion_request',return_value=page), patch.object(m,'update_page') as update, contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
                 self.assertEqual(m.cli(),0)
                 self.assertEqual(update.call_count,0 if dry else 1)
             for value in (A,B,'private title','2026-01-01','token'):
