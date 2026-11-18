@@ -278,9 +278,35 @@ def verify_legacy_writers(cfg, github_http, environ=None):
                     raise Hold('legacy_writer_queued_with_jobs')
 
 
-def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=None):
+def revision_digest(sid, version):
+    return hashlib.sha256((sid + ':' + version).encode('ascii')).hexdigest()
+
+
+def reviewed_revisions(store, requested, batch_size, paused_ids):
+    tokens = requested.split(',')
+    if (len(tokens) != batch_size or len(tokens) > 5 or len(set(tokens)) != len(tokens)
+            or any(not re.fullmatch('[0-9a-f]{64}', token) for token in tokens)):
+        raise Hold('reviewed_revisions_invalid')
+    if store.pending_count():
+        raise Hold('reviewed_backfill_pending_work')
+    wanted = set(tokens)
+    targets = {sid: version for sid, version in store.db.execute('SELECT id,version FROM inventory')
+               if revision_digest(sid, version) in wanted}
+    if len(targets) != len(wanted) or targets.keys() & set(paused_ids):
+        raise Hold('reviewed_revisions_unavailable')
+    for sid in targets:
+        if (store.get('source_hold:' + sid) or {}).get('status') == 'held':
+            raise Hold('reviewed_revisions_unavailable')
+    return targets
+
+
+def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=None,
+            review=''):
     if mode not in MODES or type(batch_size) is not int or not 1 <= batch_size <= 10:
         raise Hold('runner_arguments_invalid')
+    if (review and mode != 'backfill' or mode == 'backfill' and
+            cfg['scope'] == 'production' and not review):
+        raise Hold('reviewed_backfill_required')
     if mode == 'inspect':
         return inspect(cfg, get_http, github_http, notion_http), 0
     verify_legacy_writers(cfg, github_http)
@@ -319,7 +345,12 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 def stage_source_hold(value):
                     source_hold(value)
                     staged_holds.append(value)
-                if mode=='backfill':
+                reviewed = None
+                if mode == 'backfill' and review:
+                    reviewed = reviewed_revisions(store, review, batch_size, paused_ids)
+                    def selector(summary):
+                        return identity(summary) in reviewed
+                elif mode=='backfill':
                     waiting_ids={row[0] for row in store.db.execute('SELECT id FROM pending')}
                     delivered=set(store.db.execute('SELECT id,version FROM delivered'))
                     inventory=dict(store.db.execute('SELECT id,version FROM inventory'))
@@ -334,6 +365,14 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 source=GetSource(get_http)
                 snapshots = source.scan(on_note_hold=stage_source_hold,select_note=selector)
                 observed = getattr(source,'observed_count',len(snapshots)+len(source_holds))
+                if reviewed is not None:
+                    if staged_holds or {s['id']: s['version'] for s in snapshots} != reviewed:
+                        raise Hold('reviewed_source_changed')
+                    adapter = NotionSink(notion_http, cfg['notion_database_id'], ReadOnlyJournal(),
+                                         namespace=cfg['namespace'], **cfg['notion_properties'])
+                    for s in snapshots:
+                        if not complete(store, s) and adapter.pages(s['id']):
+                            raise Hold('reviewed_destination_changed')
                 for value in staged_holds:
                     previous = store.get('source_hold:' + value['id'])
                     if (previous and previous.get('status') == 'held' and
@@ -408,12 +447,14 @@ def main(argv=None, environ=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=MODES, required=True)
     parser.add_argument('--batch-size', type=int, default=10)
+    parser.add_argument('--reviewed-revisions', default='')
     args = parser.parse_args(argv)
     if environ is None:
         environ = {k: os.environ.get(k) for k in ENV_NAMES + OWNER_ENV_NAMES}
     try:
         cfg = configuration(environ)
-        report, status = execute(cfg, args.mode, args.batch_size, *transports(environ), owner=run_owner(environ))
+        report, status = execute(cfg, args.mode, args.batch_size, *transports(environ), owner=run_owner(environ),
+                                 review=args.reviewed_revisions)
     except CheckpointFailure as error:
         reason = getattr(error, 'reason', 'checkpoint_failed')
         if not re.fullmatch(r'(?:checkpoint_[a-z_]{1,60}|checkpoint_http_[1-5][0-9]{2})', reason):
