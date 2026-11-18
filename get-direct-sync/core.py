@@ -225,10 +225,16 @@ class Store:
             if nid in blocked:continue
             attempted+=1
             s=json.loads(raw)
-            for name,sink in sinks.items():
+            for name in ('github','notion'):
                 self._checkpoint()
+                previous=self.receipt(name,nid) or {}
+                if (name=='github' and previous.get('version')==version
+                        and (not requires_binary_assets(s) or previous.get('binary_assets_verified') is True)
+                        and not self.db.execute('SELECT 1 FROM held WHERE sink=? AND id=? AND version=?',
+                                                (name,nid,version)).fetchone()):
+                    continue
                 try:
-                    receipt=sink.sync(s,self.receipt(name,nid))
+                    receipt=sinks[name].sync(s,previous or None)
                     if receipt.get('version')!=s['version']: raise Hold('unverified_receipt')
                     before=self.db.total_changes
                     with self.db:
@@ -243,6 +249,7 @@ class Store:
                 except Exception as exc:
                     self._held(name,nid,version,exc)
                     blocked.add(nid);counts[name]['held']+=1
+                if nid in blocked:break
             if nid not in blocked and all((self.receipt(k,nid) or {}).get('version')==s['version'] for k in sinks):
                 with self.db:
                     self.db.execute('INSERT OR IGNORE INTO delivered VALUES(?,?)',(nid,version))

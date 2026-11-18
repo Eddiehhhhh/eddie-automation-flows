@@ -282,13 +282,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertEqual(result['pending'], 1)
         self.assertEqual(result['github']['held'], 1)
-        self.assertEqual(result['notion']['verified'], 1)
+        self.assertEqual(result['notion']['verified'], 0)
+        self.assertFalse(self.notext.calls or self.nomedia.calls)
         self.assertEqual(len(Archive.calls), 1)
         self.ghmedia.error = None
         scans = self.source.calls
         result, status = self.run_mode('drain')
         self.assertEqual(status, 0)
         self.assertEqual(self.source.calls, scans)
+        self.assertEqual(result['notion']['verified'], 1)
+        self.assertEqual(len(self.notext.calls), 1)
         self.assertIsNotNone(self.ghtext.calls[-1][1])
         self.assertEqual(self.ghtext.calls[-1][1]['version'], self.source.notes[0]['version'])
         self.assertIsNone(self.github.document()['lease'])
