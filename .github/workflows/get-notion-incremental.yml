@@ -4,8 +4,6 @@ name: Direct Get dual destination sync
 run-name: Direct Get ${{ inputs.dispatch_key || github.run_id }}
 
 on:
-  schedule:
-    - cron: '17 * * * *'
   workflow_run:
     workflows: [Audit Raw filenames, Link Notion workouts to diary, Sync Notion flomo notes to Raw, Get cloud sync wake]
     types: [completed]

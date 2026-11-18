@@ -7,6 +7,8 @@ on:
     - cron: "20 1 * * *"
     - cron: "20 7 * * *"
     - cron: "20 13 * * *"
+    # Get cloud wake only; the workout job skips this separate hourly tick.
+    - cron: '57 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -26,11 +28,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && github.event.schedule == '57 * * * *' && '-get-clock' || '' }}
   cancel-in-progress: true
 
 jobs:
   link:
+    if: ${{ github.event_name != 'schedule' || github.event.schedule != '57 * * * *' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -53,3 +56,10 @@ jobs:
 
       - name: Link workouts to diary
         run: python scripts/link_notion_workout_to_diary.py
+
+  get-clock:
+    if: ${{ github.event_name == 'schedule' && github.event.schedule == '57 * * * *' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo 'Get hourly cloud wake completed; workout business skipped.'
