@@ -101,14 +101,14 @@ def notion_request(
                 time.sleep(5)
                 continue
             message = body or exc.reason
-            raise RuntimeError(f"Notion API {method} {path} failed ({exc.code}): {message}") from exc
+            raise RuntimeError(f"Notion API request failed (HTTP {exc.code})") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_error = exc
             if attempt < 4:
                 time.sleep(5)
                 continue
-            raise RuntimeError(f"Notion request failed for {method} {path}: {exc}") from exc
-    raise RuntimeError(f"Notion request failed for {method} {path}: {last_error}")
+            raise RuntimeError("Notion network request failed") from None
+    raise RuntimeError("Notion request failed")
 
 
 def get_database(api_key: str, database_id: str) -> Dict[str, Any]:
@@ -127,21 +127,15 @@ def title_text_from_database(database: Dict[str, Any]) -> str:
 
 
 def resolve_database(api_key: str, configured: Optional[str], query: str) -> Dict[str, Any]:
-    if configured:
-        return get_database(api_key, configured)
-
-    matches = search_databases(api_key, query)
-    exact = [item for item in matches if title_text_from_database(item) == query]
-    if len(exact) == 1:
-        return exact[0]
-    if len(matches) == 1:
-        return matches[0]
-
-    if not matches:
-        raise SystemExit(f"Could not find a Notion database titled {query!r}")
-
-    options = ", ".join(f"{item.get('id')}:{title_text_from_database(item)}" for item in matches[:10])
-    raise SystemExit(f"Multiple Notion databases match {query!r}. Candidates: {options}")
+    # Titles and search rankings are not stable identities. Never guess a target.
+    if not configured or not UUID_RE.fullmatch(configured.strip()):
+        raise SystemExit("Configure both database IDs using private deployment secrets; title search is disabled")
+    database = get_database(api_key, configured)
+    if (database.get("object") != "database" or database.get("archived")
+            or database.get("in_trash")
+            or normalize_notion_id(str(database.get("id", ""))) != normalize_notion_id(configured)):
+        raise SystemExit("Configured database could not be validated")
+    return database
 
 
 def query_database(
@@ -214,30 +208,28 @@ def property_choice(
     properties = database.get("properties") or {}
     normalized_target = normalize_notion_id(relation_target_database_id) if relation_target_database_id else None
 
+    def target_matches(prop: Dict[str, Any]) -> bool:
+        relation = prop.get("relation") or {}
+        # This client uses the database API. Do not equate data-source IDs with database IDs.
+        target = relation.get("database_id")
+        return bool(target and normalize_notion_id(str(target)) == normalized_target)
+
     if configured:
         for name, prop in properties.items():
             if configured == name or configured == prop.get("id"):
                 if expected_type and prop.get("type") != expected_type:
-                    raise SystemExit(
-                        f"Configured property {configured!r} on {database.get('title', database.get('id'))!r} has type "
-                        f"{prop.get('type')!r}, expected {expected_type!r}"
-                    )
+                    raise SystemExit("Configured property has an incompatible type")
+                if normalized_target and not target_matches(prop):
+                    raise SystemExit("Configured relation does not target the configured diary database")
                 return name, prop
-        available = ", ".join(sorted(properties.keys()))
-        raise SystemExit(
-            f"Configured property {configured!r} was not found on database {database.get('id')!r}. "
-            f"Available properties: {available}"
-        )
+        raise SystemExit("Configured property was not found")
 
     candidates: List[Tuple[int, str, Dict[str, Any]]] = []
     for name, prop in properties.items():
         if expected_type and prop.get("type") != expected_type:
             continue
-        if normalized_target and prop.get("type") == "relation":
-            relation = prop.get("relation") or {}
-            target = relation.get("database_id") or relation.get("data_source_id") or relation.get("related_database_id")
-            if target and normalize_notion_id(str(target)) != normalized_target:
-                continue
+        if normalized_target and not target_matches(prop):
+            continue
         score = 0
         lower_name = name.lower()
         for keyword in keywords:
@@ -247,19 +239,8 @@ def property_choice(
             score += 1
         candidates.append((score, name, prop))
 
-    if not candidates and normalized_target:
-        for name, prop in properties.items():
-            if expected_type and prop.get("type") != expected_type:
-                continue
-            if prop.get("type") == "relation":
-                candidates.append((0, name, prop))
-
     if not candidates:
-        available = ", ".join(sorted(properties.keys()))
-        raise SystemExit(
-            f"Could not auto-detect a {expected_type or 'property'} on database {database.get('id')!r}. "
-            f"Available properties: {available}"
-        )
+        raise SystemExit("No compatible property found; verify private configuration and schema")
 
     best_score = max(item[0] for item in candidates)
     best = [item for item in candidates if item[0] == best_score]
@@ -272,11 +253,7 @@ def property_choice(
     if len(keyword_matches) == 1:
         return keyword_matches[0][1], keyword_matches[0][2]
 
-    available = ", ".join(sorted(name for _, name, _ in best))
-    raise SystemExit(
-        f"Ambiguous {expected_type or 'property'} selection on database {database.get('id')!r}. "
-        f"Candidates: {available}"
-    )
+    raise SystemExit("Ambiguous property selection; configure the intended property privately")
 
 
 def date_value(page: Dict[str, Any], property_name: str) -> Optional[str]:
@@ -332,8 +309,8 @@ def main() -> int:
         args.dry_run = True
 
     api_key = load_notion_api_key()
-    workout_database_id = load_env("NOTION_WORKOUT_DATABASE_ID")
-    diary_database_id = load_env("NOTION_DIARY_DATABASE_ID")
+    workout_database_id = require_env("NOTION_WORKOUT_DATABASE_ID")
+    diary_database_id = require_env("NOTION_DIARY_DATABASE_ID")
 
     workout_database = resolve_database(api_key, workout_database_id, load_env("NOTION_WORKOUT_DATABASE_NAME", "运动") or "运动")
     diary_database = resolve_database(api_key, diary_database_id, load_env("NOTION_DIARY_DATABASE_NAME", "日记中心") or "日记中心")
@@ -376,24 +353,15 @@ def main() -> int:
         "hours_back": args.hours_back,
     }
 
-    log(
-        "Resolved Notion properties: "
-        f"workout_date={workout_date_property!r}, diary_date={diary_date_property!r}, "
-        f"workout_relation={workout_relation_property!r}, title={title_property!r}"
-    )
-    log(f"Using cutoff: {cutoff}")
-
     for page in paginate_database(api_key, workout_database_id, filter_obj=filter_obj):
         stats["scanned"] += 1
         if args.limit is not None and stats["scanned"] > args.limit:
             break
 
         page_id = str(page.get("id") or "")
-        page_title = title_from_page(page, title_property)
         start_date = date_value(page, workout_date_property)
         if not start_date:
             stats["missing_start_date"] += 1
-            log(f"skip page={page_id} title={page_title!r} reason=missing_start_date")
             continue
 
         if start_date not in diary_cache:
@@ -409,45 +377,42 @@ def main() -> int:
         diary_entry = diary_cache[start_date]
         if diary_entry is None:
             stats["missing_diary"] += 1
-            log(f"skip page={page_id} title={page_title!r} date={start_date} reason=diary_not_found")
             continue
         if isinstance(diary_entry, dict) and diary_entry.get("_ambiguous"):
             stats["ambiguous_diary"] += 1
-            candidates = [
-                f"{candidate.get('id')}:{date_value(candidate, diary_date_property)}"
-                for candidate in diary_entry["_ambiguous"]  # type: ignore[index]
-            ]
-            log(
-                f"skip page={page_id} title={page_title!r} date={start_date} "
-                f"reason=diary_ambiguous candidates={candidates}"
-            )
             continue
 
         diary_page_id = str(diary_entry.get("id"))
         current_relation_ids = relation_ids(page, workout_relation_property)
         if current_relation_ids == [diary_page_id]:
             stats["unchanged"] += 1
-            log(f"unchanged page={page_id} title={page_title!r} date={start_date} diary={diary_page_id}")
             continue
 
         if args.dry_run:
             stats["linked"] += 1
-            log(
-                f"dry_run page={page_id} title={page_title!r} date={start_date} "
-                f"relation={current_relation_ids} -> diary={diary_page_id}"
-            )
             continue
 
         update_page(api_key, page_id, {workout_relation_property: {"relation": [{"id": diary_page_id}]}})
         stats["linked"] += 1
-        log(
-            f"linked page={page_id} title={page_title!r} date={start_date} "
-            f"relation={current_relation_ids} -> diary={diary_page_id}"
-        )
 
     print(json.dumps(stats, ensure_ascii=False, sort_keys=True))
     return 0
 
 
+def cli() -> int:
+    try:
+        return main()
+    except SystemExit as exc:
+        if isinstance(exc.code, int):
+            return exc.code
+        # Even configuration errors can contain user-supplied strings.
+        log("Workout linking stopped: verify private target IDs and property configuration")
+        return 1
+    except Exception:
+        # Never emit third-party response bodies, URLs, private names, IDs or tracebacks.
+        log("Workout linking failed; inspect configuration and API health privately")
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())
