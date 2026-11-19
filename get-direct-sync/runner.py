@@ -24,7 +24,8 @@ from remote_state import RemoteState
 from retry import HTTPFailure, RetryStopped, TransportFailure
 from vault_sink import VaultGitHubSink
 from source_index import publish as publish_source_index
-from reviewed_history import clock_parent, plan_at_head, verify_clock, candidates, RUNTIME_SECONDS, RESERVE_SECONDS
+from reviewed_history import (clock_parent, plan_at_head, verify_clock, candidates,
+                              rest_budget_available, RUNTIME_SECONDS, RESERVE_SECONDS)
 
 ENV_NAMES = ('GET_SYNC_CONFIG_JSON', 'GETNOTE_API_KEY', 'GETNOTE_CLIENT_ID',
              'PRIVATE_VAULT_TOKEN', 'NOTION_API_KEY')
@@ -421,6 +422,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                     store.accept(snapshots)
             counts = {'github': {'verified': 0, 'held': 0}, 'notion': {'verified': 0, 'held': 0}}
             history = None
+            campaign = store.get('reviewed_history_campaign_active') is True
+            resume_history_from_clock = False
             if mode != 'baseline':
                 archive = AssetArchive(assets, AssetTransport(cfg['allowed_asset_hosts']))
                 github_text = VaultGitHubSink(github_http, cfg['private_repo'], cfg['data_branch'],
@@ -444,7 +447,15 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 available = lambda: monotonic() + RESERVE_SECONDS < deadline
                 ordinary_history = (mode == 'sync' and cfg['scope'] == 'production'
                                     and cfg['data_branch'] == 'main' and parent_run and not user_work_waiting
-                                    and not new_source_holds)
+                                    and not new_source_holds and not campaign)
+                if (mode == 'sync' and campaign and parent_run and cfg['scope'] == 'production'
+                        and cfg['data_branch'] == 'main' and not store.pending_count()
+                        and not new_source_holds and available()):
+                    try:
+                        resume_history_from_clock = (rest_budget_available(github_http) and
+                            verify_clock(github_http, hourly_env.get('GITHUB_REPOSITORY'), parent_run))
+                    except (Hold, HTTPFailure, RetryStopped, TransportFailure, KeyError, ValueError, TypeError):
+                        pass
                 if mode == 'history' and store.pending_count():
                     history = {'deferred': 'pending_work'}
                 if (mode == 'history' or ordinary_history) and not store.pending_count() and available():
@@ -460,6 +471,9 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                     if plan and not trusted:
                         history = {'deferred': 'clock_unverified'}
                     elif plan:
+                        if mode == 'history' and not campaign:
+                            store.set('reviewed_history_campaign_active', True)
+                            campaign = True
                         history = {}
                         lookup = NotionSink(notion_http, cfg['notion_database_id'], ReadOnlyJournal(),
                                             namespace=cfg['namespace'], **cfg['notion_properties'])
@@ -471,6 +485,9 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                             for dest in ('github', 'notion'):
                                 for metric in ('verified', 'held'):
                                     counts[dest][metric] += result[dest][metric]
+                        if mode == 'history' and history.get('remaining_approved') == 0 and not store.pending_count():
+                            store.set('reviewed_history_campaign_active', False)
+                            campaign = False
             index = publish_source_index(store, github_http, cfg)
             reasons = dict(Counter(row[0] for row in store.db.execute('SELECT reason FROM held')))
             active_source_holds = sum(json.loads(row[0]).get('status') != 'resolved'
@@ -486,6 +503,10 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                       'inventory_status': index['status'], 'index_summary': index['summary']}
             if history is not None:
                 report['reviewed_history'] = history
+            if campaign or mode == 'history':
+                report['history_campaign_active'] = campaign
+            if resume_history_from_clock:
+                report['resume_history_from_clock'] = True
         finally:
             if archive is not None:
                 archive.close()

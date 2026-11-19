@@ -138,6 +138,9 @@ any reported holds. The same single-writer and GitHub-first rules apply.
 On a normal first-attempt main run, a successful history batch that made
 progress and still has approved work requests its successor after releasing
 the write lease. Completion, a hold, or lack of progress stops the chain.
+An approved migration stays active across a quota deferral. The trusted
+hourly clock starts the separate history mode again when the GitHub reserve
+has recovered and current delivery work has cleared.
 For the initial production check, `history-start` may use a one-item batch.
 Its verified successor uses the normal 25-item cap.
 
