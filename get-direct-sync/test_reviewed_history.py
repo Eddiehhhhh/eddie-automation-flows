@@ -5,7 +5,7 @@ import unittest
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from core import Hold, Store, snapshot
-from reviewed_history import SCHEMA, candidates, clock_parent, plan_at_head, should_resume_migration, verify_clock
+from reviewed_history import SCHEMA, candidates, check_candidate, clock_parent, plan_at_head, should_resume_migration, verify_clock
 from test_core import note
 
 
@@ -95,6 +95,17 @@ class ReviewedHistoryTests(unittest.TestCase):
                                                  'resume_history_from_clock': True}))
         self.assertFalse(should_resume_migration({'phase': 'sync', 'pending': 1,
                                                   'resume_history_from_clock': True}))
+
+    def test_exact_media_is_only_admitted_by_explicit_history(self):
+        raw = dict(note('31'), note_type='audio', audio={'play_url': 'https://cdn.test/audio.ogg'})
+        snap = snapshot(raw)
+        fixture = Fixture([snap])
+        blob, plan = plan_at_head(fixture, fixture.cfg)
+        args = (plan['reviewed'][0], blob, fixture.cfg, fixture, fixture, fixture)
+        self.assertEqual(check_candidate(*args), (None, 'source_changed'))
+        self.assertEqual(check_candidate(*args, allow_media=True), (snap, None))
+        fixture.exists.add(snap['id'])
+        self.assertEqual(check_candidate(*args, allow_media=True), (None, 'notion_exists'))
 
     def select(self, *, available=lambda: True, paused=(), plan=None):
         report = {}

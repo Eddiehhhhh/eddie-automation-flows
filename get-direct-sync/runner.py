@@ -477,7 +477,7 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                         history = {}
                         lookup = NotionSink(notion_http, cfg['notion_database_id'], ReadOnlyJournal(),
                                             namespace=cfg['namespace'], **cfg['notion_properties'])
-                        limits = {'check_limit': batch_size} if mode == 'history' else {}
+                        limits = {'check_limit': batch_size, 'allow_media': True} if mode == 'history' else {}
                         for reviewed in candidates(plan, cfg, store, get_http, github_http, lookup,
                                                    paused_ids, history, available, **limits):
                             history['enqueued'] += store.enqueue([reviewed])['enqueued']
