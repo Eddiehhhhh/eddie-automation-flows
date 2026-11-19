@@ -106,6 +106,15 @@ class ReviewedHistoryTests(unittest.TestCase):
         args = (plan['reviewed'][0], blob, fixture.cfg, fixture, fixture, fixture)
         self.assertEqual(check_candidate(*args, allow_media=True), (None, 'flomo_excluded'))
 
+    def test_exact_text_clipping_only_enters_the_explicit_history_job(self):
+        raw = dict(note('34'), note_type='link', web_page={'url': 'https://example.org/page'})
+        snap = snapshot(raw)
+        fixture = Fixture([snap])
+        blob, plan = plan_at_head(fixture, fixture.cfg)
+        args = (plan['reviewed'][0], blob, fixture.cfg, fixture, fixture, fixture)
+        self.assertEqual(check_candidate(*args), (None, 'source_changed'))
+        self.assertEqual(check_candidate(*args, allow_media=True), (snap, None))
+
     def test_exact_media_is_only_admitted_by_explicit_history(self):
         raw = dict(note('31'), note_type='audio', audio={'play_url': 'https://cdn.test/audio.ogg'})
         snap = snapshot(raw)

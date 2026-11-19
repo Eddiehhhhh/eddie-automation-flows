@@ -114,10 +114,11 @@ def check_candidate(row, plan_blob, cfg, get, github, notion, *, allow_media=Fal
             return None, 'flomo_excluded'
         binary = requires_binary_assets(snap)
         source_assets = asset_references(snap['note'])
-        plain_text = snap['note'].get('note_type') == 'plain_text' and not binary and not source_assets
+        kind = snap['note'].get('note_type')
+        reviewed_text = (kind == 'plain_text' or allow_media and kind == 'link') and not binary and not source_assets
         reviewed_media = allow_media and binary and bool(source_assets)
         if (snap['id'] != sid or snap['version'] != version or not snap['note']['content'].strip()
-                or not (plain_text or reviewed_media)):
+                or not (reviewed_text or reviewed_media)):
             return None, 'source_changed'
     except Hold:
         return None, 'source_changed'
