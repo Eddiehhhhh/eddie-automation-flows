@@ -89,6 +89,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(props['标签']['multi_select'], [{'name': 'synthetic tag'}])
         self.assertEqual(props['主题']['multi_select'], [{'name': 'synthetic topic'}])
         self.assertEqual(plain(props['创建时间原值']['rich_text']), self.snap['note']['created_at'])
+        self.assertEqual(plain(props['Get 创建时间']['rich_text']), self.snap['note']['created_at'])
         self.assertEqual(plain(props['更新时间原值']['rich_text']), self.snap['note']['updated_at'])
         self.assertEqual(plain(props['内容类型']['rich_text']), 'plain_text')
         self.assertEqual(plain(props['来源系统']['rich_text']), 'getnote')

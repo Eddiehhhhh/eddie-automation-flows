@@ -14,6 +14,7 @@ from retry import HTTPFailure
 FIELDS = {
     '标签': ('tags', 'multi_select'), '主题': ('topics', 'multi_select'),
     '创建时间原值': ('created_at', 'rich_text'), '更新时间原值': ('updated_at', 'rich_text'),
+    'Get 创建时间': ('created_at', 'rich_text'),
     '内容类型': ('note_type', 'rich_text'), '来源': ('source', 'rich_text'),
     '来源系统': (None, 'rich_text'), '笔记类型': ('note_type', 'select'),
 }
