@@ -8,6 +8,7 @@ from urllib.parse import quote, urlencode
 
 from assets import asset_references
 from core import Hold, requires_binary_assets, snapshot
+from render import tag_names
 from retry import HTTPFailure, RetryStopped, TransportFailure
 
 SCHEMA = 'get-reviewed-hourly-history-v1'
@@ -88,6 +89,8 @@ def check_candidate(row, plan_blob, cfg, get, github, notion, *, allow_media=Fal
         raise Hold('history_source_unavailable')
     try:
         snap = snapshot(original.get('data', {}).get('note', {}))
+        if any(re.search(r'\bflomo\b', name, re.I) for name in tag_names(snap['note'].get('tags', []))):
+            return None, 'flomo_excluded'
         binary = requires_binary_assets(snap)
         source_assets = asset_references(snap['note'])
         plain_text = snap['note'].get('note_type') == 'plain_text' and not binary and not source_assets
