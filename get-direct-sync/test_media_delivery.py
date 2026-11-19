@@ -120,6 +120,16 @@ class MediaTests(unittest.TestCase):
     def sync(self):
         return self.sink.sync(self.snap, self.receipt, self.manifest, self.root)
 
+    def test_exact_legacy_media_alias_keeps_receipt_and_never_reattaches(self):
+        original = self.sync()
+        row = original['assets'][0]
+        self.sink.sink.source_base = 'https://github.com/owner/private/blob/main'
+        toggle = next(b for b in self.http.blocks[original['page_id']] if b['id'] == row['toggle_id'])
+        toggle['toggle']['rich_text'] = self.sink.legacy_media_header(self.snap['id'], self.snap['version'], 0)
+        self.assertEqual(self.sync(), original)
+        self.assertEqual(self.http.upload_writes, 1)
+        self.assertEqual(len(self.http.blocks[row['toggle_id']]), 1)
+
     def test_native_notion_image_and_audio_use_uploaded_bytes_and_friendly_headers(self):
         fixtures = [('image/png', 'image', '图片'), ('audio/ogg', 'audio', '录音')]
         for mime, kind, label in fixtures:

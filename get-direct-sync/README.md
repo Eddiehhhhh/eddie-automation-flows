@@ -162,5 +162,6 @@ blocks are verified independently.
 Existing plain-text version receipts are still read with their original
 contract. An older verified Get version may have its heading relabeled
 “历史正文” when an updated native version is appended. Its blocks are retained.
-A same-version retry reuses the original block; it does not retrofit pages in
-bulk. Missing or unexpectedly edited managed content still stops the item.
+Approved targeted historical labels for existing attachment toggles keep
+the original media block and verified bytes. A same-version retry reuses
+the existing blocks; it does not retrofit pages in bulk. Missing or unexpectedly edited managed content still stops the item.

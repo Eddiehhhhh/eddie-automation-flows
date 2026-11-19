@@ -198,9 +198,13 @@ class NotionMedia:
         self.sink.journal.set(key, state)
         return state
 
-    def _locate(self, page_id, header, state):
+    def legacy_media_header(self, sid, version, index):
+        return self.sink.display_title('历史附件 ' + str(index + 1), self.sink.origin(sid, version))
+
+    def _locate(self, page_id, headers, state):
         matches = [b for b in self.sink.children(page_id)
-                   if b.get('type') == 'toggle' and native.matches_title(b['toggle']['rich_text'], header)]
+                   if b.get('type') == 'toggle'
+                   and any(native.matches_title(b['toggle']['rich_text'], header) for header in headers)]
         if len(matches) > 1:
             raise Hold('media_duplicate_toggle')
         if state.get('block_id') and (not matches or matches[0]['id'] != state['block_id']):
@@ -329,7 +333,10 @@ class NotionMedia:
                 name = {'image': '图片', 'audio': '录音', 'video': '视频', 'file': '附件'}[kind]
                 caption = name + ' ' + str(index + 1)
                 header = sink.display_title(caption, sink.origin(snapshot['id'], snapshot['version']))
-            block = self._locate(page['id'], header, state)
+            headers = [header]
+            if not native_media and sink.source_base:
+                headers.append(self.legacy_media_header(snapshot['id'], snapshot['version'], index))
+            block = self._locate(page['id'], headers, state)
             if block and not state:
                 raise Hold('media_unknown_existing_toggle')
             if not block:
@@ -342,7 +349,7 @@ class NotionMedia:
                         'object': 'block', 'type': kind, kind: {'type': 'file_upload',
                         'file_upload': {'id': state['upload_id']},
                         'caption': rich(caption if caption is not None else 'sha256:' + asset['sha256'])}}]}}]})
-                block = self._locate(page['id'], header, state)
+                block = self._locate(page['id'], headers, state)
                 if not block:
                     raise Hold('media_attach_readback_missing')
             receipt = self._verify_block(block, asset, kind=kind, caption=caption)
