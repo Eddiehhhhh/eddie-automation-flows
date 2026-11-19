@@ -99,6 +99,13 @@ class ReviewedHistoryTests(unittest.TestCase):
         self.assertFalse(should_resume_migration({'phase': 'sync', 'pending': 1,
                                                   'resume_history_from_clock': True}))
 
+    def test_flomo_tag_stays_excluded_even_if_listed_in_reviewed_plan(self):
+        raw = dict(note('30'), note_type='plain_text', tags=[{'name': 'Flomo'}])
+        fixture = Fixture([snapshot(raw)])
+        blob, plan = plan_at_head(fixture, fixture.cfg)
+        args = (plan['reviewed'][0], blob, fixture.cfg, fixture, fixture, fixture)
+        self.assertEqual(check_candidate(*args, allow_media=True), (None, 'flomo_excluded'))
+
     def test_exact_media_is_only_admitted_by_explicit_history(self):
         raw = dict(note('31'), note_type='audio', audio={'play_url': 'https://cdn.test/audio.ogg'})
         snap = snapshot(raw)
