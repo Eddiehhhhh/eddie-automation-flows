@@ -15,8 +15,9 @@ from urllib.parse import urlencode
 
 from assets import asset_references, manifest_coverage, open_regular, private_directory, safe_mime
 from core import GitHubSink, Hold, canonical
-from notion_sink import NotionSink, plain, rich
+from notion_sink import Hold as NotionHold, NotionSink, plain, rich
 from render import render_text
+import notion_native as native
 from retry import HTTPFailure
 
 GIT_UPLOAD_THRESHOLD = 20 * 1024 * 1024
@@ -186,10 +187,10 @@ class GitHubMedia:
 
 class NotionMedia:
     def __init__(self, http, database_id, journal, *, namespace, download,
-                 id_property='Get ID', owner_property='Sync Owner', title_property='Name'):
+                 id_property='Get ID', owner_property='Sync Owner', title_property='Name', source_base=None):
         self.sink = NotionSink(_PrivateTransport(http), database_id, journal, namespace=namespace,
                                id_property=id_property, owner_property=owner_property,
-                               title_property=title_property)
+                               title_property=title_property, source_base=source_base)
         self.download = download
 
     def _state(self, key, state, phase, **fields):
@@ -197,21 +198,25 @@ class NotionMedia:
         self.sink.journal.set(key, state)
         return state
 
-    def _locate(self, page_id, label, state):
+    def legacy_media_header(self, sid, version, index):
+        return self.sink.display_title('历史附件 ' + str(index + 1), self.sink.origin(sid, version))
+
+    def _locate(self, page_id, headers, state):
         matches = [b for b in self.sink.children(page_id)
-                   if b.get('type') == 'toggle' and plain(b['toggle']['rich_text']) == label]
+                   if b.get('type') == 'toggle'
+                   and any(native.matches_title(b['toggle']['rich_text'], header) for header in headers)]
         if len(matches) > 1:
             raise Hold('media_duplicate_toggle')
         if state.get('block_id') and (not matches or matches[0]['id'] != state['block_id']):
             raise Hold('media_managed_toggle_modified')
         return matches[0] if matches else None
 
-    def _verify_block(self, block, asset):
+    def _verify_block(self, block, asset, *, kind='file', caption=None):
         children = self.sink.children(block['id'])
-        if len(children) != 1 or children[0].get('type') != 'file' or children[0].get('has_children'):
+        if len(children) != 1 or children[0].get('type') != kind or children[0].get('has_children'):
             raise Hold('media_managed_block_modified')
-        media = children[0]['file']
-        if plain(media.get('caption', [])) != 'sha256:' + asset['sha256']:
+        media = children[0][kind]
+        if plain(media.get('caption', [])) != (caption if caption is not None else 'sha256:' + asset['sha256']):
             raise Hold('media_managed_caption_modified')
         for item in media.get('caption', []):
             annotations = item.get('annotations', {})
@@ -309,18 +314,29 @@ class NotionMedia:
                 or plain(props.get(sink.ownerprop, {}).get('rich_text', [])) != sink.owner
                 or plain(props.get(sink.titleprop, {}).get('title', [])) != text_receipt.get('title')):
             raise Hold('media_page_ownership_modified')
-        text_blocks = [b for b in sink.children(page['id']) if b['id'] == text_receipt.get('block_id')]
-        if (len(text_blocks) != 1 or text_blocks[0].get('type') != 'toggle'
-                or plain(text_blocks[0]['toggle']['rich_text']) != sink.owner + ':' + snapshot['id'] + ':' + snapshot['version']
-                or hashlib.sha256(''.join(sink.block_text(text_receipt['block_id'])).encode()).hexdigest() != text_receipt['content_sha256']):
-            raise Hold('media_managed_text_modified')
+        try:
+            sink.verify_text_receipt(sink.children(page['id']), snapshot['id'], text_receipt)
+        except (Hold, NotionHold):
+            raise Hold('media_managed_text_modified') from None
+        native_media = text_receipt.get('format') == native.FORMAT
         receipts = []
         for index, asset in enumerate(assets):
             data = read_asset_bytes(asset, archive_root)
             label = sink.owner + ':media:' + snapshot['id'] + ':' + snapshot['version'] + ':' + asset['sha256'] + ':' + str(index)
             key = 'media:' + sink.database + ':' + label
             state = sink.journal.get(key) or {}
-            block = self._locate(page['id'], label, state)
+            kind, caption, header = 'file', None, rich(label)
+            if native_media:
+                mime = safe_mime(asset.get('content_type'))
+                group = mime.split('/', 1)[0]
+                kind = group if group in ('image', 'audio', 'video') else 'file'
+                name = {'image': '图片', 'audio': '录音', 'video': '视频', 'file': '附件'}[kind]
+                caption = name + ' ' + str(index + 1)
+                header = sink.display_title(caption, sink.origin(snapshot['id'], snapshot['version']))
+            headers = [header]
+            if not native_media and sink.source_base:
+                headers.append(self.legacy_media_header(snapshot['id'], snapshot['version'], index))
+            block = self._locate(page['id'], headers, state)
             if block and not state:
                 raise Hold('media_unknown_existing_toggle')
             if not block:
@@ -329,13 +345,16 @@ class NotionMedia:
                 state = self._upload(key, state, asset, data)
                 state = self._state(key, state, 'attach_intent')
                 sink.request('PATCH', '/blocks/' + page['id'] + '/children', {'children': [{
-                    'object': 'block', 'type': 'toggle', 'toggle': {'rich_text': rich(label), 'children': [{
-                        'object': 'block', 'type': 'file', 'file': {'type': 'file_upload',
-                        'file_upload': {'id': state['upload_id']}, 'caption': rich('sha256:' + asset['sha256'])}}]}}]})
-                block = self._locate(page['id'], label, state)
+                    'object': 'block', 'type': 'toggle', 'toggle': {'rich_text': header, 'children': [{
+                        'object': 'block', 'type': kind, kind: {'type': 'file_upload',
+                        'file_upload': {'id': state['upload_id']},
+                        'caption': rich(caption if caption is not None else 'sha256:' + asset['sha256'])}}]}}]})
+                block = self._locate(page['id'], headers, state)
                 if not block:
                     raise Hold('media_attach_readback_missing')
-            receipt = self._verify_block(block, asset)
+            receipt = self._verify_block(block, asset, kind=kind, caption=caption)
+            if native_media:
+                receipt.update(kind=kind, caption=caption)
             self._state(key, state, 'verified', block_id=block['id'], receipt=receipt)
             receipts.append(receipt)
         return {'version': snapshot['version'], 'page_id': page['id'], 'assets': receipts,

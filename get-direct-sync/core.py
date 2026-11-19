@@ -189,7 +189,7 @@ class Store:
             'managed_content_modified','managed_title_modified','unresolved_prior_revision',
             'page_create_or_missing_requires_reconcile','title_write_requires_reconcile',
             'toggle_create_requires_reconcile','append_requires_reconcile','append_readback_mismatch',
-            'final_readback_mismatch','notion_database_unavailable','notion_database_property_type_mismatch',
+            'final_readback_mismatch','legacy_label_requires_reconcile','notion_database_unavailable','notion_database_property_type_mismatch',
             'notion_database_schema_unavailable','notion_database_not_live','notion_multiple_data_sources_unsupported',
             'target_unreadable','target_ownership_or_edit_conflict','target_missing','github_readback_mismatch',
             'github_write_response_invalid','github_write_requires_reconcile',

@@ -9,6 +9,7 @@ import re
 import secrets
 import tempfile
 import time
+from urllib.parse import quote
 
 from assets import AssetArchive, AssetTransport, asset_references
 from core import CheckpointFailure, GetSource, Hold, Store, identity, requires_binary_assets, snapshot
@@ -414,14 +415,15 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 archive = AssetArchive(assets, AssetTransport(cfg['allowed_asset_hosts']))
                 github_text = VaultGitHubSink(github_http, cfg['private_repo'], cfg['data_branch'],
                                              cfg['namespace'], store, raw_prefix=cfg['raw_prefix'])
+                source_base = 'https://github.com/' + cfg['private_repo'] + '/blob/' + quote(cfg['data_branch'], safe='')
                 notion_text = NotionSink(notion_http, cfg['notion_database_id'], store,
-                                        namespace=cfg['namespace'], **cfg['notion_properties'])
+                                        namespace=cfg['namespace'], source_base=source_base, **cfg['notion_properties'])
                 notion_text = ProjectedNotionSink(notion_text,notion_http,cfg['notion_database_id'],store,cfg['namespace'])
                 github_media = GitHubMedia(github_http, cfg['private_repo'], cfg['data_branch'], cfg['namespace'],
                                            publish_large=publish_large)
                 manifests = ManifestCache(archive, store, github_media, get_http)
                 notion_media = NotionMedia(notion_http, cfg['notion_database_id'], store,
-                                          namespace=cfg['namespace'], download=NotionDownload(assets),
+                                          namespace=cfg['namespace'], download=NotionDownload(assets), source_base=source_base,
                                           **cfg['notion_properties'])
                 sinks = {
                     'github': CompleteSink('github', github_text, github_media, store, manifests, assets),
