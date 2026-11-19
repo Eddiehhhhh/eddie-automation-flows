@@ -63,7 +63,8 @@ def publish_asset(http, token, repo, branch, target, data, expected):
         if git('hash-object', '-w', '--stdin', payload=data).decode().strip() != expected:
             raise Hold('media_github_readback_mismatch')
         git('update-index', '--add', '--cacheinfo', f'100644,{expected},{target}')
-        tree = git('write-tree').decode().strip()
+        # The pinned parent already owns the omitted blobs. The new blob was checked above.
+        tree = git('write-tree', '--missing-ok').decode().strip()
         commit = git('commit-tree', tree, '-p', parent, '-m', 'Archive Get binary asset').decode().strip()
         if current_head() != parent:
             raise Hold('media_git_ref_changed')
