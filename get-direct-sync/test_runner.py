@@ -192,8 +192,9 @@ class Tests(unittest.TestCase):
         with patch('runner.verify_legacy_writers'):
             self.baseline()
 
-            def candidate(plan, cfg, store, src, github, notion, paused, report, available, *, check_limit):
+            def candidate(plan, cfg, store, src, github, notion, paused, report, available, *, check_limit, allow_media):
                 self.assertEqual(check_limit, 12)
+                self.assertTrue(allow_media)
                 report['enqueued'] = 0
                 yield self.source.notes[0]
 
@@ -211,7 +212,7 @@ class Tests(unittest.TestCase):
         with patch('runner.verify_legacy_writers'):
             self.baseline()
 
-            def defer(plan, cfg, store, src, github, notion, paused, report, available, *, check_limit):
+            def defer(plan, cfg, store, src, github, notion, paused, report, available, *, check_limit, allow_media):
                 report.update(deferred='rest_budget', remaining_approved=1)
                 return iter(())
 

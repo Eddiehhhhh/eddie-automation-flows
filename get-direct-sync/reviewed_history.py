@@ -76,7 +76,7 @@ def plan_at_head(http, cfg):
     return blob, plan
 
 
-def check_candidate(row, plan_blob, cfg, get, github, notion):
+def check_candidate(row, plan_blob, cfg, get, github, notion, *, allow_media=False):
     sid, version = row['source_id'], row['source_version']
     original = get.request('GET', '/open/api/v1/resource/note/detail?' +
                            urlencode({'id': sid, 'image_quality': 'original'}))
@@ -86,8 +86,12 @@ def check_candidate(row, plan_blob, cfg, get, github, notion):
         raise Hold('history_source_unavailable')
     try:
         snap = snapshot(original.get('data', {}).get('note', {}))
-        if (snap['id'] != sid or snap['version'] != version or snap['note'].get('note_type') != 'plain_text'
-                or not snap['note']['content'].strip() or requires_binary_assets(snap) or asset_references(snap['note'])):
+        binary = requires_binary_assets(snap)
+        source_assets = asset_references(snap['note'])
+        plain_text = snap['note'].get('note_type') == 'plain_text' and not binary and not source_assets
+        reviewed_media = allow_media and binary and bool(source_assets)
+        if (snap['id'] != sid or snap['version'] != version or not snap['note']['content'].strip()
+                or not (plain_text or reviewed_media)):
             return None, 'source_changed'
     except Hold:
         return None, 'source_changed'
@@ -133,7 +137,8 @@ def should_resume_migration(report):
             and (report.get('notion', {}).get('verified', 0) > 0 or bool(history.get('newly_suspended'))))
 
 
-def candidates(plan, cfg, store, get, github, notion, paused_ids, report, available, *, check_limit=LIMIT):
+def candidates(plan, cfg, store, get, github, notion, paused_ids, report, available, *, check_limit=LIMIT,
+               allow_media=False):
     blob, value = plan
     key = 'reviewed_hourly_history'
     previous = store.get(key) or {}
@@ -160,7 +165,7 @@ def candidates(plan, cfg, store, get, github, notion, paused_ids, report, availa
             snap, reason = None, 'inventory_changed'
         else:
             try:
-                snap, reason = check_candidate(row, blob, cfg, get, github, notion)
+                snap, reason = check_candidate(row, blob, cfg, get, github, notion, allow_media=allow_media)
             except (Hold, HTTPFailure, RetryStopped, TransportFailure, KeyError, ValueError, TypeError):
                 report['deferred'] = 'precheck_unavailable'
                 break

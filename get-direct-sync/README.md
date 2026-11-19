@@ -143,6 +143,9 @@ hourly clock starts the separate history mode again when the GitHub reserve
 has recovered and current delivery work has cleared.
 For the initial production check, `history-start` may use a one-item batch.
 Its verified successor uses the normal 25-item cap.
+Explicit history also accepts approved binary-backed entries whose live
+revision and existing private source match. GitHub and Notion must verify
+the asset bytes before the item is counted as delivered.
 
 The normal source scan and pending deliveries run first. A first-attempt main
 sync dispatched by the verified GitHub hourly clock may recover up to five
