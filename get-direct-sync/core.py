@@ -58,37 +58,95 @@ class HTTP:
 
 class GetSource:
     def __init__(self,http,max_pages=10000): self.http,self.max_pages=http,max_pages
-    def scan(self,*,on_note_hold=None,select_note=None):
-        cursor=None; cursors=set(); seen=set(); result=[];self.observed_count=0;self.summaries={};self.holds=[];self.scan_complete=False
-        for _ in range(self.max_pages):
-            q='' if cursor is None else '?'+urllib.parse.urlencode({'cursor':cursor})
-            response=self.http.request('GET','/open/api/v1/resource/note/list'+q)
-            if not response or response.get('success') is not True: raise Hold('list_failed')
-            data=response.get('data',{}); notes=data.get('notes')
-            if not isinstance(notes,list) or not isinstance(data.get('has_more'),bool): raise Hold('invalid_list')
-            for summary in notes:
-                nid=identity(summary)
-                if nid in seen: raise Hold('duplicate_source_id')
-                seen.add(nid);self.observed_count+=1;self.summaries[nid]=digest(summary)
-                if select_note is not None and not select_note(summary):continue
-                r=self.http.request('GET','/open/api/v1/resource/note/detail?'+urllib.parse.urlencode({'id':nid,'image_quality':'original'}))
-                if not r or r.get('success') is not True: raise Hold('detail_failed')
-                note=r.get('data',{}).get('note',{})
-                if identity(note)!=nid or note.get('updated_at')!=summary.get('updated_at') or note.get('note_type')!=summary.get('note_type'): raise Hold('source_changed_during_scan')
-                try:result.append({**snapshot(note),'summary_hash':self.summaries[nid]})
-                except Hold as error:
-                    if on_note_hold is None or str(error) not in ('recording_transcript_unavailable','source_truncated','incomplete_source'):raise
-                    held={'id':nid,'version':source_version(note),'reason':str(error),'note':note,'summary_hash':self.summaries[nid]}
-                    self.holds.append(held)
-                    on_note_hold(held)
+    def pages(self, start, limit):
+        cursor = start
+        cursors = {str(start)} if start is not None else set()
+        seen = set()
+        for _ in range(limit):
+            query = '' if cursor is None else '?' + urllib.parse.urlencode({'cursor': cursor})
+            response = self.http.request('GET', '/open/api/v1/resource/note/list' + query)
+            if not response or response.get('success') is not True:
+                raise Hold('list_failed')
+            data = response.get('data', {})
+            notes = data.get('notes')
+            if not isinstance(notes, list) or not isinstance(data.get('has_more'), bool):
+                raise Hold('invalid_list')
+            ids = [identity(note) for note in notes]
+            if seen.intersection(ids) or len(set(ids)) != len(ids):
+                raise Hold('duplicate_source_id')
+            seen.update(ids)
             if not data['has_more']:
+                yield notes, None
+                return
+            if not notes:
+                raise Hold('empty_page_claims_more')
+            cursor = data.get('cursor', data.get('next_cursor'))
+            if not cursor or str(cursor) in cursors:
+                raise Hold('invalid_cursor')
+            cursors.add(str(cursor))
+            yield notes, cursor
+
+    def _read_summaries(self, summaries, on_note_hold, select_note):
+        result = []
+        for summary in summaries:
+            nid=identity(summary)
+            self.observed_count+=1;self.summaries[nid]=digest(summary)
+            if select_note is not None and not select_note(summary):continue
+            r=self.http.request('GET','/open/api/v1/resource/note/detail?'+urllib.parse.urlencode({'id':nid,'image_quality':'original'}))
+            if not r or r.get('success') is not True: raise Hold('detail_failed')
+            note=r.get('data',{}).get('note',{})
+            if identity(note)!=nid or note.get('updated_at')!=summary.get('updated_at') or note.get('note_type')!=summary.get('note_type'): raise Hold('source_changed_during_scan')
+            try:result.append({**snapshot(note),'summary_hash':self.summaries[nid]})
+            except Hold as error:
+                if on_note_hold is None or str(error) not in ('recording_transcript_unavailable','source_truncated','incomplete_source'):raise
+                held={'id':nid,'version':source_version(note),'reason':str(error),'note':note,'summary_hash':self.summaries[nid]}
+                self.holds.append(held)
+                on_note_hold(held)
+        return result
+
+    def _reset_scan(self):
+        self.observed_count = 0
+        self.summaries = {}
+        self.holds = []
+        self.scan_complete = False
+
+    def scan(self,*,on_note_hold=None,select_note=None):
+        self._reset_scan()
+        result = []
+        for notes, cursor in self.pages(None, self.max_pages):
+            result.extend(self._read_summaries(notes, on_note_hold, select_note))
+            if cursor is None:
                 self.scan_complete=True
                 return result
-            if not notes: raise Hold('empty_page_claims_more')
-            cursor=data.get('cursor',data.get('next_cursor'))
-            if not cursor or str(cursor) in cursors: raise Hold('invalid_cursor')
-            cursors.add(str(cursor))
         raise Hold('scan_limit')
+
+    def scan_window(self, selector, *, recent_floor, on_note_hold=None):
+        """Read at most three fresh and three rotating summary pages."""
+        self._reset_scan()
+        recent = {}
+        audit = []
+        for notes, frontier in self.pages(None, 3):
+            recent.update((identity(note), note) for note in notes)
+            dates = [note.get('created_at') for note in notes]
+            if dates and all(isinstance(value, str) and len(value) >= 10 for value in dates):
+                if max(dates) < recent_floor:
+                    break
+        cursor, cycle = selector.window_position()
+        if frontier is None:
+            cursor = None
+        else:
+            for notes, cursor in self.pages(cursor or frontier, 3):
+                if notes:
+                    audit.append(identity(notes[cycle % len(notes)]))
+                for note in notes:
+                    sid = identity(note)
+                    if sid in recent and digest(recent[sid]) != digest(note):
+                        raise Hold('source_changed_during_scan')
+                    recent[sid] = note
+        selector.prepare_window(recent, audit, cursor, cycle + int(cursor is None))
+        result = self._read_summaries(recent.values(), on_note_hold, selector)
+        self.scan_complete = True
+        return result
 
 def requires_binary_assets(snapshot):
     note=snapshot['note'];audio=note.get('audio') or {}

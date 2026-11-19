@@ -124,7 +124,7 @@ def rest_budget_available(http):
     return type(remaining) is int and remaining >= RATE_LIMIT_RESERVE
 
 
-def candidates(plan, cfg, store, get, github, notion, paused_ids, report, available):
+def candidates(plan, cfg, store, get, github, notion, paused_ids, report, available, *, check_limit=LIMIT):
     blob, value = plan
     key = 'reviewed_hourly_history'
     previous = store.get(key) or {}
@@ -139,7 +139,7 @@ def candidates(plan, cfg, store, get, github, notion, paused_ids, report, availa
         if ((sid, version) in delivered or rev in skipped or
                 all((store.receipt(sink, sid) or {}).get('version') == version for sink in ('github', 'notion'))):
             continue
-        if not available() or report['checked'] >= LIMIT:
+        if not available() or report['checked'] >= check_limit:
             break
         if not rest_budget_available(github):
             report['deferred'] = 'rest_budget'
@@ -168,6 +168,12 @@ def candidates(plan, cfg, store, get, github, notion, paused_ids, report, availa
         store.set(key, {'plan_blob': blob, 'skipped': skipped})
         report['suspended'] = len(skipped)
         report['newly_suspended'] = dict(recorded)
+    report['remaining_approved'] = sum(
+        row['reviewed_revision'] not in skipped
+        and not all((store.receipt(sink, row['source_id']) or {}).get('version') == row['source_version']
+                    for sink in ('github', 'notion'))
+        for row in value['reviewed']
+    )
 
 
 def verify_clock(http, runtime_repo, run_id):

@@ -51,4 +51,58 @@ class IncrementalTests(unittest.TestCase):
   store=Store(':memory:');store.accept([]);bad=note('1');bad['note_type']='recorder_audio';bad['audio']={}
   _,source=scan(store,[bad],detail_budget=1,audit_reserve=1);self.assertEqual(len(source.holds),1);self.assertEqual(store.db.execute('SELECT summary_hash FROM source_summaries').fetchone()[0],digest(bad))
   read,_=scan(store,[bad],detail_budget=1,audit_reserve=1);self.assertEqual(read,['1']);self.assertEqual(store.pending_count(),0)
+class CursorAPI(API):
+    def __init__(self, notes):
+        super().__init__(notes)
+        self.list_calls = []
+        self.fail_cursor = None
+
+    def request(self, method, path, body=None):
+        if '/detail?' in path:
+            return super().request(method, path, body)
+        cursor = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get('cursor', ['0'])[0]
+        self.list_calls.append(cursor)
+        if cursor == self.fail_cursor:
+            raise Hold('list_failed')
+        start = int(cursor)
+        end = start + 20
+        return {'success': True, 'data': {'notes': self.notes[start:end],
+                'has_more': end < len(self.notes), 'cursor': str(end)}}
+
+
+class WindowTests(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(':memory:')
+        self.rows = [dict(note(str(i)), created_at='2026-10-10 12:00:00') for i in range(1, 221)]
+        seed(self.store, self.rows)
+
+    def poll(self, api):
+        selector = IncrementalSelector(self.store, window=True)
+        source = GetSource(api)
+        items = source.scan_window(selector, recent_floor='2026-11-12')
+        selector.commit(source, items)
+        return source
+
+    def test_bounded_head_and_resume_eventually_catch_late_changes_and_old_new_arrival(self):
+        newer = dict(note('900'), created_at='2026-11-19 00:00:00')
+        stale = dict(self.rows[179], content='actual later edit', updated_at='2026-11-19 01:00:00')
+        rows = [newer, *self.rows[:179], stale, *self.rows[180:]]
+        for _ in range(4):
+            api = CursorAPI(rows)
+            self.poll(api)
+            self.assertLessEqual(len(api.list_calls), 6)
+        pending = {sid for sid, in self.store.db.execute('SELECT id FROM pending')}
+        self.assertEqual(pending, {'900', stale['note_id']})
+
+    def test_failure_keeps_prior_cursor_and_outbox(self):
+        self.poll(CursorAPI(self.rows))
+        previous = self.store.get('incremental_source_v1')
+        api = CursorAPI(self.rows)
+        api.fail_cursor = str(previous['sweep_cursor'])
+        with self.assertRaisesRegex(Hold, 'list_failed'):
+            self.poll(api)
+        self.assertEqual(self.store.get('incremental_source_v1'), previous)
+        self.assertEqual(self.store.pending_count(), 0)
+
+
 if __name__=='__main__':unittest.main()

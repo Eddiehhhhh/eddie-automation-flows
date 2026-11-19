@@ -13,11 +13,11 @@ on:
       mode:
         description: Explicit operation (inspect is read only)
         type: choice
-        options: [inspect, baseline, sync, backfill, drain]
+        options: [inspect, baseline, sync, backfill, history, drain]
         default: inspect
         required: true
       batch_size:
-        description: Maximum revisions delivered per run (1 to 10)
+        description: Maximum revisions checked per run (1 to 25 for history, 1 to 10 otherwise)
         type: string
         default: '10'
         required: true
