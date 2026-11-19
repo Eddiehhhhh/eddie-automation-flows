@@ -206,6 +206,14 @@ class Tests(unittest.TestCase):
         self.assertIn('标签', result['projection']['managed_fields'])
         self.assertNotIn('笔记类型', self.http.property_patches[0])
 
+    def test_get_internal_record_projects_to_defined_notion_choice(self):
+        self.http.database['properties']['笔记类型']['select']['options'].append({'name': '内部记录'})
+        self.update(note_type='internal_record')
+        result = self.sink.sync(self.snap)
+        self.assertEqual(result['projection']['status'], 'verified')
+        self.assertEqual(self.props(result)['笔记类型']['select']['name'], '内部记录')
+        self.assertEqual(plain(self.props(result)['内容类型']['rich_text']), 'internal_record')
+
     def test_unknown_note_type_is_kept_in_rich_text_without_new_select_option(self):
         self.update(note_type='synthetic_unknown_type')
         result = self.sink.sync(self.snap)

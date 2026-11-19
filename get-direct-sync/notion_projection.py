@@ -21,7 +21,7 @@ FIELDS = {
 NOTE_TYPE_LABELS = {
     'audio': '音频笔记', 'local_audio': '本地音频笔记', 'plain_text': '文字笔记',
     'link': '链接笔记', 'img_text': '图文笔记', 'recorder_audio': '录音卡笔记',
-    'recorder_flash_audio': '录音卡闪念笔记',
+    'recorder_flash_audio': '录音卡闪念笔记', 'internal_record': '内部记录',
 }
 MAX_PAYLOAD = 390000
 
