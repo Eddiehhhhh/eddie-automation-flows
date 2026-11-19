@@ -125,6 +125,8 @@ def rest_budget_available(http):
 
 
 def should_resume_migration(report):
+    if report.get('phase') == 'sync':
+        return report.get('pending') == 0 and report.get('resume_history_from_clock') is True
     history = report.get('reviewed_history') or {}
     return (report.get('phase') == 'history' and report.get('pending') == 0
             and not history.get('deferred') and history.get('remaining_approved', 0) > 0

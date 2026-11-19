@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           umask 077
           python3 runner.py --mode "$RUN_MODE" --batch-size "$RUN_BATCH_SIZE" --reviewed-revisions "$REVIEWED_REVISIONS" | tee "$RUNNER_TEMP/get-direct-result.json"
-          if [ "$RUN_MODE" = history ]; then
+          if [ "$RUN_MODE" = history ] || [ "$RUN_MODE" = sync ]; then
             python3 - <<'PY'
           import json
           import os
@@ -169,7 +169,7 @@ jobs:
         if: ${{ steps.execute.outputs.resume_history == 'true' && github.ref == 'refs/heads/main' && github.run_attempt == 1 }}
         env:
           GH_TOKEN: ${{ github.token }}
-          BATCH_SIZE: ${{ inputs.dispatch_key == 'history-start' && '25' || inputs.batch_size }}
+          BATCH_SIZE: ${{ (inputs.mode != 'history' || inputs.dispatch_key == 'history-start') && '25' || inputs.batch_size }}
         run: |
           set -euo pipefail
           gh workflow run get-notion-incremental.yml --repo "$GITHUB_REPOSITORY" --ref main \

@@ -203,6 +203,33 @@ class Tests(unittest.TestCase):
             self.assertEqual(self.source.calls, calls)
             self.assertEqual((status, result['github']['verified'], result['notion']['verified']), (0, 1, 1))
 
+    def test_quota_deferred_campaign_resumes_on_trusted_clock_only(self):
+        from test_reviewed_history import clock_env
+
+        self.cfg.update(scope='production', data_branch='main')
+        args = (self.cfg, 'sync', 10, object(), self.github, object())
+        with patch('runner.verify_legacy_writers'):
+            self.baseline()
+
+            def defer(plan, cfg, store, src, github, notion, paused, report, available, *, check_limit):
+                report.update(deferred='rest_budget', remaining_approved=1)
+                return iter(())
+
+            with patch('runner.plan_at_head', return_value=object()), patch('runner.candidates', side_effect=defer):
+                report, status = self.run_mode('history')
+            self.assertEqual(status, 2)
+            self.assertTrue(report['history_campaign_active'])
+            for quota, trusted, env, expected in (
+                (False, True, clock_env(), False),
+                (True, False, clock_env(), False),
+                (True, True, {}, False),
+                (True, True, clock_env(), True),
+            ):
+                with patch('runner.rest_budget_available', return_value=quota), patch('runner.verify_clock', return_value=trusted):
+                    report, status = runner.execute(*args, hourly_env=env)
+                self.assertEqual(status, 0)
+                self.assertEqual(bool(report.get('resume_history_from_clock')), expected)
+
     def test_private_pause_policy_skips_source_details_and_target_writes(self):
         self.baseline()
         self.update_private_state(lambda s: s.set('sync_policy', {'paused_ids': ['1']}))
