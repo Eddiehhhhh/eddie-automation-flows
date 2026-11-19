@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import tempfile
+import time
 
 from assets import AssetArchive, AssetTransport, asset_references
 from core import CheckpointFailure, GetSource, Hold, Store, identity, requires_binary_assets, snapshot
@@ -17,12 +18,15 @@ from media_delivery import GitHubMedia, NotionMedia, manifest_assets, read_asset
 from notion_sink import NotionSink
 from notion_projection import ProjectedNotionSink
 from remote_state import RemoteState
-from retry import HTTPFailure
+from retry import HTTPFailure, RetryStopped, TransportFailure
 from vault_sink import VaultGitHubSink
 from source_index import publish as publish_source_index
+from reviewed_history import clock_parent, plan_at_head, verify_clock, candidates, RUNTIME_SECONDS, RESERVE_SECONDS
 
 ENV_NAMES = ('GET_SYNC_CONFIG_JSON', 'GETNOTE_API_KEY', 'GETNOTE_CLIENT_ID',
              'PRIVATE_VAULT_TOKEN', 'NOTION_API_KEY')
+HOURLY_ENV_NAMES = ('GITHUB_EVENT_NAME', 'GITHUB_REF', 'GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR',
+                    'GITHUB_REPOSITORY', 'GITHUB_RUN_ATTEMPT', 'GET_HOURLY_DISPATCH_KEY')
 OWNER_ENV_NAMES = ('CODEX_THREAD_ID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')
 MODES = ('inspect', 'baseline', 'sync', 'backfill', 'drain')
 
@@ -301,7 +305,8 @@ def reviewed_revisions(store, requested, batch_size, paused_ids):
 
 
 def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=None,
-            review='', publish_large=None):
+            review='', publish_large=None, hourly_env=None, monotonic=time.monotonic):
+    deadline = monotonic() + RUNTIME_SECONDS
     if mode not in MODES or type(batch_size) is not int or not 1 <= batch_size <= 10:
         raise Hold('runner_arguments_invalid')
     if (review and mode != 'backfill' or mode == 'backfill' and
@@ -404,6 +409,7 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 else:
                     store.accept(snapshots)
             counts = {'github': {'verified': 0, 'held': 0}, 'notion': {'verified': 0, 'held': 0}}
+            history = None
             if mode != 'baseline':
                 archive = AssetArchive(assets, AssetTransport(cfg['allowed_asset_hosts']))
                 github_text = VaultGitHubSink(github_http, cfg['private_repo'], cfg['data_branch'],
@@ -417,10 +423,35 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 notion_media = NotionMedia(notion_http, cfg['notion_database_id'], store,
                                           namespace=cfg['namespace'], download=NotionDownload(assets),
                                           **cfg['notion_properties'])
-                counts = store.drain({
+                sinks = {
                     'github': CompleteSink('github', github_text, github_media, store, manifests, assets),
-                    'notion': CompleteSink('notion', notion_text, notion_media, store, manifests, assets)},
-                    limit=batch_size, paused_ids=paused_ids)
+                    'notion': CompleteSink('notion', notion_text, notion_media, store, manifests, assets)}
+                user_work_waiting = store.pending_count() > 0
+                counts = store.drain(sinks, limit=batch_size, paused_ids=paused_ids)
+                parent_run = clock_parent(hourly_env or {})
+                available = lambda: monotonic() + RESERVE_SECONDS < deadline
+                if (mode == 'sync' and cfg['scope'] == 'production' and cfg['data_branch'] == 'main'
+                        and parent_run and not user_work_waiting and not new_source_holds
+                        and not store.pending_count() and available()):
+                    try:
+                        plan = plan_at_head(github_http, cfg)
+                        trusted_clock = plan and verify_clock(github_http, hourly_env.get('GITHUB_REPOSITORY'), parent_run)
+                    except (Hold, HTTPFailure, RetryStopped, TransportFailure, KeyError, ValueError, TypeError):
+                        plan, trusted_clock = None, False
+                        history = {'deferred': 'plan_unavailable'}
+                    if plan and not trusted_clock:
+                        history = {'deferred': 'clock_unverified'}
+                    elif plan:
+                        history = {}
+                        lookup = NotionSink(notion_http, cfg['notion_database_id'], ReadOnlyJournal(),
+                                            namespace=cfg['namespace'], **cfg['notion_properties'])
+                        for reviewed in candidates(plan, cfg, store, get_http, github_http, lookup,
+                                                   paused_ids, history, available):
+                            history['enqueued'] += store.enqueue([reviewed])['enqueued']
+                            result = store.drain(sinks, limit=1, paused_ids=paused_ids)
+                            for dest in ('github', 'notion'):
+                                for metric in ('verified', 'held'):
+                                    counts[dest][metric] += result[dest][metric]
             index = publish_source_index(store, github_http, cfg)
             reasons = dict(Counter(row[0] for row in store.db.execute('SELECT reason FROM held')))
             active_source_holds = sum(json.loads(row[0]).get('status') != 'resolved'
@@ -433,6 +464,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                       'pending': store.pending_count(), 'github': counts['github'],
                       'notion': counts['notion'], 'held_reasons': reasons,
                       'inventory_status': index['status'], 'index_summary': index['summary']}
+            if history is not None:
+                report['reviewed_history'] = history
         finally:
             if archive is not None:
                 archive.close()
@@ -451,13 +484,14 @@ def main(argv=None, environ=None):
     parser.add_argument('--reviewed-revisions', default='')
     args = parser.parse_args(argv)
     if environ is None:
-        environ = {k: os.environ.get(k) for k in ENV_NAMES + OWNER_ENV_NAMES}
+        environ = {k: os.environ.get(k) for k in ENV_NAMES + OWNER_ENV_NAMES + HOURLY_ENV_NAMES}
     try:
         cfg = configuration(environ)
         from git_media import publish_asset
         publisher = lambda http, *args: publish_asset(http, environ['PRIVATE_VAULT_TOKEN'], *args)
         report, status = execute(cfg, args.mode, args.batch_size, *transports(environ), owner=run_owner(environ),
-                                 review=args.reviewed_revisions, publish_large=publisher)
+                                 review=args.reviewed_revisions, publish_large=publisher,
+                                 hourly_env={k: environ.get(k) for k in HOURLY_ENV_NAMES})
     except CheckpointFailure as error:
         reason = getattr(error, 'reason', 'checkpoint_failed')
         if not re.fullmatch(r'(?:checkpoint_[a-z_]{1,60}|checkpoint_http_[1-5][0-9]{2})', reason):

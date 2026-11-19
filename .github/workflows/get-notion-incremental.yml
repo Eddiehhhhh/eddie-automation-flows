@@ -127,6 +127,7 @@ jobs:
           RUN_MODE: ${{ inputs.mode || 'sync' }}
           REVIEWED_REVISIONS: ${{ inputs.reviewed_revisions }}
           RUN_BATCH_SIZE: ${{ inputs.batch_size || '10' }}
+          GET_HOURLY_DISPATCH_KEY: ${{ inputs.dispatch_key }}
         run: |
           set -euo pipefail
           umask 077

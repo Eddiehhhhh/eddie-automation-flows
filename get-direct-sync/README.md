@@ -118,3 +118,31 @@ Real cloud execution and target readback are separate acceptance steps.
 API references: [Notion file uploads](https://developers.notion.com/reference/create-file),
 [large uploads](https://developers.notion.com/guides/data-apis/sending-larger-files),
 [GitHub blobs](https://docs.github.com/en/rest/git/blobs).
+
+### Optional reviewed history on an idle hourly tick
+
+The normal source scan and pending deliveries run first. A first-attempt main
+sync dispatched by the verified GitHub hourly clock may recover up to five
+approved plain-text revisions when its normal queue was empty and still is.
+The optional input is the private default branch file
+get-direct/<namespace>/reviewed-backfill.json. Its exact fields are
+schema (get-reviewed-hourly-history-v1), namespace,
+excluded_source_ids (include the known unresolved legacy writes),
+and reviewed (an ordered list of rows with source_id, source_version,
+path, local_blob, and SHA-256 reviewed_revision of source_id:source_version).
+Approving the file requires verifying unique local and GitHub identity,
+zero pages in the official Notion database, and the same current Get revision
+against the old GitHub Markdown. Do not place note bodies or credentials in it.
+
+Each selected row is rechecked against the exact Get version, approved legacy
+blob and zero Notion pages. Paused IDs, legacy exclusions, source holds and
+already completed versions retain their restrictions. Deterministically stale
+rows get a private disposition tied to the plan blob; a fresh reviewed plan can
+reconsider them. If the plan is removed or replaced during execution, no further
+row from the previous plan is admitted. After admission, each note uses the
+normal durable outbox and readback. An unfinished write remains pending for
+the next normal run. No plan creates no historical work. There is no added
+schedule. An admission budget of 30 minutes from runtime start preserves a
+three-minute reserve for the last plain-text transaction and state release.
+A new row also requires at least 1,500 remaining GitHub core requests. An
+unavailable quota or a lower balance defers only the optional history stage.
