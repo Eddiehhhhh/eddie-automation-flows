@@ -7,6 +7,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from core import Hold, Store, snapshot
 from reviewed_history import SCHEMA, candidates, check_candidate, clock_parent, plan_at_head, should_resume_migration, verify_clock
 from test_core import note
+from notion_native import read_blocks, sections
+from notion_sink import utf16_chunks
+from vault_sink import markdown
 
 
 def clock_env():
@@ -106,6 +109,31 @@ class ReviewedHistoryTests(unittest.TestCase):
         self.assertEqual(check_candidate(*args, allow_media=True), (snap, None))
         fixture.exists.add(snap['id'])
         self.assertEqual(check_candidate(*args, allow_media=True), (None, 'notion_exists'))
+
+    def test_local_summary_keeps_the_exact_original_and_immutable_get_fields(self):
+        transcript = 'Transcript words. ' * 10
+        raw = dict(note('32'), note_type='recorder_audio', content='Different upstream summary',
+                   audio={'original': transcript, 'play_url': 'https://cdn.test/recording.ogg'})
+        snap = snapshot(raw)
+        fixture = Fixture([snap])
+        row = fixture.plan['reviewed'][0]
+        expected = '#### Earlier summary\n\nLocal material'
+        fixture.legacy[row['path']] = fileset(row['path'],
+            ('---\n---\n' + expected + '\n\n## 录音原文\n\n' + transcript).encode())
+        row['local_blob'] = fixture.legacy[row['path']]['sha']
+        row['preserve_local_summary'] = True
+        blob, plan = plan_at_head(fixture, fixture.cfg)
+        result, reason = check_candidate(plan['reviewed'][0], blob, fixture.cfg,
+                                         fixture, fixture, fixture, allow_media=True)
+        self.assertIsNone(reason)
+        self.assertEqual(result['note'], raw)
+        self.assertEqual(result['version'], snap['version'])
+        self.assertEqual(result['legacy_summary'], expected)
+        self.assertIn(expected.encode(), markdown(result, 'test', 'Raw/03 Get'))
+        summary = read_blocks(sections(result, utf16_chunks)[0][3])
+        self.assertEqual(summary[0][0], 'heading_4')
+        self.assertIn('Earlier summary', repr(summary))
+        self.assertNotIn('Different upstream summary', repr(summary))
 
     def select(self, *, available=lambda: True, paused=(), plan=None):
         report = {}

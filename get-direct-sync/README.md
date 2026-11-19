@@ -146,6 +146,11 @@ Its verified successor uses the normal 25-item cap.
 Explicit history also accepts approved binary-backed entries whose live
 revision and existing private source match. GitHub and Notion must verify
 the asset bytes before the item is counted as delivered.
+For a reviewed recording that already has its full transcript at the end of
+the existing private Markdown, the plan may set `preserve_local_summary` to
+true. The visible summary then comes from the pinned local-original blob,
+while the unmodified Get fields and version remain in source JSON. Current
+source, transcript, and content safety checks still apply before delivery.
 
 The normal source scan and pending deliveries run first. A first-attempt main
 sync dispatched by the verified GitHub hourly clock may recover up to five

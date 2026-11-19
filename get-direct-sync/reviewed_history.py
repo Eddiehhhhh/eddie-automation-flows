@@ -61,8 +61,10 @@ def plan_at_head(http, cfg):
         raise Hold('history_plan_invalid')
     seen = set()
     for row in plan['reviewed']:
-        if (not isinstance(row, dict) or set(row) != {'source_id', 'source_version', 'path', 'local_blob', 'reviewed_revision'}
-                or any(not isinstance(value, str) for value in row.values())):
+        fields = {'source_id', 'source_version', 'path', 'local_blob', 'reviewed_revision'}
+        if (not isinstance(row, dict) or set(row) - {'preserve_local_summary'} != fields
+                or any(not isinstance(row[key], str) for key in fields)
+                or 'preserve_local_summary' in row and row['preserve_local_summary'] is not True):
             raise Hold('history_plan_invalid')
         sid, version, old_path = row['source_id'], row['source_version'], row['path']
         if (not SOURCE_ID.fullmatch(sid) or sid in seen or not SHA256.fullmatch(version)
@@ -110,8 +112,30 @@ def check_candidate(row, plan_blob, cfg, get, github, notion, *, allow_media=Fal
             or type(legacy.get('size')) is not int or not 0 < legacy['size'] <= 500000):
         return None, 'legacy_changed'
     data = base64.b64decode(legacy['content'].replace('\n', ''), validate=True)
-    if (hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() != row['local_blob']
-            or snap['note']['content'].strip().encode() not in data.partition(b'\n---\n')[2]):
+    if hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() != row['local_blob']:
+        return None, 'legacy_body_changed'
+    body = data.partition(b'\n---\n')[2]
+    if row.get('preserve_local_summary'):
+        if not allow_media:
+            return None, 'explicit_history_required'
+        audio = snap['note'].get('audio')
+        original = audio.get('original') if isinstance(audio, dict) else None
+        if not isinstance(original, str) or len(original.strip()) < 50 or not binary:
+            return None, 'source_changed'
+        original = original.strip()
+        try:
+            text = body.decode('utf-8').strip()
+        except UnicodeDecodeError:
+            return None, 'legacy_body_changed'
+        if not text.endswith(original) or text.count(original) != 1:
+            return None, 'legacy_transcript_changed'
+        summary = re.sub(r'(?:\n|^)#{1,6}[ \t]+(?:录音原文|原文|逐字稿)[ \t]*$',
+                         '', text[:-len(original)].rstrip()).strip()
+        if (not summary or '![' in summary or re.search(r'OSSAccessKeyId=|[?&]Signature=', summary)):
+            return None, 'legacy_summary_requires_review'
+        snap['legacy_summary'] = summary
+        snap['legacy_source'] = {'relative_path': path, 'git_blob': row['local_blob']}
+    elif snap['note']['content'].strip().encode() not in body:
         return None, 'legacy_body_changed'
     # Refuse any existing page. Runtime Notion ownership checks also protect the write-after-query race.
     if notion.pages(sid):
@@ -161,6 +185,10 @@ def candidates(plan, cfg, store, get, github, notion, paused_ids, report, availa
         report['checked'] += 1
         if sid in excluded or (store.get('source_hold:' + sid) or {}).get('status') == 'held':
             snap, reason = None, 'paused'
+        elif row.get('preserve_local_summary') and not allow_media:
+            continue
+        elif row.get('preserve_local_summary') and store.receipt('github', sid):
+            snap, reason = None, 'github_existing_projection'
         elif inventory.get(sid) != version:
             snap, reason = None, 'inventory_changed'
         else:
