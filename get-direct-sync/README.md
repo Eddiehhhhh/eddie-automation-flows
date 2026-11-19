@@ -146,3 +146,21 @@ schedule. An admission budget of 30 minutes from runtime start preserves a
 three-minute reserve for the last plain-text transaction and state release.
 A new row also requires at least 1,500 remaining GitHub core requests. An
 unavailable quota or a lower balance defers only the optional history stage.
+
+### Notion native presentation
+
+The Notion page shows a readable Get body heading linked to the immutable
+private GitHub source version. The display uses native headings, lists,
+quotations, code blocks and basic inline styling. Recorder notes use two
+toggleable level-one sections for the summary and original transcription,
+with level-three and level-four headings preserved inside. Attachments and recordings
+use their already verified uploaded bytes, with native media blocks where
+supported. Source-only JSON and source media signatures remain in the private
+archive. The full original source digest and the digest of the displayed
+blocks are verified independently.
+
+Existing plain-text version receipts are still read with their original
+contract. An older verified Get version may have its heading relabeled
+“历史正文” when an updated native version is appended. Its blocks are retained.
+A same-version retry reuses the original block; it does not retrofit pages in
+bulk. Missing or unexpectedly edited managed content still stops the item.

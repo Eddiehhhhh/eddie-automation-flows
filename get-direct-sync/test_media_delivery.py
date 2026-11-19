@@ -65,7 +65,7 @@ class MediaFake(Fake):
                 for child in nested:
                     self.counter += 1
                     child['id'] = f'b{self.counter}'
-                    media = child['file']
+                    media = child[child['type']]
                     uid = media.pop('file_upload')['id']
                     url = 'https://notion-media.example.test/' + uid
                     self.file_bytes[url] = b''.join(self.upload_data[uid])
@@ -119,6 +119,38 @@ class MediaTests(unittest.TestCase):
 
     def sync(self):
         return self.sink.sync(self.snap, self.receipt, self.manifest, self.root)
+
+    def test_native_notion_image_and_audio_use_uploaded_bytes_and_friendly_headers(self):
+        fixtures = [('image/png', 'image', '图片'), ('audio/ogg', 'audio', '录音')]
+        for mime, kind, label in fixtures:
+            with self.subTest(kind=kind):
+                self.asset['content_type'] = mime
+                source = 'https://github.com/owner/private/blob/main'
+                fresh_note = dict(self.snap['note'], content='## 小节\n- **正文**')
+                self.snap = snapshot(fresh_note)
+                self.manifest['source_version'] = self.snap['version']
+                # Use a fresh synthetic destination for the new presentation.
+                self.journal = Journal()
+                self.http = MediaFake(self.journal)
+                self.text = NotionSink(self.http, 'db', self.journal, namespace='test', source_base=source)
+                self.receipt = self.text.sync(self.snap)
+                self.sink = NotionMedia(self.http, 'db', self.journal, namespace='test',
+                                        source_base=source, download=self.http.download)
+                self.http.lose = 'attach'
+                with self.assertRaisesRegex(Hold, 'media_transport_uncertain'):
+                    self.sync()
+                result = self.sync()
+                row = result['assets'][0]
+                self.assertEqual(row['kind'], kind)
+                self.assertEqual(row['caption'], label + ' 1')
+                toggle = [b for b in self.http.blocks[result['page_id']] if b['id'] == row['toggle_id']][0]
+                self.assertIn(label, toggle['toggle']['rich_text'][0]['text']['content'])
+                self.assertNotIn('get-direct-v1:', str(toggle['toggle']['rich_text']))
+                child = self.http.blocks[row['toggle_id']][0]
+                self.assertEqual(child['type'], kind)
+                self.assertEqual(self.http.file_bytes[child[kind]['file']['url']], self.data)
+                self.assertEqual(result, self.sync())
+                self.assertEqual(self.http.upload_writes, 1)
 
     def test_github_binary_and_repeat_and_private_gate(self):
         gh = GitFake()
