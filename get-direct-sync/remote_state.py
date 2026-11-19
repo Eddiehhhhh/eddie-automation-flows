@@ -112,6 +112,7 @@ class RemoteState:
         self.path = None
         self.recovery_evidence = None
         self._stage = 'context'
+        self._pinned_state = None
         self.prefix = '/repos/' + repo
         self.ref = 'heads/' + urllib.parse.quote(branch, safe='/')
 
@@ -133,7 +134,9 @@ class RemoteState:
         if tree.get('truncated'):
             raise Hold('remote_state_tree_incomplete')
         entries = [x for x in tree['tree'] if x['path'] == STATE_FILE]
+        parents = tuple(parent.get('sha') for parent in commit.get('parents', []))
         if not entries:
+            self._pinned_state = (head, tree_sha, None, parents)
             return head, tree_sha, {'schema': SCHEMA, 'binding': self.binding,
                                     'lease': None, 'checkpoint': None}
         if len(entries) != 1 or entries[0].get('type') != 'blob' or entries[0].get('mode') != '100644':
@@ -160,6 +163,7 @@ class RemoteState:
                                   not isinstance(lease['lease_id'], str)):
             raise Hold('remote_state_lease_invalid')
         unpack_checkpoint(doc['checkpoint'])
+        self._pinned_state = (head, tree_sha, entry['sha'], parents)
         return head, tree_sha, doc
 
     def _publish(self, head, tree_sha, doc, *, recovery=None):
@@ -177,19 +181,16 @@ class RemoteState:
                        (recovery['checkpoint_sha256'] or 'none'))
         body = canonical(doc).encode()
         expected_blob = git_blob_sha(body)
-        tree = self._request('read_expected_tree', 'GET', self.prefix + '/git/trees/' + tree_sha)
-        if tree.get('truncated'):
-            raise Hold('remote_state_tree_incomplete')
-        entries = [entry for entry in tree['tree'] if entry['path'] == STATE_FILE]
-        if len(entries) > 1 or entries and (entries[0].get('type') != 'blob' or entries[0].get('mode') != '100644'):
-            raise Hold('remote_state_file_invalid')
+        if self._pinned_state is None or self._pinned_state[:2] != (head, tree_sha):
+            raise Hold('remote_state_publish_head_changed')
+        previous_blob = self._pinned_state[2]
         before = self._request('check_publish_ref', 'GET', self.prefix + '/git/ref/' + self.ref)
         if not before or before.get('object', {}).get('sha') != head:
             raise Hold('remote_state_publish_head_changed')
         payload = {'message': message, 'branch': self.branch,
                    'content': base64.b64encode(body).decode()}
-        if entries:
-            payload['sha'] = entries[0]['sha']
+        if previous_blob is not None:
+            payload['sha'] = previous_blob
         update_error, response = None, None
         try:
             response = self._request('write_contents', 'PUT', self.prefix + '/contents/' + STATE_FILE, payload)
@@ -218,14 +219,12 @@ class RemoteState:
                 raise Hold('remote_state_readback_old_head' if current == head else 'remote_state_readback_other_head')
         if readback != doc:
             raise Hold('remote_state_readback_content_mismatch')
-        final_tree = self._request('verify_contents_blob', 'GET', self.prefix + '/git/trees/' + current_tree)
-        final_entries = [entry for entry in final_tree.get('tree', []) if entry['path'] == STATE_FILE]
-        if (final_tree.get('truncated') or len(final_entries) != 1
-                or final_entries[0].get('type') != 'blob' or final_entries[0].get('mode') != '100644'
-                or final_entries[0].get('sha') != expected_blob):
+        # The independent read-back already verified the pinned tree and blob.
+        self._stage = 'verify_contents_blob'
+        if self._pinned_state[:3] != (current, current_tree, expected_blob):
             raise Hold('remote_state_blob_write_mismatch')
-        commit = self._request('verify_contents_parent', 'GET', self.prefix + '/git/commits/' + current)
-        if [parent.get('sha') for parent in commit.get('parents', [])] != [head]:
+        self._stage = 'verify_contents_parent'
+        if self._pinned_state[3] != (head,):
             # Contents CAS protects the file; a separate branch-head race still freezes us.
             raise Hold('remote_state_publish_parent_changed')
         return desired

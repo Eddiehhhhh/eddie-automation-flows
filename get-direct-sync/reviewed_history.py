@@ -188,7 +188,8 @@ def should_resume_migration(report):
     history = report.get('reviewed_history') or {}
     return (report.get('phase') == 'history' and report.get('pending') == 0
             and not history.get('deferred') and history.get('remaining_approved', 0) > 0
-            and (report.get('notion', {}).get('verified', 0) > 0 or bool(history.get('newly_suspended'))))
+            and (report.get('notion', {}).get('verified', 0) > 0 or bool(history.get('newly_suspended'))
+                 or report.get('preserved_existing_pages', 0) > 0))
 
 
 def candidates(plan, cfg, store, get, github, notion, paused_ids, report, available, *, check_limit=LIMIT,
@@ -242,6 +243,7 @@ def candidates(plan, cfg, store, get, github, notion, paused_ids, report, availa
         report['newly_suspended'] = dict(recorded)
     report['remaining_approved'] = sum(
         row['reviewed_revision'] not in skipped
+        and not store.get('existing_page_conflict:' + row['source_id'])
         and not all((store.receipt(sink, row['source_id']) or {}).get('version') == row['source_version']
                     for sink in ('github', 'notion'))
         for row in value['reviewed']

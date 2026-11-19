@@ -488,6 +488,16 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                     self.assertEqual(error.stage, stage)
                     self.assertNotIn('secret', repr(error) + repr(vars(error)))
 
+    def test_publish_reuses_verified_tree_and_parent_without_extra_reads(self):
+        state, db = self.prepared()
+        first = len(self.git.calls)
+        state.checkpoint(db)
+        calls = self.git.calls[first:]
+        self.assertEqual(sum('/git/trees/' in path for method,path,_ in calls), 2)
+        self.assertEqual(sum('/git/commits/' in path for method,path,_ in calls), 2)
+        self.assertEqual(sum(method=='PUT' for method,_,_ in calls), 1)
+        self.assertIsNotNone(self.git.document()['checkpoint'])
+
     def test_transient_old_head_readback_reconciles_without_second_write(self):
         state, db = self.prepared()
         original = self.git.request
