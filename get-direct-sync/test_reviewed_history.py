@@ -94,6 +94,8 @@ class ReviewedHistoryTests(unittest.TestCase):
             self.assertFalse(should_resume_migration({**report, **changed}))
         self.assertTrue(should_resume_migration({**report, 'notion': {'verified': 0},
             'reviewed_history': {'remaining_approved': 9, 'newly_suspended': {'source_changed': 1}}}))
+        self.assertTrue(should_resume_migration({**report, 'notion': {'verified': 0},
+                                                 'preserved_existing_pages': 1}))
         self.assertTrue(should_resume_migration({'phase': 'sync', 'pending': 0,
                                                  'resume_history_from_clock': True}))
         self.assertFalse(should_resume_migration({'phase': 'sync', 'pending': 1,

@@ -442,7 +442,10 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                     'github': CompleteSink('github', github_text, github_media, store, manifests, assets),
                     'notion': CompleteSink('notion', notion_text, notion_media, store, manifests, assets)}
                 user_work_waiting = store.pending_count() > 0
-                counts = store.drain(sinks, limit=batch_size, paused_ids=paused_ids)
+                preserve = cfg['scope'] == 'production'
+                counts = store.drain(sinks, limit=batch_size, paused_ids=paused_ids, preserve_existing=preserve)
+                preserved_existing = counts.get('preserved_existing', 0)
+                paused_ids = (store.get('sync_policy') or {}).get('paused_ids', paused_ids)
                 parent_run = clock_parent(hourly_env or {})
                 available = lambda: monotonic() + RESERVE_SECONDS < deadline
                 ordinary_history = (mode == 'sync' and cfg['scope'] == 'production'
@@ -481,7 +484,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                         for reviewed in candidates(plan, cfg, store, get_http, github_http, lookup,
                                                    paused_ids, history, available, **limits):
                             history['enqueued'] += store.enqueue([reviewed])['enqueued']
-                            result = store.drain(sinks, limit=1, paused_ids=paused_ids)
+                            result = store.drain(sinks, limit=1, paused_ids=paused_ids, preserve_existing=preserve)
+                            preserved_existing += result.get('preserved_existing', 0)
                             for dest in ('github', 'notion'):
                                 for metric in ('verified', 'held'):
                                     counts[dest][metric] += result[dest][metric]
@@ -501,6 +505,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                       'pending': store.pending_count(), 'github': counts['github'],
                       'notion': counts['notion'], 'held_reasons': reasons,
                       'inventory_status': index['status'], 'index_summary': index['summary']}
+            if mode in ('sync', 'backfill', 'drain', 'history') and preserved_existing:
+                report['preserved_existing_pages'] = preserved_existing
             if history is not None:
                 report['reviewed_history'] = history
             if campaign or mode == 'history':

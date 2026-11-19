@@ -261,12 +261,24 @@ class Store:
         if row and row[0]==reason:return
         with self.db:self.db.execute('INSERT OR REPLACE INTO held VALUES(?,?,?,?)',(name,nid,version,reason))
         self._checkpoint()
-    def drain(self,sinks,limit=None,paused_ids=()):
+    def _preserve_existing_page(self, nid, reason):
+        revisions = [json.loads(r[0]) for r in self.db.execute(
+            'SELECT snapshot FROM pending WHERE id=? ORDER BY rowid', (nid,))]
+        policy = self.get('sync_policy') or {'paused_ids': []}
+        policy['paused_ids'] = sorted(set(policy['paused_ids']) | {nid})
+        with self.db:
+            self._set('sync_policy', policy)
+            self._set('existing_page_conflict:' + nid, {'reason': reason, 'revisions': revisions})
+            # Preserve receipts and held rows. Only the active delivery queue moves.
+            self.db.execute('DELETE FROM pending WHERE id=?', (nid,))
+        self._checkpoint()
+
+    def drain(self,sinks,limit=None,paused_ids=(),*,preserve_existing=False):
         self._ready()
         if set(sinks)!={'github','notion'}:raise Hold('both_sinks_required')
         counts={k:{'verified':0,'held':0} for k in sinks}
         if limit is not None and (type(limit) is not int or limit<0):raise Hold('invalid_drain_limit')
-        blocked=set();attempted=0
+        blocked=set();attempted=0;preserved=0
         paused=set(map(str,paused_ids))
         rows=[row for row in self.db.execute('SELECT rowid,id,version,snapshot FROM pending ORDER BY rowid').fetchall() if row[1] not in paused]
         if limit is not None:
@@ -308,7 +320,15 @@ class Store:
                 except CheckpointFailure:raise
                 except Exception as exc:
                     self._held(name,nid,version,exc)
-                    blocked.add(nid);counts[name]['held']+=1
+                    blocked.add(nid)
+                    if preserve_existing and name == 'notion' and isinstance(exc, Hold) and str(exc) in {
+                        'duplicate_source_pages', 'unknown_existing_page_ownership', 'page_ownership_mismatch',
+                        'page_parent_mismatch', 'managed_content_modified', 'managed_title_modified',
+                    }:
+                        self._preserve_existing_page(nid, str(exc))
+                        preserved += 1
+                    else:
+                        counts[name]['held']+=1
                 if nid in blocked:break
             if nid not in blocked and all((self.receipt(k,nid) or {}).get('version')==s['version'] for k in sinks):
                 with self.db:
@@ -316,7 +336,7 @@ class Store:
                     self.db.execute('DELETE FROM pending WHERE id=? AND version=?',(nid,version))
                 self._checkpoint()
             if limit is not None:self.set('drain_cursor_v1',rowid)
-        return {**counts,'pending':self.pending_count()}
+        return {**counts,'pending':self.pending_count(), **({'preserved_existing': preserved} if preserve_existing else {})}
 
 class GitHubSink:
     """Deterministic files, repository visibility gate, exact SHA compare-and-swap."""
