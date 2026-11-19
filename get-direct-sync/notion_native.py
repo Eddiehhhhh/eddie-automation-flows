@@ -69,8 +69,9 @@ def _text_blocks(kind, items):
 def sections(snapshot, chunks):
     note = snapshot['note']
     urls = {ref['url'] for ref in asset_references(note)}
+    source_content = snapshot.get('legacy_summary', note['content'])
     content = IMAGE.sub(lambda match: '图片' + ('（' + match[1] + '）' if match[1] else '') + '见附件'
-                        if match[2] in urls else match[0], note['content'])
+                        if match[2] in urls else match[0], source_content)
     original = note.get('audio')
     original = original.get('original') if isinstance(original, dict) else None
     if isinstance(original, str):

@@ -83,10 +83,11 @@ def markdown(snapshot, namespace, raw_prefix, manifest=None, *, relative_path=No
               'updated_at': note.get('updated_at', ''), 'source_version': snapshot['version'],
               'tags': tag_names(note.get('tags', [])),
               'source_json': posixpath.relpath(version_path(snapshot, namespace), posixpath.dirname(current))}
+    content = snapshot.get('legacy_summary', note['content'])
     text = '---\n' + ''.join(key + ': ' + json.dumps(value, ensure_ascii=False) + '\n'
-                             for key, value in fields.items()) + '---\n\n' + note['content'].rstrip() + '\n'
+                             for key, value in fields.items()) + '---\n\n' + content.rstrip() + '\n'
     original = (note.get('audio') or {}).get('original') if isinstance(note.get('audio'), dict) else None
-    if isinstance(original, str) and original.strip() and original.strip() != note['content'].strip():
+    if isinstance(original, str) and original.strip() and original.strip() != content.strip():
         text += '\n## 录音原文\n\n' + original.rstrip() + '\n'
     if manifest and manifest.get('assets'):
         text += '\n## 附件\n\n'
