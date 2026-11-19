@@ -181,6 +181,19 @@ class MediaTests(unittest.TestCase):
         self.assertTrue(sink.sync(self.asset, self.data)['binary_assets_verified'])
         self.assertEqual(gh.writes, 1)
 
+    def test_github_new_binary_reads_back_bytes_only_once(self):
+        for uncertain in (False, True):
+            with self.subTest(uncertain=uncertain):
+                gh = GitFake()
+                gh.uncertain = uncertain
+                sink = GitHubMedia(gh, 'owner/private', 'proof', 'test')
+                with patch.object(sink.sink, 'content', wraps=sink.sink.content) as read_bytes:
+                    result = sink.sync(self.asset, self.data)
+                self.assertTrue(result['binary_assets_verified'])
+                self.assertEqual(result['blob_sha'], gh.file['sha'])
+                self.assertEqual(gh.writes, 1)
+                read_bytes.assert_called_once()
+
     def test_github_binary_success_reads_immutable_commit_with_stale_branch(self):
         gh = GitFake()
         gh.stale_after_write = True
