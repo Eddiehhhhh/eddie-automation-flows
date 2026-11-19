@@ -142,6 +142,33 @@ class ReviewedHistoryTests(unittest.TestCase):
         self.assertIn('Earlier summary', repr(summary))
         self.assertNotIn('Different upstream summary', repr(summary))
 
+    def test_reviewed_legacy_image_matches_the_original_asset_and_preserves_layout(self):
+        transcript = 'Transcript words. ' * 10
+        note_url = 'https://get-notes.umiwi.com/get-note-board%2Fimage.png'
+        keys = '?Expires=1&OSSAccessKeyId=example&Signature=example'
+        live = note_url + keys
+        old = note_url.replace('%2F', '/') + keys + '&x-oss-process=image/resize,m_lfit,w_720,h_3240'
+        raw = dict(note('33'), note_type='recorder_audio', content=f'New summary\n\n![]({live})',
+                   audio={'original': transcript, 'play_url': 'https://cdn.test/audio.ogg'})
+        fixture = Fixture([snapshot(raw)])
+        row = fixture.plan['reviewed'][0]
+        row['preserve_local_summary'] = True
+        def project(old_link):
+            entry = ('---\n---\n#### Original summary\n\n![](' + old_link +
+                     ')\n\n## 录音原文\n\n' + transcript).encode()
+            fixture.legacy[row['path']] = fileset(row['path'], entry)
+            row['local_blob'] = fixture.legacy[row['path']]['sha']
+            blob, plan = plan_at_head(fixture, fixture.cfg)
+            return check_candidate(plan['reviewed'][0], blob, fixture.cfg,
+                                   fixture, fixture, fixture, allow_media=True)
+        archived, reason = project(old)
+        self.assertIsNone(reason)
+        self.assertEqual(archived['legacy_summary'], '#### Original summary\n\n图片见附件')
+        self.assertEqual(archived['note'], raw)
+        self.assertNotIn(b'Signature=', markdown(archived, 'test', 'Raw/03 Get'))
+        self.assertEqual(project(old.replace('image.png', 'another.png')),
+                         (None, 'legacy_summary_requires_review'))
+
     def select(self, *, available=lambda: True, paused=(), plan=None):
         report = {}
         active = plan or plan_at_head(self.api, self.api.cfg)
