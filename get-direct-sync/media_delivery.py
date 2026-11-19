@@ -120,15 +120,13 @@ class GitHubMedia:
             expected = hashlib.sha1(b'blob ' + str(size).encode() + b'\0' + data).hexdigest()
             commit = self.publish_large(sink.http, sink.repo, sink.branch, target, data, expected)
             observed = sink.http.request('GET', path + '?' + urlencode({'ref': commit}))
-            if not observed or observed.get('sha') != expected:
+            if not observed or observed.get('sha') != expected or sink.content(observed) != data:
                 raise Hold('media_github_readback_mismatch')
         else:
             observed = sink.put_verified(path, {
                 'message': 'Archive Get binary asset',
                 'content': base64.b64encode(data).decode(), 'branch': sink.branch}, data,
                 mismatch_reason='media_github_readback_mismatch')
-        if not observed or sink.content(observed) != data:
-            raise Hold('media_github_readback_mismatch')
         return {'sha256': sha, 'bytes': size, 'target': path, 'blob_sha': observed['sha'],
                 'binary_assets_verified': True}
 
