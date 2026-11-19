@@ -6,6 +6,7 @@ and finally release(). Only verified completed attempts of this same workflow
 may recover a crashed lease; elapsed time never authorizes takeover.
 """
 import base64
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -113,6 +114,7 @@ class RemoteState:
         self.recovery_evidence = None
         self._stage = 'context'
         self._pinned_state = None
+        self._verified_document = None
         self.prefix = '/repos/' + repo
         self.ref = 'heads/' + urllib.parse.quote(branch, safe='/')
 
@@ -120,7 +122,7 @@ class RemoteState:
         self._stage = stage
         return self.http.request(method, path, body)
 
-    def _read(self):
+    def _read(self, *, reuse_verified=False):
         repo = self._request('read_repository', 'GET', self.prefix)
         if not repo or repo.get('private') is not True or repo.get('default_branch') == self.branch:
             raise Hold('private_state_branch_required')
@@ -128,6 +130,8 @@ class RemoteState:
         if not ref:
             raise Hold('remote_state_branch_missing')
         head = ref['object']['sha']
+        if reuse_verified and self._pinned_state is not None and head == self._pinned_state[0]:
+            return head, self._pinned_state[1], deepcopy(self._verified_document)
         commit = self._request('read_commit', 'GET', self.prefix + '/git/commits/' + head)
         tree_sha = commit['tree']['sha']
         tree = self._request('read_tree', 'GET', self.prefix + '/git/trees/' + tree_sha)
@@ -136,9 +140,10 @@ class RemoteState:
         entries = [x for x in tree['tree'] if x['path'] == STATE_FILE]
         parents = tuple(parent.get('sha') for parent in commit.get('parents', []))
         if not entries:
+            doc = {'schema': SCHEMA, 'binding': self.binding, 'lease': None, 'checkpoint': None}
             self._pinned_state = (head, tree_sha, None, parents)
-            return head, tree_sha, {'schema': SCHEMA, 'binding': self.binding,
-                                    'lease': None, 'checkpoint': None}
+            self._verified_document = deepcopy(doc)
+            return head, tree_sha, doc
         if len(entries) != 1 or entries[0].get('type') != 'blob' or entries[0].get('mode') != '100644':
             raise Hold('remote_state_file_invalid')
         entry = entries[0]
@@ -164,6 +169,7 @@ class RemoteState:
             raise Hold('remote_state_lease_invalid')
         unpack_checkpoint(doc['checkpoint'])
         self._pinned_state = (head, tree_sha, entry['sha'], parents)
+        self._verified_document = deepcopy(doc)
         return head, tree_sha, doc
 
     def _publish(self, head, tree_sha, doc, *, recovery=None):
@@ -352,7 +358,8 @@ class RemoteState:
         try:
             if self.lease is None or self.path is None or connection.in_transaction:
                 raise Hold('remote_checkpoint_context')
-            head, tree, doc = self._read()
+            # A fresh ref to the same immutable commit also identifies its verified contents.
+            head, tree, doc = self._read(reuse_verified=True)
             if doc['lease'] != self.lease:
                 raise Hold('remote_state_lease_lost')
             self._stage = 'sqlite_backup'

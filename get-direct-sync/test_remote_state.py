@@ -493,8 +493,8 @@ class CheckpointDiagnosticTests(unittest.TestCase):
         first = len(self.git.calls)
         state.checkpoint(db)
         calls = self.git.calls[first:]
-        self.assertEqual(sum('/git/trees/' in path for method,path,_ in calls), 2)
-        self.assertEqual(sum('/git/commits/' in path for method,path,_ in calls), 2)
+        self.assertEqual(sum('/git/trees/' in path for method,path,_ in calls), 1)
+        self.assertEqual(sum('/git/commits/' in path for method,path,_ in calls), 1)
         self.assertEqual(sum(method=='PUT' for method,_,_ in calls), 1)
         self.assertIsNotNone(self.git.document()['checkpoint'])
 
@@ -538,8 +538,8 @@ class CheckpointDiagnosticTests(unittest.TestCase):
         original = state._read
         old = self.git.head
         reads = []
-        def read():
-            head, tree, doc = original()
+        def read(**kwargs):
+            head, tree, doc = original(**kwargs)
             reads.append(head)
             if len(reads) == 2:
                 return old, tree, doc
@@ -579,8 +579,8 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                 state.acquire(Path(folder).resolve() / 'state.sqlite')
                 original = state._read
                 reads = []
-                def read():
-                    head, tree, doc = original()
+                def read(**kwargs):
+                    head, tree, doc = original(**kwargs)
                     reads.append(head)
                     if len(reads) == 2:
                         if mode == 'other_head':
