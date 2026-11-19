@@ -50,6 +50,10 @@ class Source:
         self.scan_complete = True
         return copy.deepcopy(result)
 
+    def scan_window(self, selector, *, recent_floor, on_note_hold=None):
+        selector.prepare_window({s['id'] for s in self.notes + self.holds}, [], None, 1)
+        return self.scan(on_note_hold=on_note_hold, select_note=selector)
+
 
 class Text:
     def __init__(self):
@@ -181,6 +185,23 @@ class Tests(unittest.TestCase):
                 self.assertEqual([s['id'] for s, _ in self.ghtext.calls], ['2','1'])
                 self.assertEqual([s['id'] for s, _ in self.notext.calls], ['2','1'])
                 self.assertIsNone(self.github.document()['lease'])
+
+    def test_explicit_history_uses_reviewed_limit_without_listing_source(self):
+        self.cfg.update(scope='production', data_branch='main')
+        self.source.notes = [snapshot(dict(note('1'), note_type='plain_text'))]
+        with patch('runner.verify_legacy_writers'):
+            self.baseline()
+
+            def candidate(plan, cfg, store, src, github, notion, paused, report, available, *, check_limit):
+                self.assertEqual(check_limit, 12)
+                report['enqueued'] = 0
+                yield self.source.notes[0]
+
+            with patch('runner.plan_at_head', return_value=object()), patch('runner.candidates', side_effect=candidate):
+                calls = self.source.calls
+                result, status = self.run_mode('history', 12)
+            self.assertEqual(self.source.calls, calls)
+            self.assertEqual((status, result['github']['verified'], result['notion']['verified']), (0, 1, 1))
 
     def test_private_pause_policy_skips_source_details_and_target_writes(self):
         self.baseline()

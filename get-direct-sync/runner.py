@@ -9,7 +9,9 @@ import re
 import secrets
 import tempfile
 import time
+from datetime import datetime, timedelta
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from assets import AssetArchive, AssetTransport, asset_references
 from core import CheckpointFailure, GetSource, Hold, Store, identity, requires_binary_assets, snapshot
@@ -29,7 +31,7 @@ ENV_NAMES = ('GET_SYNC_CONFIG_JSON', 'GETNOTE_API_KEY', 'GETNOTE_CLIENT_ID',
 HOURLY_ENV_NAMES = ('GITHUB_EVENT_NAME', 'GITHUB_REF', 'GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR',
                     'GITHUB_REPOSITORY', 'GITHUB_RUN_ATTEMPT', 'GET_HOURLY_DISPATCH_KEY')
 OWNER_ENV_NAMES = ('CODEX_THREAD_ID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')
-MODES = ('inspect', 'baseline', 'sync', 'backfill', 'drain')
+MODES = ('inspect', 'baseline', 'sync', 'backfill', 'history', 'drain')
 
 
 def configuration(environ):
@@ -307,14 +309,17 @@ def reviewed_revisions(store, requested, batch_size, paused_ids):
 
 def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=None,
             review='', publish_large=None, hourly_env=None, monotonic=time.monotonic):
-    deadline = monotonic() + RUNTIME_SECONDS
-    if mode not in MODES or type(batch_size) is not int or not 1 <= batch_size <= 10:
+    deadline = monotonic() + (45 * 60 if mode == 'history' else RUNTIME_SECONDS)
+    maximum = 25 if mode == 'history' else 10
+    if mode not in MODES or type(batch_size) is not int or not 1 <= batch_size <= maximum:
         raise Hold('runner_arguments_invalid')
     if (review and mode != 'backfill' or mode == 'backfill' and
             cfg['scope'] == 'production' and not review):
         raise Hold('reviewed_backfill_required')
     if mode == 'inspect':
         return inspect(cfg, get_http, github_http, notion_http), 0
+    if mode == 'history' and (cfg['scope'] != 'production' or cfg['data_branch'] != 'main'):
+        raise Hold('history_requires_production_main')
     verify_legacy_writers(cfg, github_http)
     remote = RemoteState(github_http, cfg['private_repo'], cfg['state_branch'],
                          cfg['namespace'], owner or run_owner({}))
@@ -346,7 +351,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
             if mode in ('baseline', 'sync', 'backfill'):
                 def source_hold(value):
                     source_holds.append(value['id'])
-                selector = IncrementalSelector(store, paused_ids) if mode == 'sync' else None
+                windowed = mode == 'sync' and cfg['scope'] == 'production'
+                selector = IncrementalSelector(store, paused_ids, window=windowed) if mode == 'sync' else None
                 staged_holds = []
                 def stage_source_hold(value):
                     source_hold(value)
@@ -369,7 +375,11 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                             and prior.get('note',{}).get('updated_at')==summary.get('updated_at')):return False
                         chosen.add(sid);return True
                 source=GetSource(get_http)
-                snapshots = source.scan(on_note_hold=stage_source_hold,select_note=selector)
+                if windowed:
+                    floor = (datetime.now(ZoneInfo('Asia/Shanghai')).date() - timedelta(days=7)).isoformat()
+                    snapshots = source.scan_window(selector, recent_floor=floor, on_note_hold=stage_source_hold)
+                else:
+                    snapshots = source.scan(on_note_hold=stage_source_hold, select_note=selector)
                 observed = getattr(source,'observed_count',len(snapshots)+len(source_holds))
                 if reviewed is not None:
                     if staged_holds or {s['id']: s['version'] for s in snapshots} != reviewed:
@@ -432,23 +442,30 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 counts = store.drain(sinks, limit=batch_size, paused_ids=paused_ids)
                 parent_run = clock_parent(hourly_env or {})
                 available = lambda: monotonic() + RESERVE_SECONDS < deadline
-                if (mode == 'sync' and cfg['scope'] == 'production' and cfg['data_branch'] == 'main'
-                        and parent_run and not user_work_waiting and not new_source_holds
-                        and not store.pending_count() and available()):
+                ordinary_history = (mode == 'sync' and cfg['scope'] == 'production'
+                                    and cfg['data_branch'] == 'main' and parent_run and not user_work_waiting
+                                    and not new_source_holds)
+                if mode == 'history' and store.pending_count():
+                    history = {'deferred': 'pending_work'}
+                if (mode == 'history' or ordinary_history) and not store.pending_count() and available():
                     try:
                         plan = plan_at_head(github_http, cfg)
-                        trusted_clock = plan and verify_clock(github_http, hourly_env.get('GITHUB_REPOSITORY'), parent_run)
+                        trusted = plan and (mode == 'history' or
+                                            verify_clock(github_http, hourly_env.get('GITHUB_REPOSITORY'), parent_run))
                     except (Hold, HTTPFailure, RetryStopped, TransportFailure, KeyError, ValueError, TypeError):
-                        plan, trusted_clock = None, False
+                        plan, trusted = None, False
                         history = {'deferred': 'plan_unavailable'}
-                    if plan and not trusted_clock:
+                    if mode == 'history' and not plan and history is None:
+                        history = {'deferred': 'plan_unavailable'}
+                    if plan and not trusted:
                         history = {'deferred': 'clock_unverified'}
                     elif plan:
                         history = {}
                         lookup = NotionSink(notion_http, cfg['notion_database_id'], ReadOnlyJournal(),
                                             namespace=cfg['namespace'], **cfg['notion_properties'])
+                        limits = {'check_limit': batch_size} if mode == 'history' else {}
                         for reviewed in candidates(plan, cfg, store, get_http, github_http, lookup,
-                                                   paused_ids, history, available):
+                                                   paused_ids, history, available, **limits):
                             history['enqueued'] += store.enqueue([reviewed])['enqueued']
                             result = store.drain(sinks, limit=1, paused_ids=paused_ids)
                             for dest in ('github', 'notion'):
@@ -459,6 +476,7 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
             active_source_holds = sum(json.loads(row[0]).get('status') != 'resolved'
                                       for row in store.db.execute("SELECT v FROM journal WHERE k LIKE 'source_hold:%'"))
             report = {'phase': mode, 'observed': observed, 'selected': selected,
+                      'source_scan': 'recent_and_rotating' if mode == 'sync' and cfg['scope'] == 'production' else mode,
                       'source_holds': len(source_holds), 'source_holds_active': active_source_holds,
                       'new_source_holds': len(new_source_holds), 'paused_sources': len(paused_ids),
                       'paused_pending': sum(row[0] in set(paused_ids)
@@ -475,7 +493,8 @@ def execute(cfg, mode, batch_size, get_http, github_http, notion_http, *, owner=
                 store.db.close()
             if remote.lease is not None:
                 remote.release()
-    failed = report['new_source_holds'] or any(report[name]['held'] for name in ('github', 'notion'))
+    failed = (report['new_source_holds'] or any(report[name]['held'] for name in ('github', 'notion'))
+              or mode == 'history' and report.get('reviewed_history', {}).get('deferred'))
     return report, 2 if failed else 0
 
 

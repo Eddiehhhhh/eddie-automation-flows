@@ -121,6 +121,21 @@ API references: [Notion file uploads](https://developers.notion.com/reference/cr
 
 ### Optional reviewed history on an idle hourly tick
 
+Production incremental runs read up to three list pages from the head for the
+last seven Shanghai calendar days, plus up to three list pages from a durable
+rolling position. Get exposes no update-time list filter and its creation order
+does not safely bound edits to old notes. The rolling position catches those
+edits across runs. The worker reads individual details for changed summaries
+and a bounded audit. The position is committed with the selected snapshots and
+deferred changes only after successful source reads.
+
+Use the explicit `history` mode to advance the one-time approved migration at
+up to 25 reviewed candidates per run. It reads pinned candidate details
+directly without paging through the Get inventory. Existing verified
+destinations are skipped. Resume the same approved private manifest after a
+bounded run using its `remaining_approved` and suspended counts, after resolving
+any reported holds. The same single-writer and GitHub-first rules apply.
+
 The normal source scan and pending deliveries run first. A first-attempt main
 sync dispatched by the verified GitHub hourly clock may recover up to five
 approved plain-text revisions when its normal queue was empty and still is.
