@@ -143,6 +143,45 @@ class Tests(unittest.TestCase):
                 store.db.close()
                 remote.release()
 
+    def test_hourly_history_runs_only_without_normal_work(self):
+        from test_reviewed_history import clock_env
+
+        self.cfg.update(scope='production', data_branch='main')
+        historical = snapshot(dict(note('1'), note_type='plain_text'))
+        self.source.notes = [historical]
+        with patch('runner.verify_legacy_writers'):
+            self.baseline()
+            args = (self.cfg, 'sync', 10, object(), self.github, object())
+            with patch('runner.plan_at_head', return_value=None) as get_plan:
+                result, status = runner.execute(*args, hourly_env=clock_env())
+                self.assertNotIn('reviewed_history', result)
+                self.assertEqual(status, 0)
+                get_plan.assert_called_once()
+            fresh = snapshot(note('2'))
+            self.source.notes.append(fresh)
+            with patch('runner.plan_at_head', return_value=object()) as get_plan:
+                result, status = runner.execute(*args, hourly_env=clock_env())
+                get_plan.assert_not_called()
+                self.assertNotIn('reviewed_history', result)
+                self.assertEqual((status, result['github']['verified']), (0, 1))
+
+            def candidate(plan, cfg, store, source, github, notion, paused, report, available):
+                self.assertTrue(available())
+                self.assertIsNotNone(self.github.document()['lease'])
+                report['enqueued'] = 0
+                yield historical
+
+            with patch('runner.plan_at_head', return_value=object()), \
+                    patch('runner.verify_clock', return_value=True), \
+                    patch('runner.candidates', side_effect=candidate):
+                result, status = runner.execute(*args, hourly_env=clock_env())
+                self.assertEqual((status, result['pending']), (0, 0))
+                self.assertEqual(result['reviewed_history']['enqueued'], 1)
+                self.assertEqual((result['github']['verified'], result['notion']['verified']), (1, 1))
+                self.assertEqual([s['id'] for s, _ in self.ghtext.calls], ['2','1'])
+                self.assertEqual([s['id'] for s, _ in self.notext.calls], ['2','1'])
+                self.assertIsNone(self.github.document()['lease'])
+
     def test_private_pause_policy_skips_source_details_and_target_writes(self):
         self.baseline()
         self.update_private_state(lambda s: s.set('sync_policy', {'paused_ids': ['1']}))
