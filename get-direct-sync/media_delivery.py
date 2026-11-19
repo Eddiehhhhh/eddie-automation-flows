@@ -13,7 +13,7 @@ import secrets
 import stat
 from urllib.parse import urlencode
 
-from assets import asset_references, manifest_coverage, open_regular, private_directory, safe_mime
+from assets import asset_references, binary_mime, manifest_coverage, open_regular, private_directory, safe_mime
 from core import GitHubSink, Hold, canonical
 from notion_sink import Hold as NotionHold, NotionSink, plain, rich
 from render import render_text
@@ -247,6 +247,8 @@ class NotionMedia:
         http = self.sink.http
         sha, size = checked_asset(asset, data)
         mime = safe_mime(asset.get('content_type'))
+        if mime == 'audio/mp3' and binary_mime(None, data[:32]) == 'audio/mpeg':
+            mime = 'audio/mpeg'
         extension = {'audio/wav':'.wav','audio/x-wav':'.wav','audio/ogg':'.ogg',
                      'audio/mpeg':'.mp3','audio/mp4':'.m4a'}.get(mime) or mimetypes.guess_extension(mime) or '.bin'
         if not re.fullmatch(r'\.[a-zA-Z0-9]{1,10}', extension):

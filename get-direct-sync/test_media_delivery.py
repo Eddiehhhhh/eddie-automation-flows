@@ -310,6 +310,18 @@ class MediaTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, '^media_transport_uncertain$'):
             self.sync()
 
+    def test_notion_normalizes_verified_mp3_bytes_from_a_legacy_manifest(self):
+        raw = b'ID3' + bytes(128)
+        digest = hashlib.sha256(raw).hexdigest()
+        path = self.root / (digest + '.bin')
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        self.asset.update(sha256=digest, local_name=path.name, bytes=len(raw), content_type='audio/mp3')
+        result = self.sync()
+        self.assertEqual(result['assets'][0]['sha256'], digest)
+        self.assertEqual(self.http.upload_bodies[0]['content_type'], 'audio/mpeg')
+        self.assertEqual(self.http.upload_bodies[0]['filename'], digest + '.mp3')
+
     def test_notion_unsupported_mime_holds_before_upload_or_intent(self):
         before = copy.deepcopy(self.journal.data)
         for mime in ('application/octet-stream', 'not-a-mime', 'application/x-unknown'):
