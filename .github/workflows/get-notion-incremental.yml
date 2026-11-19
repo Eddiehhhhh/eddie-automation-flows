@@ -169,7 +169,7 @@ jobs:
         if: ${{ steps.execute.outputs.resume_history == 'true' && github.ref == 'refs/heads/main' && github.run_attempt == 1 }}
         env:
           GH_TOKEN: ${{ github.token }}
-          BATCH_SIZE: ${{ inputs.batch_size }}
+          BATCH_SIZE: ${{ inputs.dispatch_key == 'history-start' && '25' || inputs.batch_size }}
         run: |
           set -euo pipefail
           gh workflow run get-notion-incremental.yml --repo "$GITHUB_REPOSITORY" --ref main \

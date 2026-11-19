@@ -138,6 +138,8 @@ any reported holds. The same single-writer and GitHub-first rules apply.
 On a normal first-attempt main run, a successful history batch that made
 progress and still has approved work requests its successor after releasing
 the write lease. Completion, a hold, or lack of progress stops the chain.
+For the initial production check, `history-start` may use a one-item batch.
+Its verified successor uses the normal 25-item cap.
 
 The normal source scan and pending deliveries run first. A first-attempt main
 sync dispatched by the verified GitHub hourly clock may recover up to five
