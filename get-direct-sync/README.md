@@ -135,6 +135,9 @@ directly without paging through the Get inventory. Existing verified
 destinations are skipped. Resume the same approved private manifest after a
 bounded run using its `remaining_approved` and suspended counts, after resolving
 any reported holds. The same single-writer and GitHub-first rules apply.
+On a normal first-attempt main run, a successful history batch that made
+progress and still has approved work requests its successor after releasing
+the write lease. Completion, a hold, or lack of progress stops the chain.
 
 The normal source scan and pending deliveries run first. A first-attempt main
 sync dispatched by the verified GitHub hourly clock may recover up to five

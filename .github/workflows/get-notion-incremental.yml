@@ -117,6 +117,7 @@ jobs:
           python3 Scripts/task_preflight.py --integration > "$RUNNER_TEMP/get-direct-preflight.txt"
           grep -q '^INTEGRATION_GUARD_ACTIVE:' "$RUNNER_TEMP/get-direct-preflight.txt"
       - name: Execute explicit direct sync mode
+        id: execute
         working-directory: get-runtime/get-direct-sync
         env:
           GET_SYNC_CONFIG_JSON: ${{ secrets.GET_SYNC_CONFIG_JSON }}
@@ -131,7 +132,19 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          python3 runner.py --mode "$RUN_MODE" --batch-size "$RUN_BATCH_SIZE" --reviewed-revisions "$REVIEWED_REVISIONS"
+          python3 runner.py --mode "$RUN_MODE" --batch-size "$RUN_BATCH_SIZE" --reviewed-revisions "$REVIEWED_REVISIONS" | tee "$RUNNER_TEMP/get-direct-result.json"
+          if [ "$RUN_MODE" = history ]; then
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from reviewed_history import should_resume_migration
+          report = json.loads((Path(os.environ['RUNNER_TEMP']) / 'get-direct-result.json').read_text())
+          if should_resume_migration(report):
+              with Path(os.environ['GITHUB_OUTPUT']).open('a') as out:
+                  out.write('resume_history=true\n')
+          PY
+          fi
       - name: Recover the cloud clock if no future tick remains
         if: ${{ always() && steps.provenance.conclusion == 'success' && inputs.mode != 'inspect' }}
         env:
@@ -152,3 +165,12 @@ jobs:
           release(root)
           release_guard(guard_directory(root))
           PY
+      - name: Resume the same one-time stock migration after a successful batch
+        if: ${{ steps.execute.outputs.resume_history == 'true' && github.ref == 'refs/heads/main' && github.run_attempt == 1 }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+        run: |
+          set -euo pipefail
+          gh workflow run get-notion-incremental.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f mode=history -f batch_size="$BATCH_SIZE" -f dispatch_key="history-$GITHUB_RUN_ID"
