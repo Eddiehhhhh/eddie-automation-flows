@@ -5,7 +5,7 @@ import unittest
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from core import Hold, Store, snapshot
-from reviewed_history import SCHEMA, candidates, clock_parent, plan_at_head, verify_clock
+from reviewed_history import SCHEMA, candidates, clock_parent, plan_at_head, should_resume_migration, verify_clock
 from test_core import note
 
 
@@ -76,6 +76,21 @@ class ReviewedHistoryTests(unittest.TestCase):
         self.store = Store(':memory:')
         self.addCleanup(self.store.db.close)
         self.store.accept(snaps)
+
+    def test_explicit_migration_resumes_only_after_progress_and_no_pending_work(self):
+        report = {'phase': 'history', 'pending': 0, 'notion': {'verified': 1},
+                  'reviewed_history': {'remaining_approved': 9}}
+        self.assertTrue(should_resume_migration(report))
+        for changed in (
+            {'phase': 'sync'},
+            {'pending': 1},
+            {'reviewed_history': {'remaining_approved': 0}},
+            {'reviewed_history': {'remaining_approved': 9, 'deferred': 'rest_budget'}},
+            {'notion': {'verified': 0}},
+        ):
+            self.assertFalse(should_resume_migration({**report, **changed}))
+        self.assertTrue(should_resume_migration({**report, 'notion': {'verified': 0},
+            'reviewed_history': {'remaining_approved': 9, 'newly_suspended': {'source_changed': 1}}}))
 
     def select(self, *, available=lambda: True, paused=(), plan=None):
         report = {}

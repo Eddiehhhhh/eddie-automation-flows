@@ -124,6 +124,13 @@ def rest_budget_available(http):
     return type(remaining) is int and remaining >= RATE_LIMIT_RESERVE
 
 
+def should_resume_migration(report):
+    history = report.get('reviewed_history') or {}
+    return (report.get('phase') == 'history' and report.get('pending') == 0
+            and not history.get('deferred') and history.get('remaining_approved', 0) > 0
+            and (report.get('notion', {}).get('verified', 0) > 0 or bool(history.get('newly_suspended'))))
+
+
 def candidates(plan, cfg, store, get, github, notion, paused_ids, report, available, *, check_limit=LIMIT):
     blob, value = plan
     key = 'reviewed_hourly_history'
