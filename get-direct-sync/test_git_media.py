@@ -15,18 +15,23 @@ class GitMediaTests(unittest.TestCase):
             origin = Path(directory) / 'origin.git'
             run = subprocess.run
 
-            def git(*args):
-                return run(['git', *args], capture_output=True, check=True).stdout.decode().strip()
+            def git(*args, payload=None):
+                return run(['git', *args], input=payload, capture_output=True, check=True).stdout.decode().strip()
 
             git('init', '--bare', str(origin))
             git('-C', str(origin), 'config', 'uploadpack.allowFilter', 'true')
-            tree = git('-C', str(origin), 'mktree')
+            old_data = b'untouched fixture contents'
+            old_oid = git('-C', str(origin), 'hash-object', '-w', '--stdin', payload=old_data)
+            tree = git('-C', str(origin), 'mktree',
+                       payload=f'100644 blob {old_oid}\tuntouched.txt\n'.encode())
             parent = git('-C', str(origin), '-c', 'user.name=Synthetic fixture',
                          '-c', 'user.email=fixture@example.test', 'commit-tree', tree, '-m', 'parent')
             git('-C', str(origin), 'update-ref', 'refs/heads/main', parent)
 
             def local_route(argv, **kwargs):
                 self.assertFalse(any(arg.startswith('--force') or arg.startswith('+') for arg in argv))
+                if 'write-tree' in argv:
+                    self.assertIn('--missing-ok', argv)
                 url = 'https://github.com/owner/private.git'
                 return run([origin.as_uri() if arg == url else arg for arg in argv], **kwargs)
 
@@ -57,6 +62,9 @@ class GitMediaTests(unittest.TestCase):
                 commit = publish_asset(api, 'synthetic', 'owner/private', 'main', target, data, oid)
                 self.assertEqual(git('-C', str(origin), 'rev-parse', commit + '^'), parent)
                 self.assertEqual(git('-C', str(origin), 'show', commit + ':' + target).encode(), data)
+                self.assertEqual(git('-C', str(origin), 'diff-tree', '--name-only', '--no-commit-id',
+                                     '-r', parent, commit), target)
+                self.assertEqual(git('-C', str(origin), 'show', commit + ':untouched.txt').encode(), old_data)
                 self.assertEqual(publish_asset(api, 'synthetic', 'owner/private', 'main', target, data, oid), commit)
                 with self.assertRaisesRegex(Hold, 'media_github_content_conflict'):
                     publish_asset(api, 'synthetic', 'owner/private', 'main', target, data, '0' * 40)
