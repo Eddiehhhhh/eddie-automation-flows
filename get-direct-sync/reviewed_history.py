@@ -4,9 +4,9 @@ from collections import Counter
 import hashlib
 import json
 import re
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
-from assets import asset_references
+from assets import asset_references, recording_images
 from core import Hold, requires_binary_assets, snapshot
 from render import tag_names
 from retry import HTTPFailure, RetryStopped, TransportFailure
@@ -79,6 +79,27 @@ def plan_at_head(http, cfg):
     return blob, plan
 
 
+def restore_summary_image(summary, note, source_assets):
+    local = recording_images({**note, 'content': summary})
+    upstream = [item for item in source_assets if item['field'].startswith('content/image/')]
+    if len(local) != 1 or len(upstream) != 1:
+        raise Hold('legacy_summary_requires_review')
+    old_link, live_link = local[0]['url'], upstream[0]['url']
+    old, live = urlsplit(old_link), urlsplit(live_link)
+    signing_keys = {'Expires', 'OSSAccessKeyId', 'Signature'}
+    old_params, live_params = parse_qsl(old.query), parse_qsl(live.query)
+    # The old Get export requested a resized image of this same provider object.
+    if (old.scheme != 'https' or live.scheme != 'https'
+            or old.netloc != 'get-notes.umiwi.com' or live.netloc != old.netloc
+            or old.fragment or live.fragment or not live.path
+            or unquote(old.path) != unquote(live.path)
+            or len(live_params) != 3 or {k for k, _ in live_params} != signing_keys
+            or len(old_params) != 4 or {k for k, _ in old_params} != signing_keys | {'x-oss-process'}
+            or dict(old_params)['x-oss-process'] != 'image/resize,m_lfit,w_720,h_3240'):
+        raise Hold('legacy_summary_requires_review')
+    return summary.replace('![](' + old_link + ')', '图片见附件', 1)
+
+
 def check_candidate(row, plan_blob, cfg, get, github, notion, *, allow_media=False):
     sid, version = row['source_id'], row['source_version']
     original = get.request('GET', '/open/api/v1/resource/note/detail?' +
@@ -134,6 +155,11 @@ def check_candidate(row, plan_blob, cfg, get, github, notion, *, allow_media=Fal
             return None, 'legacy_transcript_changed'
         summary = re.sub(r'(?:\n|^)#{1,6}[ \t]+(?:录音原文|原文|逐字稿)[ \t]*$',
                          '', text[:-len(original)].rstrip()).strip()
+        if '![' in summary:
+            try:
+                summary = restore_summary_image(summary, snap['note'], source_assets)
+            except (Hold, ValueError):
+                return None, 'legacy_summary_requires_review'
         if (not summary or '![' in summary or re.search(r'OSSAccessKeyId=|[?&]Signature=', summary)):
             return None, 'legacy_summary_requires_review'
         snap['legacy_summary'] = summary
