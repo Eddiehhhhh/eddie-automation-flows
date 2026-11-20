@@ -488,6 +488,37 @@ class CheckpointDiagnosticTests(unittest.TestCase):
                     self.assertEqual(error.stage, stage)
                     self.assertNotIn('secret', repr(error) + repr(vars(error)))
 
+    def test_checkpoint_rechecks_a_briefly_stale_parent_before_put(self):
+        for stage in ('read_ref', 'check_publish_ref'):
+            with self.subTest(stage=stage):
+                self.check_transient_parent(stage)
+
+    def check_transient_parent(self, stage):
+        self.git = GitStateFake()
+        state = self.state()
+        directory = self.directory('checkpoint-' + stage)
+        state.acquire(directory)
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        db.execute('CREATE TABLE sample(value)')
+        head = self.git.head
+        parent = self.git.commits[head]['parents'][0]['sha']
+        original = self.git.request
+        stale_reads = []
+
+        def request(method, path, body=None):
+            if method == 'GET' and state._stage == stage and len(stale_reads) < 2:
+                stale_reads.append(None)
+                return {'object': {'sha': parent if len(stale_reads) == 1 else head}}
+            return original(method, path, body)
+
+        before = len(self.git.calls)
+        with patch.object(self.git, 'request', request), patch('remote_state.time.sleep') as pause:
+            state.checkpoint(db)
+        pause.assert_called_once_with(1)
+        self.assertEqual(sum(row[0] == 'PUT' for row in self.git.calls[before:]), 1)
+        self.assertNotEqual(self.git.head, head)
+
     def test_publish_reuses_verified_tree_and_parent_without_extra_reads(self):
         state, db = self.prepared()
         first = len(self.git.calls)
