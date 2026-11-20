@@ -122,14 +122,28 @@ class RemoteState:
         self._stage = stage
         return self.http.request(method, path, body)
 
+    def _read_ref(self, stage, known_parents=()):
+        path = self.prefix + '/git/ref/' + self.ref
+        ref = self._request(stage, 'GET', path)
+        # A previously verified parent can briefly reappear after GitHub advances the ref.
+        for delay in (1, 2, 4):
+            if (ref or {}).get('object', {}).get('sha') not in known_parents:
+                break
+            time.sleep(delay)
+            ref = self._request(stage, 'GET', path)
+        return ref
+
     def _read(self, *, reuse_verified=False):
         repo = self._request('read_repository', 'GET', self.prefix)
         if not repo or repo.get('private') is not True or repo.get('default_branch') == self.branch:
             raise Hold('private_state_branch_required')
-        ref = self._request('read_ref', 'GET', self.prefix + '/git/ref/' + self.ref)
+        known_parents = self._pinned_state[3] if reuse_verified and self._pinned_state else ()
+        ref = self._read_ref('read_ref', known_parents)
         if not ref:
             raise Hold('remote_state_branch_missing')
         head = ref['object']['sha']
+        if head in known_parents:
+            raise Hold('remote_state_publish_head_changed')
         if reuse_verified and self._pinned_state is not None and head == self._pinned_state[0]:
             return head, self._pinned_state[1], deepcopy(self._verified_document)
         commit = self._request('read_commit', 'GET', self.prefix + '/git/commits/' + head)
@@ -190,7 +204,7 @@ class RemoteState:
         if self._pinned_state is None or self._pinned_state[:2] != (head, tree_sha):
             raise Hold('remote_state_publish_head_changed')
         previous_blob = self._pinned_state[2]
-        before = self._request('check_publish_ref', 'GET', self.prefix + '/git/ref/' + self.ref)
+        before = self._read_ref('check_publish_ref', self._pinned_state[3])
         if not before or before.get('object', {}).get('sha') != head:
             raise Hold('remote_state_publish_head_changed')
         payload = {'message': message, 'branch': self.branch,
