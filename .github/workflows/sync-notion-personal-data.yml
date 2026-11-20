@@ -106,7 +106,7 @@ jobs:
             if test -e "$VAULT_ROOT/$item"; then paths+=(--path "$item"); fi
           done
           if test "${#paths[@]}" -gt 0; then
-            python scripts/commit_private_vault.py --all --ref main \
+            python scripts/commit_private_vault.py --all --ref main --replay-if-scope-unchanged \
               --message "Persist private Notion Flomo staging" "${paths[@]}"
           fi
 
