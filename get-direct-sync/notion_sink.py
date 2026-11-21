@@ -8,13 +8,11 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from urllib.parse import urlencode
+from core import Hold
 from render import render_text, source_title
 import notion_native as native
 
 OWNER = 'get-direct-v1'
-
-class Hold(RuntimeError):
-    pass
 
 def rich(s):
     return [{'type': 'text', 'text': {'content': s}}]
