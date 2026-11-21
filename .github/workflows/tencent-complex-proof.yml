@@ -1,0 +1,32 @@
+name: Tencent complex private proof
+on:
+  workflow_dispatch:
+    inputs:
+      proof_nonce:
+        description: Numeric identifier for an already prepared isolated private proof branch
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: eddie-private-vault-writers
+  cancel-in-progress: false
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Run proof boundary tests
+        run: python3 -m unittest discover -s tests -p 'test_tencent_complex*.py' -q
+      - name: Run isolated private proof
+        env:
+          PRIVATE_VAULT_TOKEN: ${{ secrets.PRIVATE_VAULT_TOKEN }}
+          TENCENT_DOCS_TOKEN: ${{ secrets.TENCENT_DOCS_TOKEN }}
+          TENCENT_PROOF_NONCE: ${{ inputs.proof_nonce }}
+        run: python3 scripts/run_private_command.py --label 'Tencent private proof' -- python3 scripts/tencent_complex_proof.py
